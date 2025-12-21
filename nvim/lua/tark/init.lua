@@ -155,8 +155,11 @@ end
 function M.docker_build_async(on_complete)
     local plugin_dir = M.get_plugin_dir()
     
-    -- Determine which Dockerfile to use
-    local dockerfile_type = M.config.docker.dockerfile or 'minimal'
+    -- Debug: show where we're looking
+    vim.notify('tark: Plugin directory: ' .. plugin_dir, vim.log.levels.DEBUG)
+    
+    -- Determine which Dockerfile to use (default is 'alpine')
+    local dockerfile_type = M.config.docker.dockerfile or 'alpine'
     local dockerfile_path
     local image_tag
     
@@ -164,7 +167,7 @@ function M.docker_build_async(on_complete)
         dockerfile_path = plugin_dir .. '/Dockerfile.alpine'
         image_tag = 'tark:local-alpine'
     else
-        -- 'minimal' or default - use scratch-based Dockerfile
+        -- 'minimal' - use scratch-based Dockerfile
         dockerfile_path = plugin_dir .. '/Dockerfile'
         image_tag = 'tark:local'
     end
@@ -174,7 +177,9 @@ function M.docker_build_async(on_complete)
         -- Fallback to main Dockerfile
         dockerfile_path = plugin_dir .. '/Dockerfile'
         if vim.fn.filereadable(dockerfile_path) ~= 1 then
-            vim.notify('Dockerfile not found at: ' .. dockerfile_path, vim.log.levels.ERROR)
+            vim.notify('tark: Dockerfile not found at: ' .. plugin_dir .. '\n' ..
+                'Make sure the plugin was installed with full source.\n' ..
+                'Try: :Lazy sync', vim.log.levels.ERROR)
             if on_complete then on_complete(false) end
             return false
         end
@@ -273,9 +278,16 @@ end
 
 -- Start Docker container
 function M.start_docker()
+    -- Check if Docker is available
+    if not M.check_docker() then
+        vim.notify('tark: Docker is not installed or not running.\n' ..
+            'Install Docker: https://docs.docker.com/get-docker/', vim.log.levels.ERROR)
+        return false
+    end
+    
     -- Check if already running
     if M.is_docker_running() then
-        vim.notify('tark Docker container is already running', vim.log.levels.INFO)
+        vim.notify('tark: Docker container is already running', vim.log.levels.INFO)
         return true
     end
     
@@ -580,14 +592,20 @@ function M.setup(opts)
     -- Register commands first (so they're available even if server isn't running)
     M.register_commands()
 
+    -- Show startup message
+    vim.notify('tark: Plugin loaded (mode=' .. M.config.server.mode .. ')', vim.log.levels.INFO)
+
     -- Auto-start server if enabled
     if M.config.server.auto_start then
         -- Defer to not block startup
         vim.defer_fn(function()
             if not M.is_server_running() then
+                vim.notify('tark: Starting server...', vim.log.levels.INFO)
                 M.start_server()
+            else
+                vim.notify('tark: Server already running', vim.log.levels.INFO)
             end
-        end, 100)
+        end, 500)  -- Increased delay for plugin to fully load
     end
 
     -- Setup LSP if enabled
@@ -668,6 +686,34 @@ function M.register_commands()
             vim.api.nvim_buf_set_name(0, 'tark-docker-logs')
         end
     end, { desc = 'Show tark Docker container logs' })
+
+    vim.api.nvim_create_user_command('TarkDebug', function()
+        local plugin_dir = M.get_plugin_dir()
+        local dockerfile_alpine = plugin_dir .. '/Dockerfile.alpine'
+        local dockerfile_main = plugin_dir .. '/Dockerfile'
+        
+        local lines = {
+            '=== tark Debug Info ===',
+            '',
+            'Plugin Directory: ' .. plugin_dir,
+            'Dockerfile: ' .. (vim.fn.filereadable(dockerfile_main) == 1 and 'Found' or 'NOT FOUND'),
+            'Dockerfile.alpine: ' .. (vim.fn.filereadable(dockerfile_alpine) == 1 and 'Found' or 'NOT FOUND'),
+            '',
+            '--- Config ---',
+            'server.mode: ' .. M.config.server.mode,
+            'server.auto_start: ' .. tostring(M.config.server.auto_start),
+            'docker.build_local: ' .. tostring(M.config.docker.build_local),
+            'docker.dockerfile: ' .. (M.config.docker.dockerfile or 'alpine'),
+            'docker.image: ' .. M.config.docker.image,
+            '',
+            '--- Status ---',
+            'Docker installed: ' .. tostring(M.check_docker()),
+            'Docker container running: ' .. tostring(M.is_docker_running()),
+            'Server responding: ' .. tostring(M.is_server_running()),
+            'Host arch: ' .. M.get_host_arch(),
+        }
+        vim.notify(table.concat(lines, '\n'), vim.log.levels.INFO)
+    end, { desc = 'Show tark debug info' })
 
     -- Chat command (open)
     vim.api.nvim_create_user_command('TarkChat', function(opts)
