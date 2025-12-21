@@ -24,11 +24,11 @@ M.config = {
     },
     -- Docker settings (used when mode = 'docker' or 'auto' with no binary)
     docker = {
-        image = 'ghcr.io/thoughtoinnovate/tark:latest',
+        image = 'ghcr.io/thoughtoinnovate/tark:alpine',  -- Alpine image by default (has shell for debugging)
         container_name = 'tark-server',
         pull_on_start = true,        -- Pull latest image before starting
         build_local = false,         -- Build from local Dockerfile instead of pulling
-        dockerfile = 'minimal',      -- 'minimal' (scratch, ~15MB) or 'alpine' (~30MB, has shell)
+        dockerfile = 'alpine',       -- 'alpine' (~30MB, has shell) or 'minimal' (scratch, ~15MB)
         mount_workspace = true,      -- Mount current directory into container
     },
     -- LSP settings

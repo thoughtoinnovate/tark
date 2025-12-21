@@ -19,7 +19,7 @@ AI-powered CLI agent with LSP server for code completion, hover, diagnostics, an
 
 ```bash
 # Option 1: Docker (easiest - no installation needed!)
-docker pull ghcr.io/thoughtoinnovate/tark:latest
+docker pull ghcr.io/thoughtoinnovate/tark:alpine
 
 # Option 2: Binary install (Linux/macOS)
 curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash
@@ -249,11 +249,11 @@ require('tark').setup({
     },
     -- Docker settings (used when mode = 'docker' or 'auto' without binary)
     docker = {
-        image = 'ghcr.io/thoughtoinnovate/tark:latest',
+        image = 'ghcr.io/thoughtoinnovate/tark:alpine',  -- Alpine by default (has shell)
         container_name = 'tark-server',
         pull_on_start = true,    -- Pull latest image before starting
         build_local = false,     -- Build from plugin's Dockerfile (no Rust needed!)
-        dockerfile = 'minimal',  -- 'minimal' (~15MB, scratch) or 'alpine' (~30MB, shell)
+        dockerfile = 'alpine',   -- 'alpine' (~30MB, shell) or 'minimal' (~15MB, scratch)
         mount_workspace = true,  -- Mount cwd into container for file access
     },
     -- Ghost text (inline completions)
@@ -291,7 +291,7 @@ require('tark').setup({
 |--------|-------------|
 | `pull_on_start` | Pull latest image from registry (default: true) |
 | `build_local` | Build image from plugin's Dockerfile (default: false) |
-| `dockerfile` | Image type: `'minimal'` (~15MB, scratch) or `'alpine'` (~30MB, has shell) |
+| `dockerfile` | Image type: `'alpine'` (~30MB, has shell, default) or `'minimal'` (~15MB, scratch) |
 
 #### Build Docker Image Locally
 
@@ -307,7 +307,7 @@ return {
         docker = { 
             build_local = true,    -- Build from Dockerfile in plugin directory
             pull_on_start = false, -- Don't pull from registry
-            dockerfile = 'minimal', -- 'minimal' (~15MB) or 'alpine' (~30MB)
+            -- dockerfile = 'alpine', -- Default, or use 'minimal' for smaller image
         },
     },
 }
@@ -321,8 +321,8 @@ Or build manually with:
 This builds the image using Docker on your machine - no Rust toolchain required!
 
 **Image sizes:**
-- `minimal` (default): ~15MB - Super lightweight, binary + CA certs only
-- `alpine`: ~30MB - Includes shell and curl for debugging
+- `alpine` (default): ~30MB - Includes shell and curl for debugging
+- `minimal`: ~15MB - Super lightweight, binary + CA certs only (no shell)
 
 ### CLI Config (`~/.config/tark/config.toml`)
 
