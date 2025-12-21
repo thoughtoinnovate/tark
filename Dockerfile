@@ -1,4 +1,5 @@
 # Super minimal Docker image for tark server
+# Automatically builds for host architecture (x86_64 or ARM64)
 # Final image size: ~15-20MB (just binary + certs)
 
 # =============================================================================
@@ -6,12 +7,17 @@
 # =============================================================================
 FROM rust:1.75-alpine AS builder
 
+# Detect architecture for conditional operations
+ARG TARGETARCH
+ARG TARGETPLATFORM
+
 # Install build dependencies for static linking
+# UPX is only reliable on x86_64, skip on ARM
 RUN apk add --no-cache \
     musl-dev \
     openssl-dev \
     openssl-libs-static \
-    upx
+    && if [ "$TARGETARCH" = "amd64" ]; then apk add --no-cache upx; fi
 
 WORKDIR /build
 
@@ -30,17 +36,23 @@ RUN cargo build --release 2>/dev/null || true
 COPY src ./src
 
 # Build the actual binary with optimizations
-RUN RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes" \
-    cargo build --release --bin tark && \
-    # Strip debug symbols (~50% size reduction)
+# Strip debug symbols (~50% size reduction)
+# Compress with UPX only on x86_64 (~60% additional reduction)
+RUN cargo build --release --bin tark && \
     strip /build/target/release/tark && \
-    # Compress binary with UPX (~60% additional reduction)
-    upx --best --lzma /build/target/release/tark || true
+    if [ "$TARGETARCH" = "amd64" ] && command -v upx >/dev/null 2>&1; then \
+        upx --best --lzma /build/target/release/tark || true; \
+    fi
 
 # =============================================================================
 # Stage 2: Minimal runtime (scratch-based)
 # =============================================================================
 FROM scratch
+
+# Labels for container registry
+LABEL org.opencontainers.image.source="https://github.com/thoughtoinnovate/tark"
+LABEL org.opencontainers.image.description="tark AI coding assistant - minimal image"
+LABEL org.opencontainers.image.licenses="MIT"
 
 # Copy CA certificates for HTTPS (needed for API calls)
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

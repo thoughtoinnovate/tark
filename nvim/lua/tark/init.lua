@@ -134,6 +134,23 @@ function M.get_plugin_dir()
     return plugin_dir
 end
 
+-- Get host architecture
+function M.get_host_arch()
+    local handle = io.popen('uname -m 2>/dev/null')
+    if handle then
+        local result = handle:read('*a'):gsub('%s+', '')
+        handle:close()
+        -- Normalize architecture names
+        if result == 'x86_64' or result == 'amd64' then
+            return 'x86_64'
+        elseif result == 'aarch64' or result == 'arm64' then
+            return 'arm64'
+        end
+        return result
+    end
+    return 'unknown'
+end
+
 -- Build Docker image locally from Dockerfile (with optional callback)
 function M.docker_build_async(on_complete)
     local plugin_dir = M.get_plugin_dir()
@@ -273,18 +290,20 @@ function M.start_docker()
         
         -- Build from local Dockerfile
         if not M.docker_image_exists(local_image_tag) then
+            local arch = M.get_host_arch()
             local dockerfile_desc = dockerfile_type == 'alpine' 
-                and 'Alpine-based image (~30MB, includes shell for debugging)' 
+                and 'Alpine-based image (~30MB, includes shell)' 
                 or 'Minimal scratch image (~15MB, binary only)'
             
             vim.notify(string.format([[
 Building tark Docker image from source...
 Type: %s
+Arch: %s
 
 This takes 3-5 minutes on first run.
 Run :TarkServerStatus to check progress.
 The server will start automatically when build completes.
-]], dockerfile_desc), vim.log.levels.WARN)
+]], dockerfile_desc, arch), vim.log.levels.WARN)
             
             -- Start async build with completion callback
             M.docker_build_async(function(success)
@@ -500,6 +519,7 @@ function M.server_status()
     local docker_available = M.check_docker()
     local docker_running = M.is_docker_running()
     local mode = M.get_server_mode()
+    local arch = M.get_host_arch()
     
     local lines = {
         '=== tark Server Status ===',
@@ -507,6 +527,7 @@ function M.server_status()
         'Mode: ' .. (M.config.server.mode == 'auto' and 'auto (' .. (mode or 'none') .. ')' or M.config.server.mode),
         'Server: ' .. (running and 'Running' or 'Not running'),
         'URL: http://' .. M.config.server.host .. ':' .. M.config.server.port,
+        'Host Arch: ' .. arch,
         '',
         '--- Backends ---',
         'Binary: ' .. (binary_found and 'Available (' .. M.config.server.binary .. ')' or 'Not found'),

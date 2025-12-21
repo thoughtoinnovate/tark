@@ -1,4 +1,5 @@
 # Alpine-based Docker image for tark server
+# Automatically builds for host architecture (x86_64 or ARM64)
 # Slightly larger (~25-30MB) but includes shell and curl for debugging
 # Use this if you need to exec into the container or want healthchecks with curl
 
@@ -6,6 +7,10 @@
 # Stage 1: Build the binary
 # =============================================================================
 FROM rust:1.75-alpine AS builder
+
+# Detect architecture for conditional operations
+ARG TARGETARCH
+ARG TARGETPLATFORM
 
 # Install build dependencies for static linking
 RUN apk add --no-cache \
@@ -29,7 +34,7 @@ RUN cargo build --release 2>/dev/null || true
 # Copy actual source
 COPY src ./src
 
-# Build the actual binary
+# Build the actual binary and strip debug symbols
 RUN cargo build --release --bin tark && \
     strip /build/target/release/tark
 
@@ -37,6 +42,11 @@ RUN cargo build --release --bin tark && \
 # Stage 2: Minimal Alpine runtime
 # =============================================================================
 FROM alpine:3.19
+
+# Labels for container registry
+LABEL org.opencontainers.image.source="https://github.com/thoughtoinnovate/tark"
+LABEL org.opencontainers.image.description="tark AI coding assistant - alpine image with shell"
+LABEL org.opencontainers.image.licenses="MIT"
 
 # Install only essential runtime dependencies
 RUN apk add --no-cache ca-certificates curl && \
@@ -60,4 +70,3 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 # Run the server
 ENTRYPOINT ["tark"]
 CMD ["serve", "--host", "0.0.0.0", "--port", "8765"]
-
