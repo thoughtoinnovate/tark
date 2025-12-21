@@ -41,15 +41,42 @@ security() {
     echo -e "${CYAN}[SECURITY]${NC} $1"
 }
 
+# Detect libc type (glibc vs musl)
+detect_libc() {
+    # Check if we're on musl
+    if ldd --version 2>&1 | grep -qi musl; then
+        echo "musl"
+        return
+    fi
+    
+    # Check for Alpine Linux
+    if [ -f /etc/alpine-release ]; then
+        echo "musl"
+        return
+    fi
+    
+    # Check if libc.so is musl
+    if [ -f /lib/ld-musl-x86_64.so.1 ] || [ -f /lib/ld-musl-aarch64.so.1 ]; then
+        echo "musl"
+        return
+    fi
+    
+    # Default to glibc
+    echo "gnu"
+}
+
 # Detect OS and architecture
 detect_platform() {
-    local os arch
+    local os arch libc_type=""
 
     case "$(uname -s)" in
-        Linux*)  os="linux" ;;
-        Darwin*) os="darwin" ;;
+        Linux*)   os="linux" ;;
+        Darwin*)  os="darwin" ;;
+        FreeBSD*) os="freebsd" ;;
+        OpenBSD*) os="openbsd" ;;
+        NetBSD*)  os="netbsd" ;;
         MINGW*|MSYS*|CYGWIN*) os="windows" ;;
-        *)       error "Unsupported operating system: $(uname -s)" ;;
+        *)        error "Unsupported operating system: $(uname -s)" ;;
     esac
 
     case "$(uname -m)" in
@@ -58,7 +85,12 @@ detect_platform() {
         *)             error "Unsupported architecture: $(uname -m)" ;;
     esac
 
-    echo "${os}-${arch}"
+    # For Linux, detect libc type
+    if [ "$os" = "linux" ]; then
+        libc_type="-$(detect_libc)"
+    fi
+
+    echo "${os}-${arch}${libc_type}"
 }
 
 # Get the download URL for the latest release
@@ -66,7 +98,7 @@ get_download_url() {
     local platform="$1"
     local asset_name="tark-${platform}"
     
-    if [ "$platform" = "windows-x86_64" ]; then
+    if [[ "$platform" == windows* ]]; then
         asset_name="${asset_name}.exe"
     fi
 
@@ -77,7 +109,31 @@ get_download_url() {
         download_url=$(curl -sL "$release_url" | grep "browser_download_url.*${asset_name}\"" | head -1 | cut -d '"' -f 4)
         
         if [ -z "$download_url" ]; then
-            error "Could not find binary for platform: ${platform}"
+            # Try falling back to musl for Linux if gnu not found
+            if [[ "$platform" == *"-gnu" ]]; then
+                local musl_platform="${platform/-gnu/-musl}"
+                asset_name="tark-${musl_platform}"
+                download_url=$(curl -sL "$release_url" | grep "browser_download_url.*${asset_name}\"" | head -1 | cut -d '"' -f 4)
+                if [ -n "$download_url" ]; then
+                    warn "Using musl binary (statically linked) - works on any Linux"
+                fi
+            fi
+        fi
+        
+        if [ -z "$download_url" ]; then
+            error "Could not find binary for platform: ${platform}
+
+Available platforms:
+  - linux-x86_64-gnu    (Ubuntu, Debian, Fedora, etc.)
+  - linux-x86_64-musl   (Alpine, Arch, any Linux)
+  - linux-arm64-gnu     (ARM64 with glibc)
+  - linux-arm64-musl    (ARM64, any Linux)
+  - darwin-x86_64       (macOS Intel)
+  - darwin-arm64        (macOS Apple Silicon)
+  - freebsd-x86_64      (FreeBSD)
+  - windows-x86_64      (Windows)
+
+Check releases: https://github.com/${REPO}/releases"
         fi
         
         echo "$download_url"

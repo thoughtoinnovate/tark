@@ -42,17 +42,22 @@ curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.
 
 Download from [GitHub Releases](https://github.com/thoughtoinnovate/tark/releases):
 
-| Platform | Download |
-|----------|----------|
-| Linux x86_64 | [tark-linux-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64) |
-| Linux ARM64 | [tark-linux-arm64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-arm64) |
-| macOS Intel | [tark-darwin-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-x86_64) |
-| macOS Apple Silicon | [tark-darwin-arm64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-arm64) |
-| Windows x64 | [tark-windows-x86_64.exe](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-windows-x86_64.exe) |
+| Platform | Binary | Notes |
+|----------|--------|-------|
+| **Linux (Any Distro)** | [tark-linux-x86_64-musl](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64-musl) | Static binary - works everywhere |
+| Linux (glibc) | [tark-linux-x86_64-gnu](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64-gnu) | Ubuntu, Debian, Fedora, etc. |
+| Linux ARM64 (Any) | [tark-linux-arm64-musl](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-arm64-musl) | Static ARM64 binary |
+| Linux ARM64 (glibc) | [tark-linux-arm64-gnu](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-arm64-gnu) | ARM64 with glibc |
+| **macOS Intel** | [tark-darwin-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-x86_64) | |
+| **macOS Apple Silicon** | [tark-darwin-arm64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-arm64) | M1/M2/M3 |
+| **FreeBSD** | [tark-freebsd-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-freebsd-x86_64) | |
+| **Windows x64** | [tark-windows-x86_64.exe](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-windows-x86_64.exe) | |
+
+> **Tip:** Use the `-musl` binaries for universal Linux compatibility (Alpine, Arch, NixOS, Void, etc.)
 
 ```bash
-# Example: Linux x86_64
-curl -L https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64 -o tark
+# Example: Universal Linux binary (works on any distro)
+curl -L https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64-musl -o tark
 chmod +x tark
 sudo mv tark /usr/local/bin/
 ```
