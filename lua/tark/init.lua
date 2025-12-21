@@ -153,11 +153,25 @@ function M.start_docker()
     
     -- Build docker run command
     local cwd = vim.fn.getcwd()
+    local is_linux = vim.loop.os_uname().sysname == 'Linux'
+    
     local cmd_parts = {
         'docker', 'run', '-d',
         '--name', M.config.docker.container_name,
-        '-p', M.config.server.port .. ':8765',
     }
+    
+    -- Network configuration differs by OS
+    if is_linux then
+        -- On Linux, use host network for direct localhost access (Ollama, etc.)
+        table.insert(cmd_parts, '--network')
+        table.insert(cmd_parts, 'host')
+    else
+        -- On macOS/Windows, need port mapping and host.docker.internal
+        table.insert(cmd_parts, '-p')
+        table.insert(cmd_parts, M.config.server.port .. ':8765')
+        table.insert(cmd_parts, '--add-host')
+        table.insert(cmd_parts, 'host.docker.internal:host-gateway')
+    end
     
     -- Mount workspace if configured
     if M.config.docker.mount_workspace then
@@ -180,11 +194,13 @@ function M.start_docker()
         table.insert(cmd_parts, 'ANTHROPIC_API_KEY=' .. anthropic_key)
     end
     
-    -- Add Ollama host for local Ollama access
+    -- Set Ollama host based on OS
     table.insert(cmd_parts, '-e')
-    table.insert(cmd_parts, 'OLLAMA_HOST=http://host.docker.internal:11434')
-    table.insert(cmd_parts, '--add-host')
-    table.insert(cmd_parts, 'host.docker.internal:host-gateway')
+    if is_linux then
+        table.insert(cmd_parts, 'OLLAMA_HOST=http://127.0.0.1:11434')
+    else
+        table.insert(cmd_parts, 'OLLAMA_HOST=http://host.docker.internal:11434')
+    end
     
     -- Add image name
     table.insert(cmd_parts, M.config.docker.image)

@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # For macOS / Windows (uses port mapping)
   tark:
     image: ghcr.io/thoughtoinnovate/tark:latest
     build:
@@ -9,11 +10,13 @@ services:
     container_name: tark-server
     ports:
       - "8765:8765"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       # LLM Provider API Keys (set these in your environment)
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      # Ollama host (if running Ollama on host machine)
+      # Ollama host (for accessing Ollama on host machine)
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
     volumes:
       # Mount current directory for file operations
@@ -28,6 +31,36 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
+    profiles:
+      - default
+      - macos
+      - windows
+
+  # For Linux (uses host network for direct localhost access)
+  tark-linux:
+    image: ghcr.io/thoughtoinnovate/tark:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tark-server
+    network_mode: host
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_HOST=http://127.0.0.1:11434
+    volumes:
+      - ${PWD:-/tmp}:/workspace:rw
+      - tark-data:/home/tark/.config/tark
+    working_dir: /workspace
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    profiles:
+      - linux
 
 volumes:
   tark-data:
