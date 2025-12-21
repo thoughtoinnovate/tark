@@ -1,0 +1,51 @@
+# tark Configuration
+# Tark (तर्क) = Logic/Reasoning in Sanskrit
+# Copy this file to ~/.config/tark/config.toml
+
+[llm]
+# Default LLM provider: "claude", "openai", or "ollama"
+default_provider = "openai"
+
+[llm.claude]
+model = "claude-sonnet-4-20250514"
+max_tokens = 4096
+
+[llm.openai]
+model = "gpt-4o"
+max_tokens = 4096
+
+[llm.ollama]
+# Local Ollama server URL
+base_url = "http://localhost:11434"
+# Model to use (run `ollama list` to see available models)
+# Good coding models: codellama, deepseek-coder, qwen2.5-coder, starcoder2
+model = "codellama"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[completion]
+enabled = true
+# Debounce delay before triggering completion (ms)
+debounce_ms = 150
+# Maximum tokens for completion responses
+max_completion_tokens = 256
+# Number of cached completions
+cache_size = 100
+# Context lines to include
+context_lines_before = 50
+context_lines_after = 20
+
+[agent]
+# Maximum tool call iterations per query
+max_iterations = 10
+# Default working directory (. = current directory)
+working_directory = "."
+
+[tools]
+# Enable shell command execution
+shell_enabled = true
+# Allowed paths for file operations (relative to working directory)
+allowed_paths = ["."]
+

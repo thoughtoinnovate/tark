@@ -1,0 +1,19 @@
+services:
+  dev:
+    build: .
+    image: minimal-dev
+    container_name: dev-container
+    stdin_open: true
+    tty: true
+    ports:
+      - "2222:22"
+    volumes:
+      # Persistent volume for user data
+      - dev-data:/home/dev/data
+      # Mount current directory as workspace
+      - .:/home/dev/workspace
+    working_dir: /home/dev/workspace
+
+volumes:
+  dev-data:
+    name: minimal-dev-data

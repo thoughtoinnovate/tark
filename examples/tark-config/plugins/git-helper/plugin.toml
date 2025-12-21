@@ -1,0 +1,40 @@
+# Git Helper Plugin for Tark
+# Place in ~/.config/tark/plugins/git-helper/ or .tark/plugins/git-helper/
+
+name = "git-helper"
+version = "1.0.0"
+description = "Git workflow helpers for tark"
+enabled = true
+plugin_type = "tool"
+
+# Tools provided by this plugin
+[[tools]]
+name = "git_status_detailed"
+description = "Get detailed git status with branch info and recent commits"
+command = "bash"
+args = ["-c", "echo '=== Branch ===' && git branch -v && echo '\\n=== Status ===' && git status -s && echo '\\n=== Recent Commits ===' && git log --oneline -5"]
+
+[[tools]]
+name = "git_diff_staged"
+description = "Show staged changes ready for commit"
+command = "git"
+args = ["diff", "--cached"]
+
+[[tools]]
+name = "git_log_graph"
+description = "Show git log with graph visualization"
+command = "git"
+args = ["log", "--oneline", "--graph", "--all", "-20"]
+
+# Rules this plugin injects into conversations
+rules = [
+    "When committing, write clear commit messages following conventional commits format",
+    "Check git status before making file changes to avoid conflicts",
+]
+
+# Events this plugin hooks into (future feature)
+hooks = [
+    "before_file_write",
+    "after_shell_command",
+]
+

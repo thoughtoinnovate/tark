@@ -1,0 +1,34 @@
+# Tark (तर्क) Configuration
+# Place in ~/.config/tark/config.toml for global, or .tark/config.toml for project
+
+# LLM Provider settings
+provider = "openai"                    # "openai", "claude", or "ollama"
+model = "openai/gpt-4o"               # Full model ID (provider/model)
+default_mode = "build"                 # "plan", "build", or "review"
+verbose = false                        # Show thinking/tool calls by default
+
+# Custom instructions added to every conversation
+custom_instructions = """
+When working on this project:
+- Follow the existing code style
+- Write tests for new features
+- Keep functions small and focused
+"""
+
+# Files to ignore when exploring codebase
+ignore_patterns = [
+    "node_modules",
+    "target",
+    ".git",
+    "*.lock",
+    "dist",
+    "build",
+    "__pycache__",
+]
+
+# Auto-save conversations to .tark/conversations/
+auto_save_conversations = false
+
+# Maximum context tokens before suggesting /compact
+max_context_tokens = 100000
+
