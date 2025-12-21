@@ -133,19 +133,19 @@ function M.get_plugin_dir()
     return plugin_dir
 end
 
--- Build Docker image locally from Dockerfile
-function M.docker_build()
+-- Build Docker image locally from Dockerfile (with optional callback)
+function M.docker_build_async(on_complete)
     local plugin_dir = M.get_plugin_dir()
     local dockerfile = plugin_dir .. '/Dockerfile'
     
     -- Check if Dockerfile exists
     if vim.fn.filereadable(dockerfile) ~= 1 then
         vim.notify('Dockerfile not found at: ' .. dockerfile, vim.log.levels.ERROR)
+        if on_complete then on_complete(false) end
         return false
     end
     
     local image_tag = 'tark:local'
-    vim.notify('Building tark Docker image from source...\nThis may take a few minutes.', vim.log.levels.INFO)
     
     -- Build in background with progress
     local cmd = string.format('cd %s && docker build -t %s . 2>&1', 
@@ -176,18 +176,25 @@ function M.docker_build()
         on_exit = function(_, code)
             vim.schedule(function()
                 if code == 0 then
-                    -- Update config to use local image
                     M.config.docker.image = image_tag
                     vim.notify('Docker image built successfully: ' .. image_tag, vim.log.levels.INFO)
+                    if on_complete then on_complete(true) end
                 else
-                    vim.notify('Docker build failed. Check :TarkDockerLogs for details.\n' .. 
+                    vim.notify('Docker build failed.\n' .. 
                         table.concat(output_lines, '\n'):sub(-500), vim.log.levels.ERROR)
+                    if on_complete then on_complete(false) end
                 end
             end)
         end,
     })
     
     return job_id > 0
+end
+
+-- Synchronous wrapper for manual builds
+function M.docker_build()
+    vim.notify('Building tark Docker image from source...\nThis may take a few minutes.', vim.log.levels.INFO)
+    return M.docker_build_async(nil)
 end
 
 -- Pull Docker image
@@ -231,15 +238,21 @@ function M.start_docker()
     if M.config.docker.build_local then
         -- Build from local Dockerfile
         if not M.docker_image_exists('tark:local') then
-            vim.notify('Building Docker image from source (first time setup)...', vim.log.levels.INFO)
-            M.docker_build()
-            -- Building is async, so we need to wait and retry
-            vim.defer_fn(function()
-                if M.docker_image_exists('tark:local') then
+            vim.notify([[
+Building tark Docker image from source...
+This takes 3-5 minutes on first run.
+
+Run :TarkServerStatus to check progress.
+The server will start automatically when build completes.
+]], vim.log.levels.WARN)
+            
+            -- Start async build with completion callback
+            M.docker_build_async(function(success)
+                if success then
                     M.config.docker.image = 'tark:local'
                     M.start_docker()
                 end
-            end, 30000)  -- Wait up to 30s for build
+            end)
             return true
         end
         M.config.docker.image = 'tark:local'
