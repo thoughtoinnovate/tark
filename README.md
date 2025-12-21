@@ -76,13 +76,25 @@ docker --version
 # The plugin handles the rest automatically!
 ```
 
+**Two image options:**
+| Image | Size | Description |
+|-------|------|-------------|
+| `ghcr.io/thoughtoinnovate/tark:latest` | ~15MB | Minimal (scratch), binary + certs only |
+| `ghcr.io/thoughtoinnovate/tark:alpine` | ~30MB | Alpine-based, includes shell for debugging |
+
 Or run manually:
 ```bash
+# Minimal image (default)
 docker run -d --name tark-server \
   -p 8765:8765 \
   -v $(pwd):/workspace \
   -e OPENAI_API_KEY=$OPENAI_API_KEY \
   ghcr.io/thoughtoinnovate/tark:latest
+
+# Alpine image (for debugging)
+docker run -it --name tark-server \
+  -p 8765:8765 \
+  ghcr.io/thoughtoinnovate/tark:alpine sh
 ```
 
 #### Option D: Build from Source (Requires Rust)
@@ -241,6 +253,7 @@ require('tark').setup({
         container_name = 'tark-server',
         pull_on_start = true,    -- Pull latest image before starting
         build_local = false,     -- Build from plugin's Dockerfile (no Rust needed!)
+        dockerfile = 'minimal',  -- 'minimal' (~15MB, scratch) or 'alpine' (~30MB, shell)
         mount_workspace = true,  -- Mount cwd into container for file access
     },
     -- Ghost text (inline completions)
@@ -278,6 +291,7 @@ require('tark').setup({
 |--------|-------------|
 | `pull_on_start` | Pull latest image from registry (default: true) |
 | `build_local` | Build image from plugin's Dockerfile (default: false) |
+| `dockerfile` | Image type: `'minimal'` (~15MB, scratch) or `'alpine'` (~30MB, has shell) |
 
 #### Build Docker Image Locally
 
@@ -293,6 +307,7 @@ return {
         docker = { 
             build_local = true,    -- Build from Dockerfile in plugin directory
             pull_on_start = false, -- Don't pull from registry
+            dockerfile = 'minimal', -- 'minimal' (~15MB) or 'alpine' (~30MB)
         },
     },
 }
@@ -304,7 +319,10 @@ Or build manually with:
 ```
 
 This builds the image using Docker on your machine - no Rust toolchain required!
-```
+
+**Image sizes:**
+- `minimal` (default): ~15MB - Super lightweight, binary + CA certs only
+- `alpine`: ~30MB - Includes shell and curl for debugging
 
 ### CLI Config (`~/.config/tark/config.toml`)
 

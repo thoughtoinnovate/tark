@@ -1,5 +1,6 @@
-# Super minimal Docker image for tark server
-# Final image size: ~15-20MB (just binary + certs)
+# Alpine-based Docker image for tark server
+# Slightly larger (~25-30MB) but includes shell and curl for debugging
+# Use this if you need to exec into the container or want healthchecks with curl
 
 # =============================================================================
 # Stage 1: Build the binary
@@ -10,8 +11,7 @@ FROM rust:1.75-alpine AS builder
 RUN apk add --no-cache \
     musl-dev \
     openssl-dev \
-    openssl-libs-static \
-    upx
+    openssl-libs-static
 
 WORKDIR /build
 
@@ -29,31 +29,35 @@ RUN cargo build --release 2>/dev/null || true
 # Copy actual source
 COPY src ./src
 
-# Build the actual binary with optimizations
-RUN RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes" \
-    cargo build --release --bin tark && \
-    # Strip debug symbols (~50% size reduction)
-    strip /build/target/release/tark && \
-    # Compress binary with UPX (~60% additional reduction)
-    upx --best --lzma /build/target/release/tark || true
+# Build the actual binary
+RUN cargo build --release --bin tark && \
+    strip /build/target/release/tark
 
 # =============================================================================
-# Stage 2: Minimal runtime (scratch-based)
+# Stage 2: Minimal Alpine runtime
 # =============================================================================
-FROM scratch
+FROM alpine:3.19
 
-# Copy CA certificates for HTTPS (needed for API calls)
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# Install only essential runtime dependencies
+RUN apk add --no-cache ca-certificates curl && \
+    # Create non-root user
+    adduser -D -u 1000 -s /bin/sh tark
 
-# Copy the binary
-COPY --from=builder /build/target/release/tark /tark
+# Copy binary from builder
+COPY --from=builder /build/target/release/tark /usr/local/bin/tark
+
+# Switch to non-root user
+USER tark
+WORKDIR /home/tark
 
 # Expose HTTP server port
 EXPOSE 8765
 
-# Run as non-root (UID 1000)
-USER 1000
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -sf http://localhost:8765/health || exit 1
 
-# No shell available - direct binary execution
-ENTRYPOINT ["/tark"]
+# Run the server
+ENTRYPOINT ["tark"]
 CMD ["serve", "--host", "0.0.0.0", "--port", "8765"]
+

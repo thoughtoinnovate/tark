@@ -28,6 +28,7 @@ M.config = {
         container_name = 'tark-server',
         pull_on_start = true,        -- Pull latest image before starting
         build_local = false,         -- Build from local Dockerfile instead of pulling
+        dockerfile = 'minimal',      -- 'minimal' (scratch, ~15MB) or 'alpine' (~30MB, has shell)
         mount_workspace = true,      -- Mount current directory into container
     },
     -- LSP settings
@@ -136,20 +137,38 @@ end
 -- Build Docker image locally from Dockerfile (with optional callback)
 function M.docker_build_async(on_complete)
     local plugin_dir = M.get_plugin_dir()
-    local dockerfile = plugin_dir .. '/Dockerfile'
     
-    -- Check if Dockerfile exists
-    if vim.fn.filereadable(dockerfile) ~= 1 then
-        vim.notify('Dockerfile not found at: ' .. dockerfile, vim.log.levels.ERROR)
-        if on_complete then on_complete(false) end
-        return false
+    -- Determine which Dockerfile to use
+    local dockerfile_type = M.config.docker.dockerfile or 'minimal'
+    local dockerfile_path
+    local image_tag
+    
+    if dockerfile_type == 'alpine' then
+        dockerfile_path = plugin_dir .. '/Dockerfile.alpine'
+        image_tag = 'tark:local-alpine'
+    else
+        -- 'minimal' or default - use scratch-based Dockerfile
+        dockerfile_path = plugin_dir .. '/Dockerfile'
+        image_tag = 'tark:local'
     end
     
-    local image_tag = 'tark:local'
+    -- Check if Dockerfile exists
+    if vim.fn.filereadable(dockerfile_path) ~= 1 then
+        -- Fallback to main Dockerfile
+        dockerfile_path = plugin_dir .. '/Dockerfile'
+        if vim.fn.filereadable(dockerfile_path) ~= 1 then
+            vim.notify('Dockerfile not found at: ' .. dockerfile_path, vim.log.levels.ERROR)
+            if on_complete then on_complete(false) end
+            return false
+        end
+    end
+    
+    -- Get just the filename for docker build -f
+    local dockerfile_name = vim.fn.fnamemodify(dockerfile_path, ':t')
     
     -- Build in background with progress
-    local cmd = string.format('cd %s && docker build -t %s . 2>&1', 
-        vim.fn.shellescape(plugin_dir), image_tag)
+    local cmd = string.format('cd %s && docker build -f %s -t %s . 2>&1', 
+        vim.fn.shellescape(plugin_dir), dockerfile_name, image_tag)
     
     local output_lines = {}
     local job_id = vim.fn.jobstart(cmd, {
@@ -157,8 +176,8 @@ function M.docker_build_async(on_complete)
             for _, line in ipairs(data) do
                 if line ~= '' then
                     table.insert(output_lines, line)
-                    -- Show build steps
-                    if line:match('^Step') or line:match('^Successfully') then
+                    -- Show build steps (both buildkit and legacy formats)
+                    if line:match('^Step') or line:match('^%[%d+/%d+%]') or line:match('^Successfully') or line:match('CACHED') then
                         vim.schedule(function()
                             vim.notify(line, vim.log.levels.INFO)
                         end)
@@ -170,6 +189,12 @@ function M.docker_build_async(on_complete)
             for _, line in ipairs(data) do
                 if line ~= '' then
                     table.insert(output_lines, line)
+                    -- BuildKit outputs to stderr
+                    if line:match('^%[%d+/%d+%]') or line:match('CACHED') then
+                        vim.schedule(function()
+                            vim.notify(line, vim.log.levels.INFO)
+                        end)
+                    end
                 end
             end
         end,
@@ -177,7 +202,13 @@ function M.docker_build_async(on_complete)
             vim.schedule(function()
                 if code == 0 then
                     M.config.docker.image = image_tag
-                    vim.notify('Docker image built successfully: ' .. image_tag, vim.log.levels.INFO)
+                    
+                    -- Get image size
+                    local size_handle = io.popen('docker images ' .. image_tag .. ' --format "{{.Size}}"')
+                    local size = size_handle and size_handle:read('*a'):gsub('%s+', '') or 'unknown'
+                    if size_handle then size_handle:close() end
+                    
+                    vim.notify('Docker image built: ' .. image_tag .. ' (' .. size .. ')', vim.log.levels.INFO)
                     if on_complete then on_complete(true) end
                 else
                     vim.notify('Docker build failed.\n' .. 
@@ -236,26 +267,34 @@ function M.start_docker()
     
     -- Handle image: build local or pull from registry
     if M.config.docker.build_local then
+        -- Determine the local image tag based on dockerfile type
+        local dockerfile_type = M.config.docker.dockerfile or 'minimal'
+        local local_image_tag = dockerfile_type == 'alpine' and 'tark:local-alpine' or 'tark:local'
+        
         -- Build from local Dockerfile
-        if not M.docker_image_exists('tark:local') then
-            vim.notify([[
+        if not M.docker_image_exists(local_image_tag) then
+            local dockerfile_desc = dockerfile_type == 'alpine' 
+                and 'Alpine-based image (~30MB, includes shell for debugging)' 
+                or 'Minimal scratch image (~15MB, binary only)'
+            
+            vim.notify(string.format([[
 Building tark Docker image from source...
-This takes 3-5 minutes on first run.
+Type: %s
 
+This takes 3-5 minutes on first run.
 Run :TarkServerStatus to check progress.
 The server will start automatically when build completes.
-]], vim.log.levels.WARN)
+]], dockerfile_desc), vim.log.levels.WARN)
             
             -- Start async build with completion callback
             M.docker_build_async(function(success)
                 if success then
-                    M.config.docker.image = 'tark:local'
                     M.start_docker()
                 end
             end)
             return true
         end
-        M.config.docker.image = 'tark:local'
+        M.config.docker.image = local_image_tag
     elseif M.config.docker.pull_on_start then
         -- Pull from registry
         M.docker_pull()
