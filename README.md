@@ -13,19 +13,60 @@ AI-powered CLI agent with LSP server for code completion, hover, diagnostics, an
 - **Context Tracking**: Real-time token usage and cost estimation
 - **Agent Modes**: Plan (read-only), Build (full access), Review (approval required)
 - **blink.cmp Integration**: Works seamlessly with blink.cmp - no config needed!
+- **Auto-Start Server**: Server starts automatically when Neovim opens
+
+## Quick Install
+
+```bash
+# One-liner install (Linux/macOS)
+curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash
+```
 
 ## Installation
 
-### 1. Install the CLI (Rust)
+### 1. Install the tark Binary
+
+#### Option A: Install Script (Recommended)
+
+The install script automatically detects your platform and installs the correct binary:
 
 ```bash
-# Clone and build
-git clone https://github.com/thoughtoinnovate/tark.git
-cd tark
-cargo install --path .
+# Auto-detect platform and install
+curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash
 
-# Or directly from GitHub
+# Or with options
+curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash -s -- --install-dir ~/.local/bin
+```
+
+#### Option B: Manual Download
+
+Download from [GitHub Releases](https://github.com/thoughtoinnovate/tark/releases):
+
+| Platform | Download |
+|----------|----------|
+| Linux x86_64 | [tark-linux-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64) |
+| Linux ARM64 | [tark-linux-arm64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-arm64) |
+| macOS Intel | [tark-darwin-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-x86_64) |
+| macOS Apple Silicon | [tark-darwin-arm64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-arm64) |
+| Windows x64 | [tark-windows-x86_64.exe](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-windows-x86_64.exe) |
+
+```bash
+# Example: Linux x86_64
+curl -L https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64 -o tark
+chmod +x tark
+sudo mv tark /usr/local/bin/
+```
+
+#### Option C: Build from Source (Requires Rust)
+
+```bash
 cargo install --git https://github.com/thoughtoinnovate/tark.git
+```
+
+#### Verify Installation
+
+```bash
+tark --version
 ```
 
 ### 2. Set API Key
@@ -43,7 +84,7 @@ ollama serve  # start Ollama
 
 ### 3. Install Neovim Plugin
 
-#### lazy.nvim (Recommended)
+#### lazy.nvim / LazyVim (Recommended)
 
 Add to your `lua/plugins/tark.lua`:
 
@@ -57,15 +98,19 @@ return {
     keys = {
         { "<leader>ec", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
         { "<leader>eg", "<cmd>TarkGhostToggle<cr>", desc = "Toggle ghost text" },
+        { "<leader>es", "<cmd>TarkServerStatus<cr>", desc = "Server status" },
     },
     opts = {
+        server = {
+            auto_start = true,  -- Automatically start server when Neovim opens
+        },
         ghost_text = { enabled = true },
         chat = { enabled = true },
     },
 }
 ```
 
-That's it! No need to configure blink.cmp separately.
+That's it! The server starts automatically - no manual setup needed.
 
 #### packer.nvim
 
@@ -73,22 +118,27 @@ That's it! No need to configure blink.cmp separately.
 use {
     'thoughtoinnovate/tark',
     config = function()
-        require('tark').setup()
+        require('tark').setup({
+            server = { auto_start = true },
+        })
     end
 }
 ```
 
-### 4. Start the Server
+### 4. Server Management
 
+The server starts automatically by default. You can also manage it manually:
+
+| Command | Description |
+|---------|-------------|
+| `:TarkServerStart` | Start the server |
+| `:TarkServerStop` | Stop the server |
+| `:TarkServerStatus` | Check server status |
+| `:TarkServerRestart` | Restart the server |
+
+Or start manually in a terminal:
 ```bash
-# In a terminal
 tark serve
-```
-
-Or add to your shell startup:
-```bash
-# ~/.zshrc or ~/.bashrc
-tark serve &>/dev/null &
 ```
 
 ## Usage
@@ -98,6 +148,8 @@ tark serve &>/dev/null &
 | Key | Mode | Description |
 |-----|------|-------------|
 | `<leader>ec` | Normal | Toggle chat window |
+| `<leader>es` | Normal | Show server status |
+| `<leader>eg` | Normal | Toggle ghost text |
 | `Tab` | Insert | Accept ghost text (or blink.cmp) |
 | `Ctrl+]` | Insert | Accept ghost text (always) |
 | `Ctrl+Space` | Insert | Trigger completion manually |
@@ -142,22 +194,31 @@ tark serve &>/dev/null &
 
 ```lua
 require('tark').setup({
+    -- Server settings
+    server = {
+        auto_start = true,       -- Auto-start server when Neovim opens
+        binary = 'tark',         -- Path to tark binary (or just 'tark' if in PATH)
+        host = '127.0.0.1',
+        port = 8765,
+        stop_on_exit = true,     -- Stop server when Neovim exits
+    },
+    -- Ghost text (inline completions)
     ghost_text = {
         enabled = true,
-        server_url = 'http://localhost:8765',
-        debounce_ms = 200,
-        hl_group = 'Comment',
+        debounce_ms = 150,       -- Delay before requesting completion
+        hl_group = 'Comment',    -- Highlight group for ghost text
     },
+    -- Chat window
     chat = {
         enabled = true,
         window = {
-            width = 80,
-            height = 20,
+            sidepane_width = 0.35,  -- 35% of editor width
             border = 'rounded',
         },
     },
+    -- LSP (disabled by default to avoid conflicts)
     lsp = {
-        enabled = false,  -- Use built-in LSP instead
+        enabled = false,
     },
 })
 ```
@@ -242,9 +303,33 @@ Create `.tark/` in your project for local settings:
 
 ## Security
 
+### Binary Verification
+
+All release binaries include SHA256 checksums for verification:
+
+```bash
+# The install script automatically verifies checksums
+curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash
+
+# Manual verification
+curl -L https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64.sha256
+sha256sum tark-linux-x86_64  # Compare with downloaded checksum
+```
+
+You can also verify your installed binary in Neovim:
+```vim
+:checkhealth tark
+```
+
+This shows the SHA256 hash of your installed binary which you can compare against the official release.
+
+### Privacy & Security
+
 - API keys are **only** sent to official provider endpoints
 - No telemetry or data collection
 - Local Ollama option for fully offline usage
+- All binaries are built via GitHub Actions (transparent, auditable)
+- SHA256 checksums for all release artifacts
 
 ## License
 
