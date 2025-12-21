@@ -3,21 +3,31 @@
 -- Provides AI-powered completions and chat functionality
 -- 
 -- Works seamlessly with LazyVim and blink.cmp - no manual config needed!
+-- Supports both binary and Docker modes for maximum flexibility.
 
 local M = {}
 
 -- Server job ID (for managing the background server process)
 M.server_job_id = nil
+M.docker_container_id = nil
 
 -- Default configuration
 M.config = {
     -- Server settings
     server = {
         auto_start = true,           -- Auto-start server when plugin loads
+        mode = 'auto',               -- 'auto', 'binary', or 'docker'
         binary = 'tark',             -- Path to tark binary (or just 'tark' if in PATH)
         host = '127.0.0.1',
         port = 8765,
         stop_on_exit = true,         -- Stop server when Neovim exits
+    },
+    -- Docker settings (used when mode = 'docker' or 'auto' with no binary)
+    docker = {
+        image = 'ghcr.io/thoughtoinnovate/tark:latest',
+        container_name = 'tark-server',
+        pull_on_start = true,        -- Pull latest image before starting
+        mount_workspace = true,      -- Mount current directory into container
     },
     -- LSP settings
     lsp = {
@@ -55,6 +65,28 @@ function M.check_binary()
     return false
 end
 
+-- Check if Docker is available
+function M.check_docker()
+    local handle = io.popen('docker --version 2>/dev/null')
+    if handle then
+        local result = handle:read('*a')
+        handle:close()
+        return result and result:match('Docker')
+    end
+    return false
+end
+
+-- Check if Docker container is running
+function M.is_docker_running()
+    local handle = io.popen('docker ps --filter "name=' .. M.config.docker.container_name .. '" --format "{{.ID}}" 2>/dev/null')
+    if handle then
+        local result = handle:read('*a')
+        handle:close()
+        return result and result ~= ''
+    end
+    return false
+end
+
 -- Check if server is running
 function M.is_server_running()
     local url = string.format('http://%s:%d/health', 
@@ -68,7 +100,135 @@ function M.is_server_running()
     return false
 end
 
--- Start the tark server
+-- Determine which mode to use
+function M.get_server_mode()
+    local mode = M.config.server.mode
+    
+    if mode == 'binary' then
+        return 'binary'
+    elseif mode == 'docker' then
+        return 'docker'
+    else -- 'auto'
+        -- Prefer binary if available, fallback to Docker
+        if M.check_binary() then
+            return 'binary'
+        elseif M.check_docker() then
+            return 'docker'
+        else
+            return nil
+        end
+    end
+end
+
+-- Pull Docker image
+function M.docker_pull()
+    vim.notify('Pulling tark Docker image...', vim.log.levels.INFO)
+    local handle = io.popen('docker pull ' .. M.config.docker.image .. ' 2>&1')
+    if handle then
+        local result = handle:read('*a')
+        handle:close()
+        if result:match('Status:') or result:match('up to date') or result:match('Downloaded') then
+            vim.notify('Docker image ready', vim.log.levels.INFO)
+            return true
+        end
+    end
+    return false
+end
+
+-- Start Docker container
+function M.start_docker()
+    -- Check if already running
+    if M.is_docker_running() then
+        vim.notify('tark Docker container is already running', vim.log.levels.INFO)
+        return true
+    end
+    
+    -- Remove any stopped container with same name
+    os.execute('docker rm -f ' .. M.config.docker.container_name .. ' 2>/dev/null')
+    
+    -- Pull image if configured
+    if M.config.docker.pull_on_start then
+        M.docker_pull()
+    end
+    
+    -- Build docker run command
+    local cwd = vim.fn.getcwd()
+    local cmd_parts = {
+        'docker', 'run', '-d',
+        '--name', M.config.docker.container_name,
+        '-p', M.config.server.port .. ':8765',
+    }
+    
+    -- Mount workspace if configured
+    if M.config.docker.mount_workspace then
+        table.insert(cmd_parts, '-v')
+        table.insert(cmd_parts, cwd .. ':/workspace')
+        table.insert(cmd_parts, '-w')
+        table.insert(cmd_parts, '/workspace')
+    end
+    
+    -- Pass API keys from environment
+    local openai_key = os.getenv('OPENAI_API_KEY')
+    local anthropic_key = os.getenv('ANTHROPIC_API_KEY')
+    
+    if openai_key then
+        table.insert(cmd_parts, '-e')
+        table.insert(cmd_parts, 'OPENAI_API_KEY=' .. openai_key)
+    end
+    if anthropic_key then
+        table.insert(cmd_parts, '-e')
+        table.insert(cmd_parts, 'ANTHROPIC_API_KEY=' .. anthropic_key)
+    end
+    
+    -- Add Ollama host for local Ollama access
+    table.insert(cmd_parts, '-e')
+    table.insert(cmd_parts, 'OLLAMA_HOST=http://host.docker.internal:11434')
+    table.insert(cmd_parts, '--add-host')
+    table.insert(cmd_parts, 'host.docker.internal:host-gateway')
+    
+    -- Add image name
+    table.insert(cmd_parts, M.config.docker.image)
+    
+    local cmd = table.concat(cmd_parts, ' ')
+    
+    vim.notify('Starting tark Docker container...', vim.log.levels.INFO)
+    
+    local handle = io.popen(cmd .. ' 2>&1')
+    if handle then
+        local result = handle:read('*a')
+        handle:close()
+        M.docker_container_id = result:gsub('%s+', '')
+        
+        -- Wait for container to be ready
+        vim.defer_fn(function()
+            if M.is_server_running() then
+                vim.notify('tark Docker container started on port ' .. M.config.server.port, vim.log.levels.INFO)
+            else
+                vim.notify('tark container may have failed. Check: docker logs ' .. M.config.docker.container_name, vim.log.levels.WARN)
+            end
+        end, 2000)  -- Docker needs more time to start
+        
+        return true
+    end
+    
+    vim.notify('Failed to start Docker container', vim.log.levels.ERROR)
+    return false
+end
+
+-- Stop Docker container
+function M.stop_docker()
+    if M.is_docker_running() then
+        os.execute('docker stop ' .. M.config.docker.container_name .. ' 2>/dev/null')
+        os.execute('docker rm ' .. M.config.docker.container_name .. ' 2>/dev/null')
+        vim.notify('tark Docker container stopped', vim.log.levels.INFO)
+        M.docker_container_id = nil
+        return true
+    end
+    vim.notify('No Docker container to stop', vim.log.levels.INFO)
+    return false
+end
+
+-- Start the tark server (binary or Docker)
 function M.start_server()
     -- Check if already running
     if M.is_server_running() then
@@ -76,17 +236,29 @@ function M.start_server()
         return true
     end
 
-    -- Check if binary exists
-    if not M.check_binary() then
+    local mode = M.get_server_mode()
+    
+    if mode == 'docker' then
+        return M.start_docker()
+    elseif mode == 'binary' then
+        return M.start_binary()
+    else
         vim.notify(
-            'tark binary not found. Install with:\n' ..
-            '  cargo install --git https://github.com/thoughtoinnovate/tark.git\n' ..
-            'Or download from GitHub releases.',
+            'No tark server available. Install options:\n\n' ..
+            '1. Docker (easiest):\n' ..
+            '   docker pull ghcr.io/thoughtoinnovate/tark:latest\n\n' ..
+            '2. Binary:\n' ..
+            '   curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash\n\n' ..
+            '3. From source:\n' ..
+            '   cargo install --git https://github.com/thoughtoinnovate/tark.git',
             vim.log.levels.ERROR
         )
         return false
     end
+end
 
+-- Start binary server
+function M.start_binary()
     local cmd = string.format('%s serve --host %s --port %d',
         M.config.server.binary,
         M.config.server.host,
@@ -130,8 +302,14 @@ function M.start_server()
     end
 end
 
--- Stop the tark server
+-- Stop the tark server (binary or Docker)
 function M.stop_server()
+    -- Try stopping Docker container first
+    if M.is_docker_running() then
+        return M.stop_docker()
+    end
+    
+    -- Try stopping binary process
     if M.server_job_id and M.server_job_id > 0 then
         vim.fn.jobstop(M.server_job_id)
         M.server_job_id = nil
@@ -154,13 +332,20 @@ end
 function M.server_status()
     local running = M.is_server_running()
     local binary_found = M.check_binary()
+    local docker_available = M.check_docker()
+    local docker_running = M.is_docker_running()
+    local mode = M.get_server_mode()
     
     local lines = {
         '=== tark Server Status ===',
         '',
-        'Binary: ' .. (binary_found and 'Found (' .. M.config.server.binary .. ')' or 'NOT FOUND'),
+        'Mode: ' .. (M.config.server.mode == 'auto' and 'auto (' .. (mode or 'none') .. ')' or M.config.server.mode),
         'Server: ' .. (running and 'Running' or 'Not running'),
         'URL: http://' .. M.config.server.host .. ':' .. M.config.server.port,
+        '',
+        '--- Backends ---',
+        'Binary: ' .. (binary_found and 'Available (' .. M.config.server.binary .. ')' or 'Not found'),
+        'Docker: ' .. (docker_available and (docker_running and 'Running' or 'Available') or 'Not installed'),
         '',
     }
     
@@ -184,11 +369,11 @@ function M.server_status()
         table.insert(lines, 'Start with :TarkServerStart')
     end
     
-    if not binary_found then
+    if not binary_found and not docker_available then
         table.insert(lines, '')
-        table.insert(lines, 'Install tark:')
-        table.insert(lines, '  cargo install --git https://github.com/thoughtoinnovate/tark.git')
-        table.insert(lines, '  Or download binary from GitHub releases')
+        table.insert(lines, 'Install options:')
+        table.insert(lines, '  Docker: docker pull ghcr.io/thoughtoinnovate/tark:latest')
+        table.insert(lines, '  Binary: curl -fsSL .../install.sh | bash')
     end
     
     vim.notify(table.concat(lines, '\n'), running and vim.log.levels.INFO or vim.log.levels.WARN)
@@ -238,8 +423,14 @@ function M.setup(opts)
     if M.config.server.stop_on_exit then
         vim.api.nvim_create_autocmd('VimLeavePre', {
             callback = function()
+                -- Stop binary process
                 if M.server_job_id and M.server_job_id > 0 then
                     vim.fn.jobstop(M.server_job_id)
+                end
+                -- Stop Docker container
+                if M.docker_container_id then
+                    os.execute('docker stop ' .. M.config.docker.container_name .. ' 2>/dev/null')
+                    os.execute('docker rm ' .. M.config.docker.container_name .. ' 2>/dev/null')
                 end
             end,
         })
@@ -267,6 +458,26 @@ function M.register_commands()
             M.start_server()
         end, 500)
     end, { desc = 'Restart tark server' })
+
+    -- Docker-specific commands
+    vim.api.nvim_create_user_command('TarkDockerPull', function()
+        M.docker_pull()
+    end, { desc = 'Pull latest tark Docker image' })
+
+    vim.api.nvim_create_user_command('TarkDockerLogs', function()
+        local handle = io.popen('docker logs --tail 50 ' .. M.config.docker.container_name .. ' 2>&1')
+        if handle then
+            local logs = handle:read('*a')
+            handle:close()
+            -- Open in a new buffer
+            vim.cmd('new')
+            vim.api.nvim_buf_set_lines(0, 0, -1, false, vim.split(logs, '\n'))
+            vim.bo.buftype = 'nofile'
+            vim.bo.bufhidden = 'wipe'
+            vim.bo.filetype = 'log'
+            vim.api.nvim_buf_set_name(0, 'tark-docker-logs')
+        end
+    end, { desc = 'Show tark Docker container logs' })
 
     -- Chat command (open)
     vim.api.nvim_create_user_command('TarkChat', function(opts)

@@ -1,19 +1,33 @@
+version: '3.8'
+
 services:
-  dev:
-    build: .
-    image: minimal-dev
-    container_name: dev-container
-    stdin_open: true
-    tty: true
+  tark:
+    image: ghcr.io/thoughtoinnovate/tark:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tark-server
     ports:
-      - "2222:22"
+      - "8765:8765"
+    environment:
+      # LLM Provider API Keys (set these in your environment)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Ollama host (if running Ollama on host machine)
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
     volumes:
-      # Persistent volume for user data
-      - dev-data:/home/dev/data
-      # Mount current directory as workspace
-      - .:/home/dev/workspace
-    working_dir: /home/dev/workspace
+      # Mount current directory for file operations
+      - ${PWD:-/tmp}:/workspace:rw
+      # Persist tark config and conversations
+      - tark-data:/home/tark/.config/tark
+    working_dir: /workspace
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
 volumes:
-  dev-data:
-    name: minimal-dev-data
+  tark-data:

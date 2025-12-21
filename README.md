@@ -18,7 +18,10 @@ AI-powered CLI agent with LSP server for code completion, hover, diagnostics, an
 ## Quick Install
 
 ```bash
-# One-liner install (Linux/macOS)
+# Option 1: Docker (easiest - no installation needed!)
+docker pull ghcr.io/thoughtoinnovate/tark:latest
+
+# Option 2: Binary install (Linux/macOS)
 curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash
 ```
 
@@ -62,7 +65,27 @@ chmod +x tark
 sudo mv tark /usr/local/bin/
 ```
 
-#### Option C: Build from Source (Requires Rust)
+#### Option C: Docker (No Installation Needed!)
+
+Docker is the easiest way - the plugin will automatically pull and run the container:
+
+```bash
+# Just make sure Docker is installed and running
+docker --version
+
+# The plugin handles the rest automatically!
+```
+
+Or run manually:
+```bash
+docker run -d --name tark-server \
+  -p 8765:8765 \
+  -v $(pwd):/workspace \
+  -e OPENAI_API_KEY=$OPENAI_API_KEY \
+  ghcr.io/thoughtoinnovate/tark:latest
+```
+
+#### Option D: Build from Source (Requires Rust)
 
 ```bash
 cargo install --git https://github.com/thoughtoinnovate/tark.git
@@ -71,7 +94,11 @@ cargo install --git https://github.com/thoughtoinnovate/tark.git
 #### Verify Installation
 
 ```bash
+# Binary
 tark --version
+
+# Or Docker
+docker run --rm ghcr.io/thoughtoinnovate/tark:latest --version
 ```
 
 ### 2. Set API Key
@@ -202,10 +229,18 @@ require('tark').setup({
     -- Server settings
     server = {
         auto_start = true,       -- Auto-start server when Neovim opens
-        binary = 'tark',         -- Path to tark binary (or just 'tark' if in PATH)
+        mode = 'auto',           -- 'auto', 'binary', or 'docker'
+        binary = 'tark',         -- Path to tark binary (if using binary mode)
         host = '127.0.0.1',
         port = 8765,
         stop_on_exit = true,     -- Stop server when Neovim exits
+    },
+    -- Docker settings (used when mode = 'docker' or 'auto' without binary)
+    docker = {
+        image = 'ghcr.io/thoughtoinnovate/tark:latest',
+        container_name = 'tark-server',
+        pull_on_start = true,    -- Pull latest image before starting
+        mount_workspace = true,  -- Mount cwd into container for file access
     },
     -- Ghost text (inline completions)
     ghost_text = {
@@ -226,6 +261,15 @@ require('tark').setup({
         enabled = false,
     },
 })
+```
+
+### Server Modes
+
+| Mode | Description |
+|------|-------------|
+| `auto` | Use binary if available, fallback to Docker (default) |
+| `binary` | Only use local binary |
+| `docker` | Only use Docker container |
 ```
 
 ### CLI Config (`~/.config/tark/config.toml`)
