@@ -27,6 +27,7 @@ M.config = {
         image = 'ghcr.io/thoughtoinnovate/tark:latest',
         container_name = 'tark-server',
         pull_on_start = true,        -- Pull latest image before starting
+        build_local = false,         -- Build from local Dockerfile instead of pulling
         mount_workspace = true,      -- Mount current directory into container
     },
     -- LSP settings
@@ -120,6 +121,75 @@ function M.get_server_mode()
     end
 end
 
+-- Get the plugin installation directory
+function M.get_plugin_dir()
+    -- Find where this plugin is installed
+    local source = debug.getinfo(1, 'S').source
+    if source:sub(1, 1) == '@' then
+        source = source:sub(2)
+    end
+    -- Go up from lua/tark/init.lua to plugin root
+    local plugin_dir = vim.fn.fnamemodify(source, ':h:h:h')
+    return plugin_dir
+end
+
+-- Build Docker image locally from Dockerfile
+function M.docker_build()
+    local plugin_dir = M.get_plugin_dir()
+    local dockerfile = plugin_dir .. '/Dockerfile'
+    
+    -- Check if Dockerfile exists
+    if vim.fn.filereadable(dockerfile) ~= 1 then
+        vim.notify('Dockerfile not found at: ' .. dockerfile, vim.log.levels.ERROR)
+        return false
+    end
+    
+    local image_tag = 'tark:local'
+    vim.notify('Building tark Docker image from source...\nThis may take a few minutes.', vim.log.levels.INFO)
+    
+    -- Build in background with progress
+    local cmd = string.format('cd %s && docker build -t %s . 2>&1', 
+        vim.fn.shellescape(plugin_dir), image_tag)
+    
+    local output_lines = {}
+    local job_id = vim.fn.jobstart(cmd, {
+        on_stdout = function(_, data)
+            for _, line in ipairs(data) do
+                if line ~= '' then
+                    table.insert(output_lines, line)
+                    -- Show build steps
+                    if line:match('^Step') or line:match('^Successfully') then
+                        vim.schedule(function()
+                            vim.notify(line, vim.log.levels.INFO)
+                        end)
+                    end
+                end
+            end
+        end,
+        on_stderr = function(_, data)
+            for _, line in ipairs(data) do
+                if line ~= '' then
+                    table.insert(output_lines, line)
+                end
+            end
+        end,
+        on_exit = function(_, code)
+            vim.schedule(function()
+                if code == 0 then
+                    -- Update config to use local image
+                    M.config.docker.image = image_tag
+                    vim.notify('Docker image built successfully: ' .. image_tag, vim.log.levels.INFO)
+                else
+                    vim.notify('Docker build failed. Check :TarkDockerLogs for details.\n' .. 
+                        table.concat(output_lines, '\n'):sub(-500), vim.log.levels.ERROR)
+                end
+            end)
+        end,
+    })
+    
+    return job_id > 0
+end
+
 -- Pull Docker image
 function M.docker_pull()
     vim.notify('Pulling tark Docker image...', vim.log.levels.INFO)
@@ -135,6 +205,17 @@ function M.docker_pull()
     return false
 end
 
+-- Check if local Docker image exists
+function M.docker_image_exists(image_name)
+    local handle = io.popen('docker images -q ' .. image_name .. ' 2>/dev/null')
+    if handle then
+        local result = handle:read('*a')
+        handle:close()
+        return result and result ~= ''
+    end
+    return false
+end
+
 -- Start Docker container
 function M.start_docker()
     -- Check if already running
@@ -146,8 +227,24 @@ function M.start_docker()
     -- Remove any stopped container with same name
     os.execute('docker rm -f ' .. M.config.docker.container_name .. ' 2>/dev/null')
     
-    -- Pull image if configured
-    if M.config.docker.pull_on_start then
+    -- Handle image: build local or pull from registry
+    if M.config.docker.build_local then
+        -- Build from local Dockerfile
+        if not M.docker_image_exists('tark:local') then
+            vim.notify('Building Docker image from source (first time setup)...', vim.log.levels.INFO)
+            M.docker_build()
+            -- Building is async, so we need to wait and retry
+            vim.defer_fn(function()
+                if M.docker_image_exists('tark:local') then
+                    M.config.docker.image = 'tark:local'
+                    M.start_docker()
+                end
+            end, 30000)  -- Wait up to 30s for build
+            return true
+        end
+        M.config.docker.image = 'tark:local'
+    elseif M.config.docker.pull_on_start then
+        -- Pull from registry
         M.docker_pull()
     end
     
@@ -479,6 +576,10 @@ function M.register_commands()
     vim.api.nvim_create_user_command('TarkDockerPull', function()
         M.docker_pull()
     end, { desc = 'Pull latest tark Docker image' })
+
+    vim.api.nvim_create_user_command('TarkDockerBuild', function()
+        M.docker_build()
+    end, { desc = 'Build tark Docker image from source' })
 
     vim.api.nvim_create_user_command('TarkDockerLogs', function()
         local handle = io.popen('docker logs --tail 50 ' .. M.config.docker.container_name .. ' 2>&1')

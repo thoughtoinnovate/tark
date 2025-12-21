@@ -240,6 +240,7 @@ require('tark').setup({
         image = 'ghcr.io/thoughtoinnovate/tark:latest',
         container_name = 'tark-server',
         pull_on_start = true,    -- Pull latest image before starting
+        build_local = false,     -- Build from plugin's Dockerfile (no Rust needed!)
         mount_workspace = true,  -- Mount cwd into container for file access
     },
     -- Ghost text (inline completions)
@@ -270,6 +271,39 @@ require('tark').setup({
 | `auto` | Use binary if available, fallback to Docker (default) |
 | `binary` | Only use local binary |
 | `docker` | Only use Docker container |
+
+### Docker Options
+
+| Option | Description |
+|--------|-------------|
+| `pull_on_start` | Pull latest image from registry (default: true) |
+| `build_local` | Build image from plugin's Dockerfile (default: false) |
+
+#### Build Docker Image Locally
+
+If you want to build from source without installing Rust:
+
+```lua
+-- lua/plugins/tark.lua
+return {
+    "thoughtoinnovate/tark",
+    lazy = false,
+    opts = {
+        server = { mode = 'docker' },
+        docker = { 
+            build_local = true,    -- Build from Dockerfile in plugin directory
+            pull_on_start = false, -- Don't pull from registry
+        },
+    },
+}
+```
+
+Or build manually with:
+```vim
+:TarkDockerBuild
+```
+
+This builds the image using Docker on your machine - no Rust toolchain required!
 ```
 
 ### CLI Config (`~/.config/tark/config.toml`)
