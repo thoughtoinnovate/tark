@@ -12,11 +12,16 @@ ARG TARGETARCH
 ARG TARGETPLATFORM
 
 # Install build dependencies for static linking
+# gcc/g++ are needed for tree-sitter C compilation
 # UPX is only reliable on x86_64, skip on ARM
 RUN apk add --no-cache \
     musl-dev \
     openssl-dev \
     openssl-libs-static \
+    gcc \
+    g++ \
+    make \
+    pkgconfig \
     && if [ "$TARGETARCH" = "amd64" ]; then apk add --no-cache upx; fi
 
 WORKDIR /build
