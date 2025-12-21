@@ -683,7 +683,8 @@ function M.register_commands()
             vim.bo.buftype = 'nofile'
             vim.bo.bufhidden = 'wipe'
             vim.bo.filetype = 'log'
-            vim.api.nvim_buf_set_name(0, 'tark-docker-logs')
+            -- Use unique buffer name with timestamp
+            pcall(vim.api.nvim_buf_set_name, 0, 'tark-docker-logs-' .. os.time())
         end
     end, { desc = 'Show tark Docker container logs' })
 
