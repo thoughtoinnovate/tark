@@ -746,7 +746,9 @@ impl Tool for CallHierarchyTool {
                     
                     // Simple heuristic: find identifiers followed by (
                     let func_body = lines[start..end].join("\n");
-                    let call_pattern = regex::Regex::new(r"(\w+)\s*\(").unwrap();
+                    static CALL_PATTERN: once_cell::sync::Lazy<regex::Regex> = 
+                        once_cell::sync::Lazy::new(|| regex::Regex::new(r"(\w+)\s*\(").expect("valid regex"));
+                    let call_pattern = &*CALL_PATTERN;
                     
                     let mut calls: Vec<String> = call_pattern
                         .captures_iter(&func_body)

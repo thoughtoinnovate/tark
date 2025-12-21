@@ -493,8 +493,8 @@ async fn handle_chat(
         }
         
         // Update provider if changed (preserves conversation)
-        if provider_changed {
-            let provider_name = req.provider.clone().unwrap();
+        // Safety: provider_changed is only true when req.provider.is_some()
+        if let Some(provider_name) = req.provider.clone().filter(|_| provider_changed) {
             let provider = match llm::create_provider(&provider_name) {
                 Ok(p) => Arc::from(p),
                 Err(e) => {
