@@ -46,6 +46,9 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact_name: tark-windows-x86_64.exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: tark-windows-arm64.exe
           
           # FreeBSD
           - target: x86_64-unknown-freebsd
