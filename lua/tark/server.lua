@@ -117,6 +117,49 @@ function M.download_binary(callback)
     
     vim.notify('tark: Downloading ' .. version_display .. ' binary for ' .. platform .. '...', vim.log.levels.INFO)
     
+    -- First check if the release exists (HEAD request)
+    local check_cmd = string.format('curl -sfI "%s" >/dev/null 2>&1', binary_url)
+    local check_result = os.execute(check_cmd)
+    
+    if check_result ~= 0 then
+        local error_msg = string.format([[
+tark: No binary available for download!
+
+Channel: %s
+URL: %s
+
+]], version_display, binary_url)
+        
+        if channel == 'nightly' then
+            error_msg = error_msg .. [[Nightly release does not exist yet.
+
+To create nightly builds:
+1. Go to GitHub → Actions → "Manual Build"
+2. Click "Run workflow" → Select platforms → Run
+3. Wait for build to complete (~10 min)
+4. Then restart Neovim
+
+Or switch to Docker mode:
+  opts = { server = { mode = 'docker' } }]]
+        elseif channel == 'stable' or channel == 'latest' then
+            error_msg = error_msg .. [[No stable release exists yet.
+
+To create a release:
+  git tag v0.1.0
+  git push --tags
+
+Or use Docker mode:
+  opts = { server = { mode = 'docker' } }
+
+Or try nightly (if manual builds exist):
+  opts = { server = { channel = 'nightly' } }]]
+        end
+        
+        vim.notify(error_msg, vim.log.levels.ERROR)
+        if callback then callback(false) end
+        return
+    end
+    
     -- Download binary and checksum, then verify
     local download_cmd = string.format(
         'curl -fsSL "%s" -o "%s" && curl -fsSL "%s" -o "%s"',
