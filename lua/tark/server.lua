@@ -55,34 +55,52 @@ local function get_local_binary_path()
 end
 
 -- Detect platform for binary download
+-- Returns: os, arch, binary_name
 local function detect_platform()
-    local os_name = vim.loop.os_uname().sysname
-    local arch = vim.loop.os_uname().machine
+    local uname = vim.loop.os_uname()
+    local os_name = uname.sysname
+    local arch = uname.machine
     
-    local os_map = {
-        Linux = 'linux',
-        Darwin = 'darwin',
-        Windows_NT = 'windows',
-        FreeBSD = 'freebsd',
-    }
+    -- Detect OS
+    local os_key
+    if os_name == 'Linux' then
+        os_key = 'linux'
+    elseif os_name == 'Darwin' then
+        os_key = 'darwin'
+    elseif os_name == 'FreeBSD' then
+        os_key = 'freebsd'
+    elseif os_name:match('Windows') or os_name:match('MINGW') or os_name:match('MSYS') then
+        os_key = 'windows'
+    else
+        os_key = 'linux'  -- fallback
+    end
     
-    local arch_map = {
-        x86_64 = 'x86_64',
-        amd64 = 'x86_64',
-        aarch64 = 'arm64',
-        arm64 = 'arm64',
-    }
+    -- Detect architecture
+    local arch_key
+    if arch == 'x86_64' or arch == 'amd64' then
+        arch_key = 'x86_64'
+    elseif arch == 'aarch64' or arch == 'arm64' then
+        arch_key = 'arm64'
+    elseif arch:match('arm') then
+        arch_key = 'arm64'  -- assume ARM64 for other ARM variants
+    else
+        arch_key = 'x86_64'  -- fallback
+    end
     
-    local os_key = os_map[os_name] or 'linux'
-    local arch_key = arch_map[arch] or 'x86_64'
+    -- Build binary name (Windows needs .exe extension)
+    local binary_name
+    if os_key == 'windows' then
+        binary_name = 'tark-' .. os_key .. '-' .. arch_key .. '.exe'
+    else
+        binary_name = 'tark-' .. os_key .. '-' .. arch_key
+    end
     
-    return os_key .. '-' .. arch_key
+    return os_key, arch_key, binary_name
 end
 
 -- Download tark binary automatically with SHA256 verification
 function M.download_binary(callback)
-    local platform = detect_platform()
-    local binary_name = 'tark-' .. platform
+    local os_key, arch_key, binary_name = detect_platform()
     
     -- Determine download URL based on channel
     local channel = M.config.channel or 'stable'
@@ -109,8 +127,9 @@ function M.download_binary(callback)
     local checksum_url = binary_url .. '.sha256'
     local dest = get_local_binary_path()
     local checksum_file = dest .. '.sha256'
+    local platform_display = os_key .. '-' .. arch_key
     
-    vim.notify('tark: Downloading ' .. version_display .. ' binary for ' .. platform .. '...', vim.log.levels.INFO)
+    vim.notify('tark: Downloading ' .. version_display .. ' binary for ' .. platform_display .. '...', vim.log.levels.INFO)
     
     -- First check if the release exists (HEAD request)
     local check_cmd = string.format('curl -sfI "%s" >/dev/null 2>&1', binary_url)
@@ -725,10 +744,16 @@ end
 
 -- Get server status
 function M.status()
+    -- Detect platform
+    local os_key, arch_key, binary_name = detect_platform()
+    
     local status = {
         running = false,
         mode = M.state.mode,
         url = string.format('http://%s:%d', M.config.host, M.config.port),
+        platform = os_key .. '-' .. arch_key,
+        binary_name = binary_name,
+        channel = M.config.channel or 'stable',
     }
     
     -- Check actual health

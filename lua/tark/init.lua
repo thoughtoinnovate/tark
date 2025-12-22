@@ -119,6 +119,12 @@ local function setup_commands()
         end
         
         table.insert(lines, '')
+        table.insert(lines, '--- Platform ---')
+        table.insert(lines, 'Detected: ' .. (status.platform or 'unknown'))
+        table.insert(lines, 'Binary Name: ' .. (status.binary_name or 'unknown'))
+        table.insert(lines, 'Channel: ' .. (status.channel or 'stable'))
+        
+        table.insert(lines, '')
         table.insert(lines, '--- Availability ---')
         table.insert(lines, 'Binary: ' .. (status.binary_available and '✅ ' .. (status.binary_info or 'available') or '❌ ' .. (status.binary_info or 'not found')))
         table.insert(lines, 'Docker: ' .. (status.docker_available and '✅ available' or '❌ ' .. (status.docker_info or 'not available')))
