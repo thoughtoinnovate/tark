@@ -130,25 +130,13 @@ ollama serve  # start Ollama
 
 Add to your `lua/plugins/tark.lua`:
 
+##### Minimal Config (Auto-download binary)
+
 ```lua
+-- Simplest setup - plugin auto-downloads binary
 return {
     "thoughtoinnovate/tark",
     lazy = false,
-    dependencies = {
-        { "saghen/blink.cmp", optional = true },  -- Optional: Tab integration
-    },
-    keys = {
-        { "<leader>ec", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
-        { "<leader>eg", "<cmd>TarkGhostToggle<cr>", desc = "Toggle ghost text" },
-        { "<leader>es", "<cmd>TarkServerStatus<cr>", desc = "Server status" },
-    },
-    opts = {
-        server = {
-            auto_start = true,  -- Automatically start server when Neovim opens
-        },
-        ghost_text = { enabled = true },
-        chat = { enabled = true },
-    },
 }
 ```
 
@@ -158,6 +146,73 @@ That's it! The plugin automatically:
 3. Starts the server
 
 No manual installation needed!
+
+##### Recommended Config (with keymaps)
+
+```lua
+return {
+    "thoughtoinnovate/tark",
+    lazy = false,
+    keys = {
+        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
+        { "<leader>tg", "<cmd>TarkGhostToggle<cr>", desc = "Toggle ghost text" },
+        { "<leader>ts", "<cmd>TarkServerStatus<cr>", desc = "Server status" },
+    },
+}
+```
+
+##### Docker Config (no binary download)
+
+```lua
+return {
+    "thoughtoinnovate/tark",
+    lazy = false,
+    keys = {
+        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
+    },
+    opts = {
+        server = { mode = 'docker' },
+    },
+}
+```
+
+##### Nightly Config (bleeding edge)
+
+```lua
+return {
+    "thoughtoinnovate/tark",
+    lazy = false,
+    opts = {
+        server = { channel = 'nightly' },
+    },
+}
+```
+
+##### Full Config (all options)
+
+```lua
+return {
+    "thoughtoinnovate/tark",
+    lazy = false,
+    dependencies = {
+        { "saghen/blink.cmp", optional = true },  -- Optional: Tab integration
+    },
+    keys = {
+        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
+        { "<leader>tg", "<cmd>TarkGhostToggle<cr>", desc = "Toggle ghost text" },
+        { "<leader>ts", "<cmd>TarkServerStatus<cr>", desc = "Server status" },
+        { "<leader>tr", "<cmd>TarkServerRestart<cr>", desc = "Restart server" },
+    },
+    opts = {
+        server = {
+            auto_start = true,
+            channel = 'stable',  -- or 'nightly'
+        },
+        ghost_text = { enabled = true },
+        chat = { enabled = true },
+    },
+}
+```
 
 #### packer.nvim
 
