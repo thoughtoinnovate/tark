@@ -234,7 +234,7 @@ impl ChatAgent {
 
     pub fn with_mode(llm: Arc<dyn LlmProvider>, tools: ToolRegistry, mode: AgentMode) -> Self {
         let mut context = ConversationContext::new();
-        context.add_system(&get_system_prompt(mode));
+        context.add_system(get_system_prompt(mode));
 
         Self {
             llm,
@@ -255,7 +255,7 @@ impl ChatAgent {
         self.tools = tools;
         self.mode = mode;
         // Update the system prompt in context (replace the first system message)
-        self.context.update_system_prompt(&get_system_prompt(mode));
+        self.context.update_system_prompt(get_system_prompt(mode));
     }
 
     /// Update just the LLM provider while preserving conversation history
@@ -294,7 +294,7 @@ impl ChatAgent {
             return Ok(()); // Not enough to summarize
         }
 
-        for (i, msg) in messages.iter().enumerate().skip(1).take(to_summarize) {
+        for (_i, msg) in messages.iter().enumerate().skip(1).take(to_summarize) {
             let role = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",
@@ -648,6 +648,6 @@ impl ChatAgent {
     /// Clear conversation history (keeps system prompt)
     pub fn reset(&mut self) {
         self.context.clear();
-        self.context.add_system(&get_system_prompt(self.mode));
+        self.context.add_system(get_system_prompt(self.mode));
     }
 }

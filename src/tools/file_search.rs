@@ -272,7 +272,7 @@ impl Tool for CodebaseOverviewTool {
     }
 }
 
-fn build_tree(root: &PathBuf, current: &PathBuf, depth: usize, max_depth: usize) -> String {
+fn build_tree(_root: &PathBuf, current: &PathBuf, depth: usize, max_depth: usize) -> String {
     if depth > max_depth {
         return String::new();
     }

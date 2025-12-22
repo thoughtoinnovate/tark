@@ -98,13 +98,10 @@ fn is_dangerous_command(cmd: &str) -> Option<&'static str> {
 /// Check if command should show a warning
 fn should_warn(cmd: &str) -> Option<&'static str> {
     let cmd_lower = cmd.to_lowercase();
-
-    for pattern in WARN_PATTERNS {
-        if cmd_lower.contains(&pattern.to_lowercase()) {
-            return Some(pattern);
-        }
-    }
-    None
+    WARN_PATTERNS
+        .iter()
+        .find(|&pattern| cmd_lower.contains(&pattern.to_lowercase()))
+        .copied()
 }
 
 /// Tool for executing shell commands

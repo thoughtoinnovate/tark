@@ -102,7 +102,7 @@ impl ConversationContext {
 
     /// Estimate tokens in text (~4 chars per token for English)
     pub fn estimate_tokens(text: &str) -> usize {
-        (text.len() + 3) / 4 // Round up
+        text.len().div_ceil(4)
     }
 
     /// Estimate total tokens in context

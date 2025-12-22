@@ -174,7 +174,7 @@ fn search_file(
     };
 
     let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
 
     let relative_path = path
         .strip_prefix(working_dir)
@@ -199,9 +199,9 @@ fn search_file(
                 let end = (i + context_lines + 1).min(lines.len());
 
                 results.push(format!("{}:{}:", relative_path, i + 1));
-                for j in start..end {
+                for (j, line_content) in lines.iter().enumerate().take(end).skip(start) {
                     let prefix = if j == i { ">" } else { " " };
-                    results.push(format!("{} {:4}| {}", prefix, j + 1, lines[j]));
+                    results.push(format!("{} {:4}| {}", prefix, j + 1, line_content));
                 }
                 results.push(String::new());
             } else {
@@ -339,7 +339,7 @@ impl Tool for FindReferencesTool {
 
         let params: Params = serde_json::from_value(params)?;
         let include_definition = params.include_definition.unwrap_or(true);
-        let context_lines = params.context_lines.unwrap_or(2);
+        let _context_lines = params.context_lines.unwrap_or(2);
         let symbol = &params.symbol;
 
         let mut output = String::new();
@@ -395,7 +395,7 @@ impl Tool for FindReferencesTool {
             };
 
             let reader = BufReader::new(file);
-            let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+            let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
 
             let relative_path = path
                 .strip_prefix(&self.working_dir)
@@ -433,7 +433,7 @@ impl Tool for FindReferencesTool {
                     }
 
                     let def_lines: Vec<String> =
-                        lines[start..end.min(lines.len())].iter().cloned().collect();
+                        lines[start..end.min(lines.len())].to_vec();
                     definitions.push((relative_path.clone(), i + 1, def_lines));
                 } else if !is_def {
                     // This is a usage

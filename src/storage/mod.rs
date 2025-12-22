@@ -1149,10 +1149,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let storage = TarkStorage::new(temp.path()).unwrap();
 
-        assert!(storage.root().exists());
-        assert!(storage.root().join("conversations").exists());
-        assert!(storage.root().join("plans").exists());
-        assert!(storage.root().join("rules").exists());
+        assert!(storage.global.root().exists());
+        assert!(storage.global.root().join("conversations").exists());
+        assert!(storage.global.root().join("plans").exists());
+        assert!(storage.global.root().join("rules").exists());
     }
 
     #[test]

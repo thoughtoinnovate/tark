@@ -44,7 +44,7 @@ impl FimBuilder {
 
         // Build prefix
         let mut prefix = String::new();
-        for (i, line_content) in lines
+        for (_i, line_content) in lines
             .iter()
             .enumerate()
             .skip(start_line)

@@ -100,6 +100,7 @@ impl Document {
     }
 
     /// Get position as byte offset
+    #[allow(dead_code)]
     pub fn position_to_offset(&self, position: &Position) -> Option<usize> {
         let mut offset = 0;
         for (i, line) in self.content.lines().enumerate() {

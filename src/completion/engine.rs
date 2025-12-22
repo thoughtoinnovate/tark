@@ -106,7 +106,5 @@ impl CompletionEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Tests would require mocking the LLM provider
 }

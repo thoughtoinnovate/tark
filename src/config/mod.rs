@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Main configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     pub llm: LlmConfig,
@@ -13,18 +13,6 @@ pub struct Config {
     pub completion: CompletionConfig,
     pub agent: AgentConfig,
     pub tools: ToolsConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            llm: LlmConfig::default(),
-            server: ServerConfig::default(),
-            completion: CompletionConfig::default(),
-            agent: AgentConfig::default(),
-            tools: ToolsConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
