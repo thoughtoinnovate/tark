@@ -652,22 +652,22 @@ function M.start(callback)
     elseif mode == 'docker' then
         M.start_docker(callback)
     else  -- 'auto'
-        -- Try binary first (including auto-download), fallback to Docker
+        -- Try binary first, then auto-download, fallback to Docker only as last resort
         local binary_ok = M.binary_available()
         if binary_ok then
             M.start_binary(callback)
         else
-            -- Check if Docker is available first
-            local docker_ok = M.docker_available()
-            if docker_ok then
-                vim.notify('tark: Using Docker mode', vim.log.levels.INFO)
-                M.start_docker(callback)
-            else
-                -- No Docker, try to auto-download binary
-                vim.notify('tark: No binary or Docker found. Auto-downloading binary...', vim.log.levels.INFO)
-                M.download_binary(function(success)
-                    if success then
-                        M.start_binary(callback)
+            -- Binary not found, try to auto-download first
+            vim.notify('tark: Binary not found. Downloading...', vim.log.levels.INFO)
+            M.download_binary(function(success)
+                if success then
+                    M.start_binary(callback)
+                else
+                    -- Download failed, try Docker as fallback
+                    local docker_ok = M.docker_available()
+                    if docker_ok then
+                        vim.notify('tark: Binary download failed. Falling back to Docker...', vim.log.levels.INFO)
+                        M.start_docker(callback)
                     else
                         vim.notify([[
 tark: Could not start server.
@@ -679,8 +679,8 @@ Install options:
 ]], vim.log.levels.ERROR)
                         if callback then callback(false) end
                     end
-                end)
-            end
+                end
+            end)
         end
     end
 end
