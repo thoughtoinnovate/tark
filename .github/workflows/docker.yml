@@ -1,10 +1,17 @@
 name: Docker
 
-# Only build and push Docker images on releases (tags)
-# For regular commits, use release.yml which handles everything
+# Build and push Docker images
+# - Automatically on version tags (releases)
+# - Manually via workflow_dispatch (click "Run workflow" button)
 on:
   push:
-    tags: ['v*']  # Only on version tags, not every commit
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Docker image tag (e.g., dev, test, or leave empty for git sha)'
+        required: false
+        default: 'dev'
 
 env:
   REGISTRY: ghcr.io
@@ -37,10 +44,14 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            # For tags (releases): v1.0.0, 1.0, 1, latest
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            # For manual runs: use input tag or 'dev'
+            type=raw,value=${{ github.event.inputs.tag || 'dev' }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push
         uses: docker/build-push-action@v5

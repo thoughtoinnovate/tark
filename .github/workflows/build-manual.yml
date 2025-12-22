@@ -1,0 +1,167 @@
+name: Manual Build
+
+# Manual workflow to build binaries without creating a release
+# Use this for testing builds before a release
+# Click "Run workflow" button in GitHub Actions tab
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to build'
+        required: true
+        default: 'linux'
+        type: choice
+        options:
+          - linux
+          - macos
+          - windows
+          - all
+      upload_artifacts:
+        description: 'Upload build artifacts'
+        required: true
+        default: true
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: tark
+
+jobs:
+  build-linux:
+    if: ${{ github.event.inputs.platforms == 'linux' || github.event.inputs.platforms == 'all' }}
+    name: Build Linux
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            artifact_name: tark-linux-x86_64-gnu
+          - target: x86_64-unknown-linux-musl
+            artifact_name: tark-linux-x86_64-musl
+            use_cross: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build with cross
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build with cargo
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary
+        run: |
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} ${{ matrix.artifact_name }}
+          strip ${{ matrix.artifact_name }} 2>/dev/null || true
+          chmod +x ${{ matrix.artifact_name }}
+          ls -lh ${{ matrix.artifact_name }}
+          sha256sum ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
+
+      - name: Upload artifact
+        if: ${{ github.event.inputs.upload_artifacts == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.artifact_name }}
+            ${{ matrix.artifact_name }}.sha256
+
+  build-macos:
+    if: ${{ github.event.inputs.platforms == 'macos' || github.event.inputs.platforms == 'all' }}
+    name: Build macOS
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            artifact_name: tark-darwin-x86_64
+          - target: aarch64-apple-darwin
+            artifact_name: tark-darwin-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary
+        run: |
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} ${{ matrix.artifact_name }}
+          strip ${{ matrix.artifact_name }} 2>/dev/null || true
+          chmod +x ${{ matrix.artifact_name }}
+          ls -lh ${{ matrix.artifact_name }}
+          shasum -a 256 ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
+
+      - name: Upload artifact
+        if: ${{ github.event.inputs.upload_artifacts == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.artifact_name }}
+            ${{ matrix.artifact_name }}.sha256
+
+  build-windows:
+    if: ${{ github.event.inputs.platforms == 'windows' || github.event.inputs.platforms == 'all' }}
+    name: Build Windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Prepare binary
+        shell: pwsh
+        run: |
+          Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "tark-windows-x86_64.exe"
+          Get-FileHash "tark-windows-x86_64.exe" -Algorithm SHA256 | Format-List > "tark-windows-x86_64.exe.sha256"
+          Get-Item "tark-windows-x86_64.exe"
+
+      - name: Upload artifact
+        if: ${{ github.event.inputs.upload_artifacts == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tark-windows-x86_64.exe
+          path: |
+            tark-windows-x86_64.exe
+            tark-windows-x86_64.exe.sha256
+
+  summary:
+    name: Build Summary
+    needs: [build-linux, build-macos, build-windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "## Manual Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux | ${{ needs.build-linux.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS | ${{ needs.build-macos.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Windows | ${{ needs.build-windows.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Artifacts uploaded: ${{ github.event.inputs.upload_artifacts }}" >> $GITHUB_STEP_SUMMARY
+
