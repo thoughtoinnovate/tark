@@ -190,6 +190,88 @@ cargo build --release
 nvim --cmd "set rtp+=." -c "lua require('tark').setup()"
 ```
 
+## After Every Code Change ⚡
+
+**IMPORTANT**: Follow this checklist after making any code changes.
+
+### 1. Verify Code Compiles
+
+```bash
+cargo build --release
+```
+
+### 2. Run All Checks
+
+```bash
+# Format check
+cargo fmt --all -- --check
+
+# Linting (must pass with zero warnings)
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Tests
+cargo test --all-features
+```
+
+### 3. Fix Any Issues
+
+- **Format errors**: Run `cargo fmt --all`
+- **Clippy warnings**: Fix the code, don't just suppress
+- **Test failures**: Fix the failing tests
+
+### 4. Update Documentation
+
+If you changed:
+- **Config options** → Update `README.md`
+- **Commands** → Update `README.md` command tables
+- **Architecture** → Update `AGENTS.md`
+- **Public APIs** → Add/update doc comments
+
+### 5. Update Version (if needed)
+
+For breaking changes or new features:
+```bash
+# Update both files to same version
+# Cargo.toml: version = "0.X.0"
+# lua/tark/init.lua: M.version = '0.X.0'
+```
+
+### 6. Commit with Conventional Message
+
+```bash
+git add -A
+git commit -m "type: description"
+```
+
+Types:
+- `feat:` - New feature
+- `fix:` - Bug fix
+- `docs:` - Documentation only
+- `refactor:` - Code change that neither fixes a bug nor adds a feature
+- `test:` - Adding tests
+- `chore:` - Maintenance tasks
+
+### 7. Push and Verify CI
+
+```bash
+git push
+```
+
+Then check GitHub Actions to ensure CI passes.
+
+### Quick Checklist
+
+```
+□ Code compiles (cargo build)
+□ Format passes (cargo fmt --check)
+□ Clippy passes (cargo clippy -- -D warnings)
+□ Tests pass (cargo test)
+□ Documentation updated (if needed)
+□ Versions synced (if needed)
+□ Conventional commit message
+□ CI passes after push
+```
+
 ## Getting Help
 
 - Check existing code for patterns

@@ -53,19 +53,55 @@ git checkout -b fix/your-bug-fix
 - Add tests for new functionality
 - Update documentation if needed
 
-### 3. Run Checks
+### 3. After Every Code Change
 
-Before committing, ensure all checks pass:
+**IMPORTANT**: Follow this checklist after making any changes.
+
+#### a. Verify Build
 
 ```bash
-# Format code
+cargo build --release
+```
+
+#### b. Run All Checks
+
+```bash
+# Format code (fix any issues)
 cargo fmt --all
 
-# Run clippy
+# Verify formatting
+cargo fmt --all -- --check
+
+# Run clippy (must pass with zero warnings)
 cargo clippy --all-targets --all-features -- -D warnings
 
 # Run tests
 cargo test --all-features
+```
+
+#### c. Fix Any Issues
+
+- **Format errors**: Already fixed by `cargo fmt --all`
+- **Clippy warnings**: Fix the code, don't suppress warnings
+- **Test failures**: Fix the failing tests before proceeding
+
+#### d. Update Documentation
+
+| If you changed... | Update... |
+|-------------------|-----------|
+| Config options | `README.md` |
+| Commands | `README.md` command tables |
+| Architecture | `AGENTS.md` |
+| Public APIs | Doc comments (`///` or `---`) |
+
+#### e. Sync Versions (if needed)
+
+For new features or breaking changes:
+
+```bash
+# Both files must have the same version!
+# Cargo.toml: version = "0.X.0"
+# lua/tark/init.lua: M.version = '0.X.0'
 ```
 
 ### 4. Commit
@@ -76,16 +112,45 @@ Use conventional commit messages:
 git commit -m "feat: add new feature"
 git commit -m "fix: resolve bug in X"
 git commit -m "docs: update README"
+git commit -m "refactor: improve code structure"
+git commit -m "test: add tests for X"
 git commit -m "chore: update dependencies"
 ```
 
-### 5. Push and Create PR
+### 5. Push and Verify CI
 
 ```bash
 git push origin feature/your-feature-name
 ```
 
-Then create a Pull Request on GitHub.
+**Important**: Check GitHub Actions to ensure CI passes before creating PR.
+
+### 6. Create Pull Request
+
+Create a Pull Request on GitHub with:
+- Clear description of changes
+- Link to related issues (if any)
+- Screenshots for UI changes
+
+### Quick Checklist
+
+Before every commit:
+
+```
+□ cargo build --release (compiles)
+□ cargo fmt --all (formatted)
+□ cargo clippy -- -D warnings (no warnings)
+□ cargo test --all-features (tests pass)
+□ Documentation updated (if needed)
+□ Versions synced (if needed)
+□ Conventional commit message
+```
+
+After push:
+
+```
+□ CI passes on GitHub Actions
+```
 
 ## Code Style
 
