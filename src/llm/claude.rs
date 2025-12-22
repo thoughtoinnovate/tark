@@ -4,8 +4,8 @@
 //! The ANTHROPIC_API_KEY is never sent to any third-party services.
 
 use super::{
-    CodeIssue, LlmProvider, LlmResponse, Message, RefactoringSuggestion,
-    Role, ToolCall, ToolDefinition,
+    CodeIssue, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role, ToolCall,
+    ToolDefinition,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -74,7 +74,8 @@ impl ClaudeProvider {
                     }
                 }
                 Role::Tool => {
-                    if let (Some(text), Some(tool_id)) = (msg.content.as_text(), &msg.tool_call_id) {
+                    if let (Some(text), Some(tool_id)) = (msg.content.as_text(), &msg.tool_call_id)
+                    {
                         claude_messages.push(ClaudeMessage {
                             role: "user".to_string(),
                             content: ClaudeContent::Blocks(vec![ClaudeContentBlock::ToolResult {
@@ -132,7 +133,11 @@ impl LlmProvider for ClaudeProvider {
         "claude"
     }
 
-    async fn chat(&self, messages: &[Message], tools: Option<&[ToolDefinition]>) -> Result<LlmResponse> {
+    async fn chat(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+    ) -> Result<LlmResponse> {
         let (system, claude_messages) = self.convert_messages(messages);
 
         let mut request = ClaudeRequest {
@@ -217,12 +222,11 @@ impl LlmProvider for ClaudeProvider {
     }
 
     async fn explain_code(&self, code: &str, context: &str) -> Result<String> {
-        let system = "You are a helpful code assistant. Explain the provided code clearly and concisely. \
+        let system =
+            "You are a helpful code assistant. Explain the provided code clearly and concisely. \
                       Focus on what the code does, its purpose, and any important details.";
 
-        let user_content = format!(
-            "Explain this code:\n\n```\n{code}\n```\n\nContext:\n{context}"
-        );
+        let user_content = format!("Explain this code:\n\n```\n{code}\n```\n\nContext:\n{context}");
 
         let request = ClaudeRequest {
             model: self.model.clone(),
@@ -246,7 +250,11 @@ impl LlmProvider for ClaudeProvider {
         Ok("No explanation available.".to_string())
     }
 
-    async fn suggest_refactorings(&self, code: &str, context: &str) -> Result<Vec<RefactoringSuggestion>> {
+    async fn suggest_refactorings(
+        &self,
+        code: &str,
+        context: &str,
+    ) -> Result<Vec<RefactoringSuggestion>> {
         let system = r#"You are a code refactoring assistant. Analyze the provided code and suggest improvements.
 Return your suggestions as a JSON array with this structure:
 [{"title": "Brief title", "description": "Why this helps", "new_code": "The refactored code"}]
@@ -279,7 +287,9 @@ Only return the JSON array, no other text."#;
                 if let Some(json_start) = text.find('[') {
                     if let Some(json_end) = text.rfind(']') {
                         let json_str = &text[json_start..=json_end];
-                        if let Ok(suggestions) = serde_json::from_str::<Vec<RefactoringSuggestion>>(json_str) {
+                        if let Ok(suggestions) =
+                            serde_json::from_str::<Vec<RefactoringSuggestion>>(json_str)
+                        {
                             return Ok(suggestions);
                         }
                     }
@@ -297,9 +307,7 @@ Return your findings as a JSON array with this structure:
 Line numbers are 1-indexed. Only return the JSON array, no other text.
 Focus on: bugs, security issues, performance problems, and code quality."#;
 
-        let user_content = format!(
-            "Review this {language} code:\n\n```{language}\n{code}\n```"
-        );
+        let user_content = format!("Review this {language} code:\n\n```{language}\n{code}\n```");
 
         let request = ClaudeRequest {
             model: self.model.clone(),
@@ -393,4 +401,3 @@ struct ClaudeResponse {
     #[allow(dead_code)]
     stop_reason: Option<String>,
 }
-

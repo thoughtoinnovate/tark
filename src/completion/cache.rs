@@ -152,4 +152,3 @@ mod tests {
         assert!(cache.get("p1", "s1").is_none() || cache.get("p2", "s2").is_none());
     }
 }
-

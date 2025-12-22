@@ -77,4 +77,3 @@ pub async fn handle_code_action(
 
     Ok(Some(actions))
 }
-

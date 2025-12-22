@@ -261,7 +261,8 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn explain_code(&self, code: &str, context: &str) -> Result<String> {
-        let system = "You are a helpful code assistant. Explain the provided code clearly and concisely. \
+        let system =
+            "You are a helpful code assistant. Explain the provided code clearly and concisely. \
                       Focus on what the code does, its purpose, and any important details.";
 
         let user_content = format!("Explain this code:\n\n```\n{code}\n```\n\nContext:\n{context}");
@@ -310,8 +311,9 @@ Return your suggestions as a JSON array with this structure:
 [{"title": "Brief title", "description": "Why this helps", "new_code": "The refactored code"}]
 Only return the JSON array, no other text."#;
 
-        let user_content =
-            format!("Suggest refactorings for this code:\n\n```\n{code}\n```\n\nContext:\n{context}");
+        let user_content = format!(
+            "Suggest refactorings for this code:\n\n```\n{code}\n```\n\nContext:\n{context}"
+        );
 
         let request = OpenAiRequest {
             model: self.model.clone(),
@@ -472,4 +474,3 @@ struct OpenAiResponse {
 struct OpenAiChoice {
     message: OpenAiMessage,
 }
-

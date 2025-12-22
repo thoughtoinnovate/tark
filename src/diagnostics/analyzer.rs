@@ -2,10 +2,10 @@
 
 use crate::llm::{IssueSeverity, LlmProvider};
 use anyhow::Result;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 /// A diagnostic message
 #[derive(Debug, Clone)]
@@ -74,15 +74,19 @@ impl DiagnosticsEngine {
     }
 
     /// Analyze code and return diagnostics
-    pub async fn analyze(&self, uri: &str, content: &str, language: &str) -> Result<Vec<Diagnostic>> {
+    pub async fn analyze(
+        &self,
+        uri: &str,
+        content: &str,
+        language: &str,
+    ) -> Result<Vec<Diagnostic>> {
         let content_hash = self.hash_content(content);
 
         // Check cache
         {
             let cache = self.cache.read().await;
             if let Some(entry) = cache.get(uri) {
-                if entry.content_hash == content_hash
-                    && entry.created_at.elapsed() < self.cache_ttl
+                if entry.content_hash == content_hash && entry.created_at.elapsed() < self.cache_ttl
                 {
                     return Ok(entry.diagnostics.clone());
                 }
@@ -142,4 +146,3 @@ impl DiagnosticsEngine {
         hasher.finish()
     }
 }
-

@@ -1,8 +1,8 @@
 //! Ollama LLM provider implementation (local models)
 
 use super::{
-    CodeIssue, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role,
-    ToolCall, ToolDefinition,
+    CodeIssue, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role, ToolCall,
+    ToolDefinition,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -19,7 +19,8 @@ pub struct OllamaProvider {
 
 impl OllamaProvider {
     pub fn new() -> Result<Self> {
-        let base_url = env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
+        let base_url =
+            env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
         let model = env::var("OLLAMA_MODEL").unwrap_or_else(|_| "codellama".to_string());
 
         Ok(Self {
@@ -138,7 +139,7 @@ impl LlmProvider for OllamaProvider {
                     .join("\n");
 
                 let mut modified_messages = ollama_messages.clone();
-                
+
                 // Find or create system message
                 if let Some(sys_msg) = modified_messages.iter_mut().find(|m| m.role == "system") {
                     sys_msg.content = format!(
@@ -191,7 +192,7 @@ impl LlmProvider for OllamaProvider {
         );
 
         let response = self.generate(&prompt).await?;
-        
+
         // Clean up the response
         let cleaned = response
             .trim()
@@ -208,11 +209,15 @@ impl LlmProvider for OllamaProvider {
         let messages = vec![
             OllamaMessage {
                 role: "system".to_string(),
-                content: "You are a helpful code assistant. Explain code clearly and concisely.".to_string(),
+                content: "You are a helpful code assistant. Explain code clearly and concisely."
+                    .to_string(),
             },
             OllamaMessage {
                 role: "user".to_string(),
-                content: format!("Explain this code:\n\n```\n{}\n```\n\nContext:\n{}", code, context),
+                content: format!(
+                    "Explain this code:\n\n```\n{}\n```\n\nContext:\n{}",
+                    code, context
+                ),
             },
         ];
 
@@ -262,7 +267,9 @@ Only return valid JSON, no other text."#.to_string(),
         if let Some(start) = text.find('[') {
             if let Some(end) = text.rfind(']') {
                 let json_str = &text[start..=end];
-                if let Ok(suggestions) = serde_json::from_str::<Vec<RefactoringSuggestion>>(json_str) {
+                if let Ok(suggestions) =
+                    serde_json::from_str::<Vec<RefactoringSuggestion>>(json_str)
+                {
                     return Ok(suggestions);
                 }
             }
@@ -317,7 +324,7 @@ impl OllamaProvider {
     fn parse_tool_call(&self, content: &str) -> Option<ToolCall> {
         // Try to find JSON tool call in response
         let content = content.trim();
-        
+
         // Look for JSON object
         let start = content.find('{')?;
         let end = content.rfind('}')?;
@@ -380,4 +387,3 @@ struct OllamaGenerateRequest {
 struct OllamaGenerateResponse {
     response: String,
 }
-

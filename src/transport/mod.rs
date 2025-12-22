@@ -4,4 +4,3 @@ pub mod cli;
 pub mod http;
 
 pub use http::update_status;
-

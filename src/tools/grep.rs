@@ -123,10 +123,7 @@ impl Tool for GrepTool {
 
                 // Check file pattern if specified
                 if let Some(ref file_pattern) = params.file_pattern {
-                    let file_name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     if !glob_match(file_pattern, file_name) {
                         continue;
                     }
@@ -350,23 +347,23 @@ impl Tool for FindReferencesTool {
 
         // Patterns that likely indicate a definition
         let definition_patterns = vec![
-            format!("fn {}(", symbol),           // Rust function
-            format!("fn {} (", symbol),          // Rust function with space
-            format!("pub fn {}(", symbol),       // Rust pub function
-            format!("async fn {}(", symbol),     // Rust async function
-            format!("struct {} ", symbol),       // Rust struct
-            format!("enum {} ", symbol),         // Rust enum
-            format!("trait {} ", symbol),        // Rust trait
-            format!("impl {} ", symbol),         // Rust impl
-            format!("type {} ", symbol),         // Rust type alias
-            format!("const {}:", symbol),        // Rust const
-            format!("let {}:", symbol),          // Rust let
-            format!("let {} =", symbol),         // Rust let
-            format!("function {}(", symbol),     // JS/TS function
-            format!("const {} =", symbol),       // JS/TS const
-            format!("class {} ", symbol),        // JS/TS/Python class
-            format!("def {}(", symbol),          // Python function
-            format!("interface {} ", symbol),    // TS interface
+            format!("fn {}(", symbol),        // Rust function
+            format!("fn {} (", symbol),       // Rust function with space
+            format!("pub fn {}(", symbol),    // Rust pub function
+            format!("async fn {}(", symbol),  // Rust async function
+            format!("struct {} ", symbol),    // Rust struct
+            format!("enum {} ", symbol),      // Rust enum
+            format!("trait {} ", symbol),     // Rust trait
+            format!("impl {} ", symbol),      // Rust impl
+            format!("type {} ", symbol),      // Rust type alias
+            format!("const {}:", symbol),     // Rust const
+            format!("let {}:", symbol),       // Rust let
+            format!("let {} =", symbol),      // Rust let
+            format!("function {}(", symbol),  // JS/TS function
+            format!("const {} =", symbol),    // JS/TS const
+            format!("class {} ", symbol),     // JS/TS/Python class
+            format!("def {}(", symbol),       // Python function
+            format!("interface {} ", symbol), // TS interface
         ];
 
         let mut definitions: Vec<(String, usize, Vec<String>)> = Vec::new();
@@ -418,7 +415,7 @@ impl Tool for FindReferencesTool {
                     // Capture definition with context
                     let start = i;
                     let mut end = i + 1;
-                    
+
                     // Try to capture the full definition (look for closing brace)
                     let mut brace_count = 0;
                     for (j, l) in lines.iter().enumerate().skip(i) {
@@ -428,16 +425,15 @@ impl Tool for FindReferencesTool {
                         if brace_count == 0 && j > i {
                             break;
                         }
-                        if j > i + 50 {  // Limit definition size
+                        if j > i + 50 {
+                            // Limit definition size
                             end = i + 20;
                             break;
                         }
                     }
-                    
-                    let def_lines: Vec<String> = lines[start..end.min(lines.len())]
-                        .iter()
-                        .cloned()
-                        .collect();
+
+                    let def_lines: Vec<String> =
+                        lines[start..end.min(lines.len())].iter().cloned().collect();
                     definitions.push((relative_path.clone(), i + 1, def_lines));
                 } else if !is_def {
                     // This is a usage
@@ -448,7 +444,10 @@ impl Tool for FindReferencesTool {
 
         // Format output
         if definitions.is_empty() && usages.is_empty() {
-            return Ok(ToolResult::success(format!("No references found for `{}`", symbol)));
+            return Ok(ToolResult::success(format!(
+                "No references found for `{}`",
+                symbol
+            )));
         }
 
         // Show definitions first
@@ -471,11 +470,14 @@ impl Tool for FindReferencesTool {
         if !usages.is_empty() {
             output.push_str(&format!("## Usages ({} found)\n\n", usages.len()));
             for (file, line, content) in usages.iter().take(20) {
-                output.push_str(&format!("- `{}:{}` → `{}`\n", file, line, 
-                    if content.len() > 80 { 
-                        format!("{}...", &content[..77]) 
-                    } else { 
-                        content.clone() 
+                output.push_str(&format!(
+                    "- `{}:{}` → `{}`\n",
+                    file,
+                    line,
+                    if content.len() > 80 {
+                        format!("{}...", &content[..77])
+                    } else {
+                        content.clone()
                     }
                 ));
             }
@@ -492,4 +494,3 @@ impl Tool for FindReferencesTool {
         Ok(ToolResult::success(output))
     }
 }
-

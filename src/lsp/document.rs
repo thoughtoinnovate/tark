@@ -158,4 +158,3 @@ impl Default for DocumentStore {
         Self::new()
     }
 }
-

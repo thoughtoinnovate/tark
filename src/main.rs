@@ -89,7 +89,9 @@ async fn main() -> Result<()> {
     };
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()),
+        )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
@@ -99,9 +101,15 @@ async fn main() -> Result<()> {
             lsp::run_lsp_server().await?;
         }
         Commands::Serve { port, host, cwd } => {
-            let working_dir = cwd.map(std::path::PathBuf::from)
+            let working_dir = cwd
+                .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            tracing::info!("Starting HTTP server on {}:{}, cwd: {:?}", host, port, working_dir);
+            tracing::info!(
+                "Starting HTTP server on {}:{}, cwd: {:?}",
+                host,
+                port,
+                working_dir
+            );
             transport::http::run_http_server(&host, port, working_dir).await?;
         }
         Commands::Start { port } => {
@@ -109,7 +117,9 @@ async fn main() -> Result<()> {
             let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
             // Run HTTP server in background, LSP on stdio
             let http_handle = tokio::spawn(async move {
-                if let Err(e) = transport::http::run_http_server("127.0.0.1", port, working_dir).await {
+                if let Err(e) =
+                    transport::http::run_http_server("127.0.0.1", port, working_dir).await
+                {
                     tracing::error!("HTTP server error: {}", e);
                 }
             });

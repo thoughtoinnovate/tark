@@ -68,4 +68,3 @@ fn truncate_label(s: &str, max_len: usize) -> String {
         format!("{}...", &first_line[..max_len - 3])
     }
 }
-

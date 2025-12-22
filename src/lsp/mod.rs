@@ -8,4 +8,3 @@ mod hover;
 mod server;
 
 pub use server::run_lsp_server;
-

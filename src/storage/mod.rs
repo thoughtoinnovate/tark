@@ -1,7 +1,7 @@
 //! Persistent storage for tark agent
-//! 
+//!
 //! Configuration hierarchy (project overrides global):
-//! 
+//!
 //! ~/.config/tark/                    # Global config
 //! ├── config.toml                    # Global settings
 //! ├── rules/                         # Global rules
@@ -21,10 +21,10 @@
 //!     └── {plugin}/
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Project-level storage directory name
 const TARK_DIR: &str = ".tark";
@@ -49,21 +49,21 @@ impl GlobalStorage {
                 .join(".config")
                 .join(GLOBAL_CONFIG_DIR)
         };
-        
+
         // Create directory structure
         std::fs::create_dir_all(&root)?;
         std::fs::create_dir_all(root.join("rules"))?;
         std::fs::create_dir_all(root.join("mcp"))?;
         std::fs::create_dir_all(root.join("plugins"))?;
-        
+
         Ok(Self { root })
     }
-    
+
     /// Get the root global config directory
     pub fn root(&self) -> &Path {
         &self.root
     }
-    
+
     /// Load global config
     pub fn load_config(&self) -> Result<WorkspaceConfig> {
         let path = self.root.join("config.toml");
@@ -74,7 +74,7 @@ impl GlobalStorage {
             Ok(WorkspaceConfig::default())
         }
     }
-    
+
     /// Save global config
     pub fn save_config(&self, config: &WorkspaceConfig) -> Result<()> {
         let path = self.root.join("config.toml");
@@ -82,7 +82,7 @@ impl GlobalStorage {
         std::fs::write(path, content)?;
         Ok(())
     }
-    
+
     /// Load global MCP servers
     pub fn load_mcp_servers(&self) -> Result<McpConfig> {
         let path = self.root.join("mcp").join("servers.toml");
@@ -93,12 +93,12 @@ impl GlobalStorage {
             Ok(McpConfig::default())
         }
     }
-    
+
     /// Load global rules
     pub fn load_rules(&self) -> Result<Vec<Rule>> {
         load_rules_from_dir(&self.root.join("rules"))
     }
-    
+
     /// List global plugins
     pub fn list_plugins(&self) -> Result<Vec<PluginInfo>> {
         list_plugins_from_dir(&self.root.join("plugins"))
@@ -118,7 +118,7 @@ impl TarkStorage {
     pub fn new(workspace_dir: impl AsRef<Path>) -> Result<Self> {
         let project_root = workspace_dir.as_ref().join(TARK_DIR);
         let global = GlobalStorage::new()?;
-        
+
         // Create project directory structure
         std::fs::create_dir_all(&project_root)?;
         std::fs::create_dir_all(project_root.join("conversations"))?;
@@ -126,39 +126,42 @@ impl TarkStorage {
         std::fs::create_dir_all(project_root.join("rules"))?;
         std::fs::create_dir_all(project_root.join("mcp"))?;
         std::fs::create_dir_all(project_root.join("plugins"))?;
-        
-        Ok(Self { project_root, global })
+
+        Ok(Self {
+            project_root,
+            global,
+        })
     }
-    
+
     /// Get the project .tark directory
     pub fn project_root(&self) -> &Path {
         &self.project_root
     }
-    
+
     /// Get the global config directory
     pub fn global_root(&self) -> &Path {
         self.global.root()
     }
-    
+
     // ========== Config (merged: global + project) ==========
-    
+
     /// Load merged config (project overrides global)
     pub fn load_config(&self) -> Result<WorkspaceConfig> {
         // Start with global config
         let mut config = self.global.load_config().unwrap_or_default();
-        
+
         // Override with project config if it exists
         let project_path = self.project_root.join("config.toml");
         if project_path.exists() {
             let content = std::fs::read_to_string(&project_path)?;
-            let project_config: WorkspaceConfig = toml::from_str(&content)
-                .context("Failed to parse project config.toml")?;
+            let project_config: WorkspaceConfig =
+                toml::from_str(&content).context("Failed to parse project config.toml")?;
             config.merge(project_config);
         }
-        
+
         Ok(config)
     }
-    
+
     /// Save project-level config
     pub fn save_config(&self, config: &WorkspaceConfig) -> Result<()> {
         let path = self.project_root.join("config.toml");
@@ -166,14 +169,14 @@ impl TarkStorage {
         std::fs::write(path, content)?;
         Ok(())
     }
-    
+
     /// Save global config
     pub fn save_global_config(&self, config: &WorkspaceConfig) -> Result<()> {
         self.global.save_config(config)
     }
-    
+
     // ========== Conversations (project-level only) ==========
-    
+
     /// Save a conversation
     pub fn save_conversation(&self, conversation: &SavedConversation) -> Result<PathBuf> {
         let filename = format!("{}.json", conversation.id);
@@ -182,19 +185,22 @@ impl TarkStorage {
         std::fs::write(&path, content)?;
         Ok(path)
     }
-    
+
     /// Load a conversation by ID
     pub fn load_conversation(&self, id: &str) -> Result<SavedConversation> {
-        let path = self.project_root.join("conversations").join(format!("{}.json", id));
+        let path = self
+            .project_root
+            .join("conversations")
+            .join(format!("{}.json", id));
         let content = std::fs::read_to_string(&path)?;
         serde_json::from_str(&content).context("Failed to parse conversation")
     }
-    
+
     /// List all saved conversations
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>> {
         let dir = self.project_root.join("conversations");
         let mut conversations = Vec::new();
-        
+
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 if let Some(ext) = entry.path().extension() {
@@ -214,23 +220,26 @@ impl TarkStorage {
                 }
             }
         }
-        
+
         // Sort by creation date (newest first)
         conversations.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(conversations)
     }
-    
+
     /// Delete a conversation
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
-        let path = self.project_root.join("conversations").join(format!("{}.json", id));
+        let path = self
+            .project_root
+            .join("conversations")
+            .join(format!("{}.json", id));
         if path.exists() {
             std::fs::remove_file(path)?;
         }
         Ok(())
     }
-    
+
     // ========== Plans (project-level only) ==========
-    
+
     /// Save a plan
     pub fn save_plan(&self, name: &str, content: &str) -> Result<PathBuf> {
         let filename = format!("{}.md", sanitize_filename(name));
@@ -238,29 +247,30 @@ impl TarkStorage {
         std::fs::write(&path, content)?;
         Ok(path)
     }
-    
+
     /// Load a plan
     pub fn load_plan(&self, name: &str) -> Result<String> {
         let filename = format!("{}.md", sanitize_filename(name));
         let path = self.project_root.join("plans").join(&filename);
         std::fs::read_to_string(&path).context("Failed to read plan")
     }
-    
+
     /// List all plans
     pub fn list_plans(&self) -> Result<Vec<PlanSummary>> {
         let dir = self.project_root.join("plans");
         let mut plans = Vec::new();
-        
+
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().map(|e| e == "md").unwrap_or(false) {
-                    let name = path.file_stem()
+                    let name = path
+                        .file_stem()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default();
                     let metadata = entry.metadata().ok();
                     let modified = metadata.and_then(|m| m.modified().ok());
-                    
+
                     plans.push(PlanSummary {
                         name,
                         path: path.clone(),
@@ -269,13 +279,13 @@ impl TarkStorage {
                 }
             }
         }
-        
+
         plans.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
         Ok(plans)
     }
-    
+
     // ========== Rules (merged: global + project) ==========
-    
+
     /// Save a project rule
     pub fn save_rule(&self, name: &str, content: &str) -> Result<PathBuf> {
         let filename = format!("{}.md", sanitize_filename(name));
@@ -283,7 +293,7 @@ impl TarkStorage {
         std::fs::write(&path, content)?;
         Ok(path)
     }
-    
+
     /// Save a global rule
     pub fn save_global_rule(&self, name: &str, content: &str) -> Result<PathBuf> {
         let filename = format!("{}.md", sanitize_filename(name));
@@ -291,85 +301,91 @@ impl TarkStorage {
         std::fs::write(&path, content)?;
         Ok(path)
     }
-    
+
     /// Load a rule (checks project first, then global)
     pub fn load_rule(&self, name: &str) -> Result<String> {
         let filename = format!("{}.md", sanitize_filename(name));
-        
+
         // Check project first
         let project_path = self.project_root.join("rules").join(&filename);
         if project_path.exists() {
             return std::fs::read_to_string(&project_path).context("Failed to read rule");
         }
-        
+
         // Fall back to global
         let global_path = self.global.root().join("rules").join(&filename);
         std::fs::read_to_string(&global_path).context("Failed to read rule")
     }
-    
+
     /// Load all rules (global + project, project overrides)
     pub fn load_all_rules(&self) -> Result<Vec<Rule>> {
         let mut rules_map: HashMap<String, Rule> = HashMap::new();
-        
+
         // Load global rules first
         for rule in load_rules_from_dir(&self.global.root().join("rules"))? {
             rules_map.insert(rule.name.clone(), rule);
         }
-        
+
         // Project rules override global
         for rule in load_rules_from_dir(&self.project_root.join("rules"))? {
             rules_map.insert(rule.name.clone(), rule);
         }
-        
+
         let mut rules: Vec<Rule> = rules_map.into_values().collect();
         rules.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(rules)
     }
-    
+
     /// List all rules (both global and project)
     pub fn list_rules(&self) -> Result<Vec<RuleInfo>> {
         let mut rules_map: HashMap<String, RuleInfo> = HashMap::new();
-        
+
         // Global rules
         for name in list_rule_names(&self.global.root().join("rules"))? {
-            rules_map.insert(name.clone(), RuleInfo {
-                name,
-                scope: ConfigScope::Global,
-            });
+            rules_map.insert(
+                name.clone(),
+                RuleInfo {
+                    name,
+                    scope: ConfigScope::Global,
+                },
+            );
         }
-        
+
         // Project rules (override)
         for name in list_rule_names(&self.project_root.join("rules"))? {
-            rules_map.insert(name.clone(), RuleInfo {
-                name,
-                scope: ConfigScope::Project,
-            });
+            rules_map.insert(
+                name.clone(),
+                RuleInfo {
+                    name,
+                    scope: ConfigScope::Project,
+                },
+            );
         }
-        
+
         let mut rules: Vec<RuleInfo> = rules_map.into_values().collect();
         rules.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(rules)
     }
-    
+
     // ========== MCP Servers (merged: global + project) ==========
-    
+
     /// Load merged MCP config
     pub fn load_mcp_config(&self) -> Result<McpConfig> {
         // Start with global
         let mut config = self.global.load_mcp_servers().unwrap_or_default();
-        
+
         // Merge project MCP config
         let project_path = self.project_root.join("mcp").join("servers.toml");
         if project_path.exists() {
             let content = std::fs::read_to_string(&project_path)?;
-            let project_config: McpConfig = toml::from_str(&content)
-                .context("Failed to parse project mcp/servers.toml")?;
+            let project_config: McpConfig =
+                toml::from_str(&content).context("Failed to parse project mcp/servers.toml")?;
             config.merge(project_config);
         }
-        
+
         Ok(config)
     }
-    
+
     /// Save project MCP config
     pub fn save_mcp_config(&self, config: &McpConfig) -> Result<()> {
         let path = self.project_root.join("mcp").join("servers.toml");
@@ -377,82 +393,93 @@ impl TarkStorage {
         std::fs::write(path, content)?;
         Ok(())
     }
-    
+
     // ========== Plugins (merged: global + project) ==========
-    
+
     /// List all plugins (global + project)
     pub fn list_plugins(&self) -> Result<Vec<PluginInfo>> {
         let mut plugins_map: HashMap<String, PluginInfo> = HashMap::new();
-        
+
         // Global plugins
         for plugin in list_plugins_from_dir(&self.global.root().join("plugins"))? {
             plugins_map.insert(plugin.name.clone(), plugin);
         }
-        
+
         // Project plugins (override)
         for mut plugin in list_plugins_from_dir(&self.project_root.join("plugins"))? {
             plugin.scope = ConfigScope::Project;
             plugins_map.insert(plugin.name.clone(), plugin);
         }
-        
+
         let mut plugins: Vec<PluginInfo> = plugins_map.into_values().collect();
         plugins.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(plugins)
     }
-    
+
     /// Load a plugin's config
     pub fn load_plugin_config(&self, name: &str) -> Result<PluginConfig> {
         // Check project first
-        let project_path = self.project_root.join("plugins").join(name).join("plugin.toml");
+        let project_path = self
+            .project_root
+            .join("plugins")
+            .join(name)
+            .join("plugin.toml");
         if project_path.exists() {
             let content = std::fs::read_to_string(&project_path)?;
             return toml::from_str(&content).context("Failed to parse plugin.toml");
         }
-        
+
         // Fall back to global
-        let global_path = self.global.root().join("plugins").join(name).join("plugin.toml");
+        let global_path = self
+            .global
+            .root()
+            .join("plugins")
+            .join(name)
+            .join("plugin.toml");
         let content = std::fs::read_to_string(&global_path)?;
         toml::from_str(&content).context("Failed to parse plugin.toml")
     }
-    
+
     // ========== Agents (merged: global + project) ==========
-    
+
     /// List all available agents (global + project)
     pub fn list_agents(&self) -> Result<Vec<AgentInfo>> {
         let mut agents_map: HashMap<String, AgentInfo> = HashMap::new();
-        
+
         // Global agents
-        for agent in load_agents_from_dir(&self.global.root().join("agents"), ConfigScope::Global)? {
+        for agent in load_agents_from_dir(&self.global.root().join("agents"), ConfigScope::Global)?
+        {
             agents_map.insert(agent.id.clone(), agent);
         }
-        
+
         // Project agents (override)
-        for agent in load_agents_from_dir(&self.project_root.join("agents"), ConfigScope::Project)? {
+        for agent in load_agents_from_dir(&self.project_root.join("agents"), ConfigScope::Project)?
+        {
             agents_map.insert(agent.id.clone(), agent);
         }
-        
+
         let mut agents: Vec<AgentInfo> = agents_map.into_values().collect();
         agents.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(agents)
     }
-    
+
     /// Load an agent config by ID (checks project first, then global)
     pub fn load_agent(&self, id: &str) -> Result<AgentConfig> {
         let filename = format!("{}.toml", sanitize_filename(id));
-        
+
         // Check project first
         let project_path = self.project_root.join("agents").join(&filename);
         if project_path.exists() {
             let content = std::fs::read_to_string(&project_path)?;
             return toml::from_str(&content).context("Failed to parse agent config");
         }
-        
+
         // Fall back to global
         let global_path = self.global.root().join("agents").join(&filename);
         let content = std::fs::read_to_string(&global_path)?;
         toml::from_str(&content).context("Failed to parse agent config")
     }
-    
+
     /// Save an agent config (to project by default)
     pub fn save_agent(&self, id: &str, config: &AgentConfig) -> Result<PathBuf> {
         let filename = format!("{}.toml", sanitize_filename(id));
@@ -463,7 +490,7 @@ impl TarkStorage {
         std::fs::write(&path, content)?;
         Ok(path)
     }
-    
+
     /// Save an agent config to global location
     pub fn save_global_agent(&self, id: &str, config: &AgentConfig) -> Result<PathBuf> {
         let filename = format!("{}.toml", sanitize_filename(id));
@@ -474,16 +501,16 @@ impl TarkStorage {
         std::fs::write(&path, content)?;
         Ok(path)
     }
-    
+
     /// Find agents that match the given trigger context
     pub fn find_matching_agents(&self, context: &TriggerContext) -> Result<Vec<AgentInfo>> {
         let all_agents = self.list_agents()?;
         let mut matches = Vec::new();
-        
+
         for agent_info in all_agents {
             if let Ok(agent) = self.load_agent(&agent_info.id) {
                 let triggers = &agent.triggers;
-                
+
                 // Check file patterns
                 if let Some(ref file_path) = context.file_path {
                     for pattern in &triggers.file_patterns {
@@ -493,7 +520,7 @@ impl TarkStorage {
                         }
                     }
                 }
-                
+
                 // Check keywords in message
                 if let Some(ref message) = context.message {
                     let msg_lower = message.to_lowercase();
@@ -504,7 +531,7 @@ impl TarkStorage {
                         }
                     }
                 }
-                
+
                 // Check git context
                 if let Some(ref git_ctx) = context.git_context {
                     if triggers.git_contexts.contains(git_ctx) {
@@ -513,7 +540,7 @@ impl TarkStorage {
                 }
             }
         }
-        
+
         Ok(matches)
     }
 }
@@ -883,7 +910,7 @@ impl SavedConversation {
             token_stats: TokenStats::default(),
         }
     }
-    
+
     /// Add a message
     pub fn add_message(&mut self, role: &str, content: &str) {
         self.messages.push(SavedMessage {
@@ -963,16 +990,17 @@ fn sanitize_filename(name: &str) -> String {
 /// Load rules from a directory
 fn load_rules_from_dir(dir: &Path) -> Result<Vec<Rule>> {
     let mut rules = Vec::new();
-    
+
     if !dir.exists() {
         return Ok(rules);
     }
-    
+
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map(|e| e == "md").unwrap_or(false) {
-                let name = path.file_stem()
+                let name = path
+                    .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
                 if let Ok(content) = std::fs::read_to_string(&path) {
@@ -981,18 +1009,18 @@ fn load_rules_from_dir(dir: &Path) -> Result<Vec<Rule>> {
             }
         }
     }
-    
+
     Ok(rules)
 }
 
 /// List rule names from a directory
 fn list_rule_names(dir: &Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
-    
+
     if !dir.exists() {
         return Ok(names);
     }
-    
+
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1003,39 +1031,41 @@ fn list_rule_names(dir: &Path) -> Result<Vec<String>> {
             }
         }
     }
-    
+
     Ok(names)
 }
 
 /// List plugins from a directory
 fn list_plugins_from_dir(dir: &Path) -> Result<Vec<PluginInfo>> {
     let mut plugins = Vec::new();
-    
+
     if !dir.exists() {
         return Ok(plugins);
     }
-    
+
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 let plugin_toml = path.join("plugin.toml");
                 if plugin_toml.exists() {
-                    let name = path.file_name()
+                    let name = path
+                        .file_name()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    
+
                     // Try to load plugin config for details
-                    let (enabled, description) = if let Ok(content) = std::fs::read_to_string(&plugin_toml) {
-                        if let Ok(config) = toml::from_str::<PluginConfig>(&content) {
-                            (config.enabled, config.description)
+                    let (enabled, description) =
+                        if let Ok(content) = std::fs::read_to_string(&plugin_toml) {
+                            if let Ok(config) = toml::from_str::<PluginConfig>(&content) {
+                                (config.enabled, config.description)
+                            } else {
+                                (true, None)
+                            }
                         } else {
                             (true, None)
-                        }
-                    } else {
-                        (true, None)
-                    };
-                    
+                        };
+
                     plugins.push(PluginInfo {
                         name,
                         path: path.clone(),
@@ -1047,26 +1077,27 @@ fn list_plugins_from_dir(dir: &Path) -> Result<Vec<PluginInfo>> {
             }
         }
     }
-    
+
     Ok(plugins)
 }
 
 /// Load agents from a directory
 fn load_agents_from_dir(dir: &Path, scope: ConfigScope) -> Result<Vec<AgentInfo>> {
     let mut agents = Vec::new();
-    
+
     if !dir.exists() {
         return Ok(agents);
     }
-    
+
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map(|e| e == "toml").unwrap_or(false) {
-                let id = path.file_stem()
+                let id = path
+                    .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
-                
+
                 // Try to load agent config for details
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(config) = toml::from_str::<AgentConfig>(&content) {
@@ -1084,7 +1115,7 @@ fn load_agents_from_dir(dir: &Path, scope: ConfigScope) -> Result<Vec<AgentInfo>
             }
         }
     }
-    
+
     Ok(agents)
 }
 
@@ -1092,7 +1123,7 @@ fn load_agents_from_dir(dir: &Path, scope: ConfigScope) -> Result<Vec<AgentInfo>
 fn glob_match(pattern: &str, text: &str) -> bool {
     let pattern = pattern.to_lowercase();
     let text = text.to_lowercase();
-    
+
     // Simple implementation - handle * as wildcard
     if pattern.contains('*') {
         let parts: Vec<&str> = pattern.split('*').collect();
@@ -1103,7 +1134,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
             return starts && ends;
         }
     }
-    
+
     // Exact match fallback
     pattern == text || text.contains(&pattern)
 }
@@ -1112,32 +1143,31 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    
+
     #[test]
     fn test_storage_init() {
         let temp = TempDir::new().unwrap();
         let storage = TarkStorage::new(temp.path()).unwrap();
-        
+
         assert!(storage.root().exists());
         assert!(storage.root().join("conversations").exists());
         assert!(storage.root().join("plans").exists());
         assert!(storage.root().join("rules").exists());
     }
-    
+
     #[test]
     fn test_config_roundtrip() {
         let temp = TempDir::new().unwrap();
         let storage = TarkStorage::new(temp.path()).unwrap();
-        
+
         let mut config = WorkspaceConfig::default();
         config.provider = "claude".to_string();
         config.verbose = true;
-        
+
         storage.save_config(&config).unwrap();
         let loaded = storage.load_config().unwrap();
-        
+
         assert_eq!(loaded.provider, "claude");
         assert!(loaded.verbose);
     }
 }
-

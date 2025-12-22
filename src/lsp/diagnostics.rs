@@ -1,7 +1,7 @@
 //! LSP diagnostics handler
 
 use super::document::Document;
-use crate::diagnostics::{DiagnosticsEngine, DiagnosticSeverity};
+use crate::diagnostics::{DiagnosticSeverity, DiagnosticsEngine};
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
@@ -40,8 +40,12 @@ pub async fn run_diagnostics(
                 },
                 severity: Some(match issue.severity {
                     DiagnosticSeverity::Error => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
-                    DiagnosticSeverity::Warning => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,
-                    DiagnosticSeverity::Info => tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION,
+                    DiagnosticSeverity::Warning => {
+                        tower_lsp::lsp_types::DiagnosticSeverity::WARNING
+                    }
+                    DiagnosticSeverity::Info => {
+                        tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION
+                    }
                     DiagnosticSeverity::Hint => tower_lsp::lsp_types::DiagnosticSeverity::HINT,
                 }),
                 code: None,
@@ -57,4 +61,3 @@ pub async fn run_diagnostics(
 
     Ok(diagnostics)
 }
-

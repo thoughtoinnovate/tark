@@ -44,7 +44,11 @@ impl FimBuilder {
 
         // Build prefix
         let mut prefix = String::new();
-        for (i, line_content) in lines.iter().enumerate().skip(start_line).take(line - start_line)
+        for (i, line_content) in lines
+            .iter()
+            .enumerate()
+            .skip(start_line)
+            .take(line - start_line)
         {
             prefix.push_str(line_content);
             prefix.push('\n');
@@ -148,4 +152,3 @@ mod tests {
         assert_eq!(suffix, "\n");
     }
 }
-

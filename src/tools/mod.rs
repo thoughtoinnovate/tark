@@ -3,14 +3,19 @@
 mod file_ops;
 mod file_search;
 mod grep;
-mod shell;
 mod lsp_tools;
+mod shell;
 
-pub use file_ops::{ReadFileTool, ReadFilesTool, WriteFileTool, PatchFileTool, DeleteFileTool, ListDirectoryTool, ProposeChangeTool};
-pub use file_search::{FileSearchTool, CodebaseOverviewTool};
-pub use grep::{GrepTool, FindReferencesTool};
+pub use file_ops::{
+    DeleteFileTool, ListDirectoryTool, PatchFileTool, ProposeChangeTool, ReadFileTool,
+    ReadFilesTool, WriteFileTool,
+};
+pub use file_search::{CodebaseOverviewTool, FileSearchTool};
+pub use grep::{FindReferencesTool, GrepTool};
+pub use lsp_tools::{
+    CallHierarchyTool, FindAllReferencesTool, GetSignatureTool, GoToDefinitionTool, ListSymbolsTool,
+};
 pub use shell::ShellTool;
-pub use lsp_tools::{ListSymbolsTool, GoToDefinitionTool, FindAllReferencesTool, CallHierarchyTool, GetSignatureTool};
 
 use crate::llm::ToolDefinition;
 use anyhow::Result;
@@ -106,20 +111,20 @@ impl ToolRegistry {
         tracing::debug!("Creating tool registry for mode: {:?}", mode);
 
         // Read-only tools (available in all modes)
-        registry.register(Arc::new(CodebaseOverviewTool::new(working_dir.clone())));  // Overview (use first!)
-        registry.register(Arc::new(FindReferencesTool::new(working_dir.clone())));   // Code flow tracing
+        registry.register(Arc::new(CodebaseOverviewTool::new(working_dir.clone()))); // Overview (use first!)
+        registry.register(Arc::new(FindReferencesTool::new(working_dir.clone()))); // Code flow tracing
         registry.register(Arc::new(ReadFileTool::new(working_dir.clone())));
-        registry.register(Arc::new(ReadFilesTool::new(working_dir.clone())));  // Batch read
-        registry.register(Arc::new(ListDirectoryTool::new(working_dir.clone())));  // Directory listing
+        registry.register(Arc::new(ReadFilesTool::new(working_dir.clone()))); // Batch read
+        registry.register(Arc::new(ListDirectoryTool::new(working_dir.clone()))); // Directory listing
         registry.register(Arc::new(FileSearchTool::new(working_dir.clone())));
         registry.register(Arc::new(GrepTool::new(working_dir.clone())));
-        
+
         // LSP-powered tools for code understanding (available in all modes)
-        registry.register(Arc::new(ListSymbolsTool::new(working_dir.clone())));        // List symbols in file/dir
-        registry.register(Arc::new(GoToDefinitionTool::new(working_dir.clone())));     // Jump to definition
-        registry.register(Arc::new(FindAllReferencesTool::new(working_dir.clone())));  // Find all usages
-        registry.register(Arc::new(CallHierarchyTool::new(working_dir.clone())));      // Trace call flow
-        registry.register(Arc::new(GetSignatureTool::new(working_dir.clone())));       // Get function signature
+        registry.register(Arc::new(ListSymbolsTool::new(working_dir.clone()))); // List symbols in file/dir
+        registry.register(Arc::new(GoToDefinitionTool::new(working_dir.clone()))); // Jump to definition
+        registry.register(Arc::new(FindAllReferencesTool::new(working_dir.clone()))); // Find all usages
+        registry.register(Arc::new(CallHierarchyTool::new(working_dir.clone()))); // Trace call flow
+        registry.register(Arc::new(GetSignatureTool::new(working_dir.clone()))); // Get function signature
 
         // Write tools (only in Build and Review modes)
         if mode != AgentMode::Plan {
@@ -175,4 +180,3 @@ impl ToolRegistry {
         &self.working_dir
     }
 }
-

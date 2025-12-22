@@ -173,4 +173,3 @@ pub enum IssueSeverity {
     Info,
     Hint,
 }
-

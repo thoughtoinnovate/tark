@@ -20,7 +20,11 @@ pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
 
     /// Send a chat completion request
-    async fn chat(&self, messages: &[Message], tools: Option<&[ToolDefinition]>) -> Result<LlmResponse>;
+    async fn chat(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+    ) -> Result<LlmResponse>;
 
     /// Fill-in-middle completion for code
     async fn complete_fim(&self, prefix: &str, suffix: &str, language: &str) -> Result<String>;
@@ -29,7 +33,11 @@ pub trait LlmProvider: Send + Sync {
     async fn explain_code(&self, code: &str, context: &str) -> Result<String>;
 
     /// Suggest refactorings for selected code
-    async fn suggest_refactorings(&self, code: &str, context: &str) -> Result<Vec<RefactoringSuggestion>>;
+    async fn suggest_refactorings(
+        &self,
+        code: &str,
+        context: &str,
+    ) -> Result<Vec<RefactoringSuggestion>>;
 
     /// Review code and return potential issues
     async fn review_code(&self, code: &str, language: &str) -> Result<Vec<CodeIssue>>;
@@ -41,7 +49,9 @@ pub fn create_provider(name: &str) -> Result<Box<dyn LlmProvider>> {
         "claude" | "anthropic" => Ok(Box::new(ClaudeProvider::new()?)),
         "openai" | "gpt" => Ok(Box::new(OpenAiProvider::new()?)),
         "ollama" | "local" => Ok(Box::new(OllamaProvider::new()?)),
-        _ => anyhow::bail!("Unknown LLM provider: {}. Supported: claude, openai, ollama", name),
+        _ => anyhow::bail!(
+            "Unknown LLM provider: {}. Supported: claude, openai, ollama",
+            name
+        ),
     }
 }
-

@@ -2,5 +2,4 @@
 
 mod analyzer;
 
-pub use analyzer::{DiagnosticsEngine, Diagnostic, DiagnosticSeverity};
-
+pub use analyzer::{Diagnostic, DiagnosticSeverity, DiagnosticsEngine};

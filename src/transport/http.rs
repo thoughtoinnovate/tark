@@ -127,7 +127,8 @@ struct AgentStatus {
 }
 
 /// Global agent status (shared across requests)
-static AGENT_STATUS: std::sync::OnceLock<tokio::sync::RwLock<AgentStatus>> = std::sync::OnceLock::new();
+static AGENT_STATUS: std::sync::OnceLock<tokio::sync::RwLock<AgentStatus>> =
+    std::sync::OnceLock::new();
 
 fn get_agent_status() -> &'static tokio::sync::RwLock<AgentStatus> {
     AGENT_STATUS.get_or_init(|| tokio::sync::RwLock::new(AgentStatus::default()))
@@ -169,17 +170,17 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
     let config = Config::load().unwrap_or_default();
     let working_dir = working_dir.canonicalize().unwrap_or(working_dir);
     tracing::info!("Server working directory: {:?}", working_dir);
-    
+
     // Initialize storage
     let storage = TarkStorage::new(working_dir.clone()).ok();
-    
+
     // Load saved session or use defaults
     let (default_provider, default_model) = if let Some(ref s) = storage {
         let saved_config = s.load_config().unwrap_or_default();
-        let provider = if saved_config.provider != "openai" { 
-            saved_config.provider 
-        } else { 
-            config.llm.default_provider.clone() 
+        let provider = if saved_config.provider != "openai" {
+            saved_config.provider
+        } else {
+            config.llm.default_provider.clone()
         };
         let model = saved_config.model.unwrap_or_else(|| "gpt-4o".to_string());
         (provider, model)
@@ -190,7 +191,8 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
     // Create initial chat agent
     let provider: Arc<dyn LlmProvider> = Arc::from(llm::create_provider(&default_provider)?);
     let tools = ToolRegistry::with_defaults(working_dir.clone(), config.tools.shell_enabled);
-    let chat_agent = ChatAgent::new(provider, tools).with_max_iterations(config.agent.max_iterations);
+    let chat_agent =
+        ChatAgent::new(provider, tools).with_max_iterations(config.agent.max_iterations);
 
     let state = Arc::new(AppState {
         current_provider: RwLock::new(default_provider),
@@ -214,7 +216,12 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         .route("/chat/status", get(get_status))
         .route("/session", get(get_session))
         .route("/session/save", post(save_session))
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
@@ -237,10 +244,12 @@ async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse
 
 async fn list_providers(State(state): State<Arc<AppState>>) -> Json<ProvidersResponse> {
     let current = state.current_provider.read().await.clone();
-    
+
     // Check which providers are available (have API keys set)
-    let ollama_available = std::env::var("OLLAMA_MODEL").is_ok() 
-        || reqwest::get("http://localhost:11434/api/tags").await.is_ok();
+    let ollama_available = std::env::var("OLLAMA_MODEL").is_ok()
+        || reqwest::get("http://localhost:11434/api/tags")
+            .await
+            .is_ok();
     let claude_available = std::env::var("ANTHROPIC_API_KEY").is_ok();
     let openai_available = std::env::var("OPENAI_API_KEY").is_ok();
 
@@ -271,15 +280,18 @@ async fn set_provider(
     Json(req): Json<SetProviderRequest>,
 ) -> impl IntoResponse {
     let provider_name = req.provider.to_lowercase();
-    
+
     // Validate provider name
-    if !["ollama", "claude", "openai", "local", "anthropic", "gpt"].contains(&provider_name.as_str()) {
+    if !["ollama", "claude", "openai", "local", "anthropic", "gpt"]
+        .contains(&provider_name.as_str())
+    {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ 
-                "error": "Invalid provider. Use: ollama, claude, or openai" 
+            Json(serde_json::json!({
+                "error": "Invalid provider. Use: ollama, claude, or openai"
             })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Create new provider
@@ -289,14 +301,16 @@ async fn set_provider(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": e.to_string() })),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
     // Create new chat agent with new provider
-    let tools = ToolRegistry::with_defaults(state.working_dir.clone(), state.config.tools.shell_enabled);
-    let new_agent = ChatAgent::new(provider, tools)
-        .with_max_iterations(state.config.agent.max_iterations);
+    let tools =
+        ToolRegistry::with_defaults(state.working_dir.clone(), state.config.tools.shell_enabled);
+    let new_agent =
+        ChatAgent::new(provider, tools).with_max_iterations(state.config.agent.max_iterations);
 
     // Update state
     {
@@ -310,11 +324,12 @@ async fn set_provider(
 
     (
         StatusCode::OK,
-        Json(serde_json::json!({ 
-            "success": true, 
-            "provider": provider_name 
+        Json(serde_json::json!({
+            "success": true,
+            "provider": provider_name
         })),
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn handle_completion(
@@ -329,7 +344,8 @@ async fn handle_completion(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -347,7 +363,8 @@ async fn handle_completion(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }
@@ -359,14 +376,15 @@ async fn handle_inline_completion(
     // Use request provider or current provider
     let current = state.current_provider.read().await.clone();
     let provider_name = req.provider.unwrap_or(current);
-    
+
     let provider: Arc<dyn LlmProvider> = match llm::create_provider(&provider_name) {
         Ok(p) => Arc::from(p),
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -392,13 +410,15 @@ async fn handle_inline_completion(
                 completion: response.completion,
                 line_count: response.line_count,
             }),
-        ).into_response(),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Inline completion error: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }
@@ -410,16 +430,19 @@ async fn handle_chat(
     use crate::tools::AgentMode;
 
     // Determine working directory: use request cwd if provided, otherwise server's working dir
-    let working_dir = req.cwd
+    let working_dir = req
+        .cwd
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| state.working_dir.clone());
 
     // Parse agent mode
-    let mode_str = req.mode.as_ref()
+    let mode_str = req
+        .mode
+        .as_ref()
         .map(|m| m.to_lowercase())
         .unwrap_or_else(|| "build".to_string());
-    
+
     let mode = match mode_str.as_str() {
         "plan" => AgentMode::Plan,
         "review" => AgentMode::Review,
@@ -430,19 +453,29 @@ async fn handle_chat(
     let current_mode = state.current_mode.read().await.clone();
     let current_cwd = state.current_cwd.read().await.clone();
     let current_provider = state.current_provider.read().await.clone();
-    
+
     let mode_changed = mode_str != current_mode;
     let cwd_changed = working_dir != current_cwd;
-    let provider_changed = req.provider.as_ref().map(|p| p != &current_provider).unwrap_or(false);
-    
-    tracing::debug!("Chat request - mode: {}, cwd_changed: {}, provider_changed: {}, mode_changed: {}", 
-        mode_str, cwd_changed, provider_changed, mode_changed);
+    let provider_changed = req
+        .provider
+        .as_ref()
+        .map(|p| p != &current_provider)
+        .unwrap_or(false);
+
+    tracing::debug!(
+        "Chat request - mode: {}, cwd_changed: {}, provider_changed: {}, mode_changed: {}",
+        mode_str,
+        cwd_changed,
+        provider_changed,
+        mode_changed
+    );
 
     // Only create a completely NEW agent if working directory changes (need fresh file context)
     // For mode/provider changes, update the existing agent to PRESERVE conversation history
     if cwd_changed {
         // CWD changed - need a fresh agent with new file context
-        let provider_name = req.provider
+        let provider_name = req
+            .provider
             .clone()
             .unwrap_or_else(|| current_provider.clone());
 
@@ -452,13 +485,15 @@ async fn handle_chat(
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": e.to_string() })),
-                ).into_response();
+                )
+                    .into_response();
             }
         };
 
-        let tools = ToolRegistry::for_mode(working_dir.clone(), mode, state.config.tools.shell_enabled);
+        let tools =
+            ToolRegistry::for_mode(working_dir.clone(), mode, state.config.tools.shell_enabled);
         tracing::info!("Creating new agent for new cwd: {:?}", working_dir);
-        
+
         let new_agent = ChatAgent::with_mode(provider, tools, mode)
             .with_max_iterations(state.config.agent.max_iterations);
 
@@ -482,17 +517,21 @@ async fn handle_chat(
     } else {
         // CWD same - update existing agent to preserve conversation history
         let mut agent = state.chat_agent.write().await;
-        
+
         // Update mode if changed (preserves conversation)
         if mode_changed {
-            let tools = ToolRegistry::for_mode(working_dir.clone(), mode, state.config.tools.shell_enabled);
+            let tools =
+                ToolRegistry::for_mode(working_dir.clone(), mode, state.config.tools.shell_enabled);
             agent.update_mode(tools, mode);
-            tracing::info!("Updated agent mode to: {} (conversation preserved)", mode_str);
-            
+            tracing::info!(
+                "Updated agent mode to: {} (conversation preserved)",
+                mode_str
+            );
+
             let mut current = state.current_mode.write().await;
             *current = mode_str.clone();
         }
-        
+
         // Update provider if changed (preserves conversation)
         // Safety: provider_changed is only true when req.provider.is_some()
         if let Some(provider_name) = req.provider.clone().filter(|_| provider_changed) {
@@ -502,16 +541,20 @@ async fn handle_chat(
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({ "error": e.to_string() })),
-                    ).into_response();
+                    )
+                        .into_response();
                 }
             };
             agent.update_provider(provider);
-            tracing::info!("Updated agent provider to: {} (conversation preserved)", provider_name);
-            
+            tracing::info!(
+                "Updated agent provider to: {} (conversation preserved)",
+                provider_name
+            );
+
             let mut current = state.current_provider.write().await;
             *current = provider_name;
         }
-        
+
         // Clear history if requested
         if req.clear_history {
             agent.reset();
@@ -529,9 +572,9 @@ async fn handle_chat(
 
     // Set status to thinking
     update_status("Thinking...", None, None, 0).await;
-    
+
     let result = agent.chat(&req.message).await;
-    
+
     // Clear status when done
     clear_status().await;
 
@@ -541,23 +584,29 @@ async fn handle_chat(
             Json(ChatResponse {
                 response: response.text,
                 tool_calls_made: response.tool_calls_made,
-                tool_call_log: response.tool_call_log.into_iter().map(|l| ToolCallLogEntry {
-                    tool: l.tool,
-                    args: l.args,
-                    result_preview: l.result_preview,
-                }).collect(),
+                tool_call_log: response
+                    .tool_call_log
+                    .into_iter()
+                    .map(|l| ToolCallLogEntry {
+                        tool: l.tool,
+                        args: l.args,
+                        result_preview: l.result_preview,
+                    })
+                    .collect(),
                 provider: final_provider,
                 mode: mode_str,
                 auto_compacted: response.auto_compacted,
                 context_usage_percent: response.context_usage_percent,
             }),
-        ).into_response(),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Chat error: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }
@@ -575,8 +624,12 @@ async fn get_session(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let provider = state.current_provider.read().await.clone();
     let model = state.current_model.read().await.clone();
     let mode = state.current_mode.read().await.clone();
-    
-    Json(SessionResponse { provider, model, mode })
+
+    Json(SessionResponse {
+        provider,
+        model,
+        mode,
+    })
 }
 
 /// Save session request
@@ -605,29 +658,27 @@ async fn save_session(
         let mut current = state.current_mode.write().await;
         *current = mode.clone();
     }
-    
+
     // Save to storage
     if let Some(ref storage) = state.storage {
         let provider = state.current_provider.read().await.clone();
         let model = state.current_model.read().await.clone();
-        
+
         let config = crate::storage::WorkspaceConfig {
             provider,
             model: Some(model),
             ..Default::default()
         };
-        
+
         if let Err(e) = storage.save_config(&config) {
             tracing::warn!("Failed to save session: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": format!("Failed to save: {}", e) })),
-            ).into_response();
+            )
+                .into_response();
         }
     }
-    
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "success": true })),
-    ).into_response()
+
+    (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
 }

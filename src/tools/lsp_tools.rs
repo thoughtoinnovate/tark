@@ -1,5 +1,5 @@
 //! LSP-powered tools using tree-sitter for code understanding
-//! 
+//!
 //! These tools provide IDE-like code intelligence:
 //! - Go to definition
 //! - Find all references  
@@ -96,7 +96,8 @@ impl CodeAnalyzer {
     /// Get tree-sitter query for extracting symbols based on language
     fn get_symbols_query(extension: &str) -> Option<&'static str> {
         match extension {
-            "rs" => Some(r#"
+            "rs" => Some(
+                r#"
                 (function_item name: (identifier) @fn.name) @fn.def
                 (impl_item type: (type_identifier) @impl.name) @impl.def
                 (struct_item name: (type_identifier) @struct.name) @struct.def
@@ -106,8 +107,10 @@ impl CodeAnalyzer {
                 (const_item name: (identifier) @const.name) @const.def
                 (static_item name: (identifier) @static.name) @static.def
                 (type_item name: (type_identifier) @type.name) @type.def
-            "#),
-            "ts" | "tsx" | "js" | "jsx" | "mjs" => Some(r#"
+            "#,
+            ),
+            "ts" | "tsx" | "js" | "jsx" | "mjs" => Some(
+                r#"
                 (function_declaration name: (identifier) @fn.name) @fn.def
                 (class_declaration name: (identifier) @class.name) @class.def
                 (interface_declaration name: (identifier) @interface.name) @interface.def
@@ -115,25 +118,28 @@ impl CodeAnalyzer {
                 (enum_declaration name: (identifier) @enum.name) @enum.def
                 (method_definition name: (property_identifier) @method.name) @method.def
                 (lexical_declaration (variable_declarator name: (identifier) @var.name)) @var.def
-            "#),
-            "py" => Some(r#"
+            "#,
+            ),
+            "py" => Some(
+                r#"
                 (function_definition name: (identifier) @fn.name) @fn.def
                 (class_definition name: (identifier) @class.name) @class.def
-            "#),
-            "go" => Some(r#"
+            "#,
+            ),
+            "go" => Some(
+                r#"
                 (function_declaration name: (identifier) @fn.name) @fn.def
                 (method_declaration name: (field_identifier) @method.name) @method.def
                 (type_declaration (type_spec name: (type_identifier) @type.name)) @type.def
-            "#),
+            "#,
+            ),
             _ => None,
         }
     }
 
     /// Parse a file and extract symbols
     pub fn extract_symbols(&self, file_path: &Path) -> Result<Vec<Symbol>> {
-        let extension = file_path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let extension = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let language = Self::get_language(extension)
             .ok_or_else(|| anyhow::anyhow!("Unsupported language: {}", extension))?;
@@ -145,7 +151,8 @@ impl CodeAnalyzer {
         let mut parser = Parser::new();
         parser.set_language(&language)?;
 
-        let tree = parser.parse(&content, None)
+        let tree = parser
+            .parse(&content, None)
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
         let query = Query::new(&language, query_str)?;
@@ -188,7 +195,7 @@ impl CodeAnalyzer {
                     start_line = node.start_position().row;
                     start_col = node.start_position().column;
                     end_line = node.end_position().row;
-                    
+
                     // Extract first line as signature
                     if start_line < lines.len() {
                         signature = Some(lines[start_line].trim().to_string());
@@ -225,14 +232,20 @@ impl CodeAnalyzer {
         while line_idx > 0 {
             let line = lines[line_idx].trim();
             if line.starts_with("///") || line.starts_with("//!") {
-                comments.push(line.trim_start_matches("///").trim_start_matches("//!").trim());
+                comments.push(
+                    line.trim_start_matches("///")
+                        .trim_start_matches("//!")
+                        .trim(),
+                );
             } else if line.starts_with("#") && !line.starts_with("#[") {
                 // Python docstring indicator
                 comments.push(line.trim_start_matches('#').trim());
             } else if !line.is_empty() && !line.starts_with("#[") && !line.starts_with("@") {
                 break;
             }
-            if line_idx == 0 { break; }
+            if line_idx == 0 {
+                break;
+            }
             line_idx -= 1;
         }
 
@@ -245,7 +258,11 @@ impl CodeAnalyzer {
     }
 
     /// Find definition of a symbol by name
-    pub fn find_definition(&self, symbol_name: &str, search_files: &[PathBuf]) -> Result<Vec<Symbol>> {
+    pub fn find_definition(
+        &self,
+        symbol_name: &str,
+        search_files: &[PathBuf],
+    ) -> Result<Vec<Symbol>> {
         let mut results = Vec::new();
 
         for file in search_files {
@@ -262,7 +279,11 @@ impl CodeAnalyzer {
     }
 
     /// Find all references to a symbol (uses grep-like search + validation)
-    pub fn find_references(&self, symbol_name: &str, search_files: &[PathBuf]) -> Result<Vec<(String, usize, String)>> {
+    pub fn find_references(
+        &self,
+        symbol_name: &str,
+        search_files: &[PathBuf],
+    ) -> Result<Vec<(String, usize, String)>> {
         let mut results = Vec::new();
 
         for file in search_files {
@@ -296,24 +317,38 @@ impl CodeAnalyzer {
             .into_iter()
             .filter_entry(|e| {
                 let name = e.file_name().to_str().unwrap_or("");
-                !name.starts_with('.') && 
-                name != "node_modules" && 
-                name != "target" &&
-                name != "dist" &&
-                name != "build" &&
-                name != "__pycache__" &&
-                name != "vendor"
+                !name.starts_with('.')
+                    && name != "node_modules"
+                    && name != "target"
+                    && name != "dist"
+                    && name != "build"
+                    && name != "__pycache__"
+                    && name != "vendor"
             });
 
         for entry in walker.flatten() {
             if entry.file_type().is_file() {
                 let path = entry.path();
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    let should_include = extensions
-                        .map(|exts| exts.contains(&ext))
-                        .unwrap_or_else(|| {
-                            matches!(ext, "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp")
-                        });
+                    let should_include =
+                        extensions
+                            .map(|exts| exts.contains(&ext))
+                            .unwrap_or_else(|| {
+                                matches!(
+                                    ext,
+                                    "rs" | "ts"
+                                        | "tsx"
+                                        | "js"
+                                        | "jsx"
+                                        | "py"
+                                        | "go"
+                                        | "java"
+                                        | "c"
+                                        | "cpp"
+                                        | "h"
+                                        | "hpp"
+                                )
+                            });
                     if should_include {
                         files.push(path.to_path_buf());
                     }
@@ -371,16 +406,18 @@ impl Tool for ListSymbolsTool {
     }
 
     async fn execute(&self, params: Value) -> Result<ToolResult> {
-        let path = params["path"].as_str()
+        let path = params["path"]
+            .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
         let kind_filter = params["kind"].as_str();
 
         let target_path = self.analyzer.working_dir.join(path);
-        
+
         let files = if target_path.is_file() {
             vec![target_path]
         } else if target_path.is_dir() {
-            self.analyzer.get_searchable_files(None)
+            self.analyzer
+                .get_searchable_files(None)
                 .into_iter()
                 .filter(|f| f.starts_with(&target_path))
                 .collect()
@@ -400,13 +437,14 @@ impl Tool for ListSymbolsTool {
             if kind != "all" {
                 all_symbols.retain(|s| {
                     let kind_str = format!("{}", s.kind).to_lowercase();
-                    kind_str == kind || matches!(
-                        (kind, &s.kind),
-                        ("function", SymbolKind::Function) |
-                        ("function", SymbolKind::Method) |
-                        ("class", SymbolKind::Class) |
-                        ("class", SymbolKind::Struct)
-                    )
+                    kind_str == kind
+                        || matches!(
+                            (kind, &s.kind),
+                            ("function", SymbolKind::Function)
+                                | ("function", SymbolKind::Method)
+                                | ("class", SymbolKind::Class)
+                                | ("class", SymbolKind::Struct)
+                        )
                 });
             }
         }
@@ -417,7 +455,7 @@ impl Tool for ListSymbolsTool {
 
         // Format output
         let mut output = format!("Found {} symbols:\n\n", all_symbols.len());
-        
+
         // Group by file
         let mut by_file: HashMap<String, Vec<&Symbol>> = HashMap::new();
         for symbol in &all_symbols {
@@ -429,7 +467,7 @@ impl Tool for ListSymbolsTool {
                 .strip_prefix(&self.analyzer.working_dir)
                 .map(|p| p.display().to_string())
                 .unwrap_or(file);
-            
+
             output.push_str(&format!("## {}\n", rel_path));
             for s in symbols {
                 output.push_str(&format!(
@@ -493,9 +531,10 @@ impl Tool for GoToDefinitionTool {
     }
 
     async fn execute(&self, params: Value) -> Result<ToolResult> {
-        let symbol = params["symbol"].as_str()
+        let symbol = params["symbol"]
+            .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'symbol' parameter"))?;
-        
+
         let files = self.analyzer.get_searchable_files(None);
         let definitions = self.analyzer.find_definition(symbol, &files)?;
 
@@ -509,8 +548,12 @@ impl Tool for GoToDefinitionTool {
             )));
         }
 
-        let mut output = format!("Found {} definition(s) for '{}':\n\n", definitions.len(), symbol);
-        
+        let mut output = format!(
+            "Found {} definition(s) for '{}':\n\n",
+            definitions.len(),
+            symbol
+        );
+
         for def in &definitions {
             let rel_path = PathBuf::from(&def.file)
                 .strip_prefix(&self.analyzer.working_dir)
@@ -521,11 +564,7 @@ impl Tool for GoToDefinitionTool {
                 "📍 **{}** ({})\n\
                    File: {}\n\
                    Line: {}-{}\n",
-                def.name,
-                def.kind,
-                rel_path,
-                def.line,
-                def.end_line
+                def.name, def.kind, rel_path, def.line, def.end_line
             ));
 
             if let Some(sig) = &def.signature {
@@ -584,12 +623,13 @@ impl Tool for FindAllReferencesTool {
     }
 
     async fn execute(&self, params: Value) -> Result<ToolResult> {
-        let symbol = params["symbol"].as_str()
+        let symbol = params["symbol"]
+            .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'symbol' parameter"))?;
         let include_def = params["include_definition"].as_bool().unwrap_or(true);
 
         let files = self.analyzer.get_searchable_files(None);
-        
+
         // Find definition first
         let definitions = if include_def {
             self.analyzer.find_definition(symbol, &files)?
@@ -629,7 +669,7 @@ impl Tool for FindAllReferencesTool {
 
         // Show references
         output.push_str(&format!("## References ({} found)\n\n", references.len()));
-        
+
         // Group by file
         let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
         for (file, line, content) in references {
@@ -641,7 +681,7 @@ impl Tool for FindAllReferencesTool {
                 .strip_prefix(&self.analyzer.working_dir)
                 .map(|p| p.display().to_string())
                 .unwrap_or(file);
-            
+
             output.push_str(&format!("### {}\n", rel_path));
             for (line, content) in refs {
                 output.push_str(&format!("  L{}: {}\n", line, content));
@@ -697,15 +737,16 @@ impl Tool for CallHierarchyTool {
     }
 
     async fn execute(&self, params: Value) -> Result<ToolResult> {
-        let function = params["function"].as_str()
+        let function = params["function"]
+            .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'function' parameter"))?;
         let direction = params["direction"].as_str().unwrap_or("both");
 
         let files = self.analyzer.get_searchable_files(None);
-        
+
         // Find the function definition
         let definitions = self.analyzer.find_definition(function, &files)?;
-        
+
         if definitions.is_empty() {
             return Ok(ToolResult::success(format!(
                 "Function '{}' not found. Use list_symbols to see available functions.",
@@ -719,7 +760,7 @@ impl Tool for CallHierarchyTool {
         if direction == "incoming" || direction == "both" {
             output.push_str("## ⬅️ Incoming (Callers)\n\n");
             let callers = self.analyzer.find_references(function, &files)?;
-            
+
             if callers.is_empty() {
                 output.push_str("  No callers found (might be entry point or exported)\n\n");
             } else {
@@ -736,28 +777,31 @@ impl Tool for CallHierarchyTool {
         // Find outgoing calls (what does this function call)
         if direction == "outgoing" || direction == "both" {
             output.push_str("## ➡️ Outgoing (Callees)\n\n");
-            
+
             // Read the function body and find function calls
             if let Some(def) = definitions.first() {
                 if let Ok(content) = fs::read_to_string(&def.file) {
                     let lines: Vec<&str> = content.lines().collect();
                     let start = def.line.saturating_sub(1);
                     let end = def.end_line.min(lines.len());
-                    
+
                     // Simple heuristic: find identifiers followed by (
                     let func_body = lines[start..end].join("\n");
-                    static CALL_PATTERN: once_cell::sync::Lazy<regex::Regex> = 
-                        once_cell::sync::Lazy::new(|| regex::Regex::new(r"(\w+)\s*\(").expect("valid regex"));
+                    static CALL_PATTERN: once_cell::sync::Lazy<regex::Regex> =
+                        once_cell::sync::Lazy::new(|| {
+                            regex::Regex::new(r"(\w+)\s*\(").expect("valid regex")
+                        });
                     let call_pattern = &*CALL_PATTERN;
-                    
+
                     let mut calls: Vec<String> = call_pattern
                         .captures_iter(&func_body)
                         .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
                         .filter(|name| {
-                            !["if", "while", "for", "match", "return", function].contains(&name.as_str())
+                            !["if", "while", "for", "match", "return", function]
+                                .contains(&name.as_str())
                         })
                         .collect();
-                    
+
                     calls.sort();
                     calls.dedup();
 
@@ -831,7 +875,8 @@ impl Tool for GetSignatureTool {
     }
 
     async fn execute(&self, params: Value) -> Result<ToolResult> {
-        let symbol = params["symbol"].as_str()
+        let symbol = params["symbol"]
+            .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'symbol' parameter"))?;
 
         let files = self.analyzer.get_searchable_files(None);
@@ -873,7 +918,7 @@ impl Tool for GetSignatureTool {
                 let lines: Vec<&str> = content.lines().collect();
                 let start = def.line.saturating_sub(1);
                 let end = (start + 10).min(lines.len()); // First 10 lines
-                
+
                 output.push_str("## Context\n```\n");
                 for line in &lines[start..end] {
                     output.push_str(line);
@@ -896,7 +941,7 @@ mod tests {
     fn test_symbol_extraction() {
         let cwd = env::current_dir().unwrap();
         let analyzer = CodeAnalyzer::new(cwd);
-        
+
         // Test on this file itself
         let this_file = PathBuf::from(file!());
         if this_file.exists() {
@@ -905,4 +950,3 @@ mod tests {
         }
     }
 }
-

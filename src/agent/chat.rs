@@ -1,7 +1,7 @@
 //! Chat agent implementation with tool execution loop
 
 use super::ConversationContext;
-use crate::llm::{LlmProvider, LlmResponse, Message, MessageContent, ContentPart, Role};
+use crate::llm::{ContentPart, LlmProvider, LlmResponse, Message, MessageContent, Role};
 use crate::tools::{AgentMode, ToolRegistry};
 use crate::transport::update_status;
 use anyhow::Result;
@@ -60,7 +60,8 @@ When user asks for changes, use `propose_change` to show what the diff would loo
 ✅ ALWAYS:
 - Try 3+ search patterns before saying "not found"
 - Show what you DID find
-- Use propose_change to show diffs when suggesting code changes"#.to_string(),
+- Use propose_change to show diffs when suggesting code changes"#
+            .to_string(),
 
         AgentMode::Review => r#"You are an AI coding assistant in REVIEW MODE.
 
@@ -95,9 +96,11 @@ IMPORTANT: For each action that modifies files or runs commands:
 2. Show the exact changes/command
 3. Wait for user confirmation before proceeding
 
-Be thorough and cautious. Explain implications of changes."#.to_string(),
+Be thorough and cautious. Explain implications of changes."#
+            .to_string(),
 
-        AgentMode::Build => r#"You are an AI coding assistant with access to tools for working with the codebase.
+        AgentMode::Build => {
+            r#"You are an AI coding assistant with access to tools for working with the codebase.
 
 🚀 CRITICAL RULES:
 1. USE TOOLS IMMEDIATELY - Don't explain what you'll do, just DO IT
@@ -191,7 +194,9 @@ Safe shell commands (OK to run):
 - Show what you DID find, even if it's not exactly what was asked
 - Create diagrams using Mermaid when asked for visual representations
 - Suggest next steps based on what you discovered
-- Be cautious with shell commands - prefer read-only commands when possible"#.to_string(),
+- Be cautious with shell commands - prefer read-only commands when possible"#
+                .to_string()
+        }
     }
 }
 
@@ -266,7 +271,7 @@ impl ChatAgent {
     /// Auto-compact context by summarizing older messages
     async fn auto_compact(&mut self) -> Result<()> {
         let messages = self.context.messages();
-        
+
         // Need at least 4 messages to compact (system + some history)
         if messages.len() < 4 {
             return Ok(());
@@ -278,13 +283,13 @@ impl ChatAgent {
              1. What the user asked for\n\
              2. What actions were taken (files read/modified, commands run)\n\
              3. Current state and any pending tasks\n\n\
-             Conversation:\n"
+             Conversation:\n",
         );
 
         // Collect messages to summarize (skip system prompt, keep recent 2 exchanges)
         let keep_recent = 4; // Keep last 2 user+assistant pairs
         let to_summarize = messages.len().saturating_sub(keep_recent + 1); // +1 for system
-        
+
         if to_summarize < 2 {
             return Ok(()); // Not enough to summarize
         }
@@ -292,48 +297,54 @@ impl ChatAgent {
         for (i, msg) in messages.iter().enumerate().skip(1).take(to_summarize) {
             let role = match msg.role {
                 Role::User => "User",
-                Role::Assistant => "Assistant", 
+                Role::Assistant => "Assistant",
                 Role::System => continue,
                 Role::Tool => "Tool Result",
             };
-            
+
             let content = match &msg.content {
                 MessageContent::Text(t) => t.clone(),
                 MessageContent::Parts(parts) => {
-                    parts.iter().filter_map(|p| match p {
-                        ContentPart::Text { text } => Some(text.clone()),
-                        ContentPart::ToolResult { content, .. } => {
-                            // Truncate tool results in summary
-                            Some(if content.len() > 200 {
-                                format!("{}...(truncated)", &content[..200])
-                            } else {
-                                content.clone()
-                            })
-                        }
-                        _ => None,
-                    }).collect::<Vec<_>>().join("\n")
+                    parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            ContentPart::Text { text } => Some(text.clone()),
+                            ContentPart::ToolResult { content, .. } => {
+                                // Truncate tool results in summary
+                                Some(if content.len() > 200 {
+                                    format!("{}...(truncated)", &content[..200])
+                                } else {
+                                    content.clone()
+                                })
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 }
             };
-            
+
             // Truncate long messages
             let truncated = if content.len() > 500 {
                 format!("{}...(truncated)", &content[..500])
             } else {
                 content
             };
-            
+
             summary_content.push_str(&format!("\n{}: {}\n", role, truncated));
         }
 
         // Ask LLM to summarize
         let summary_messages = vec![Message::user(summary_content)];
-        
+
         match self.llm.chat(&summary_messages, None).await {
             Ok(LlmResponse::Text(summary)) => {
                 // Compact the context with the summary
                 self.context.compact_with_summary(&summary, keep_recent);
-                tracing::info!("Auto-compacted context. New size: ~{} tokens", 
-                    self.context.estimate_total_tokens());
+                tracing::info!(
+                    "Auto-compacted context. New size: ~{} tokens",
+                    self.context.estimate_total_tokens()
+                );
             }
             Ok(_) => {
                 tracing::warn!("Auto-compact got unexpected response type");
@@ -352,7 +363,7 @@ impl ChatAgent {
     pub async fn chat(&mut self, user_message: &str) -> Result<AgentResponse> {
         // Track if auto-compaction happens
         let mut auto_compacted = false;
-        
+
         // Auto-compact if context is near limit (80%+)
         if self.context.is_near_limit() {
             let usage = self.context.usage_percentage();
@@ -360,7 +371,7 @@ impl ChatAgent {
             self.auto_compact().await?;
             auto_compacted = true;
         }
-        
+
         self.context.add_user(user_message);
 
         let tool_definitions = self.tools.definitions();
@@ -375,7 +386,7 @@ impl ChatAgent {
                 );
                 break;
             }
-            
+
             // Check context size before each LLM call
             let estimated_tokens = self.context.estimate_total_tokens();
             tracing::debug!("Context size: ~{} tokens", estimated_tokens);
@@ -409,34 +420,42 @@ impl ChatAgent {
                     for (i, call) in calls.iter().enumerate() {
                         // Update status with current tool and argument
                         let tool_arg = match &call.name[..] {
-                            "grep" | "file_search" => call.arguments.get("pattern")
+                            "grep" | "file_search" => call
+                                .arguments
+                                .get("pattern")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            "read_file" | "write_file" | "delete_file" => call.arguments.get("path")
+                            "read_file" | "write_file" | "delete_file" => call
+                                .arguments
+                                .get("path")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            "read_files" => call.arguments.get("paths")
+                            "read_files" => call
+                                .arguments
+                                .get("paths")
                                 .and_then(|v| v.as_array())
                                 .map(|arr| {
-                                    let files: Vec<_> = arr.iter()
-                                        .filter_map(|v| v.as_str())
-                                        .take(3)
-                                        .collect();
+                                    let files: Vec<_> =
+                                        arr.iter().filter_map(|v| v.as_str()).take(3).collect();
                                     if arr.len() > 3 {
                                         format!("{} +{} more", files.join(", "), arr.len() - 3)
                                     } else {
                                         files.join(", ")
                                     }
                                 }),
-                            "list_directory" | "codebase_overview" => call.arguments.get("path")
+                            "list_directory" | "codebase_overview" => call
+                                .arguments
+                                .get("path")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            "shell" => call.arguments.get("command")
+                            "shell" => call
+                                .arguments
+                                .get("command")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
                             _ => None,
                         };
-                        
+
                         let action = match &call.name[..] {
                             "grep" => "Grepping",
                             "file_search" => "Searching",
@@ -449,17 +468,25 @@ impl ChatAgent {
                             "shell" => "Executing",
                             _ => "Processing",
                         };
-                        
+
                         crate::transport::update_status(
                             action,
                             Some(&call.name),
                             tool_arg.as_deref(),
                             total_tool_calls + i + 1,
-                        ).await;
-                        
-                        tracing::debug!("Executing tool: {} with args: {}", call.name, call.arguments);
+                        )
+                        .await;
 
-                        let result = self.tools.execute(&call.name, call.arguments.clone()).await?;
+                        tracing::debug!(
+                            "Executing tool: {} with args: {}",
+                            call.name,
+                            call.arguments
+                        );
+
+                        let result = self
+                            .tools
+                            .execute(&call.name, call.arguments.clone())
+                            .await?;
 
                         tracing::debug!("Tool result: {:?}", result);
 
@@ -513,28 +540,40 @@ impl ChatAgent {
                     for (i, call) in tool_calls.iter().enumerate() {
                         // Update status with current tool
                         let tool_arg = match &call.name[..] {
-                            "grep" | "file_search" => call.arguments.get("pattern")
+                            "grep" | "file_search" => call
+                                .arguments
+                                .get("pattern")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            "read_file" | "write_file" | "delete_file" => call.arguments.get("path")
+                            "read_file" | "write_file" | "delete_file" => call
+                                .arguments
+                                .get("path")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            "read_files" => call.arguments.get("paths")
+                            "read_files" => call
+                                .arguments
+                                .get("paths")
                                 .and_then(|v| v.as_array())
                                 .map(|a| format!("{} files", a.len())),
-                            "list_directory" => call.arguments.get("path")
+                            "list_directory" => call
+                                .arguments
+                                .get("path")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            "find_references" => call.arguments.get("symbol")
+                            "find_references" => call
+                                .arguments
+                                .get("symbol")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
                             "codebase_overview" => Some("project".to_string()),
-                            "shell" => call.arguments.get("command")
+                            "shell" => call
+                                .arguments
+                                .get("command")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
                             _ => None,
                         };
-                        
+
                         let action = match &call.name[..] {
                             "grep" => "Searching",
                             "file_search" => "Finding files",
@@ -548,17 +587,25 @@ impl ChatAgent {
                             "patch_file" => "Patching",
                             _ => "Processing",
                         };
-                        
+
                         update_status(
                             action,
                             Some(&call.name),
                             tool_arg.as_deref(),
                             total_tool_calls + i + 1,
-                        ).await;
-                        
-                        tracing::debug!("Executing tool: {} with args: {}", call.name, call.arguments);
+                        )
+                        .await;
 
-                        let result = self.tools.execute(&call.name, call.arguments.clone()).await?;
+                        tracing::debug!(
+                            "Executing tool: {} with args: {}",
+                            call.name,
+                            call.arguments
+                        );
+
+                        let result = self
+                            .tools
+                            .execute(&call.name, call.arguments.clone())
+                            .await?;
 
                         tracing::debug!("Tool result: {:?}", result);
 
@@ -604,4 +651,3 @@ impl ChatAgent {
         self.context.add_system(&get_system_prompt(self.mode));
     }
 }
-

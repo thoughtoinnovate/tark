@@ -44,4 +44,3 @@ pub async fn handle_hover(
         range: None,
     }))
 }
-

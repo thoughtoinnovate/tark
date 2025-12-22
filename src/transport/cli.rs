@@ -27,7 +27,8 @@ pub async fn run_chat(initial_message: Option<String>, working_dir: &str) -> Res
     let tools = ToolRegistry::with_defaults(working_dir, config.tools.shell_enabled);
 
     // Create agent
-    let mut agent = ChatAgent::new(provider, tools).with_max_iterations(config.agent.max_iterations);
+    let mut agent =
+        ChatAgent::new(provider, tools).with_max_iterations(config.agent.max_iterations);
 
     // Handle initial message if provided
     if let Some(msg) = initial_message {
@@ -132,4 +133,3 @@ pub async fn run_complete(file: &str, line: usize, col: usize) -> Result<()> {
 
     Ok(())
 }
-

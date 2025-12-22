@@ -22,12 +22,10 @@ const DANGEROUS_PATTERNS: &[&str] = &[
     "dd if=",
     "mkfs",
     "format ",
-    
     // System modification
     "chmod -R 777",
     "chmod 777 /",
     "chown -R",
-    
     // Privilege escalation
     "sudo rm",
     "sudo dd",
@@ -36,13 +34,11 @@ const DANGEROUS_PATTERNS: &[&str] = &[
     "sudo chown",
     "su -c",
     "su root",
-    
     // Network attacks
-    ":(){ :|:& };:",  // Fork bomb
-    "wget http",      // Downloading arbitrary scripts
-    "curl http",      // Downloading arbitrary scripts (but allow https APIs)
-    "nc -l",          // Netcat listener
-    
+    ":(){ :|:& };:", // Fork bomb
+    "wget http",     // Downloading arbitrary scripts
+    "curl http",     // Downloading arbitrary scripts (but allow https APIs)
+    "nc -l",         // Netcat listener
     // Dangerous redirects
     "> /etc/",
     ">> /etc/",
@@ -51,11 +47,9 @@ const DANGEROUS_PATTERNS: &[&str] = &[
     "> /boot/",
     "> /sys/",
     "> /proc/",
-    
     // Environment manipulation
     "export PATH=",
     "unset PATH",
-    
     // Shutdown/reboot
     "shutdown",
     "reboot",
@@ -67,8 +61,8 @@ const DANGEROUS_PATTERNS: &[&str] = &[
 
 /// Commands that require extra caution but may be allowed
 const WARN_PATTERNS: &[&str] = &[
-    "rm -rf",     // Recursive delete (but not root)
-    "rm -r",      // Recursive delete
+    "rm -rf", // Recursive delete (but not root)
+    "rm -r",  // Recursive delete
     "git push --force",
     "git reset --hard",
     "DROP TABLE",
@@ -80,13 +74,13 @@ const WARN_PATTERNS: &[&str] = &[
 /// Check if a command is dangerous
 fn is_dangerous_command(cmd: &str) -> Option<&'static str> {
     let cmd_lower = cmd.to_lowercase();
-    
+
     for pattern in DANGEROUS_PATTERNS {
         if cmd_lower.contains(&pattern.to_lowercase()) {
             return Some(pattern);
         }
     }
-    
+
     // Special check for rm -rf with paths that could be dangerous
     if cmd_lower.contains("rm ") && (cmd_lower.contains(" -rf") || cmd_lower.contains(" -fr")) {
         // Check for dangerous path patterns
@@ -97,14 +91,14 @@ fn is_dangerous_command(cmd: &str) -> Option<&'static str> {
             }
         }
     }
-    
+
     None
 }
 
 /// Check if command should show a warning
 fn should_warn(cmd: &str) -> Option<&'static str> {
     let cmd_lower = cmd.to_lowercase();
-    
+
     for pattern in WARN_PATTERNS {
         if cmd_lower.contains(&pattern.to_lowercase()) {
             return Some(pattern);
@@ -164,7 +158,7 @@ impl Tool for ShellTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        
+
         // SAFETY CHECK: Block dangerous commands
         if let Some(pattern) = is_dangerous_command(&params.command) {
             return Ok(ToolResult::error(format!(
@@ -174,12 +168,15 @@ impl Tool for ShellTool {
                 pattern
             )));
         }
-        
+
         // SAFETY CHECK: Warn about risky commands
         if let Some(pattern) = should_warn(&params.command) {
-            tracing::warn!("Executing potentially risky command matching pattern: {}", pattern);
+            tracing::warn!(
+                "Executing potentially risky command matching pattern: {}",
+                pattern
+            );
         }
-        
+
         let working_dir = params
             .working_dir
             .map(|p| self.working_dir.join(p))
@@ -234,7 +231,10 @@ impl Tool for ShellTool {
                     Ok(ToolResult::error(result_text))
                 }
             }
-            Ok(Err(e)) => Ok(ToolResult::error(format!("Failed to execute command: {}", e))),
+            Ok(Err(e)) => Ok(ToolResult::error(format!(
+                "Failed to execute command: {}",
+                e
+            ))),
             Err(_) => Ok(ToolResult::error(format!(
                 "Command timed out after {} seconds",
                 timeout.as_secs()
@@ -242,4 +242,3 @@ impl Tool for ShellTool {
         }
     }
 }
-

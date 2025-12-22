@@ -224,7 +224,7 @@ impl Tool for CodebaseOverviewTool {
         let include_counts = params.include_file_counts.unwrap_or(true);
 
         let mut output = String::new();
-        
+
         // 1. Directory structure
         output.push_str("## Directory Structure\n```\n");
         let tree = build_tree(&self.working_dir, &self.working_dir, 0, max_depth);
@@ -252,12 +252,12 @@ impl Tool for CodebaseOverviewTool {
             let stats = count_files_by_extension(&self.working_dir);
             let mut stats_vec: Vec<_> = stats.into_iter().collect();
             stats_vec.sort_by(|a, b| b.1.cmp(&a.1));
-            
+
             for (ext, count) in stats_vec.iter().take(15) {
                 let lang = extension_to_language(ext);
                 output.push_str(&format!("- {} ({}): {} files\n", lang, ext, count));
             }
-            
+
             let total: usize = stats_vec.iter().map(|(_, c)| c).sum();
             output.push_str(&format!("\n**Total:** {} files\n", total));
         }
@@ -279,51 +279,63 @@ fn build_tree(root: &PathBuf, current: &PathBuf, depth: usize, max_depth: usize)
 
     let mut output = String::new();
     let indent = "  ".repeat(depth);
-    
+
     let dir_name = if depth == 0 {
         ".".to_string()
     } else {
-        current.file_name()
+        current
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("?")
             .to_string()
     };
-    
+
     output.push_str(&format!("{}📁 {}/\n", indent, dir_name));
 
     if let Ok(entries) = std::fs::read_dir(current) {
         let mut dirs = Vec::new();
         let mut files = Vec::new();
-        
+
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
-            let name = path.file_name()
+            let name = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("?")
                 .to_string();
-            
+
             // Skip hidden files and common ignore patterns
-            if name.starts_with('.') || name == "node_modules" || name == "target" 
-                || name == "dist" || name == "build" || name == "__pycache__" 
-                || name == "venv" || name == ".git" {
+            if name.starts_with('.')
+                || name == "node_modules"
+                || name == "target"
+                || name == "dist"
+                || name == "build"
+                || name == "__pycache__"
+                || name == "venv"
+                || name == ".git"
+            {
                 continue;
             }
-            
+
             if path.is_dir() {
                 dirs.push(path);
             } else {
                 files.push(name);
             }
         }
-        
+
         // Show up to 10 files at this level
         for file in files.iter().take(10) {
             output.push_str(&format!("{}  📄 {}\n", indent, file));
         }
         if files.len() > 10 {
-            output.push_str(&format!("{}  ... and {} more files\n", indent, files.len() - 10));
+            output.push_str(&format!(
+                "{}  ... and {} more files\n",
+                indent,
+                files.len() - 10
+            ));
         }
-        
+
         // Recurse into directories
         dirs.sort();
         for dir in dirs {
@@ -336,22 +348,47 @@ fn build_tree(root: &PathBuf, current: &PathBuf, depth: usize, max_depth: usize)
 
 fn find_key_files(dir: &PathBuf) -> Vec<(&'static str, Vec<String>)> {
     let key_patterns = vec![
-        ("Documentation", vec!["README.md", "README", "readme.md", "CHANGELOG.md", "CONTRIBUTING.md"]),
-        ("Configuration", vec!["package.json", "Cargo.toml", "pyproject.toml", "go.mod", "pom.xml", "build.gradle", "Makefile", "docker-compose.yml", "Dockerfile"]),
-        ("Entry Points", vec!["main.rs", "lib.rs", "main.py", "app.py", "index.js", "index.ts", "main.go", "App.tsx", "App.jsx"]),
+        (
+            "Documentation",
+            vec![
+                "README.md",
+                "README",
+                "readme.md",
+                "CHANGELOG.md",
+                "CONTRIBUTING.md",
+            ],
+        ),
+        (
+            "Configuration",
+            vec![
+                "package.json",
+                "Cargo.toml",
+                "pyproject.toml",
+                "go.mod",
+                "pom.xml",
+                "build.gradle",
+                "Makefile",
+                "docker-compose.yml",
+                "Dockerfile",
+            ],
+        ),
+        (
+            "Entry Points",
+            vec![
+                "main.rs", "lib.rs", "main.py", "app.py", "index.js", "index.ts", "main.go",
+                "App.tsx", "App.jsx",
+            ],
+        ),
     ];
-    
+
     let mut results = Vec::new();
-    
+
     for (category, patterns) in key_patterns {
         let mut found = Vec::new();
         for pattern in patterns {
             // Check root and src directories
-            let paths = vec![
-                dir.join(pattern),
-                dir.join("src").join(pattern),
-            ];
-            
+            let paths = vec![dir.join(pattern), dir.join("src").join(pattern)];
+
             for path in paths {
                 if path.exists() {
                     if let Ok(rel) = path.strip_prefix(dir) {
@@ -364,21 +401,19 @@ fn find_key_files(dir: &PathBuf) -> Vec<(&'static str, Vec<String>)> {
             results.push((category, found));
         }
     }
-    
+
     results
 }
 
 fn count_files_by_extension(dir: &PathBuf) -> std::collections::HashMap<String, usize> {
     let mut counts = std::collections::HashMap::new();
-    
-    let walker = WalkBuilder::new(dir)
-        .hidden(true)
-        .git_ignore(true)
-        .build();
-    
+
+    let walker = WalkBuilder::new(dir).hidden(true).git_ignore(true).build();
+
     for entry in walker.filter_map(|e| e.ok()) {
         if entry.path().is_file() {
-            let ext = entry.path()
+            let ext = entry
+                .path()
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("(no ext)")
@@ -386,7 +421,7 @@ fn count_files_by_extension(dir: &PathBuf) -> std::collections::HashMap<String, 
             *counts.entry(ext).or_insert(0) += 1;
         }
     }
-    
+
     counts
 }
 
@@ -439,4 +474,3 @@ mod tests {
         assert!(!fuzzy_match("xyz", "main.rs"));
     }
 }
-

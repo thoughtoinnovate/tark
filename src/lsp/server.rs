@@ -229,7 +229,8 @@ pub async fn run_lsp_server() -> Result<()> {
     let config = Config::load().unwrap_or_default();
 
     // Create LLM provider
-    let provider: Arc<dyn LlmProvider> = Arc::from(llm::create_provider(&config.llm.default_provider)?);
+    let provider: Arc<dyn LlmProvider> =
+        Arc::from(llm::create_provider(&config.llm.default_provider)?);
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
