@@ -165,9 +165,10 @@ async fn get_status() -> impl IntoResponse {
 }
 
 /// Run the HTTP server
-pub async fn run_http_server(host: &str, port: u16) -> Result<()> {
+pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Result<()> {
     let config = Config::load().unwrap_or_default();
-    let working_dir = std::env::current_dir()?;
+    let working_dir = working_dir.canonicalize().unwrap_or(working_dir);
+    tracing::info!("Server working directory: {:?}", working_dir);
     
     // Initialize storage
     let storage = TarkStorage::new(working_dir.clone()).ok();

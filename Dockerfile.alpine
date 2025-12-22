@@ -63,7 +63,8 @@ COPY --from=builder /build/target/release/tark /usr/local/bin/tark
 
 # Switch to non-root user
 USER tark
-WORKDIR /home/tark
+# Use /workspace as default - this is where volumes are mounted
+WORKDIR /workspace
 
 # Expose HTTP server port
 EXPOSE 8765
@@ -72,6 +73,6 @@ EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:8765/health || exit 1
 
-# Run the server
+# Run the server with /workspace as working directory
 ENTRYPOINT ["tark"]
-CMD ["serve", "--host", "0.0.0.0", "--port", "8765"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8765", "--cwd", "/workspace"]

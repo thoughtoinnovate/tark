@@ -72,5 +72,6 @@ EXPOSE 8765
 USER 1000
 
 # No shell available - direct binary execution
+# Use /workspace as cwd (where volumes are mounted)
 ENTRYPOINT ["/tark"]
-CMD ["serve", "--host", "0.0.0.0", "--port", "8765"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8765", "--cwd", "/workspace"]
