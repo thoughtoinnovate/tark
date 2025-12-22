@@ -1,0 +1,23 @@
+# tark Code Owners
+# These owners will be requested for review when PRs modify these paths
+
+# Default owners for everything
+* @thoughtoinnovate
+
+# Rust backend
+/src/ @thoughtoinnovate
+/Cargo.toml @thoughtoinnovate
+
+# Neovim plugin
+/lua/ @thoughtoinnovate
+/plugin/ @thoughtoinnovate
+
+# Docker & CI/CD
+/Dockerfile* @thoughtoinnovate
+/.github/ @thoughtoinnovate
+/docker-compose.yml @thoughtoinnovate
+
+# Documentation
+/README.md @thoughtoinnovate
+/examples/ @thoughtoinnovate
+
