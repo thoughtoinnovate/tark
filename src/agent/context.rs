@@ -1,5 +1,7 @@
 //! Conversation context management
 
+#![allow(dead_code)]
+
 use crate::llm::{ContentPart, Message, MessageContent, Role, ToolCall};
 
 /// Default max tokens (conservative estimate for most models)

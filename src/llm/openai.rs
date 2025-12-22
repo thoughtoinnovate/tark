@@ -3,6 +3,8 @@
 //! SECURITY: API keys are ONLY sent to official OpenAI endpoints.
 //! The OPENAI_API_KEY is never sent to any third-party services.
 
+#![allow(dead_code)]
+
 use super::{
     CodeIssue, ContentPart, LlmProvider, LlmResponse, Message, MessageContent,
     RefactoringSuggestion, Role, ToolCall, ToolDefinition,

@@ -1,5 +1,7 @@
 //! Shared types for LLM providers
 
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 
 /// Role in a conversation

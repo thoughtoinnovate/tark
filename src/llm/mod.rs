@@ -1,5 +1,7 @@
 //! LLM provider implementations
 
+#![allow(dead_code)]
+
 mod claude;
 mod ollama;
 mod openai;

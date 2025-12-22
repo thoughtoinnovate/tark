@@ -1,5 +1,7 @@
 //! Code analysis and diagnostics
 
+#![allow(dead_code)]
+
 use crate::llm::{IssueSeverity, LlmProvider};
 use anyhow::Result;
 use std::collections::HashMap;

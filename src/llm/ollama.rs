@@ -1,5 +1,7 @@
 //! Ollama LLM provider implementation (local models)
 
+#![allow(dead_code)]
+
 use super::{
     CodeIssue, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role, ToolCall,
     ToolDefinition,

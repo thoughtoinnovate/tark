@@ -1,5 +1,7 @@
 //! Chat agent implementation with tool execution loop
 
+#![allow(dead_code)]
+
 use super::ConversationContext;
 use crate::llm::{ContentPart, LlmProvider, LlmResponse, Message, MessageContent, Role};
 use crate::tools::{AgentMode, ToolRegistry};

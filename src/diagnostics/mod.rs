@@ -2,4 +2,6 @@
 
 mod analyzer;
 
-pub use analyzer::{Diagnostic, DiagnosticSeverity, DiagnosticsEngine};
+#[allow(unused_imports)]
+pub use analyzer::Diagnostic;
+pub use analyzer::{DiagnosticSeverity, DiagnosticsEngine};

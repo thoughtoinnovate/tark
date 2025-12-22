@@ -5,5 +5,7 @@ mod engine;
 mod fim;
 
 pub use cache::CompletionCache;
-pub use engine::{CompletionEngine, CompletionRequest, CompletionResponse};
+#[allow(unused_imports)]
+pub use engine::CompletionResponse;
+pub use engine::{CompletionEngine, CompletionRequest};
 pub use fim::FimBuilder;

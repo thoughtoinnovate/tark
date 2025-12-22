@@ -1,5 +1,7 @@
 //! Agent tools for file system and shell operations
 
+#![allow(dead_code)]
+
 mod file_ops;
 mod file_search;
 mod grep;

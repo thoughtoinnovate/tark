@@ -20,6 +20,8 @@
 //! └── plugins/                       # Project-specific plugins
 //!     └── {plugin}/
 
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -1149,9 +1151,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let storage = TarkStorage::new(temp.path()).unwrap();
 
+        // Check project-level directories (in .tark/)
+        assert!(storage.project_root().exists());
+        assert!(storage.project_root().join("conversations").exists());
+        assert!(storage.project_root().join("plans").exists());
+        assert!(storage.project_root().join("rules").exists());
+
+        // Check global directories exist
         assert!(storage.global.root().exists());
-        assert!(storage.global.root().join("conversations").exists());
-        assert!(storage.global.root().join("plans").exists());
         assert!(storage.global.root().join("rules").exists());
     }
 

@@ -1,5 +1,7 @@
 //! Core completion engine
 
+#![allow(dead_code)]
+
 use super::{CompletionCache, FimBuilder};
 use crate::llm::LlmProvider;
 use anyhow::Result;
