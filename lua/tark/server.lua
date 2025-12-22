@@ -88,7 +88,11 @@ end
 function M.download_binary(callback)
     local platform = detect_platform()
     local binary_name = 'tark-' .. platform
-    local base_url = 'https://github.com/thoughtoinnovate/tark/releases/latest/download/'
+    
+    -- Use version from init.lua to ensure binary matches Lua code
+    local tark = require('tark')
+    local version = 'v' .. tark.version
+    local base_url = 'https://github.com/thoughtoinnovate/tark/releases/download/' .. version .. '/'
     local binary_url = base_url .. binary_name
     local checksum_url = binary_url .. '.sha256'
     local dest = get_local_binary_path()
