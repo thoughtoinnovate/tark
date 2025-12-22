@@ -272,6 +272,7 @@ impl Tool for CodebaseOverviewTool {
     }
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn build_tree(root: &PathBuf, current: &PathBuf, depth: usize, max_depth: usize) -> String {
     if depth > max_depth {
         return String::new();

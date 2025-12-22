@@ -1160,9 +1160,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let storage = TarkStorage::new(temp.path()).unwrap();
 
-        let mut config = WorkspaceConfig::default();
-        config.provider = "claude".to_string();
-        config.verbose = true;
+        let config = WorkspaceConfig {
+            provider: "claude".to_string(),
+            verbose: true,
+            ..Default::default()
+        };
 
         storage.save_config(&config).unwrap();
         let loaded = storage.load_config().unwrap();
