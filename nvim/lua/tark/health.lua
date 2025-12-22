@@ -1,208 +1,158 @@
--- Health check for tark
+-- tark health check module
+-- Used by :checkhealth tark
+
 local M = {}
 
--- Check if a command exists
-local function command_exists(cmd)
-    local handle = io.popen('which ' .. cmd .. ' 2>/dev/null || where ' .. cmd .. ' 2>nul')
-    if handle then
-        local result = handle:read('*a')
-        handle:close()
-        return result and result ~= ''
-    end
-    return false
-end
-
--- Get OS type
-local function get_os()
-    local uname = io.popen('uname -s 2>/dev/null')
-    if uname then
-        local os_name = uname:read('*l')
-        uname:close()
-        if os_name then
-            if os_name:match('Darwin') then return 'macos'
-            elseif os_name:match('Linux') then return 'linux'
-            end
-        end
-    end
-    -- Fallback: check for Windows
-    if os.getenv('OS') and os.getenv('OS'):match('Windows') then
-        return 'windows'
-    end
-    return 'unknown'
-end
+local health = vim.health or require('health')
+local start = health.start or health.report_start
+local ok = health.ok or health.report_ok
+local warn = health.warn or health.report_warn
+local error_fn = health.error or health.report_error
+local info = health.info or health.report_info
 
 function M.check()
-    vim.health.start("tark")
+    start('tark')
     
-    -- 1. Check if tark binary is installed
-    vim.health.start("Binary Installation")
+    -- Check Neovim version
+    start('Neovim')
+    local nvim_version = vim.version()
+    if nvim_version.major >= 0 and nvim_version.minor >= 9 then
+        ok('Neovim version: ' .. nvim_version.major .. '.' .. nvim_version.minor .. '.' .. nvim_version.patch)
+    else
+        warn('Neovim 0.9+ recommended, you have: ' .. nvim_version.major .. '.' .. nvim_version.minor)
+    end
     
-    local binary_found = command_exists('tark')
-    if binary_found then
-        vim.health.ok("tark binary found in PATH")
+    -- Check curl (required for HTTP communication)
+    start('Dependencies')
+    local curl_ok = vim.fn.executable('curl') == 1
+    if curl_ok then
+        ok('curl is available')
+    else
+        error_fn('curl not found - required for server communication')
+    end
+    
+    -- Check tark module loaded
+    local tark_ok, tark = pcall(require, 'tark')
+    if tark_ok then
+        ok('tark module loaded (v' .. (tark.version or 'unknown') .. ')')
+    else
+        error_fn('Failed to load tark module')
+        return
+    end
+    
+    -- Check binary availability
+    start('tark Binary')
+    local server = require('tark.server')
+    local binary_ok, binary_info = server.binary_available()
+    if binary_ok then
+        ok('Binary found: ' .. binary_info)
         
-        -- Get version
-        local version_handle = io.popen('tark --version 2>/dev/null')
-        if version_handle then
-            local version = version_handle:read('*l')
-            version_handle:close()
-            if version then
-                vim.health.info("Version: " .. version)
-            end
-        end
-        
-        -- Get binary path and show checksum for verification
-        local which_handle = io.popen('which tark 2>/dev/null || where tark 2>nul')
-        if which_handle then
-            local binary_path = which_handle:read('*l')
-            which_handle:close()
-            if binary_path and binary_path ~= '' then
-                vim.health.info("Binary path: " .. binary_path)
-                
-                -- Calculate SHA256 for verification
-                local sha_handle = io.popen('sha256sum "' .. binary_path .. '" 2>/dev/null || shasum -a 256 "' .. binary_path .. '" 2>/dev/null')
-                if sha_handle then
-                    local sha_output = sha_handle:read('*l')
-                    sha_handle:close()
-                    if sha_output then
-                        local sha256 = sha_output:match('^(%w+)')
-                        if sha256 then
-                            vim.health.info("SHA256: " .. sha256)
-                            vim.health.info("Verify at: https://github.com/thoughtoinnovate/tark/releases")
-                        end
-                    end
+        -- Get binary hash for verification
+        local binary_path = vim.fn.exepath('tark')
+        if binary_path and binary_path ~= '' then
+            local hash_cmd = vim.fn.has('mac') == 1 and 'shasum -a 256' or 'sha256sum'
+            local hash = vim.fn.system(hash_cmd .. ' ' .. binary_path .. ' 2>/dev/null')
+            if hash and hash ~= '' then
+                local sha = hash:match('^(%S+)')
+                if sha then
+                    info('SHA256: ' .. sha)
                 end
             end
         end
     else
-        local os_type = get_os()
-        local install_hints = {
-            "tark binary not found in PATH",
-            "",
-            "Install options:",
-        }
-        
-        -- Add OS-specific installation instructions
-        if os_type == 'macos' then
-            table.insert(install_hints, "  brew install thoughtoinnovate/tap/tark  (coming soon)")
-        elseif os_type == 'linux' then
-            table.insert(install_hints, "  Download from: https://github.com/thoughtoinnovate/tark/releases")
-        end
-        
-        table.insert(install_hints, "  cargo install --git https://github.com/thoughtoinnovate/tark.git")
-        table.insert(install_hints, "")
-        table.insert(install_hints, "Or build from source:")
-        table.insert(install_hints, "  git clone https://github.com/thoughtoinnovate/tark.git")
-        table.insert(install_hints, "  cd tark && cargo install --path .")
-        
-        vim.health.error("tark binary not found", install_hints)
+        info('Binary not installed: ' .. (binary_info or 'not found'))
+        info('Install with: curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash')
     end
     
-    -- 2. Check if server is running
-    vim.health.start("Server Status")
-    
-    local config = require('tark').config
-    local server_url = string.format('http://%s:%d/health', 
-        config.server.host or '127.0.0.1', 
-        config.server.port or 8765)
-    
-    local handle = io.popen('curl -s --max-time 2 ' .. server_url .. ' 2>/dev/null')
-    if handle then
-        local result = handle:read('*a')
-        handle:close()
+    -- Check Docker availability
+    start('Docker')
+    local docker_ok, docker_info = server.docker_available()
+    if docker_ok then
+        ok('Docker is available')
         
-        if result and result:match('"status":"ok"') then
-            vim.health.ok("tark server is running")
-            
-            -- Extract details
-            local provider = result:match('"current_provider":"([^"]+)"')
-            local version = result:match('"version":"([^"]+)"')
-            if provider then
-                vim.health.info("Current provider: " .. provider)
+        -- Check if tark image exists
+        local image = server.config.docker.image
+        local handle = io.popen('docker images -q ' .. image .. ' 2>/dev/null')
+        if handle then
+            local result = handle:read('*a')
+            handle:close()
+            if result and result ~= '' then
+                ok('Docker image present: ' .. image)
+            else
+                info('Docker image not pulled yet: ' .. image)
+                info('Run :TarkDockerPull to download')
             end
-            if version then
-                vim.health.info("Server version: " .. version)
-            end
+        end
+        
+        -- Check if container is running
+        if server.container_running() then
+            ok('Docker container running: ' .. server.config.docker.container_name)
         else
-            vim.health.warn("tark server is not running", {
-                "Auto-start is " .. (config.server.auto_start and "enabled" or "disabled"),
-                "",
-                "To start manually:",
-                "  :TarkServerStart",
-                "  or run: tark serve",
-            })
+            info('Docker container not running')
         end
     else
-        vim.health.error("Could not check server status (curl failed)")
+        info('Docker: ' .. (docker_info or 'not available'))
+        info('Docker is optional - you can use the binary instead')
     end
     
-    -- 3. Check for API keys
-    vim.health.start("LLM Providers")
+    -- Check server status
+    start('Server')
+    local healthy, resp = server.health_check()
+    if healthy then
+        ok('Server is running and healthy')
+        if resp then
+            if resp.version then
+                info('Server version: ' .. resp.version)
+            end
+            if resp.provider then
+                info('Current provider: ' .. resp.provider)
+            end
+        end
+    else
+        warn('Server is not running')
+        info('Start with :TarkServerStart')
+    end
     
-    local openai_key = os.getenv("OPENAI_API_KEY")
-    local anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-    local ollama_running = false
+    -- Check API keys
+    start('API Keys')
+    local openai_key = os.getenv('OPENAI_API_KEY')
+    local anthropic_key = os.getenv('ANTHROPIC_API_KEY')
+    local ollama_host = os.getenv('OLLAMA_HOST') or 'http://localhost:11434'
+    
+    if openai_key and openai_key ~= '' then
+        ok('OPENAI_API_KEY is set')
+    else
+        info('OPENAI_API_KEY not set')
+    end
+    
+    if anthropic_key and anthropic_key ~= '' then
+        ok('ANTHROPIC_API_KEY is set')
+    else
+        info('ANTHROPIC_API_KEY not set')
+    end
     
     -- Check Ollama
-    local ollama_handle = io.popen('curl -s --max-time 1 http://localhost:11434/api/tags 2>/dev/null')
-    if ollama_handle then
-        local ollama_result = ollama_handle:read('*a')
-        ollama_handle:close()
-        ollama_running = ollama_result and ollama_result:match('"models"')
-    end
-    
-    if ollama_running then
-        vim.health.ok("Ollama is running (local models available)")
+    local ollama_ok = vim.fn.system('curl -s --connect-timeout 2 ' .. ollama_host .. '/api/tags 2>/dev/null')
+    if ollama_ok and ollama_ok ~= '' and not ollama_ok:match('error') then
+        ok('Ollama is running at ' .. ollama_host)
     else
-        vim.health.info("Ollama not running (optional, for local models)")
+        info('Ollama not detected at ' .. ollama_host)
     end
     
-    if openai_key then
-        vim.health.ok("OPENAI_API_KEY is set")
-    else
-        vim.health.warn("OPENAI_API_KEY not set", {
-            "Set with: export OPENAI_API_KEY='sk-...'",
-        })
+    if not openai_key and not anthropic_key and (not ollama_ok or ollama_ok == '') then
+        warn('No LLM provider configured')
+        info('Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or start Ollama')
     end
     
-    if anthropic_key then
-        vim.health.ok("ANTHROPIC_API_KEY is set")
-    else
-        vim.health.info("ANTHROPIC_API_KEY not set (optional, for Claude)")
-    end
-    
-    if not openai_key and not anthropic_key and not ollama_running then
-        vim.health.error("No LLM provider available", {
-            "You need at least one of:",
-            "  - OPENAI_API_KEY environment variable",
-            "  - ANTHROPIC_API_KEY environment variable", 
-            "  - Ollama running locally (ollama serve)",
-        })
-    end
-    
-    -- 4. Check plugin integration
-    vim.health.start("Plugin Integration")
-    
-    local has_blink = pcall(require, 'blink.cmp')
-    if has_blink then
-        vim.health.ok("blink.cmp detected - Tab integration enabled")
-    else
-        vim.health.info("blink.cmp not found - using standalone Tab mapping")
-    end
-    
-    local has_lspconfig = pcall(require, 'lspconfig')
-    if has_lspconfig then
-        vim.health.ok("nvim-lspconfig available")
-    else
-        vim.health.info("nvim-lspconfig not found (optional, for tark LSP)")
-    end
-    
-    -- Config summary
-    vim.health.start("Configuration")
-    vim.health.info("Ghost text: " .. (config.ghost_text.enabled and "enabled" or "disabled"))
-    vim.health.info("Chat: " .. (config.chat.enabled and "enabled" or "disabled"))
-    vim.health.info("LSP: " .. (config.lsp.enabled and "enabled" or "disabled"))
-    vim.health.info("Auto-start server: " .. (config.server.auto_start and "yes" or "no"))
+    -- Configuration info
+    start('Configuration')
+    local config = tark.config
+    info('Server mode: ' .. config.server.mode)
+    info('Server URL: http://' .. config.server.host .. ':' .. config.server.port)
+    info('Auto-start: ' .. (config.server.auto_start and 'yes' or 'no'))
+    info('Ghost text: ' .. (config.ghost_text.enabled and 'enabled' or 'disabled'))
+    info('Chat: ' .. (config.chat.enabled and 'enabled' or 'disabled'))
+    info('LSP: ' .. (config.lsp.enabled and 'enabled' or 'disabled'))
 end
 
 return M
