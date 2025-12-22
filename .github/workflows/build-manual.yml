@@ -184,47 +184,35 @@ jobs:
           done
           ls -la release/
 
-      - name: Delete existing nightly release
+      - name: Create or update nightly release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete nightly --yes 2>/dev/null || true
-          git push origin :refs/tags/nightly 2>/dev/null || true
-
-      - name: Create nightly tag
-        run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git tag -f nightly
-          git push -f origin nightly
-
-      - name: Create nightly release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: nightly
-          name: Nightly Build
-          prerelease: true
-          body: |
-            ## Nightly Build
-            
-            ⚠️ **This is an automated nightly build from the latest code.**
-            
-            - Built from: ${{ github.sha }}
-            - Built at: ${{ github.event.repository.updated_at }}
-            
-            For stable releases, see [Releases](https://github.com/${{ github.repository }}/releases).
-            
-            ### Usage
-            
-            ```lua
-            -- In your Neovim config
-            opts = {
-                server = { channel = 'nightly' },
-            }
-            ```
-          files: release/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Delete existing nightly release if it exists
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          
+          # Create new nightly release with all binaries
+          gh release create nightly \
+            --title "Nightly Build" \
+            --prerelease \
+            --notes "## Nightly Build
+          
+          ⚠️ **This is an automated nightly build from the latest code.**
+          
+          - Built from: ${{ github.sha }}
+          - Built at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          
+          For stable releases, see [Releases](https://github.com/${{ github.repository }}/releases).
+          
+          ### Usage
+          
+          \`\`\`lua
+          -- In your Neovim config
+          opts = {
+              server = { channel = 'nightly' },
+          }
+          \`\`\`" \
+            release/*
 
       - name: Summary
         run: |
