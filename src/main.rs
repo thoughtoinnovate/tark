@@ -14,7 +14,7 @@ mod transport;
 
 #[derive(Parser)]
 #[command(name = "tark")]
-#[command(author, version, about = "Tark (तर्क) - AI-powered CLI agent with LSP server", long_about = None)]
+#[command(author, version, about = "Tark - AI-powered CLI agent with LSP server", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

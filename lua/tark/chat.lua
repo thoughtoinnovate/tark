@@ -1,4 +1,4 @@
--- Chat interface for tark (तर्क = Logic) with provider selection and slash commands
+-- Chat interface for tark with provider selection and slash commands
 
 local M = {}
 

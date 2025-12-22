@@ -1,4 +1,4 @@
-# Tark (तर्क) Configuration
+# Tark Configuration
 # Place in ~/.config/tark/config.toml for global, or .tark/config.toml for project
 
 # LLM Provider settings

@@ -1,5 +1,4 @@
-//! tark (तर्क): AI-powered CLI agent with LSP server
-//! Tark = Logic/Reasoning in Sanskrit
+//! tark: AI-powered CLI agent with LSP server
 //!
 //! This library provides:
 //! - LSP server with AI-powered completions, hover, code actions, and diagnostics

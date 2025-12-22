@@ -1,5 +1,5 @@
 # tark Configuration
-# Tark (तर्क) = Logic/Reasoning in Sanskrit
+# Tark - Default Configuration
 # Copy this file to ~/.config/tark/config.toml
 
 [llm]

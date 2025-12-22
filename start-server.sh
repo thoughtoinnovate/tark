@@ -1,6 +1,6 @@
 #!/bin/bash
 # Start tark HTTP server for Neovim ghost text completions
-# Tark (तर्क) = Logic/Reasoning in Sanskrit
+# Tark - AI-powered CLI agent
 
 # Use Ollama with ibm/granite4 model by default
 export OLLAMA_MODEL="${OLLAMA_MODEL:-ibm/granite4}"

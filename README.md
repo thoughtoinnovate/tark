@@ -1,6 +1,4 @@
-# tark (तर्क)
-
-> **Tark** means "Logic" or "Reasoning" in Sanskrit
+# tark
 
 AI-powered CLI agent with LSP server for code completion, hover, diagnostics, and chat.
 
