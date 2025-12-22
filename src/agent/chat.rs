@@ -255,7 +255,7 @@ impl ChatAgent {
         self.tools = tools;
         self.mode = mode;
         // Update the system prompt in context (replace the first system message)
-        self.context.update_system_prompt(get_system_prompt(mode));
+        self.context.update_system_prompt(&get_system_prompt(mode));
     }
 
     /// Update just the LLM provider while preserving conversation history
