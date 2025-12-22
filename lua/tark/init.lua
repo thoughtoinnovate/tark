@@ -133,6 +133,15 @@ local function setup_commands()
         vim.notify(table.concat(lines, '\n'), vim.log.levels.INFO)
     end, { desc = 'Show tark server status' })
     
+    -- Binary commands
+    vim.api.nvim_create_user_command('TarkBinaryDownload', function()
+        get_server().download_binary(function(success)
+            if success then
+                vim.notify('tark: Binary ready! Run :TarkServerStart', vim.log.levels.INFO)
+            end
+        end)
+    end, { desc = 'Download tark binary' })
+    
     -- Docker commands
     vim.api.nvim_create_user_command('TarkDockerPull', function()
         get_server().docker_pull()

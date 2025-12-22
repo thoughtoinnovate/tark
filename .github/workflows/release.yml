@@ -82,16 +82,22 @@ jobs:
         if: ${{ !matrix.use_cross }}
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Rename binary (Unix)
+      - name: Strip and rename binary (Unix)
         if: runner.os != 'Windows'
         run: |
           cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} ${{ matrix.artifact_name }}
+          # Strip debug symbols for smaller binary (~50% size reduction)
+          strip ${{ matrix.artifact_name }} 2>/dev/null || true
           chmod +x ${{ matrix.artifact_name }}
+          # Show binary size
+          ls -lh ${{ matrix.artifact_name }}
 
       - name: Rename binary (Windows)
         if: runner.os == 'Windows'
         run: |
           cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe ${{ matrix.artifact_name }}
+          # Show binary size
+          dir ${{ matrix.artifact_name }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

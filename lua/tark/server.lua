@@ -40,6 +40,107 @@ local function command_exists(cmd)
     return false
 end
 
+-- Get the plugin's data directory for storing the binary
+local function get_data_dir()
+    local data_dir = vim.fn.stdpath('data') .. '/tark'
+    if vim.fn.isdirectory(data_dir) == 0 then
+        vim.fn.mkdir(data_dir, 'p')
+    end
+    return data_dir
+end
+
+-- Get the local binary path (in plugin data dir)
+local function get_local_binary_path()
+    return get_data_dir() .. '/tark'
+end
+
+-- Detect platform for binary download
+local function detect_platform()
+    local os_name = vim.loop.os_uname().sysname
+    local arch = vim.loop.os_uname().machine
+    
+    local os_map = {
+        Linux = 'linux',
+        Darwin = 'darwin',
+        Windows_NT = 'windows',
+        FreeBSD = 'freebsd',
+    }
+    
+    local arch_map = {
+        x86_64 = 'x86_64',
+        amd64 = 'x86_64',
+        aarch64 = 'arm64',
+        arm64 = 'arm64',
+    }
+    
+    local os_key = os_map[os_name] or 'linux'
+    local arch_key = arch_map[arch] or 'x86_64'
+    
+    -- For Linux, prefer musl (static, works everywhere)
+    if os_key == 'linux' then
+        return os_key .. '-' .. arch_key .. '-musl'
+    end
+    
+    return os_key .. '-' .. arch_key
+end
+
+-- Download tark binary automatically
+function M.download_binary(callback)
+    local platform = detect_platform()
+    local binary_name = 'tark-' .. platform
+    local url = 'https://github.com/thoughtoinnovate/tark/releases/latest/download/' .. binary_name
+    local dest = get_local_binary_path()
+    
+    vim.notify('tark: Downloading binary for ' .. platform .. '...', vim.log.levels.INFO)
+    
+    -- Download using curl
+    local cmd = string.format('curl -fsSL "%s" -o "%s" && chmod +x "%s"', url, dest, dest)
+    
+    vim.fn.jobstart(cmd, {
+        on_exit = function(_, code)
+            vim.schedule(function()
+                if code == 0 then
+                    -- Verify the download
+                    local handle = io.popen(dest .. ' --version 2>&1')
+                    if handle then
+                        local result = handle:read('*a')
+                        handle:close()
+                        if result and result:match('tark') then
+                            vim.notify('tark: Binary downloaded successfully!', vim.log.levels.INFO)
+                            -- Update config to use local binary
+                            M.config.binary = dest
+                            if callback then callback(true) end
+                            return
+                        end
+                    end
+                    vim.notify('tark: Downloaded file is not a valid tark binary', vim.log.levels.ERROR)
+                    os.remove(dest)
+                    if callback then callback(false) end
+                else
+                    vim.notify('tark: Failed to download binary. Check your internet connection.', vim.log.levels.ERROR)
+                    if callback then callback(false) end
+                end
+            end)
+        end,
+    })
+end
+
+-- Check if local binary exists and is valid
+local function local_binary_available()
+    local binary_path = get_local_binary_path()
+    if vim.fn.filereadable(binary_path) == 1 then
+        local handle = io.popen(binary_path .. ' --version 2>&1')
+        if handle then
+            local result = handle:read('*a')
+            handle:close()
+            if result and result:match('tark') then
+                return true, binary_path
+            end
+        end
+    end
+    return false
+end
+
 -- Check if Docker is available and running
 function M.docker_available()
     if not command_exists('docker') then
@@ -59,23 +160,29 @@ function M.docker_available()
     return false, 'Could not check Docker status'
 end
 
--- Check if tark binary is available
+-- Check if tark binary is available (system or local)
 function M.binary_available()
+    -- First check system binary
     local binary = M.config.binary
-    if not command_exists(binary) then
-        return false, 'Binary not found: ' .. binary
-    end
-    
-    -- Verify it's actually tark
-    local handle = io.popen(binary .. ' --version 2>&1')
-    if handle then
-        local result = handle:read('*a')
-        handle:close()
-        if result:match('tark') then
-            return true, result:gsub('%s+$', '')
+    if command_exists(binary) then
+        local handle = io.popen(binary .. ' --version 2>&1')
+        if handle then
+            local result = handle:read('*a')
+            handle:close()
+            if result:match('tark') then
+                return true, result:gsub('%s+$', '')
+            end
         end
     end
-    return false, 'Binary exists but is not tark'
+    
+    -- Check local binary (downloaded by plugin)
+    local local_ok, local_path = local_binary_available()
+    if local_ok then
+        M.config.binary = local_path
+        return true, 'local: ' .. local_path
+    end
+    
+    return false, 'Binary not found (system or local)'
 end
 
 -- Check if server is responding
@@ -406,22 +513,52 @@ function M.start(callback)
     local mode = M.config.mode
     
     if mode == 'binary' then
-        M.start_binary(callback)
-    elseif mode == 'docker' then
-        M.start_docker(callback)
-    else  -- 'auto'
-        -- Try binary first, fallback to Docker
+        -- Binary mode: try to find or auto-download
         local binary_ok = M.binary_available()
         if binary_ok then
             M.start_binary(callback)
         else
+            -- Auto-download binary
+            vim.notify('tark: Binary not found. Downloading...', vim.log.levels.INFO)
+            M.download_binary(function(success)
+                if success then
+                    M.start_binary(callback)
+                elseif callback then
+                    callback(false)
+                end
+            end)
+        end
+    elseif mode == 'docker' then
+        M.start_docker(callback)
+    else  -- 'auto'
+        -- Try binary first (including auto-download), fallback to Docker
+        local binary_ok = M.binary_available()
+        if binary_ok then
+            M.start_binary(callback)
+        else
+            -- Check if Docker is available first
             local docker_ok = M.docker_available()
             if docker_ok then
-                vim.notify('tark binary not found, using Docker mode', vim.log.levels.INFO)
+                vim.notify('tark: Using Docker mode', vim.log.levels.INFO)
                 M.start_docker(callback)
             else
-                vim.notify('Neither tark binary nor Docker available. Install tark or Docker.', vim.log.levels.ERROR)
-                if callback then callback(false) end
+                -- No Docker, try to auto-download binary
+                vim.notify('tark: No binary or Docker found. Auto-downloading binary...', vim.log.levels.INFO)
+                M.download_binary(function(success)
+                    if success then
+                        M.start_binary(callback)
+                    else
+                        vim.notify([[
+tark: Could not start server.
+
+Install options:
+1. Binary (auto): Restart Neovim to retry download
+2. Binary (manual): curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash
+3. Docker: Install Docker and restart Neovim
+]], vim.log.levels.ERROR)
+                        if callback then callback(false) end
+                    end
+                end)
             end
         end
     end
