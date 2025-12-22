@@ -231,7 +231,8 @@ Or try nightly (if manual builds exist):
                     local result = handle:read('*a')
                     handle:close()
                     if result and result:match('tark') then
-                        vim.notify('tark: Binary downloaded and verified successfully!', vim.log.levels.INFO)
+                        local version = result:match('tark%s+([%d%.]+)') or 'unknown'
+                        vim.notify('✅ tark: Binary downloaded successfully!\n\nVersion: ' .. version .. '\nPath: ' .. dest, vim.log.levels.INFO)
                         M.config.binary = dest
                         if callback then callback(true) end
                         return
