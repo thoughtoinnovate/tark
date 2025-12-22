@@ -84,42 +84,85 @@ local function detect_platform()
     return os_key .. '-' .. arch_key
 end
 
--- Download tark binary automatically
+-- Download tark binary automatically with SHA256 verification
 function M.download_binary(callback)
     local platform = detect_platform()
     local binary_name = 'tark-' .. platform
-    local url = 'https://github.com/thoughtoinnovate/tark/releases/latest/download/' .. binary_name
+    local base_url = 'https://github.com/thoughtoinnovate/tark/releases/latest/download/'
+    local binary_url = base_url .. binary_name
+    local checksum_url = binary_url .. '.sha256'
     local dest = get_local_binary_path()
+    local checksum_file = dest .. '.sha256'
     
     vim.notify('tark: Downloading binary for ' .. platform .. '...', vim.log.levels.INFO)
     
-    -- Download using curl
-    local cmd = string.format('curl -fsSL "%s" -o "%s" && chmod +x "%s"', url, dest, dest)
+    -- Download binary and checksum, then verify
+    local download_cmd = string.format(
+        'curl -fsSL "%s" -o "%s" && curl -fsSL "%s" -o "%s"',
+        binary_url, dest, checksum_url, checksum_file
+    )
     
-    vim.fn.jobstart(cmd, {
+    vim.fn.jobstart(download_cmd, {
         on_exit = function(_, code)
             vim.schedule(function()
-                if code == 0 then
-                    -- Verify the download
-                    local handle = io.popen(dest .. ' --version 2>&1')
-                    if handle then
-                        local result = handle:read('*a')
-                        handle:close()
-                        if result and result:match('tark') then
-                            vim.notify('tark: Binary downloaded successfully!', vim.log.levels.INFO)
-                            -- Update config to use local binary
-                            M.config.binary = dest
-                            if callback then callback(true) end
-                            return
-                        end
-                    end
-                    vim.notify('tark: Downloaded file is not a valid tark binary', vim.log.levels.ERROR)
-                    os.remove(dest)
-                    if callback then callback(false) end
-                else
+                if code ~= 0 then
                     vim.notify('tark: Failed to download binary. Check your internet connection.', vim.log.levels.ERROR)
                     if callback then callback(false) end
+                    return
                 end
+                
+                -- Verify SHA256 checksum
+                vim.notify('tark: Verifying checksum...', vim.log.levels.INFO)
+                
+                -- Read expected checksum
+                local checksum_handle = io.open(checksum_file, 'r')
+                if not checksum_handle then
+                    vim.notify('tark: Could not read checksum file, skipping verification', vim.log.levels.WARN)
+                else
+                    local expected = checksum_handle:read('*a'):match('^(%S+)')
+                    checksum_handle:close()
+                    os.remove(checksum_file)
+                    
+                    if expected then
+                        -- Calculate actual checksum
+                        local sha_cmd = vim.fn.executable('sha256sum') == 1 
+                            and 'sha256sum' 
+                            or 'shasum -a 256'
+                        local sha_handle = io.popen(sha_cmd .. ' "' .. dest .. '" 2>/dev/null')
+                        if sha_handle then
+                            local actual = sha_handle:read('*a'):match('^(%S+)')
+                            sha_handle:close()
+                            
+                            if actual ~= expected then
+                                vim.notify('tark: SECURITY ALERT - Checksum verification FAILED!\nExpected: ' .. expected .. '\nActual: ' .. actual, vim.log.levels.ERROR)
+                                os.remove(dest)
+                                if callback then callback(false) end
+                                return
+                            end
+                            vim.notify('tark: Checksum verified ✓', vim.log.levels.INFO)
+                        end
+                    end
+                end
+                
+                -- Make executable
+                vim.fn.system('chmod +x "' .. dest .. '"')
+                
+                -- Verify the binary works
+                local handle = io.popen(dest .. ' --version 2>&1')
+                if handle then
+                    local result = handle:read('*a')
+                    handle:close()
+                    if result and result:match('tark') then
+                        vim.notify('tark: Binary downloaded and verified successfully!', vim.log.levels.INFO)
+                        M.config.binary = dest
+                        if callback then callback(true) end
+                        return
+                    end
+                end
+                
+                vim.notify('tark: Downloaded file is not a valid tark binary', vim.log.levels.ERROR)
+                os.remove(dest)
+                if callback then callback(false) end
             end)
         end,
     })
