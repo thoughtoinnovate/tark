@@ -152,7 +152,12 @@ return {
 }
 ```
 
-That's it! The server starts automatically - no manual setup needed.
+That's it! The plugin automatically:
+1. Downloads the correct binary for your platform
+2. Verifies SHA256 checksum for security
+3. Starts the server
+
+No manual installation needed!
 
 #### packer.nvim
 
@@ -177,6 +182,7 @@ The server starts automatically by default. You can also manage it manually:
 | `:TarkServerStop` | Stop the server |
 | `:TarkServerStatus` | Check server status |
 | `:TarkServerRestart` | Restart the server |
+| `:TarkBinaryDownload [channel]` | Download binary (optional: `stable`/`nightly`) |
 
 Or start manually in a terminal:
 ```bash
@@ -244,6 +250,7 @@ require('tark').setup({
         host = '127.0.0.1',
         port = 8765,
         stop_on_exit = true,     -- Stop server when Neovim exits
+        channel = 'stable',      -- 'stable' (pinned to plugin version) or 'nightly' (latest)
     },
     -- Docker settings (used when mode = 'docker' or 'auto' without binary)
     docker = {
@@ -282,6 +289,27 @@ require('tark').setup({
 | `auto` | Use binary if available, fallback to Docker (default) |
 | `binary` | Only use local binary |
 | `docker` | Only use Docker container |
+
+### Update Channels
+
+| Channel | Description |
+|---------|-------------|
+| `stable` | Downloads binary matching plugin version (default, recommended) |
+| `nightly` | Always downloads latest release (bleeding edge) |
+
+```lua
+-- Use nightly/latest releases
+opts = {
+    server = { channel = 'nightly' },
+}
+```
+
+Switch channels at runtime:
+```vim
+:TarkBinaryDownload nightly   " Switch to nightly
+:TarkBinaryDownload stable    " Switch back to stable
+:TarkServerRestart            " Restart with new binary
+```
 
 ### Docker Options
 
