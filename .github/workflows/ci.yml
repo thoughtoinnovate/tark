@@ -29,13 +29,11 @@ jobs:
       - name: Run tests
         run: cargo test --all-features
 
+  # Build only on Linux for regular CI (fast feedback)
+  # Full multi-platform builds happen in release.yml
   build:
-    name: Build ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    
+    name: Build
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       
@@ -50,31 +48,19 @@ jobs:
       - name: Build
         run: cargo build --release
       
-      - name: Check binary size (Unix)
-        if: runner.os != 'Windows'
+      - name: Check binary size
         run: |
           BINARY="target/release/tark"
           SIZE=$(ls -l "$BINARY" | awk '{print $5}')
           SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
           echo "Binary size: ${SIZE_MB} MB"
-          # Strip and show reduced size
           strip "$BINARY" 2>/dev/null || true
           STRIPPED_SIZE=$(ls -l "$BINARY" | awk '{print $5}')
           STRIPPED_MB=$(echo "scale=2; $STRIPPED_SIZE / 1048576" | bc)
           echo "Stripped size: ${STRIPPED_MB} MB"
-          # Warn if binary is too large (> 30MB stripped)
           if [ "$STRIPPED_SIZE" -gt 31457280 ]; then
             echo "::warning::Binary size (${STRIPPED_MB}MB) exceeds 30MB threshold"
           fi
-      
-      - name: Check binary size (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $binary = "target/release/tark.exe"
-          $size = (Get-Item $binary).Length
-          $sizeMB = [math]::Round($size / 1MB, 2)
-          Write-Host "Binary size: $sizeMB MB"
 
   lint:
     name: Lint
