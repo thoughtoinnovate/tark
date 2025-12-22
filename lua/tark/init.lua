@@ -16,6 +16,7 @@ M.config = {
         port = 8765,
         auto_start = true,       -- Auto-start server when Neovim opens
         stop_on_exit = true,     -- Stop server when Neovim exits
+        channel = 'stable',      -- 'stable' (pinned version) or 'nightly' (latest)
     },
     -- Docker settings
     docker = {
@@ -134,13 +135,33 @@ local function setup_commands()
     end, { desc = 'Show tark server status' })
     
     -- Binary commands
-    vim.api.nvim_create_user_command('TarkBinaryDownload', function()
+    vim.api.nvim_create_user_command('TarkBinaryDownload', function(opts)
+        -- Allow switching channel: :TarkBinaryDownload nightly
+        if opts.args and opts.args ~= '' then
+            local channel = opts.args:lower()
+            if channel == 'nightly' or channel == 'latest' or channel == 'stable' then
+                get_server().config.channel = channel
+                vim.notify('tark: Switched to ' .. channel .. ' channel', vim.log.levels.INFO)
+            else
+                vim.notify('tark: Invalid channel. Use: stable, nightly, or latest', vim.log.levels.ERROR)
+                return
+            end
+        end
+        
+        -- Remove existing binary to force re-download
+        local data_dir = vim.fn.stdpath('data') .. '/tark'
+        os.remove(data_dir .. '/tark')
+        
         get_server().download_binary(function(success)
             if success then
-                vim.notify('tark: Binary ready! Run :TarkServerStart', vim.log.levels.INFO)
+                vim.notify('tark: Binary ready! Run :TarkServerRestart', vim.log.levels.INFO)
             end
         end)
-    end, { desc = 'Download tark binary' })
+    end, { 
+        desc = 'Download tark binary (optional: stable/nightly)',
+        nargs = '?',
+        complete = function() return { 'stable', 'nightly', 'latest' } end,
+    })
     
     -- Docker commands
     vim.api.nvim_create_user_command('TarkDockerPull', function()

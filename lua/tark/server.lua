@@ -89,16 +89,29 @@ function M.download_binary(callback)
     local platform = detect_platform()
     local binary_name = 'tark-' .. platform
     
-    -- Use version from init.lua to ensure binary matches Lua code
-    local tark = require('tark')
-    local version = 'v' .. tark.version
-    local base_url = 'https://github.com/thoughtoinnovate/tark/releases/download/' .. version .. '/'
+    -- Determine download URL based on channel
+    local channel = M.config.channel or 'stable'
+    local base_url
+    local version_display
+    
+    if channel == 'nightly' or channel == 'latest' then
+        -- Use latest release (nightly/bleeding edge)
+        base_url = 'https://github.com/thoughtoinnovate/tark/releases/latest/download/'
+        version_display = 'nightly (latest)'
+    else
+        -- Use pinned version matching plugin (stable)
+        local tark = require('tark')
+        local version = 'v' .. tark.version
+        base_url = 'https://github.com/thoughtoinnovate/tark/releases/download/' .. version .. '/'
+        version_display = version .. ' (stable)'
+    end
+    
     local binary_url = base_url .. binary_name
     local checksum_url = binary_url .. '.sha256'
     local dest = get_local_binary_path()
     local checksum_file = dest .. '.sha256'
     
-    vim.notify('tark: Downloading binary for ' .. platform .. '...', vim.log.levels.INFO)
+    vim.notify('tark: Downloading ' .. version_display .. ' binary for ' .. platform .. '...', vim.log.levels.INFO)
     
     -- Download binary and checksum, then verify
     local download_cmd = string.format(
