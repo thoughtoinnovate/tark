@@ -214,8 +214,13 @@ function M.setup(opts)
     
     -- Setup chat if enabled
     if M.config.chat.enabled then
+        -- Determine if we're using Docker mode
+        local is_docker_mode = M.config.server.mode == 'docker' or 
+            (M.config.server.mode == 'auto' and M.config.docker.build_local)
+        
         local chat_config = vim.tbl_deep_extend('force', M.config.chat, {
             server_url = string.format('http://%s:%d', M.config.server.host, M.config.server.port),
+            docker_mode = is_docker_mode,
         })
         -- Chat setup is called when first opened, but we can pass config
         get_chat().setup(chat_config)

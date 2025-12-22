@@ -5,6 +5,7 @@ local M = {}
 M.config = {
     server_url = 'http://localhost:8765',
     auto_show_diff = true,  -- Show inline diff in chat when files are modified
+    docker_mode = false,    -- If true, server is in Docker (use /workspace as cwd)
     window = {
         style = 'sidepane',  -- 'sidepane' or 'popup'
         position = 'right',  -- 'right' or 'left' (for sidepane)
@@ -16,6 +17,16 @@ M.config = {
         border = 'rounded',
     },
 }
+
+-- Get the cwd to send to server (handles Docker mode)
+local function get_server_cwd()
+    if M.config.docker_mode then
+        -- Docker container has workspace mounted at /workspace
+        return '/workspace'
+    else
+        return vim.fn.getcwd()
+    end
+end
 
 local chat_buf = nil
 local chat_win = nil
@@ -1258,8 +1269,8 @@ local function send_message(message)
     end)
 
     -- Get editor's current working directory
-    local cwd = vim.fn.getcwd()
-    local clean_cwd = cwd:gsub('\\', '\\\\'):gsub('"', '\\"')
+    local server_cwd = get_server_cwd()
+    local clean_cwd = server_cwd:gsub('\\', '\\\\'):gsub('"', '\\"')
 
     -- Ensure message is a proper string (escape special characters)
     local clean_message = message:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'):gsub('\t', '\\t')
@@ -1948,8 +1959,8 @@ slash_commands = {
             append_message('system', '🗜️ *Compacting conversation...*')
             
             -- Send request to compact the context
-            local cwd = vim.fn.getcwd()
-            local clean_cwd = cwd:gsub('\\', '\\\\'):gsub('"', '\\"')
+            local server_cwd = get_server_cwd()
+            local clean_cwd = server_cwd:gsub('\\', '\\\\'):gsub('"', '\\"')
             local req_body = '{"message": "Please provide a brief summary of our conversation so far in 2-3 sentences. Focus on: what files were discussed, what changes were made, and what the user wanted to accomplish. Start with: CONTEXT SUMMARY:", "clear_history": false, "provider": "' .. current_provider .. '", "cwd": "' .. clean_cwd .. '"}'
             
             vim.fn.jobstart({
