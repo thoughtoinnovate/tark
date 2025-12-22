@@ -190,6 +190,17 @@ function M.setup(opts)
     -- Merge user config with defaults
     M.config = vim.tbl_deep_extend('force', M.config, opts or {})
     
+    -- Smart defaults: keep Docker container running (faster reconnect)
+    -- Only apply if user didn't explicitly set stop_on_exit
+    local user_set_stop = opts and opts.server and opts.server.stop_on_exit ~= nil
+    if not user_set_stop then
+        local is_docker = M.config.server.mode == 'docker' or 
+            (M.config.server.mode == 'auto' and M.config.docker.build_local)
+        if is_docker then
+            M.config.server.stop_on_exit = false  -- Keep container running
+        end
+    end
+    
     -- Setup commands
     setup_commands()
     
