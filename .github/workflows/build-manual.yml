@@ -1,26 +1,25 @@
 name: Manual Build
 
-# Manual workflow to build binaries without creating a release
-# Use this for testing builds before a release
-# Click "Run workflow" button in GitHub Actions tab
+# Manual workflow to build binaries and publish to 'nightly' release
+# Click "Run workflow" → builds selected platforms → uploads to nightly release
+# 
+# Users can then download from:
+#   https://github.com/thoughtoinnovate/tark/releases/download/nightly/tark-linux-x86_64-musl
+#
+# Plugin with channel='nightly' will download from this release
 on:
   workflow_dispatch:
     inputs:
       platforms:
         description: 'Platforms to build'
         required: true
-        default: 'linux'
+        default: 'all'
         type: choice
         options:
           - linux
           - macos
           - windows
           - all
-      upload_artifacts:
-        description: 'Upload build artifacts'
-        required: true
-        default: true
-        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -69,7 +68,6 @@ jobs:
           sha256sum ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
 
       - name: Upload artifact
-        if: ${{ github.event.inputs.upload_artifacts == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
@@ -109,7 +107,6 @@ jobs:
           shasum -a 256 ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
 
       - name: Upload artifact
-        if: ${{ github.event.inputs.upload_artifacts == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
@@ -135,11 +132,11 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "tark-windows-x86_64.exe"
-          Get-FileHash "tark-windows-x86_64.exe" -Algorithm SHA256 | Format-List > "tark-windows-x86_64.exe.sha256"
+          $hash = (Get-FileHash "tark-windows-x86_64.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  tark-windows-x86_64.exe" | Out-File -Encoding ASCII "tark-windows-x86_64.exe.sha256"
           Get-Item "tark-windows-x86_64.exe"
 
       - name: Upload artifact
-        if: ${{ github.event.inputs.upload_artifacts == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: tark-windows-x86_64.exe
@@ -147,21 +144,82 @@ jobs:
             tark-windows-x86_64.exe
             tark-windows-x86_64.exe.sha256
 
-  summary:
-    name: Build Summary
+  # Publish all built binaries to 'nightly' release
+  publish-nightly:
+    name: Publish Nightly Release
     needs: [build-linux, build-macos, build-windows]
-    if: always()
+    if: always() && (needs.build-linux.result == 'success' || needs.build-macos.result == 'success' || needs.build-windows.result == 'success')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          # Copy all binaries and checksums
+          for dir in artifacts/*/; do
+            if [ -d "$dir" ]; then
+              cp "$dir"* release/ 2>/dev/null || true
+            fi
+          done
+          ls -la release/
+
+      - name: Delete existing nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly --yes 2>/dev/null || true
+          git push origin :refs/tags/nightly 2>/dev/null || true
+
+      - name: Create nightly tag
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag -f nightly
+          git push -f origin nightly
+
+      - name: Create nightly release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: nightly
+          name: Nightly Build
+          prerelease: true
+          body: |
+            ## Nightly Build
+            
+            ⚠️ **This is an automated nightly build from the latest code.**
+            
+            - Built from: ${{ github.sha }}
+            - Built at: ${{ github.event.repository.updated_at }}
+            
+            For stable releases, see [Releases](https://github.com/${{ github.repository }}/releases).
+            
+            ### Usage
+            
+            ```lua
+            -- In your Neovim config
+            opts = {
+                server = { channel = 'nightly' },
+            }
+            ```
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Summary
         run: |
-          echo "## Manual Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Nightly Release Published! 🚀" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Linux | ${{ needs.build-linux.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| macOS | ${{ needs.build-macos.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Windows | ${{ needs.build-windows.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "Download URL:" >> $GITHUB_STEP_SUMMARY
+          echo "\`https://github.com/${{ github.repository }}/releases/download/nightly/<binary>\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Artifacts uploaded: ${{ github.event.inputs.upload_artifacts }}" >> $GITHUB_STEP_SUMMARY
-
+          echo "### Binaries uploaded:" >> $GITHUB_STEP_SUMMARY
+          ls release/ >> $GITHUB_STEP_SUMMARY

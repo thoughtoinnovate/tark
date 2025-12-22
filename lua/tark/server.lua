@@ -94,10 +94,14 @@ function M.download_binary(callback)
     local base_url
     local version_display
     
-    if channel == 'nightly' or channel == 'latest' then
-        -- Use latest release (nightly/bleeding edge)
+    if channel == 'nightly' then
+        -- Use nightly release (manual builds)
+        base_url = 'https://github.com/thoughtoinnovate/tark/releases/download/nightly/'
+        version_display = 'nightly'
+    elseif channel == 'latest' then
+        -- Use latest stable release
         base_url = 'https://github.com/thoughtoinnovate/tark/releases/latest/download/'
-        version_display = 'nightly (latest)'
+        version_display = 'latest'
     else
         -- Use pinned version matching plugin (stable)
         local tark = require('tark')
