@@ -32,7 +32,7 @@ function M.check()
     end
     
     -- Check tark module loaded
-    local tark_ok, tark = pcall(require, 'tark')
+    local tark_ok, tark = pcall(require, 'Tark')
     if tark_ok then
         ok('tark module loaded (v' .. (tark.version or 'unknown') .. ')')
     else
@@ -42,7 +42,7 @@ function M.check()
     
     -- Check binary availability
     start('tark Binary')
-    local server = require('tark.server')
+    local server = require('Tark.server')
     local binary_ok, binary_info = server.binary_available()
     if binary_ok then
         ok('Binary found: ' .. binary_info)

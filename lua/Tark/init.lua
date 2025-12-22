@@ -56,7 +56,7 @@ local lsp = nil
 -- Get server module
 local function get_server()
     if not server then
-        server = require('tark.server')
+        server = require('Tark.server')
     end
     return server
 end
@@ -64,7 +64,7 @@ end
 -- Get ghost text module
 local function get_ghost()
     if not ghost then
-        ghost = require('tark.ghost')
+        ghost = require('Tark.ghost')
     end
     return ghost
 end
@@ -72,7 +72,7 @@ end
 -- Get chat module
 local function get_chat()
     if not chat then
-        chat = require('tark.chat')
+        chat = require('Tark.chat')
     end
     return chat
 end
@@ -80,7 +80,7 @@ end
 -- Get LSP module
 local function get_lsp()
     if not lsp then
-        lsp = require('tark.lsp')
+        lsp = require('Tark.lsp')
     end
     return lsp
 end
