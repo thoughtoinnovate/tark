@@ -432,8 +432,7 @@ impl Tool for FindReferencesTool {
                         }
                     }
 
-                    let def_lines: Vec<String> =
-                        lines[start..end.min(lines.len())].to_vec();
+                    let def_lines: Vec<String> = lines[start..end.min(lines.len())].to_vec();
                     definitions.push((relative_path.clone(), i + 1, def_lines));
                 } else if !is_def {
                     // This is a usage
