@@ -76,11 +76,6 @@ local function detect_platform()
     local os_key = os_map[os_name] or 'linux'
     local arch_key = arch_map[arch] or 'x86_64'
     
-    -- For Linux, prefer musl (static, works everywhere)
-    if os_key == 'linux' then
-        return os_key .. '-' .. arch_key .. '-musl'
-    end
-    
     return os_key .. '-' .. arch_key
 end
 
