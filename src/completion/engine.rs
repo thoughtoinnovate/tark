@@ -183,6 +183,62 @@ impl CompletionEngine {
 
         let mut context_hints = Vec::new();
 
+        // File + cursor metadata (always helpful to steer the model)
+        let language_hint = ctx
+            .language
+            .as_deref()
+            .unwrap_or_else(|| FimBuilder::detect_language(&request.file_path));
+        let filename = request
+            .file_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        context_hints.push(format!(
+            "// File: {} ({})",
+            filename,
+            language_hint
+        ));
+        context_hints.push(format!(
+            "// Cursor: line {}, col {}",
+            request.cursor_line + 1,
+            request.cursor_col + 1
+        ));
+
+        // Provide a small before/after snippet around the cursor
+        let lines: Vec<&str> = request.file_content.lines().collect();
+        let mut before_snippet = String::new();
+        let mut after_snippet = String::new();
+
+        // Up to 3 lines before cursor
+        if request.cursor_line > 0 {
+            let start = request.cursor_line.saturating_sub(3);
+            for l in &lines[start..request.cursor_line] {
+                before_snippet.push_str(l);
+                before_snippet.push('\n');
+            }
+        }
+        // Up to 3 lines after cursor
+        if request.cursor_line + 1 < lines.len() {
+            let end = (request.cursor_line + 4).min(lines.len());
+            for l in &lines[(request.cursor_line + 1)..end] {
+                after_snippet.push_str(l);
+                after_snippet.push('\n');
+            }
+        }
+
+        if !before_snippet.trim().is_empty() {
+            context_hints.push(format!(
+                "// Before:\n// {}",
+                before_snippet.trim_end().replace('\n', "\n// ")
+            ));
+        }
+        if !after_snippet.trim().is_empty() {
+            context_hints.push(format!(
+                "// After:\n// {}",
+                after_snippet.trim_end().replace('\n', "\n// ")
+            ));
+        }
+
         // Add type info at cursor
         if let Some(cursor_type) = &ctx.cursor_type {
             // Clean up the type info (remove markdown formatting)
