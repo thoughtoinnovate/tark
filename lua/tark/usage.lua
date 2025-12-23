@@ -1,14 +1,12 @@
 -- lua/tark/usage.lua
 local M = {}
 
-local config = require('tark').config
-
--- Get server URL
+-- Get server URL (lazy-load config to ensure it's initialized)
 local function get_url(path)
-    return string.format('http://%s:%d%s', 
-        config.server.host, 
-        config.server.port, 
-        path)
+    local config = require('tark').config
+    local host = config.server.host or '127.0.0.1'
+    local port = config.server.port or 8765
+    return string.format('http://%s:%d%s', host, port, path)
 end
 
 -- Format cost
@@ -35,13 +33,19 @@ end
 
 -- Show usage summary in floating window
 function M.show_summary()
-    local curl = require('plenary.curl')
+    local ok, curl = pcall(require, 'plenary.curl')
+    if not ok then
+        vim.notify('plenary.nvim is required for :TarkUsage. Install it or use :TarkUsageOpen instead.', vim.log.levels.ERROR)
+        return
+    end
     
-    curl.get(get_url('/api/usage/summary'), {
+    local url = get_url('/api/usage/summary')
+    curl.get(url, {
         callback = function(response)
             vim.schedule(function()
-                if response.status ~= 200 then
-                    vim.notify('Failed to fetch usage data', vim.log.levels.ERROR)
+                if not response or response.status ~= 200 then
+                    local status = response and response.status or 'no response'
+                    vim.notify(string.format('Failed to fetch usage data (status: %s, url: %s)', status, url), vim.log.levels.ERROR)
                     return
                 end
                 
