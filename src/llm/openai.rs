@@ -47,8 +47,75 @@ impl OpenAiProvider {
         self
     }
 
+    /// Sanitize message history to fix orphaned tool calls.
+    /// OpenAI requires that every assistant message with tool_calls must be
+    /// followed by tool messages responding to each tool_call_id.
+    fn sanitize_messages(&self, messages: &[Message]) -> Vec<Message> {
+        use std::collections::HashSet;
+
+        let mut result: Vec<Message> = Vec::new();
+        let mut i = 0;
+
+        while i < messages.len() {
+            let msg = &messages[i];
+
+            // Check if this is an assistant message with tool calls
+            if msg.role == Role::Assistant {
+                let tool_call_ids: Vec<String> = match &msg.content {
+                    MessageContent::Parts(parts) => parts
+                        .iter()
+                        .filter_map(|p| {
+                            if let ContentPart::ToolUse { id, .. } = p {
+                                Some(id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    _ => vec![],
+                };
+
+                if !tool_call_ids.is_empty() {
+                    // Look ahead to see if all tool responses exist
+                    let mut found_ids: HashSet<String> = HashSet::new();
+                    let mut j = i + 1;
+                    while j < messages.len() && messages[j].role == Role::Tool {
+                        if let Some(ref id) = messages[j].tool_call_id {
+                            found_ids.insert(id.clone());
+                        }
+                        j += 1;
+                    }
+
+                    // Check if all tool calls have responses
+                    let missing: Vec<&String> = tool_call_ids
+                        .iter()
+                        .filter(|id| !found_ids.contains(*id))
+                        .collect();
+
+                    if !missing.is_empty() {
+                        // Skip this assistant message and its tool responses - they're orphaned
+                        tracing::warn!(
+                            "Removing orphaned tool call message (missing responses for: {:?})",
+                            missing
+                        );
+                        // Skip to after the tool responses
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+
+            result.push(msg.clone());
+            i += 1;
+        }
+
+        result
+    }
+
     fn convert_messages(&self, messages: &[Message]) -> Vec<OpenAiMessage> {
-        messages
+        // First sanitize to remove orphaned tool calls
+        let sanitized = self.sanitize_messages(messages);
+        sanitized
             .iter()
             .map(|msg| {
                 let role = match msg.role {
