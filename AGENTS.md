@@ -26,8 +26,10 @@ tark/
 │   │   └── ollama.rs       # Local Ollama
 │   ├── lsp/                # LSP server implementation
 │   ├── storage/            # Persistent storage (.tark/)
+│   │   └── usage.rs        # Usage tracking with SQLite
 │   ├── tools/              # Agent tools (file ops, grep, shell)
 │   └── transport/          # HTTP server and CLI
+│       └── dashboard.rs    # Usage dashboard HTML
 ├── lua/                    # Neovim plugin (Lua)
 │   └── tark/
 │       ├── init.lua        # Plugin entry point & setup
@@ -36,6 +38,7 @@ tark/
 │       ├── ghost.lua       # Ghost text completions
 │       ├── lsp.lua         # LSP integration helpers (async)
 │       ├── lsp_server.lua  # LSP proxy HTTP server
+│       ├── usage.lua       # Usage tracking UI
 │       └── health.lua      # :checkhealth integration
 ├── .github/workflows/      # CI/CD
 │   ├── ci.yml              # Tests, build, lint
@@ -126,10 +129,13 @@ tark/
 | `src/tools/mod.rs` | Tool definitions | Adding new tools |
 | `src/llm/types.rs` | LLM message types | Changing API contracts |
 | `src/completion/engine.rs` | FIM completion logic | Changing completion behavior |
+| `src/storage/usage.rs` | Usage tracking & SQLite | Adding usage analytics |
+| `src/transport/dashboard.rs` | Usage dashboard HTML | Modifying dashboard UI |
 | `lua/tark/server.lua` | Server management | Binary/Docker handling |
 | `lua/tark/init.lua` | Plugin config | Adding config options |
 | `lua/tark/lsp.lua` | LSP helpers | Adding LSP features |
 | `lua/tark/lsp_server.lua` | LSP proxy server | Adding proxy endpoints |
+| `lua/tark/usage.lua` | Usage tracking UI | Adding usage features |
 | `.github/workflows/release.yml` | Release automation | Adding platforms |
 
 ## Common Tasks
