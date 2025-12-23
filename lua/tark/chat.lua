@@ -441,6 +441,116 @@ local function reset_stats()
     session_stats.total_cost = 0
 end
 
+-- Custom floating picker with Vim navigation (j/k, Up/Down, Enter, Esc)
+local function vim_select(items, opts, on_choice)
+    opts = opts or {}
+    local prompt = opts.prompt or 'Select:'
+    
+    -- Calculate dimensions
+    local max_width = 0
+    for _, item in ipairs(items) do
+        max_width = math.max(max_width, #item)
+    end
+    max_width = math.max(max_width, #prompt)
+    local width = math.min(max_width + 4, math.floor(vim.o.columns * 0.8))
+    local height = math.min(#items, math.floor(vim.o.lines * 0.5))
+    
+    -- Create buffer
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, items)
+    vim.api.nvim_buf_set_option(buf, 'modifiable', false)
+    vim.api.nvim_buf_set_option(buf, 'bufhidden', 'wipe')
+    
+    -- Calculate position (center)
+    local col = math.floor((vim.o.columns - width) / 2)
+    local row = math.floor((vim.o.lines - height) / 2) - 2
+    
+    -- Create window
+    local win = vim.api.nvim_open_win(buf, true, {
+        relative = 'editor',
+        width = width,
+        height = height,
+        col = col,
+        row = row,
+        style = 'minimal',
+        border = 'rounded',
+        title = ' ' .. prompt .. ' ',
+        title_pos = 'center',
+        footer = { { ' j/k:move  Enter:select  Esc:cancel ', 'Comment' } },
+        footer_pos = 'center',
+    })
+    
+    -- Highlight current line
+    vim.api.nvim_win_set_option(win, 'cursorline', true)
+    vim.api.nvim_win_set_option(win, 'winhighlight', 'CursorLine:PmenuSel')
+    
+    -- Start in normal mode at first line
+    vim.api.nvim_win_set_cursor(win, {1, 0})
+    vim.cmd('stopinsert')
+    
+    -- Helper to close and callback
+    local function close_and_select(idx)
+        if vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_close(win, true)
+        end
+        if idx and idx > 0 and idx <= #items then
+            on_choice(items[idx], idx)
+        else
+            on_choice(nil, nil)
+        end
+    end
+    
+    -- Keymaps
+    local kopts = { buffer = buf, silent = true, nowait = true }
+    
+    -- Navigation
+    vim.keymap.set('n', 'j', 'j', kopts)
+    vim.keymap.set('n', 'k', 'k', kopts)
+    vim.keymap.set('n', '<Down>', 'j', kopts)
+    vim.keymap.set('n', '<Up>', 'k', kopts)
+    vim.keymap.set('n', 'G', 'G', kopts)
+    vim.keymap.set('n', 'gg', 'gg', kopts)
+    vim.keymap.set('n', '<C-d>', '<C-d>', kopts)
+    vim.keymap.set('n', '<C-u>', '<C-u>', kopts)
+    
+    -- Selection
+    vim.keymap.set('n', '<CR>', function()
+        local cursor = vim.api.nvim_win_get_cursor(win)
+        close_and_select(cursor[1])
+    end, kopts)
+    vim.keymap.set('n', 'l', function()
+        local cursor = vim.api.nvim_win_get_cursor(win)
+        close_and_select(cursor[1])
+    end, kopts)
+    
+    -- Cancel
+    vim.keymap.set('n', '<Esc>', function() close_and_select(nil) end, kopts)
+    vim.keymap.set('n', 'q', function() close_and_select(nil) end, kopts)
+    vim.keymap.set('n', 'h', function() close_and_select(nil) end, kopts)
+    
+    -- Also handle insert mode keys for quick typing
+    vim.keymap.set('i', '<Esc>', function() 
+        vim.cmd('stopinsert')
+        close_and_select(nil) 
+    end, kopts)
+    vim.keymap.set('i', '<CR>', function()
+        vim.cmd('stopinsert')
+        local cursor = vim.api.nvim_win_get_cursor(win)
+        close_and_select(cursor[1])
+    end, kopts)
+    
+    -- Close on buffer leave
+    vim.api.nvim_create_autocmd('BufLeave', {
+        buffer = buf,
+        once = true,
+        callback = function()
+            if vim.api.nvim_win_is_valid(win) then
+                vim.api.nvim_win_close(win, true)
+            end
+        end,
+    })
+end
+
 -- Default context windows (fallback if models.dev not loaded)
 local default_context_windows = {
     openai = 128000,   -- GPT-4o: 128K
@@ -1761,8 +1871,8 @@ local function show_model_picker(provider_info, models)
         table.insert(items, provider_info.icon .. ' ' .. display)
     end
     
-    vim.ui.select(items, {
-        prompt = 'Select ' .. provider_info.name .. ' Model:',
+    vim_select(items, {
+        prompt = 'Select ' .. provider_info.name .. ' Model',
     }, function(choice, idx)
         if choice and idx then
             local selected_model = models[idx]
@@ -1808,8 +1918,8 @@ local function show_provider_menu()
         table.insert(items, marker .. p.icon .. ' ' .. p.name)
     end
 
-    vim.ui.select(items, {
-        prompt = 'Select AI Provider:',
+    vim_select(items, {
+        prompt = 'Select AI Provider',
     }, function(choice, idx)
         if choice and idx then
             local provider = providers_info[idx]
