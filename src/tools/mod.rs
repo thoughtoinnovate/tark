@@ -15,7 +15,7 @@ pub use file_ops::{
 pub use file_search::{CodebaseOverviewTool, FileSearchTool};
 pub use grep::{FindReferencesTool, GrepTool};
 pub use lsp_tools::{
-    set_lsp_proxy_port, CallHierarchyTool, FindAllReferencesTool, GetSignatureTool,
+    set_lsp_proxy_port, CallHierarchyTool, CodeAnalyzer, FindAllReferencesTool, GetSignatureTool,
     GoToDefinitionTool, ListSymbolsTool,
 };
 pub use shell::ShellTool;
