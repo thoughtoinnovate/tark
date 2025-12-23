@@ -58,6 +58,35 @@ local ghost = nil
 local chat = nil
 local lsp = nil
 
+-- Get the global port file path
+local function get_port_file_path()
+    local data_dir = vim.fn.stdpath('data')
+    return data_dir .. '/tark/server.port'
+end
+
+-- Read the server port from the global port file
+-- Returns the port from file if exists, otherwise returns configured port
+local function get_server_port()
+    local port_file = get_port_file_path()
+    if vim.fn.filereadable(port_file) == 1 then
+        local content = vim.fn.readfile(port_file)
+        if content and content[1] then
+            local port = tonumber(content[1])
+            if port then
+                return port
+            end
+        end
+    end
+    -- Fallback to configured port
+    return M.config.server.port
+end
+
+-- Get the server URL (uses dynamic port discovery)
+function M.get_server_url()
+    local port = get_server_port()
+    return string.format('http://%s:%d', M.config.server.host, port)
+end
+
 -- Get server module
 local function get_server()
     if not server then
@@ -332,7 +361,7 @@ function M.setup(opts)
             (M.config.server.mode == 'auto' and M.config.docker.build_local)
         
         local chat_config = vim.tbl_deep_extend('force', M.config.chat, {
-            server_url = string.format('http://%s:%d', M.config.server.host, M.config.server.port),
+            server_url = M.get_server_url(),  -- Uses dynamic port discovery
             docker_mode = is_docker_mode,
             lsp_proxy = M.config.lsp.enabled and M.config.chat.lsp_proxy,
         })

@@ -22,6 +22,62 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
+/// Get the global port file path (~/.local/share/tark/server.port)
+fn get_port_file_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("tark")
+        .join("server.port")
+}
+
+/// Write the server port to the global port file
+fn write_port_file(port: u16) -> Result<()> {
+    let port_file = get_port_file_path();
+    if let Some(parent) = port_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&port_file, port.to_string())?;
+    tracing::info!("Wrote port {} to {:?}", port, port_file);
+    Ok(())
+}
+
+/// Remove the port file on shutdown
+fn remove_port_file() {
+    let port_file = get_port_file_path();
+    if port_file.exists() {
+        if let Err(e) = std::fs::remove_file(&port_file) {
+            tracing::warn!("Failed to remove port file: {}", e);
+        } else {
+            tracing::info!("Removed port file {:?}", port_file);
+        }
+    }
+}
+
+/// Find an available port starting from the preferred port
+async fn find_available_port(host: &str, preferred: u16) -> Result<(tokio::net::TcpListener, u16)> {
+    // Try the preferred port first
+    let addr: SocketAddr = format!("{}:{}", host, preferred).parse()?;
+    if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
+        return Ok((listener, preferred));
+    }
+
+    // Try up to 100 subsequent ports
+    for offset in 1..100 {
+        let port = preferred + offset;
+        let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+        if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
+            tracing::warn!("Port {} was in use, using port {} instead", preferred, port);
+            return Ok((listener, port));
+        }
+    }
+
+    anyhow::bail!(
+        "Could not find an available port in range {}-{}",
+        preferred,
+        preferred + 99
+    )
+}
+
 /// Shared application state
 struct AppState {
     current_provider: RwLock<String>,
@@ -325,11 +381,29 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         )
         .with_state(state);
 
-    let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+    // Find an available port (auto-selects if preferred port is in use)
+    let (listener, actual_port) = find_available_port(host, port).await?;
+
+    // Write the port to the global port file for clients to discover
+    if let Err(e) = write_port_file(actual_port) {
+        tracing::warn!("Failed to write port file: {}", e);
+    }
+
+    let addr = listener.local_addr()?;
     tracing::info!("HTTP server listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Set up graceful shutdown to clean up port file
+    let shutdown_signal = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install CTRL+C signal handler");
+        tracing::info!("Shutdown signal received");
+        remove_port_file();
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal)
+        .await?;
 
     Ok(())
 }

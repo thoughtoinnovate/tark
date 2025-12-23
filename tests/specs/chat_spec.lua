@@ -83,8 +83,10 @@ describe('chat - agent mode', function()
             assert.is_table(chat.config)
         end)
 
-        it('has server_url config', function()
-            assert.is_string(chat.config.server_url)
+        it('has server_url config (nil by default, resolved dynamically)', function()
+            -- server_url is nil by default - resolved dynamically via port file
+            -- This is to support auto port selection
+            assert.is_nil(chat.config.server_url)
         end)
 
         it('has window config', function()

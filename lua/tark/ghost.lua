@@ -15,11 +15,26 @@ local function set_enabled(state)
 end
 
 M.config = {
-    server_url = 'http://localhost:8765',
+    server_url = nil,  -- Will be dynamically resolved from tark.get_server_url()
     debounce_ms = 150,
     hl_group = 'Comment',
     lsp_context = true,  -- Include LSP context in requests
 }
+
+-- Get the server URL dynamically (resolves port from global port file)
+local function get_server_url()
+    -- If explicitly set, use that (e.g., for testing)
+    if M.config.server_url then
+        return M.config.server_url
+    end
+    -- Otherwise, use dynamic port discovery from main tark module
+    local ok, tark = pcall(require, 'tark')
+    if ok and tark.get_server_url then
+        return tark.get_server_url()
+    end
+    -- Fallback
+    return 'http://127.0.0.1:8765'
+end
 
 -- Session stats for completion mode (similar to chat mode)
 local session_stats = {
@@ -268,7 +283,7 @@ local function send_completion_request(bufnr, cursor, file_path, file_content, c
         '-X', 'POST',
         '-H', 'Content-Type: application/json',
         '-d', req_body,
-        M.config.server_url .. '/inline-complete',
+        get_server_url() .. '/inline-complete',
     }, {
         stdout_buffered = true,
         on_stdout = function(_, data)

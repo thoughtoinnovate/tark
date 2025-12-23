@@ -1,12 +1,10 @@
 -- lua/tark/usage.lua
 local M = {}
 
--- Get server URL (lazy-load config to ensure it's initialized)
+-- Get server URL (uses dynamic port discovery from tark module)
 local function get_url(path)
-    local config = require('tark').config
-    local host = config.server.host or '127.0.0.1'
-    local port = config.server.port or 8765
-    return string.format('http://%s:%d%s', host, port, path)
+    local tark = require('tark')
+    return tark.get_server_url() .. path
 end
 
 -- Format cost

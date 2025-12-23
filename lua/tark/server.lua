@@ -29,6 +29,35 @@ M.config = {
     },
 }
 
+-- Get the global port file path
+local function get_port_file_path()
+    local data_dir = vim.fn.stdpath('data')
+    return data_dir .. '/tark/server.port'
+end
+
+-- Read the server port from the global port file
+-- Returns the port from file if exists, otherwise returns configured port
+local function get_server_port()
+    local port_file = get_port_file_path()
+    if vim.fn.filereadable(port_file) == 1 then
+        local content = vim.fn.readfile(port_file)
+        if content and content[1] then
+            local port = tonumber(content[1])
+            if port then
+                return port
+            end
+        end
+    end
+    -- Fallback to configured port
+    return M.config.port
+end
+
+-- Get the server URL (uses dynamic port discovery)
+function M.get_url()
+    local port = get_server_port()
+    return string.format('http://%s:%d', M.config.host, port)
+end
+
 -- Check if a command exists
 local function command_exists(cmd)
     local handle = io.popen('command -v ' .. cmd .. ' 2>/dev/null')
@@ -317,7 +346,7 @@ end
 
 -- Check if server is responding
 function M.health_check()
-    local url = string.format('http://%s:%d/health', M.config.host, M.config.port)
+    local url = M.get_url() .. '/health'
     local handle = io.popen('curl -s --connect-timeout 1 ' .. url .. ' 2>/dev/null')
     if handle then
         local result = handle:read('*a')
@@ -759,10 +788,11 @@ function M.status()
     local status = {
         running = false,
         mode = M.state.mode,
-        url = string.format('http://%s:%d', M.config.host, M.config.port),
+        url = M.get_url(),
         platform = os_key .. '-' .. arch_key,
         binary_name = binary_name,
         channel = M.config.channel or 'stable',
+        port = get_server_port(),
     }
     
     -- Check actual health

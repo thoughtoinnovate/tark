@@ -4,7 +4,7 @@
 local M = {}
 
 M.config = {
-    server_url = 'http://localhost:8765',
+    server_url = nil,       -- Will be dynamically resolved from tark.get_server_url()
     auto_show_diff = true,  -- Show inline diff in chat when files are modified
     docker_mode = false,    -- If true, server is in Docker (use /workspace as cwd)
     lsp_proxy = true,       -- Enable LSP proxy for agent tools
@@ -20,6 +20,21 @@ M.config = {
         border = 'rounded',
     },
 }
+
+-- Get the server URL dynamically (resolves port from global port file)
+local function get_server_url()
+    -- If explicitly set, use that (e.g., for testing)
+    if M.config.server_url then
+        return M.config.server_url
+    end
+    -- Otherwise, use dynamic port discovery from main tark module
+    local ok, tark = pcall(require, 'tark')
+    if ok and tark.get_server_url then
+        return tark.get_server_url()
+    end
+    -- Fallback
+    return 'http://127.0.0.1:8765'
+end
 
 -- LSP proxy port (dynamically assigned when chat opens)
 local lsp_proxy_port = nil
@@ -1236,7 +1251,7 @@ end
 
 -- Poll agent status and update display
 local function poll_status()
-    local url = M.config.server_url .. '/chat/status'
+    local url = get_server_url() .. '/chat/status'
     vim.fn.jobstart({
         'curl', '-s', '--connect-timeout', '1', url
     }, {
@@ -1346,7 +1361,7 @@ local function send_message(message)
         '-X', 'POST',
         '-H', 'Content-Type: application/json',
         '-d', req_body,
-        M.config.server_url .. '/chat',
+        get_server_url() .. '/chat',
     }, {
         stdout_buffered = true,
         on_stdout = function(_, data)
@@ -1623,7 +1638,7 @@ local function switch_provider(new_provider, skip_message)
         'curl', '-s', '-X', 'POST',
         '-H', 'Content-Type: application/json',
         '-d', req_body,
-        M.config.server_url .. '/provider',
+        get_server_url() .. '/provider',
     }, {
         stdout_buffered = true,
         on_stdout = function(_, data)
@@ -1636,7 +1651,7 @@ local function switch_provider(new_provider, skip_message)
                         append_message('system', '✅ *Switched to ' .. new_provider .. '*')
                         -- Clear history with new provider
                         local clear_body = '{"message": "", "clear_history": true, "provider": "' .. new_provider .. '"}'
-                        vim.fn.system('curl -s -X POST -H "Content-Type: application/json" -d \'' .. clear_body .. '\' ' .. M.config.server_url .. '/chat')
+                        vim.fn.system('curl -s -X POST -H "Content-Type: application/json" -d \'' .. clear_body .. '\' ' .. get_server_url() .. '/chat')
                     elseif ok and resp and resp.error then
                         append_message('system', '❌ *Error: ' .. resp.error .. '*')
                     end
@@ -1858,7 +1873,7 @@ local function clear_chat()
     
     -- Also clear server-side history
     local clear_body = '{"message": "", "clear_history": true, "provider": "' .. current_provider .. '"}'
-    vim.fn.system('curl -s -X POST -H "Content-Type: application/json" -d \'' .. clear_body .. '\' ' .. M.config.server_url .. '/chat')
+    vim.fn.system('curl -s -X POST -H "Content-Type: application/json" -d \'' .. clear_body .. '\' ' .. get_server_url() .. '/chat')
     
     append_message('system', '🗑️ *Chat history cleared*')
 end
@@ -2035,7 +2050,7 @@ slash_commands = {
                 'curl', '-s', '-X', 'POST',
                 '-H', 'Content-Type: application/json',
                 '-d', req_body,
-                M.config.server_url .. '/chat',
+                get_server_url() .. '/chat',
             }, {
                 stdout_buffered = true,
                 on_stdout = function(_, data)
@@ -2047,7 +2062,7 @@ slash_commands = {
                                 
                                 -- Now clear and start fresh with summary
                                 local clear_body = '{"message": "Previous context summary: ' .. summary:gsub('"', '\\"'):gsub('\n', ' ') .. '", "clear_history": true, "provider": "' .. current_provider .. '", "cwd": "' .. clean_cwd .. '"}'
-                                vim.fn.system('curl -s -X POST -H "Content-Type: application/json" -d \'' .. clear_body .. '\' ' .. M.config.server_url .. '/chat')
+                                vim.fn.system('curl -s -X POST -H "Content-Type: application/json" -d \'' .. clear_body .. '\' ' .. get_server_url() .. '/chat')
                                 
                                 -- Reset local stats
                                 local old_tokens = session_stats.input_tokens + session_stats.output_tokens
@@ -2759,7 +2774,7 @@ function M.setup(opts)
     
     -- Restore session from server (provider, model, mode, style, position)
     vim.fn.jobstart({
-        'curl', '-s', M.config.server_url .. '/session',
+        'curl', '-s', get_server_url() .. '/session',
     }, {
         stdout_buffered = true,
         on_stdout = function(_, data)
@@ -2801,7 +2816,7 @@ local function save_session()
         'curl', '-s', '-X', 'POST',
         '-H', 'Content-Type: application/json',
         '-d', body,
-        M.config.server_url .. '/session/save',
+        get_server_url() .. '/session/save',
     }, {
         stdout_buffered = true,
         on_stdout = function(_, data)
