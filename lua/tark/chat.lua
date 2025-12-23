@@ -4080,6 +4080,7 @@ end
 M._test_get_agent_running = function() return agent_running end
 M._test_set_agent_running = function(running) agent_running = running end
 M._test_get_queue_processing = function() return queue_processing end
+M._test_set_queue_processing = function(processing) queue_processing = processing end
 
 -- Mode switching test helpers
 M._test_get_current_mode = function() return current_mode end

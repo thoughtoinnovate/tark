@@ -233,7 +233,7 @@ async fn test_delete_session() {
 
             // Try to delete it
             let delete_response = client
-                .delete(&format!("http://127.0.0.1:8765/sessions/{}", session_id))
+                .delete(format!("http://127.0.0.1:8765/sessions/{}", session_id))
                 .send()
                 .await;
 

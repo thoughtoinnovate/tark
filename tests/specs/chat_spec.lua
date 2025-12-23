@@ -306,6 +306,9 @@ describe('chat - agent mode', function()
         it('allows mode switching when agent not running', function()
             -- Ensure agent is not running and no queue processing
             chat._test_set_agent_running(false)
+            if chat._test_set_queue_processing then
+                chat._test_set_queue_processing(false)
+            end
             
             local can_switch = chat._test_can_switch_mode()
             assert.is_true(can_switch, 'Should allow mode switch when agent not running')
