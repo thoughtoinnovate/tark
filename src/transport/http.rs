@@ -291,9 +291,15 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
             Ok(tracker) => {
                 let host = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string());
                 let username = whoami::username();
+                
+                // Extract project name from working directory
+                let project_name = working_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string());
 
-                // Create session
-                let session = tracker.create_session(&host, &username);
+                // Create session with project name
+                let session = tracker.create_session(&host, &username, project_name.as_deref());
                 let session_id = session
                     .map(|s| s.id)
                     .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
