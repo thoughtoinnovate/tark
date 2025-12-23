@@ -228,6 +228,40 @@ local function setup_commands()
             get_chat().close()
         end
     end, { desc = 'Close chat window' })
+    
+    -- Usage commands
+    vim.api.nvim_create_user_command('TarkUsage', function()
+        local usage = require('tark.usage')
+        usage.show_summary()
+    end, { desc = 'Show usage summary' })
+    
+    vim.api.nvim_create_user_command('TarkUsageOpen', function()
+        local url = string.format('http://%s:%d/usage', 
+            M.config.server.host, 
+            M.config.server.port)
+        
+        -- Cross-platform browser open
+        local cmd
+        if vim.fn.has('mac') == 1 then
+            cmd = 'open'
+        elseif vim.fn.has('unix') == 1 then
+            cmd = 'xdg-open'
+        else
+            cmd = 'start'
+        end
+        
+        vim.fn.jobstart({cmd, url}, {detach = true})
+        vim.notify('Opening usage dashboard: ' .. url, vim.log.levels.INFO)
+    end, { desc = 'Open usage dashboard in browser' })
+    
+    vim.api.nvim_create_user_command('TarkUsageCleanup', function(opts)
+        local days = tonumber(opts.args) or 30
+        local usage = require('tark.usage')
+        usage.cleanup(days)
+    end, { 
+        nargs = '?',
+        desc = 'Cleanup usage logs older than N days (default: 30)' 
+    })
 end
 
 -- Setup keymaps (user can override via opts.keys)

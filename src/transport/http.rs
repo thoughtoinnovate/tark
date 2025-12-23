@@ -4,6 +4,7 @@ use crate::agent::ChatAgent;
 use crate::completion::{CompletionEngine, CompletionRequest};
 use crate::config::Config;
 use crate::llm::{self, LlmProvider};
+use crate::storage::usage::UsageTracker;
 use crate::storage::TarkStorage;
 use crate::tools::ToolRegistry;
 use anyhow::Result;
@@ -31,6 +32,8 @@ struct AppState {
     working_dir: PathBuf,
     config: Config,
     storage: Option<TarkStorage>,
+    usage_tracker: Option<Arc<UsageTracker>>,
+    session_id: String,
 }
 
 /// LSP context from Neovim plugin
@@ -224,6 +227,39 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
     // Initialize storage
     let storage = TarkStorage::new(working_dir.clone()).ok();
 
+    // Initialize usage tracker and create session
+    let (usage_tracker, session_id) = if let Some(ref storage) = storage {
+        match UsageTracker::new(storage.project_root()) {
+            Ok(tracker) => {
+                let host = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string());
+                let username = whoami::username();
+
+                // Create session
+                let session = tracker.create_session(&host, &username);
+                let session_id = session
+                    .map(|s| s.id)
+                    .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+
+                // Fetch pricing in background
+                let tracker_clone = Arc::new(tracker);
+                let tracker_for_fetch = Arc::clone(&tracker_clone);
+                tokio::spawn(async move {
+                    if let Err(e) = tracker_for_fetch.fetch_pricing().await {
+                        tracing::warn!("Failed to fetch pricing from models.dev: {}", e);
+                    }
+                });
+
+                (Some(tracker_clone), session_id)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize usage tracker: {}", e);
+                (None, uuid::Uuid::new_v4().to_string())
+            }
+        }
+    } else {
+        (None, uuid::Uuid::new_v4().to_string())
+    };
+
     // Load saved session or use defaults
     let (default_provider, default_model) = if let Some(ref s) = storage {
         let saved_config = s.load_config().unwrap_or_default();
@@ -253,6 +289,8 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         working_dir,
         config,
         storage,
+        usage_tracker,
+        session_id,
     });
 
     // Build router
@@ -266,6 +304,15 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         .route("/chat/status", get(get_status))
         .route("/session", get(get_session))
         .route("/session/save", post(save_session))
+        // Usage dashboard and API
+        .route("/usage", get(usage_dashboard))
+        .route("/api/usage/summary", get(usage_summary))
+        .route("/api/usage/models", get(usage_by_model))
+        .route("/api/usage/modes", get(usage_by_mode))
+        .route("/api/usage/sessions", get(usage_sessions))
+        .route("/api/usage/storage", get(usage_storage))
+        .route("/api/usage/cleanup", post(usage_cleanup))
+        .route("/api/usage/export", get(usage_export))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -483,15 +530,48 @@ async fn handle_inline_completion(
     };
 
     match engine.complete(&completion_req).await {
-        Ok(response) => (
-            StatusCode::OK,
-            Json(InlineCompleteResponse {
-                completion: response.completion,
-                line_count: response.line_count,
-                usage: response.usage,
-            }),
-        )
-            .into_response(),
+        Ok(response) => {
+            // Log usage if tracker is available
+            if let (Some(ref tracker), Some(ref usage)) = (&state.usage_tracker, &response.usage) {
+                let provider = state.current_provider.read().await.clone();
+                let model = state.current_model.read().await.clone();
+
+                // Calculate cost
+                let cost = tracker
+                    .calculate_cost(&provider, &model, usage.input_tokens, usage.output_tokens)
+                    .await;
+
+                // Log usage in background
+                let tracker_clone = Arc::clone(tracker);
+                let session_id = state.session_id.clone();
+                let usage_clone = usage.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = tracker_clone.log_usage(crate::storage::usage::UsageLog {
+                        session_id,
+                        provider,
+                        model,
+                        mode: "completion".to_string(),
+                        input_tokens: usage_clone.input_tokens,
+                        output_tokens: usage_clone.output_tokens,
+                        cost_usd: cost,
+                        request_type: "fim".to_string(),
+                        estimated: false,
+                    }) {
+                        tracing::error!("Failed to log completion usage: {}", e);
+                    }
+                });
+            }
+
+            (
+                StatusCode::OK,
+                Json(InlineCompleteResponse {
+                    completion: response.completion,
+                    line_count: response.line_count,
+                    usage: response.usage,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!("Inline completion error: {}", e);
             (
@@ -662,27 +742,61 @@ async fn handle_chat(
     clear_status().await;
 
     match result {
-        Ok(response) => (
-            StatusCode::OK,
-            Json(ChatResponse {
-                response: response.text,
-                tool_calls_made: response.tool_calls_made,
-                tool_call_log: response
-                    .tool_call_log
-                    .into_iter()
-                    .map(|l| ToolCallLogEntry {
-                        tool: l.tool,
-                        args: l.args,
-                        result_preview: l.result_preview,
-                    })
-                    .collect(),
-                provider: final_provider,
-                mode: mode_str,
-                auto_compacted: response.auto_compacted,
-                context_usage_percent: response.context_usage_percent,
-            }),
-        )
-            .into_response(),
+        Ok(response) => {
+            // Log usage if tracker is available
+            if let (Some(ref tracker), Some(ref usage)) = (&state.usage_tracker, &response.usage) {
+                let provider = state.current_provider.read().await.clone();
+                let model = state.current_model.read().await.clone();
+                let mode = state.current_mode.read().await.clone();
+
+                // Calculate cost
+                let cost = tracker
+                    .calculate_cost(&provider, &model, usage.input_tokens, usage.output_tokens)
+                    .await;
+
+                // Log usage in background
+                let tracker_clone = Arc::clone(tracker);
+                let session_id = state.session_id.clone();
+                let usage_clone = usage.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = tracker_clone.log_usage(crate::storage::usage::UsageLog {
+                        session_id,
+                        provider,
+                        model,
+                        mode,
+                        input_tokens: usage_clone.input_tokens,
+                        output_tokens: usage_clone.output_tokens,
+                        cost_usd: cost,
+                        request_type: "chat".to_string(),
+                        estimated: false,
+                    }) {
+                        tracing::error!("Failed to log usage: {}", e);
+                    }
+                });
+            }
+
+            (
+                StatusCode::OK,
+                Json(ChatResponse {
+                    response: response.text,
+                    tool_calls_made: response.tool_calls_made,
+                    tool_call_log: response
+                        .tool_call_log
+                        .into_iter()
+                        .map(|l| ToolCallLogEntry {
+                            tool: l.tool,
+                            args: l.args,
+                            result_preview: l.result_preview,
+                        })
+                        .collect(),
+                    provider: final_provider,
+                    mode: mode_str,
+                    auto_compacted: response.auto_compacted,
+                    context_usage_percent: response.context_usage_percent,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!("Chat error: {}", e);
             (
@@ -764,4 +878,187 @@ async fn save_session(
     }
 
     (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
+}
+
+// ========== Usage Dashboard Endpoints ==========
+
+/// Serve the HTML usage dashboard
+async fn usage_dashboard() -> impl IntoResponse {
+    use axum::response::Html;
+    Html(crate::transport::dashboard::DASHBOARD_HTML)
+}
+
+/// Get usage summary
+async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.usage_tracker {
+        Some(tracker) => match tracker.get_summary() {
+            Ok(summary) => (StatusCode::OK, Json(summary)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Usage tracking not initialized" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Get usage by model
+async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.usage_tracker {
+        Some(tracker) => match tracker.get_usage_by_model() {
+            Ok(models) => (StatusCode::OK, Json(models)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Usage tracking not initialized" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Get usage by mode
+async fn usage_by_mode(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.usage_tracker {
+        Some(tracker) => match tracker.get_usage_by_mode() {
+            Ok(modes) => (StatusCode::OK, Json(modes)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Usage tracking not initialized" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Get sessions with stats
+async fn usage_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.usage_tracker {
+        Some(tracker) => match tracker.get_sessions() {
+            Ok(sessions) => (StatusCode::OK, Json(sessions)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Usage tracking not initialized" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Get storage size
+async fn usage_storage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.usage_tracker {
+        Some(tracker) => match tracker.get_summary() {
+            Ok(summary) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "size_bytes": summary.db_size_bytes,
+                    "size_human": summary.db_size_human,
+                })),
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Usage tracking not initialized" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Cleanup old usage logs
+async fn usage_cleanup(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::storage::usage::CleanupRequest>,
+) -> impl IntoResponse {
+    match &state.usage_tracker {
+        Some(tracker) => match tracker.cleanup(req).await {
+            Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Usage tracking not initialized" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Export usage data as CSV
+async fn usage_export(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use axum::body::Body;
+    use axum::http::header;
+    use axum::response::Response;
+
+    match &state.usage_tracker {
+        Some(tracker) => {
+            // Get all data
+            let models = tracker.get_usage_by_model().ok().unwrap_or_default();
+            let sessions = tracker.get_sessions().ok().unwrap_or_default();
+
+            // Build CSV
+            let mut csv = String::from("Type,Provider,Model,Host,Username,Session,Tokens,Cost\n");
+
+            // Add model data
+            for m in models {
+                csv.push_str(&format!(
+                    "model,{},{},,,{},{}\n",
+                    m.provider,
+                    m.model,
+                    m.input_tokens + m.output_tokens,
+                    m.cost
+                ));
+            }
+
+            // Add session data
+            for s in sessions {
+                csv.push_str(&format!(
+                    "session,,,{},{},{},{},{}\n",
+                    s.host, s.username, s.id, s.total_tokens, s.total_cost
+                ));
+            }
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/csv")
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"tark-usage.csv\"",
+                )
+                .body(Body::from(csv))
+                .unwrap()
+        }
+        None => Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Body::from("Usage tracking not initialized"))
+            .unwrap(),
+    }
 }

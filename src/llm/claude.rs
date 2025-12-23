@@ -158,6 +158,13 @@ impl LlmProvider for ClaudeProvider {
 
         let response = self.send_request(request).await?;
 
+        // Convert Claude usage to our TokenUsage type
+        let usage = response.usage.map(|u| crate::llm::TokenUsage {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            total_tokens: u.input_tokens + u.output_tokens,
+        });
+
         // Parse response content
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
@@ -179,13 +186,20 @@ impl LlmProvider for ClaudeProvider {
         }
 
         if tool_calls.is_empty() {
-            Ok(LlmResponse::Text(text_parts.join("\n")))
+            Ok(LlmResponse::Text {
+                text: text_parts.join("\n"),
+                usage,
+            })
         } else if text_parts.is_empty() {
-            Ok(LlmResponse::ToolCalls(tool_calls))
+            Ok(LlmResponse::ToolCalls {
+                calls: tool_calls,
+                usage,
+            })
         } else {
             Ok(LlmResponse::Mixed {
                 text: Some(text_parts.join("\n")),
                 tool_calls,
+                usage,
             })
         }
     }
@@ -423,4 +437,82 @@ struct ClaudeResponse {
 struct ClaudeUsage {
     input_tokens: u32,
     output_tokens: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_claude_response_with_usage() {
+        let json = r#"{
+            "content": [{
+                "type": "text",
+                "text": "Hello, world!"
+            }],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5
+            }
+        }"#;
+
+        let response: ClaudeResponse = serde_json::from_str(json).unwrap();
+        assert!(response.usage.is_some());
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn test_parse_claude_response_without_usage() {
+        let json = r#"{
+            "content": [{
+                "type": "text",
+                "text": "Hello"
+            }]
+        }"#;
+
+        let response: ClaudeResponse = serde_json::from_str(json).unwrap();
+        assert!(response.usage.is_none());
+    }
+
+    #[test]
+    fn test_convert_claude_usage_to_token_usage() {
+        let claude_usage = ClaudeUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+        };
+
+        let token_usage = crate::llm::TokenUsage {
+            input_tokens: claude_usage.input_tokens,
+            output_tokens: claude_usage.output_tokens,
+            total_tokens: claude_usage.input_tokens + claude_usage.output_tokens,
+        };
+
+        assert_eq!(token_usage.input_tokens, 100);
+        assert_eq!(token_usage.output_tokens, 50);
+        assert_eq!(token_usage.total_tokens, 150);
+    }
+
+    #[test]
+    fn test_parse_claude_response_with_tool_use() {
+        let json = r#"{
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_123",
+                "name": "test_tool",
+                "input": {"arg": "value"}
+            }],
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 10
+            }
+        }"#;
+
+        let response: ClaudeResponse = serde_json::from_str(json).unwrap();
+        assert!(response.usage.is_some());
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.input_tokens, 20);
+        assert_eq!(usage.output_tokens, 10);
+    }
 }

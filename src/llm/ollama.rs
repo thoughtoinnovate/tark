@@ -169,10 +169,16 @@ impl LlmProvider for OllamaProvider {
 
                 // Try to parse tool call from response
                 if let Some(tool_call) = self.parse_tool_call(&content) {
-                    return Ok(LlmResponse::ToolCalls(vec![tool_call]));
+                    return Ok(LlmResponse::ToolCalls {
+                        calls: vec![tool_call],
+                        usage: None, // Ollama doesn't provide usage info
+                    });
                 }
 
-                return Ok(LlmResponse::Text(content));
+                return Ok(LlmResponse::Text {
+                    text: content,
+                    usage: None, // Ollama doesn't provide usage info
+                });
             }
         }
 
@@ -183,7 +189,10 @@ impl LlmProvider for OllamaProvider {
         };
 
         let response = self.send_request(request).await?;
-        Ok(LlmResponse::Text(response.message.content))
+        Ok(LlmResponse::Text {
+            text: response.message.content,
+            usage: None, // Ollama doesn't provide usage info
+        })
     }
 
     async fn complete_fim(

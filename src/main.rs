@@ -75,6 +75,21 @@ enum Commands {
         #[arg(short, long)]
         col: usize,
     },
+
+    /// Show usage statistics and costs
+    Usage {
+        /// Output format (table, json)
+        #[arg(short, long, default_value = "table")]
+        format: String,
+
+        /// Working directory (default: current directory)
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Cleanup logs older than N days
+        #[arg(long)]
+        cleanup: Option<u32>,
+    },
 }
 
 #[tokio::main]
@@ -134,6 +149,16 @@ async fn main() -> Result<()> {
         }
         Commands::Complete { file, line, col } => {
             transport::cli::run_complete(&file, line, col).await?;
+        }
+        Commands::Usage {
+            format,
+            cwd,
+            cleanup,
+        } => {
+            let working_dir = cwd
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+            transport::cli::run_usage(&working_dir, &format, cleanup).await?;
         }
     }
 

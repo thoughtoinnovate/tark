@@ -9,11 +9,12 @@ M.config = {
     docker_mode = false,    -- If true, server is in Docker (use /workspace as cwd)
     lsp_proxy = true,       -- Enable LSP proxy for agent tools
     window = {
-        style = 'sidepane',  -- 'sidepane' or 'popup'
-        position = 'right',  -- 'right' or 'left' (for sidepane)
+        style = 'split',     -- 'split' (docked), 'sidepane' (floating overlay), or 'popup'
+        position = 'right',  -- 'right' or 'left' (for split/sidepane)
         width = 80,          -- for popup mode
         height = 20,         -- for popup mode
         sidepane_width = 0.35,  -- 35% of editor width (or fixed number like 60)
+        split_width = 80,    -- fixed width for split mode (columns)
         min_width = 50,
         max_width = 100,
         border = 'rounded',
@@ -491,6 +492,15 @@ local function get_mode_highlight(mode, with_bg)
     return mode_highlights[mode] or ('TarkModeBuild' .. suffix)
 end
 
+-- Check if a window is a floating window
+local function is_floating_window(win)
+    if not win or not vim.api.nvim_win_is_valid(win) then
+        return false
+    end
+    local config = vim.api.nvim_win_get_config(win)
+    return config.relative ~= nil and config.relative ~= ''
+end
+
 -- Update input window title with current mode (OpenCode style)
 local function update_input_window_title()
     if not input_win or not vim.api.nvim_win_is_valid(input_win) then
@@ -499,6 +509,8 @@ local function update_input_window_title()
     
     -- Mode with model name (like OpenCode)
     local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
+    local mode_icons = { plan = '◇', build = '◆', review = '◈' }
+    local mode_icon = mode_icons[current_mode] or '◆'
     local model_name = current_model or model_mappings[current_provider] or 'GPT-4o'
     local model_short = model_name:match('[^/]+$') or model_name
     local provider_label = current_provider:sub(1,1):upper() .. current_provider:sub(2)
@@ -506,25 +518,35 @@ local function update_input_window_title()
     -- Mode-specific highlight (colored background for instant recognition)
     local mode_hl = get_mode_highlight(current_mode, true)
     
-    local config = vim.api.nvim_win_get_config(input_win)
-    config.title = {
-        { ' ' .. mode_label .. ' ', mode_hl },
-        { ' ' .. model_short .. ' ', 'Comment' },
-        { provider_label .. ' ', 'FloatBorder' },
-    }
-    config.title_pos = 'left'
-    
-    -- Add footer text (keybindings) with mode-aware hint
-    local mode_hint = current_mode == 'plan' and 'build' or 'plan'
-    config.footer = {
-        { ' tab ', 'Comment' },
-        { mode_hint, get_mode_highlight(mode_hint, false) },
-        { '  /', 'Comment' },
-        { 'commands ', 'FloatBorder' },
-    }
-    config.footer_pos = 'left'
-    
-    vim.api.nvim_win_set_config(input_win, config)
+    -- Check if this is a floating window or a split window
+    if is_floating_window(input_win) then
+        -- Floating window: use title/footer
+        local config = vim.api.nvim_win_get_config(input_win)
+        config.title = {
+            { ' ' .. mode_label .. ' ', mode_hl },
+            { ' ' .. model_short .. ' ', 'Comment' },
+            { provider_label .. ' ', 'FloatBorder' },
+        }
+        config.title_pos = 'left'
+        
+        -- Add footer text (keybindings) with mode-aware hint
+        local mode_hint = current_mode == 'plan' and 'build' or 'plan'
+        config.footer = {
+            { ' tab ', 'Comment' },
+            { mode_hint, get_mode_highlight(mode_hint, false) },
+            { '  /', 'Comment' },
+            { 'commands ', 'FloatBorder' },
+        }
+        config.footer_pos = 'left'
+        
+        vim.api.nvim_win_set_config(input_win, config)
+    else
+        -- Split window: use statusline
+        local mode_hint = current_mode == 'plan' and 'build' or 'plan'
+        vim.api.nvim_win_set_option(input_win, 'statusline',
+            string.format('%%#TarkMode%s# %s %s %%#Comment# %s %%#FloatBorder# %s %%#Comment# tab:%s  /:commands %%#Normal#',
+                mode_label, mode_icon, mode_label, model_short, provider_label, mode_hint))
+    end
 end
 
 -- Update chat window title with current stats
@@ -557,44 +579,54 @@ local function update_chat_window_title()
     -- Right: Cost
     local cost_part = string.format('$%.4f ', session_stats.total_cost)
     
-    -- Layout: [Model] ... [Context] ... [Cost]
-    local config = vim.api.nvim_win_get_config(chat_win)
-    local width = config.width or 80
-    
-    -- Calculate display widths
-    local left_width = display_width(model_part)
-    local center_width = display_width(context_part)
-    local right_width = display_width(cost_part)
-    
-    -- INTELLIGENT PADDING: Left-align left, Center center, Right-align right
-    local usable_width = width - 2  -- Account for border chars
-    
-    -- Where should center START to be truly centered?
-    local center_start = math.floor((usable_width - center_width) / 2)
-    -- Where should right START to be truly right-aligned?
-    local right_start = usable_width - right_width
-    
-    -- Calculate padding needed
-    local left_pad = center_start - left_width
-    local right_pad = right_start - (center_start + center_width)
-    
-    -- Ensure minimum padding
-    if left_pad < 1 then left_pad = 1 end
-    if right_pad < 1 then right_pad = 1 end
-    
-    -- Color the context bar based on usage
-    local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
-    
-    config.title = {
-        { model_part, 'FloatTitle' },  -- Left: Model name
-        { string.rep(' ', left_pad), 'FloatBorder' },
-        { context_part, context_hl },  -- Center: Context usage (truly centered)
-        { string.rep(' ', right_pad), 'FloatBorder' },
-        { cost_part, 'String' },  -- Right: Cost (right-aligned)
-    }
-    config.title_pos = 'left'
-    
-    vim.api.nvim_win_set_config(chat_win, config)
+    -- Check if this is a floating window or a split window
+    if is_floating_window(chat_win) then
+        -- Floating window: use title config
+        local config = vim.api.nvim_win_get_config(chat_win)
+        local width = config.width or 80
+        
+        -- Calculate display widths
+        local left_width = display_width(model_part)
+        local center_width = display_width(context_part)
+        local right_width = display_width(cost_part)
+        
+        -- INTELLIGENT PADDING: Left-align left, Center center, Right-align right
+        local usable_width = width - 2  -- Account for border chars
+        
+        -- Where should center START to be truly centered?
+        local center_start = math.floor((usable_width - center_width) / 2)
+        -- Where should right START to be truly right-aligned?
+        local right_start = usable_width - right_width
+        
+        -- Calculate padding needed
+        local left_pad = center_start - left_width
+        local right_pad = right_start - (center_start + center_width)
+        
+        -- Ensure minimum padding
+        if left_pad < 1 then left_pad = 1 end
+        if right_pad < 1 then right_pad = 1 end
+        
+        -- Color the context bar based on usage
+        local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
+        
+        config.title = {
+            { model_part, 'FloatTitle' },  -- Left: Model name
+            { string.rep(' ', left_pad), 'FloatBorder' },
+            { context_part, context_hl },  -- Center: Context usage (truly centered)
+            { string.rep(' ', right_pad), 'FloatBorder' },
+            { cost_part, 'String' },  -- Right: Cost (right-aligned)
+        }
+        config.title_pos = 'left'
+        
+        vim.api.nvim_win_set_config(chat_win, config)
+    else
+        -- Split window: use statusline
+        -- Color the context based on usage
+        local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
+        vim.api.nvim_win_set_option(chat_win, 'statusline',
+            string.format('%%#FloatTitle#%s%%#Normal# %%#%s#%s%%#Normal# %%#String#%s%%#Normal#',
+                model_part, context_hl, context_part, cost_part))
+    end
     
     -- Also update input title
     update_input_window_title()
@@ -682,9 +714,10 @@ local function get_command_completions()
         { word = '/?', menu = 'Help (short)', kind = '📚' },
         { word = '/exit', menu = 'Close chat window', kind = '🚪' },
         { word = '/quit', menu = 'Close chat window', kind = '🚪' },
-        { word = '/sidepane', menu = 'Sidepane layout (right)', kind = '📐' },
+        { word = '/split', menu = 'Split layout (docked)', kind = '📐' },
+        { word = '/sidepane', menu = 'Sidepane layout (floating)', kind = '📐' },
         { word = '/popup', menu = 'Popup layout (centered)', kind = '📐' },
-        { word = '/layout', menu = 'Toggle sidepane/popup', kind = '📐' },
+        { word = '/layout', menu = 'Toggle split/sidepane/popup', kind = '📐' },
         { word = '/diff', menu = 'Side-by-side diff view', kind = '📊' },
         { word = '/autodiff', menu = 'Toggle auto diff on changes', kind = '📊' },
     }
@@ -1883,6 +1916,9 @@ slash_commands = {
                 '',
                 '`/cost` - Show model pricing info',
                 '',
+                '`/usage` - Show usage summary (tokens, costs, sessions)',
+                '`/usage-open` - Open usage dashboard in browser',
+                '',
                 '`/exit` or `/q` - Close chat window',
                 '',
                 '**Layout:**',
@@ -2150,8 +2186,24 @@ slash_commands = {
     ['close'] = { alias = 'exit' },
     
     -- Layout commands
+    ['split'] = {
+        description = 'Switch to split layout (docked, resizes other windows)',
+        usage = '/split [left|right]',
+        handler = function(args)
+            M.config.window.style = 'split'
+            if args and args:match('left') then
+                M.config.window.position = 'left'
+            else
+                M.config.window.position = 'right'
+            end
+            -- Reopen to apply
+            M.close()
+            vim.defer_fn(function() M.open() end, 50)
+            append_message('system', '📐 Switched to split layout (docked)')
+        end,
+    },
     ['sidepane'] = {
-        description = 'Switch to sidepane layout (right side)',
+        description = 'Switch to sidepane layout (floating overlay)',
         usage = '/sidepane [left|right]',
         handler = function(args)
             M.config.window.style = 'sidepane'
@@ -2163,7 +2215,7 @@ slash_commands = {
             -- Reopen to apply
             M.close()
             vim.defer_fn(function() M.open() end, 50)
-            append_message('system', '📐 Switched to sidepane layout')
+            append_message('system', '📐 Switched to sidepane layout (floating)')
         end,
     },
     ['popup'] = {
@@ -2178,13 +2230,19 @@ slash_commands = {
         end,
     },
     ['layout'] = {
-        description = 'Toggle between sidepane and popup',
+        description = 'Cycle through split/sidepane/popup layouts',
         usage = '/layout',
         handler = function()
-            if M.config.window.style == 'sidepane' then
-                M.config.window.style = 'popup'
-            else
+            -- Cycle: split -> sidepane -> popup -> split
+            if M.config.window.style == 'split' then
                 M.config.window.style = 'sidepane'
+                append_message('system', '📐 Layout: sidepane (floating)')
+            elseif M.config.window.style == 'sidepane' then
+                M.config.window.style = 'popup'
+                append_message('system', '📐 Layout: popup (centered)')
+            else
+                M.config.window.style = 'split'
+                append_message('system', '📐 Layout: split (docked)')
             end
             -- Reopen to apply
             M.close()
@@ -2209,6 +2267,22 @@ slash_commands = {
             M.config.auto_show_diff = not M.config.auto_show_diff
             local status = M.config.auto_show_diff and 'ON' or 'OFF'
             append_message('system', '📊 Inline diff in chat: **' .. status .. '**')
+        end,
+    },
+    
+    -- Usage commands
+    ['usage'] = {
+        description = 'Show usage stats',
+        usage = '/usage',
+        handler = function()
+            require('tark.usage').show_summary()
+        end,
+    },
+    ['usage-open'] = {
+        description = 'Open usage dashboard in browser',
+        usage = '/usage-open',
+        handler = function()
+            vim.cmd('TarkUsageOpen')
         end,
     },
 }
@@ -2274,121 +2348,184 @@ function M.open(initial_message)
     -- Initialize header
     update_chat_header()
 
-    local editor_width = vim.o.columns
-    local editor_height = vim.o.lines
-    local input_height = 3
-    local width, height, col, row
-    
-    -- Calculate dimensions based on style
-    if M.config.window.style == 'sidepane' then
-        -- SIDEPANE MODE: Full height, intelligent width on right
-        local sidepane_width = M.config.window.sidepane_width
-        if sidepane_width <= 1 then
-            -- Percentage of editor width
-            width = math.floor(editor_width * sidepane_width)
-        else
-            -- Fixed width
-            width = math.floor(sidepane_width)
-        end
-        -- Apply min/max constraints
-        width = math.max(M.config.window.min_width or 50, width)
-        width = math.min(M.config.window.max_width or 100, width)
-        
-        -- Full height (minus statusline, cmdline, tabline)
-        height = editor_height - input_height - 4
-        
-        -- Position on right edge
+    -- SPLIT MODE: Create proper docked split windows that resize other content
+    if M.config.window.style == 'split' then
+        -- Create vertical split on right or left
         if M.config.window.position == 'left' then
-            col = 0
+            vim.cmd('topleft vsplit')
         else
-            col = editor_width - width - 2
+            vim.cmd('botright vsplit')
         end
-        row = 0
+        
+        -- Now we're in the new split window
+        chat_win = vim.api.nvim_get_current_win()
+        vim.api.nvim_win_set_buf(chat_win, buf)
+        
+        -- Set the width
+        local split_width = M.config.window.split_width or 80
+        vim.api.nvim_win_set_width(chat_win, split_width)
+        
+        -- Configure window options for chat
+        vim.api.nvim_win_set_option(chat_win, 'number', false)
+        vim.api.nvim_win_set_option(chat_win, 'relativenumber', false)
+        vim.api.nvim_win_set_option(chat_win, 'signcolumn', 'no')
+        vim.api.nvim_win_set_option(chat_win, 'wrap', true)
+        vim.api.nvim_win_set_option(chat_win, 'linebreak', true)
+        vim.api.nvim_win_set_option(chat_win, 'winfixwidth', true)
+        
+        -- Create horizontal split at bottom of chat for input
+        vim.cmd('belowright split')
+        input_win = vim.api.nvim_get_current_win()
+        vim.api.nvim_win_set_buf(input_win, input)
+        
+        -- Set input height (3-5 lines)
+        local input_height = 5
+        vim.api.nvim_win_set_height(input_win, input_height)
+        
+        -- Configure window options for input
+        vim.api.nvim_win_set_option(input_win, 'number', false)
+        vim.api.nvim_win_set_option(input_win, 'relativenumber', false)
+        vim.api.nvim_win_set_option(input_win, 'signcolumn', 'no')
+        vim.api.nvim_win_set_option(input_win, 'wrap', true)
+        vim.api.nvim_win_set_option(input_win, 'winfixheight', true)
+        vim.api.nvim_win_set_option(input_win, 'winfixwidth', true)
+        
+        -- Set statusline for split mode to show info (replaces floating title/footer)
+        local mode_icons = { plan = '◇', build = '◆', review = '◈' }
+        local mode_icon = mode_icons[current_mode] or '◆'
+        local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
+        local model_name = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
+        
+        -- Chat window statusline shows model and context
+        vim.api.nvim_win_set_option(chat_win, 'statusline', 
+            string.format('%%#FloatTitle# %s %%#Comment# [0%%%%] 0/128K %%#String# $0.0000 %%#Normal#', model_name))
+        
+        -- Input window statusline shows mode
+        vim.api.nvim_win_set_option(input_win, 'statusline',
+            string.format('%%#TarkMode%s# %s %s %%#Comment# %s %%#FloatBorder# %s %%#Comment# tab:mode  /:commands %%#Normal#',
+                current_mode:sub(1,1):upper() .. current_mode:sub(2), mode_icon, mode_label, model_name, 
+                current_provider:sub(1,1):upper() .. current_provider:sub(2)))
+        
+        -- Focus input window
+        vim.api.nvim_set_current_win(input_win)
     else
-        -- POPUP MODE: Centered floating window
-        width = M.config.window.width
-        height = M.config.window.height
-        col = math.floor((editor_width - width) / 2)
-        row = math.floor((editor_height - height - input_height - 4) / 2)
+        -- FLOATING MODES (sidepane/popup)
+        local editor_width = vim.o.columns
+        local editor_height = vim.o.lines
+        local input_height = 3
+        local width, height, col, row
+        
+        -- Calculate dimensions based on style
+        if M.config.window.style == 'sidepane' then
+            -- SIDEPANE MODE: Full height, intelligent width on right
+            local sidepane_width = M.config.window.sidepane_width
+            if sidepane_width <= 1 then
+                -- Percentage of editor width
+                width = math.floor(editor_width * sidepane_width)
+            else
+                -- Fixed width
+                width = math.floor(sidepane_width)
+            end
+            -- Apply min/max constraints
+            width = math.max(M.config.window.min_width or 50, width)
+            width = math.min(M.config.window.max_width or 100, width)
+            
+            -- Full height (minus statusline, cmdline, tabline)
+            height = editor_height - input_height - 4
+            
+            -- Position on right edge
+            if M.config.window.position == 'left' then
+                col = 0
+            else
+                col = editor_width - width - 2
+            end
+            row = 0
+        else
+            -- POPUP MODE: Centered floating window
+            width = M.config.window.width
+            height = M.config.window.height
+            col = math.floor((editor_width - width) / 2)
+            row = math.floor((editor_height - height - input_height - 4) / 2)
+        end
+
+        -- Build initial chat title (model | context | cost)
+        local model_name_t = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
+        
+        -- Layout: [Model] ... [0%] 0/128K ... [$0.0000]
+        local model_part_t = string.format(' %s ', model_name_t)
+        local context_part_t = string.format('[0%%] 0/%s', format_number(128000))
+        local cost_part_t = '$0.0000 '
+        
+        -- INTELLIGENT PADDING: Left-align left, Center center, Right-align right
+        local left_width_t = display_width(model_part_t)
+        local center_width_t = display_width(context_part_t)
+        local right_width_t = display_width(cost_part_t)
+        local usable_width_t = width - 2  -- Account for border chars
+        
+        -- Where should center START to be truly centered?
+        local center_start_t = math.floor((usable_width_t - center_width_t) / 2)
+        -- Where should right START to be truly right-aligned?
+        local right_start_t = usable_width_t - right_width_t
+        
+        -- Calculate padding needed
+        local left_pad_t = center_start_t - left_width_t
+        local right_pad_t = right_start_t - (center_start_t + center_width_t)
+        if left_pad_t < 1 then left_pad_t = 1 end
+        if right_pad_t < 1 then right_pad_t = 1 end
+        
+        local title_config = {
+            { model_part_t, 'FloatTitle' },
+            { string.rep(' ', left_pad_t), 'FloatBorder' },
+            { context_part_t, 'Comment' },
+            { string.rep(' ', right_pad_t), 'FloatBorder' },
+            { cost_part_t, 'String' },
+        }
+        
+        chat_win = vim.api.nvim_open_win(buf, false, {
+            relative = 'editor',
+            width = width,
+            height = height,
+            col = col,
+            row = row,
+            style = 'minimal',
+            border = M.config.window.border,
+            title = title_config,
+            title_pos = 'left',
+        })
+
+        -- Create input window with mode-specific title (mode badge is HERE, not in chat window)
+        local mode_icons = { plan = '◇', build = '◆', review = '◈' }
+        local mode_icon = mode_icons[current_mode] or '◆'
+        local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
+        local input_mode_hl = get_mode_highlight(current_mode, true)
+        local input_mode_part = string.format(' %s %s ', mode_icon, mode_label)
+        
+        -- Position input window below chat (sidepane: at bottom; popup: below chat)
+        local input_row = M.config.window.style == 'sidepane' and (editor_height - input_height - 2) or (row + height + 2)
+        
+        input_win = vim.api.nvim_open_win(input, true, {
+            relative = 'editor',
+            width = width,
+            height = input_height,
+            col = col,
+            row = input_row,
+            style = 'minimal',
+            border = M.config.window.border,
+            title = {
+                { input_mode_part, input_mode_hl },
+                { ' ' .. model_name_t .. ' ', 'Comment' },
+                { current_provider:sub(1,1):upper() .. current_provider:sub(2) .. ' ', 'FloatBorder' },
+            },
+            title_pos = 'left',
+            footer = {
+                { ' tab ', 'Comment' },
+                { current_mode == 'plan' and 'build' or 'plan', get_mode_highlight(current_mode == 'plan' and 'build' or 'plan', false) },
+                { '  /', 'Comment' },
+                { 'commands ', 'FloatBorder' },
+            },
+            footer_pos = 'left',
+        })
     end
-
-    -- Build initial chat title (model | context | cost)
-    local model_name_t = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
-    
-    -- Layout: [Model] ... [0%] 0/128K ... [$0.0000]
-    local model_part_t = string.format(' %s ', model_name_t)
-    local context_part_t = string.format('[0%%] 0/%s', format_number(128000))
-    local cost_part_t = '$0.0000 '
-    
-    -- INTELLIGENT PADDING: Left-align left, Center center, Right-align right
-    local left_width_t = display_width(model_part_t)
-    local center_width_t = display_width(context_part_t)
-    local right_width_t = display_width(cost_part_t)
-    local usable_width_t = width - 2  -- Account for border chars
-    
-    -- Where should center START to be truly centered?
-    local center_start_t = math.floor((usable_width_t - center_width_t) / 2)
-    -- Where should right START to be truly right-aligned?
-    local right_start_t = usable_width_t - right_width_t
-    
-    -- Calculate padding needed
-    local left_pad_t = center_start_t - left_width_t
-    local right_pad_t = right_start_t - (center_start_t + center_width_t)
-    if left_pad_t < 1 then left_pad_t = 1 end
-    if right_pad_t < 1 then right_pad_t = 1 end
-    
-    local title_config = {
-        { model_part_t, 'FloatTitle' },
-        { string.rep(' ', left_pad_t), 'FloatBorder' },
-        { context_part_t, 'Comment' },
-        { string.rep(' ', right_pad_t), 'FloatBorder' },
-        { cost_part_t, 'String' },
-    }
-    
-    chat_win = vim.api.nvim_open_win(buf, false, {
-        relative = 'editor',
-        width = width,
-        height = height,
-        col = col,
-        row = row,
-        style = 'minimal',
-        border = M.config.window.border,
-        title = title_config,
-        title_pos = 'left',
-    })
-
-    -- Create input window with mode-specific title (mode badge is HERE, not in chat window)
-    local mode_icons = { plan = '◇', build = '◆', review = '◈' }
-    local mode_icon = mode_icons[current_mode] or '◆'
-    local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
-    local input_mode_hl = get_mode_highlight(current_mode, true)
-    local input_mode_part = string.format(' %s %s ', mode_icon, mode_label)
-    
-    -- Position input window below chat (sidepane: at bottom; popup: below chat)
-    local input_row = M.config.window.style == 'sidepane' and (editor_height - input_height - 2) or (row + height + 2)
-    
-    input_win = vim.api.nvim_open_win(input, true, {
-        relative = 'editor',
-        width = width,
-        height = input_height,
-        col = col,
-        row = input_row,
-        style = 'minimal',
-        border = M.config.window.border,
-        title = {
-            { input_mode_part, input_mode_hl },
-            { ' ' .. model_name_t .. ' ', 'Comment' },
-            { current_provider:sub(1,1):upper() .. current_provider:sub(2) .. ' ', 'FloatBorder' },
-        },
-        title_pos = 'left',
-        footer = {
-            { ' tab ', 'Comment' },
-            { current_mode == 'plan' and 'build' or 'plan', get_mode_highlight(current_mode == 'plan' and 'build' or 'plan', false) },
-            { '  /', 'Comment' },
-            { 'commands ', 'FloatBorder' },
-        },
-        footer_pos = 'left',
-    })
 
     -- Helper function to process input
     local function do_send()

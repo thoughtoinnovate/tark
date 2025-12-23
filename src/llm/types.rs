@@ -103,31 +103,124 @@ impl Message {
 #[derive(Debug, Clone)]
 pub enum LlmResponse {
     /// Plain text response
-    Text(String),
+    Text {
+        text: String,
+        usage: Option<TokenUsage>,
+    },
     /// Tool calls requested by the model
-    ToolCalls(Vec<ToolCall>),
+    ToolCalls {
+        calls: Vec<ToolCall>,
+        usage: Option<TokenUsage>,
+    },
     /// Mixed response with text and tool calls
     Mixed {
         text: Option<String>,
         tool_calls: Vec<ToolCall>,
+        usage: Option<TokenUsage>,
     },
 }
 
 impl LlmResponse {
     pub fn text(&self) -> Option<&str> {
         match self {
-            LlmResponse::Text(s) => Some(s),
+            LlmResponse::Text { text, .. } => Some(text),
             LlmResponse::Mixed { text, .. } => text.as_deref(),
-            LlmResponse::ToolCalls(_) => None,
+            LlmResponse::ToolCalls { .. } => None,
         }
     }
 
     pub fn tool_calls(&self) -> &[ToolCall] {
         match self {
-            LlmResponse::ToolCalls(calls) => calls,
+            LlmResponse::ToolCalls { calls, .. } => calls,
             LlmResponse::Mixed { tool_calls, .. } => tool_calls,
-            LlmResponse::Text(_) => &[],
+            LlmResponse::Text { .. } => &[],
         }
+    }
+
+    pub fn usage(&self) -> Option<&TokenUsage> {
+        match self {
+            LlmResponse::Text { usage, .. } => usage.as_ref(),
+            LlmResponse::ToolCalls { usage, .. } => usage.as_ref(),
+            LlmResponse::Mixed { usage, .. } => usage.as_ref(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_token_usage_default() {
+        let usage = TokenUsage::default();
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+    }
+
+    #[test]
+    fn test_llm_response_text_with_usage() {
+        let usage = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+        };
+        let response = LlmResponse::Text {
+            text: "Hello".to_string(),
+            usage: Some(usage.clone()),
+        };
+
+        assert_eq!(response.text(), Some("Hello"));
+        assert!(response.usage().is_some());
+        let resp_usage = response.usage().unwrap();
+        assert_eq!(resp_usage.input_tokens, 10);
+        assert_eq!(resp_usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn test_llm_response_text_without_usage() {
+        let response = LlmResponse::Text {
+            text: "Hello".to_string(),
+            usage: None,
+        };
+
+        assert_eq!(response.text(), Some("Hello"));
+        assert!(response.usage().is_none());
+    }
+
+    #[test]
+    fn test_llm_response_tool_calls_with_usage() {
+        let usage = TokenUsage {
+            input_tokens: 20,
+            output_tokens: 10,
+            total_tokens: 30,
+        };
+        let response = LlmResponse::ToolCalls {
+            calls: vec![],
+            usage: Some(usage),
+        };
+
+        assert!(response.text().is_none());
+        assert!(response.usage().is_some());
+    }
+
+    #[test]
+    fn test_llm_response_mixed_with_usage() {
+        let usage = TokenUsage {
+            input_tokens: 15,
+            output_tokens: 8,
+            total_tokens: 23,
+        };
+        let response = LlmResponse::Mixed {
+            text: Some("Result".to_string()),
+            tool_calls: vec![],
+            usage: Some(usage),
+        };
+
+        assert_eq!(response.text(), Some("Result"));
+        assert!(response.usage().is_some());
+        let resp_usage = response.usage().unwrap();
+        assert_eq!(resp_usage.total_tokens, 23);
     }
 }
 

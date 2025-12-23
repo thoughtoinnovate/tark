@@ -185,6 +185,13 @@ impl LlmProvider for OpenAiProvider {
 
         let response = self.send_request(request).await?;
 
+        // Convert OpenAI usage to our TokenUsage type
+        let usage = response.usage.map(|u| crate::llm::TokenUsage {
+            input_tokens: u.prompt_tokens,
+            output_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+        });
+
         if let Some(choice) = response.choices.first() {
             let text = choice.message.content.clone();
             let tool_calls: Vec<ToolCall> = choice
@@ -205,14 +212,27 @@ impl LlmProvider for OpenAiProvider {
                 .unwrap_or_default();
 
             if tool_calls.is_empty() {
-                Ok(LlmResponse::Text(text.unwrap_or_default()))
+                Ok(LlmResponse::Text {
+                    text: text.unwrap_or_default(),
+                    usage,
+                })
             } else if text.is_none() || text.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
-                Ok(LlmResponse::ToolCalls(tool_calls))
+                Ok(LlmResponse::ToolCalls {
+                    calls: tool_calls,
+                    usage,
+                })
             } else {
-                Ok(LlmResponse::Mixed { text, tool_calls })
+                Ok(LlmResponse::Mixed {
+                    text,
+                    tool_calls,
+                    usage,
+                })
             }
         } else {
-            Ok(LlmResponse::Text(String::new()))
+            Ok(LlmResponse::Text {
+                text: String::new(),
+                usage,
+            })
         }
     }
 
@@ -497,4 +517,95 @@ struct OpenAiUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
     total_tokens: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_openai_response_with_usage() {
+        let json = r#"{
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello, world!"
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        }"#;
+
+        let response: OpenAiResponse = serde_json::from_str(json).unwrap();
+        assert!(response.usage.is_some());
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn test_parse_openai_response_without_usage() {
+        let json = r#"{
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello"
+                }
+            }]
+        }"#;
+
+        let response: OpenAiResponse = serde_json::from_str(json).unwrap();
+        assert!(response.usage.is_none());
+    }
+
+    #[test]
+    fn test_convert_openai_usage_to_token_usage() {
+        let openai_usage = OpenAiUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+
+        let token_usage = crate::llm::TokenUsage {
+            input_tokens: openai_usage.prompt_tokens,
+            output_tokens: openai_usage.completion_tokens,
+            total_tokens: openai_usage.total_tokens,
+        };
+
+        assert_eq!(token_usage.input_tokens, 100);
+        assert_eq!(token_usage.output_tokens, 50);
+        assert_eq!(token_usage.total_tokens, 150);
+    }
+
+    #[test]
+    fn test_parse_openai_response_with_tool_calls() {
+        let json = r#"{
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "test_tool",
+                            "arguments": "{\"arg\": \"value\"}"
+                        }
+                    }]
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 20,
+                "completion_tokens": 10,
+                "total_tokens": 30
+            }
+        }"#;
+
+        let response: OpenAiResponse = serde_json::from_str(json).unwrap();
+        assert!(response.usage.is_some());
+        assert_eq!(response.usage.unwrap().total_tokens, 30);
+    }
 }

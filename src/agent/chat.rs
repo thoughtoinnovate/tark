@@ -218,6 +218,7 @@ pub struct AgentResponse {
     pub tool_call_log: Vec<ToolCallLog>,
     pub auto_compacted: bool,
     pub context_usage_percent: usize,
+    pub usage: Option<crate::llm::TokenUsage>,
 }
 
 /// Chat agent that can use tools to accomplish tasks
@@ -340,7 +341,7 @@ impl ChatAgent {
         let summary_messages = vec![Message::user(summary_content)];
 
         match self.llm.chat(&summary_messages, None).await {
-            Ok(LlmResponse::Text(summary)) => {
+            Ok(LlmResponse::Text { text: summary, .. }) => {
                 // Compact the context with the summary
                 self.context.compact_with_summary(&summary, keep_recent);
                 tracing::info!(
@@ -380,6 +381,7 @@ impl ChatAgent {
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
+        let mut accumulated_usage = crate::llm::TokenUsage::default();
 
         loop {
             if iterations >= self.max_iterations {
@@ -398,10 +400,17 @@ impl ChatAgent {
                 .chat(self.context.messages(), Some(&tool_definitions))
                 .await?;
 
+            // Accumulate usage from this response
+            if let Some(usage) = response.usage() {
+                accumulated_usage.input_tokens += usage.input_tokens;
+                accumulated_usage.output_tokens += usage.output_tokens;
+                accumulated_usage.total_tokens += usage.total_tokens;
+            }
+
             iterations += 1;
 
             match response {
-                LlmResponse::Text(text) => {
+                LlmResponse::Text { text, .. } => {
                     self.context.add_assistant(&text);
                     let context_usage_percent = self.context.usage_percentage();
                     return Ok(AgentResponse {
@@ -410,9 +419,10 @@ impl ChatAgent {
                         tool_call_log,
                         auto_compacted,
                         context_usage_percent,
+                        usage: Some(accumulated_usage),
                     });
                 }
-                LlmResponse::ToolCalls(calls) => {
+                LlmResponse::ToolCalls { calls, .. } => {
                     total_tool_calls += calls.len();
 
                     // First, add the assistant message with tool calls (required for OpenAI)
@@ -508,7 +518,9 @@ impl ChatAgent {
                         self.context.add_tool_result(&call.id, &result.output);
                     }
                 }
-                LlmResponse::Mixed { text, tool_calls } => {
+                LlmResponse::Mixed {
+                    text, tool_calls, ..
+                } => {
                     if tool_calls.is_empty() {
                         // No tool calls, just add text
                         if let Some(text) = text {
@@ -530,6 +542,7 @@ impl ChatAgent {
                             tool_call_log,
                             auto_compacted,
                             context_usage_percent,
+                            usage: Some(accumulated_usage),
                         });
                     }
 
@@ -644,6 +657,7 @@ impl ChatAgent {
             tool_call_log,
             auto_compacted,
             context_usage_percent,
+            usage: Some(accumulated_usage),
         })
     }
 

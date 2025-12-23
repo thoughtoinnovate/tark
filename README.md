@@ -8,6 +8,7 @@ AI-powered CLI agent with LSP server for code completion, hover, diagnostics, an
 - **Chat Agent**: Interactive chat with tools for file operations and shell commands
 - **LSP-Powered Tools**: Go to definition, find references, call hierarchy using tree-sitter
 - **Multi-Provider**: Supports Claude (Anthropic), OpenAI, and local Ollama models
+- **Usage Dashboard**: Track costs, tokens, and sessions with interactive web dashboard
 - **Context Tracking**: Real-time token usage and cost estimation
 - **Agent Modes**: Plan (read-only), Build (full access), Review (approval required)
 - **blink.cmp Integration**: Works seamlessly with blink.cmp - no config needed!
@@ -240,6 +241,9 @@ The server starts automatically by default. You can also manage it manually:
 | `:TarkBinaryDownload [channel]` | Download binary (optional: `stable`/`nightly`) |
 | `:TarkCompletionStats` | Show completion token usage and cost |
 | `:TarkCompletionStatsReset` | Reset completion stats |
+| `:TarkUsage` | Show usage summary (tokens, costs, sessions) |
+| `:TarkUsageOpen` | Open usage dashboard in browser |
+| `:TarkUsageCleanup [days]` | Cleanup logs older than N days (default: 30) |
 
 Or start manually in a terminal:
 ```bash
@@ -270,6 +274,8 @@ tark serve
 | `/build` | Switch to Build mode (full access) |
 | `/thinking` | Toggle verbose output |
 | `/clear` | Clear chat history |
+| `/usage` | Show usage stats in floating window |
+| `/usage-open` | Open usage dashboard in browser |
 | `/exit` | Close chat window |
 
 ### Agent Modes
@@ -286,6 +292,45 @@ tark serve
 - Type `/` for command autocompletion  
 - Context usage shown in title bar
 - Real-time thinking display with tool calls
+
+### Usage Tracking & Dashboard
+
+Track token usage, costs, and sessions across all your AI interactions:
+
+#### Terminal Command
+```bash
+# Show usage summary in terminal
+tark usage
+
+# Export as JSON
+tark usage --format json
+
+# Cleanup old logs
+tark usage --cleanup 30
+```
+
+#### Neovim Commands
+```vim
+:TarkUsage              " Show summary in floating window
+:TarkUsageOpen          " Open interactive dashboard in browser
+:TarkUsageCleanup 30    " Delete logs older than 30 days
+```
+
+#### Chat Slash Commands
+```
+/usage                  " Show stats in chat
+/usage-open            " Open browser dashboard
+```
+
+#### Web Dashboard
+The interactive HTML dashboard (`http://localhost:8765/usage`) provides:
+- 📊 **Interactive charts** - Visualize costs and token usage by model
+- 💰 **Real-time pricing** - Fetches latest rates from models.dev
+- 📈 **Detailed breakdown** - By model, mode (chat/completion), session, user
+- 🗄️ **Storage insights** - SQLite database size and cleanup tools
+- 📤 **Export to CSV** - Download usage data for external analysis
+
+All usage data is stored locally in `.tark/usage.db` within your workspace.
 
 ### Statusline Integration
 

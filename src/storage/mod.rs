@@ -17,10 +17,13 @@
 //! ├── rules/                         # Project-specific rules
 //! ├── mcp/                           # Project-specific MCP servers
 //! │   └── servers.toml
-//! └── plugins/                       # Project-specific plugins
-//!     └── {plugin}/
+//! ├── plugins/                       # Project-specific plugins
+//! │   └── {plugin}/
+//! └── usage.db                       # Usage tracking database
 
 #![allow(dead_code)]
+
+pub mod usage;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
