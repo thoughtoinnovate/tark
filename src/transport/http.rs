@@ -395,6 +395,13 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         .route("/sessions/new", post(create_new_session))
         .route("/sessions/switch", post(switch_session))
         .route("/sessions/delete", post(delete_session))
+        // Execution plans
+        .route("/plans", get(list_plans))
+        .route("/plans/current", get(get_current_plan))
+        .route("/plans/create", post(create_plan))
+        .route("/plans/update", post(update_plan))
+        .route("/plans/task/status", post(update_task_status))
+        .route("/plans/delete", post(delete_plan))
         // Usage dashboard and API
         .route("/usage", get(usage_dashboard))
         .route("/api/usage/summary", get(usage_summary))
@@ -1233,6 +1240,309 @@ async fn delete_session(
     match storage.delete_session(&req.session_id) {
         Ok(()) => {
             tracing::info!("Deleted session: {}", req.session_id);
+            (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// ========== Execution Plan Endpoints ==========
+
+/// List all execution plans
+async fn list_plans(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    match storage.list_execution_plans() {
+        Ok(plans) => (StatusCode::OK, Json(plans)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Get current execution plan
+async fn get_current_plan(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    match storage.load_current_execution_plan() {
+        Ok(plan) => (StatusCode::OK, Json(plan)).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Create plan request
+#[derive(Debug, Deserialize)]
+struct CreatePlanRequest {
+    title: String,
+    original_prompt: String,
+    tasks: Vec<CreatePlanTask>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatePlanTask {
+    description: String,
+    subtasks: Vec<String>,
+}
+
+/// Create a new execution plan
+async fn create_plan(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreatePlanRequest>,
+) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    let mut plan = crate::storage::ExecutionPlan::new(&req.title, &req.original_prompt);
+
+    // Add tasks and subtasks
+    for task in &req.tasks {
+        plan.add_task(&task.description);
+        let task_idx = plan.tasks.len() - 1;
+        for subtask in &task.subtasks {
+            plan.add_subtask(task_idx, subtask);
+        }
+    }
+
+    // Associate with current session
+    if let Ok(session) = storage.load_current_session() {
+        plan.session_id = Some(session.id);
+    }
+
+    match storage.save_execution_plan(&plan) {
+        Ok(_) => {
+            tracing::info!("Created plan: {} ({})", plan.title, plan.id);
+            (StatusCode::OK, Json(plan)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Update plan request
+#[derive(Debug, Deserialize)]
+struct UpdatePlanRequest {
+    plan_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refinement: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_task_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_subtask_index: Option<usize>,
+}
+
+/// Update an execution plan
+async fn update_plan(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdatePlanRequest>,
+) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    let mut plan = match storage.load_execution_plan(&req.plan_id) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    // Update status if provided
+    if let Some(status_str) = &req.status {
+        plan.status = match status_str.as_str() {
+            "draft" => crate::storage::PlanStatus::Draft,
+            "active" => crate::storage::PlanStatus::Active,
+            "paused" => crate::storage::PlanStatus::Paused,
+            "completed" => crate::storage::PlanStatus::Completed,
+            "abandoned" => crate::storage::PlanStatus::Abandoned,
+            _ => plan.status,
+        };
+    }
+
+    // Add refinement if provided
+    if let Some(refinement) = &req.refinement {
+        plan.add_refinement(refinement);
+    }
+
+    // Update indices if provided
+    if let Some(idx) = req.current_task_index {
+        plan.current_task_index = idx;
+    }
+    if let Some(idx) = req.current_subtask_index {
+        plan.current_subtask_index = idx;
+    }
+
+    match storage.save_execution_plan(&plan) {
+        Ok(_) => {
+            tracing::info!("Updated plan: {}", plan.id);
+            (StatusCode::OK, Json(plan)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Update task status request
+#[derive(Debug, Deserialize)]
+struct UpdateTaskStatusRequest {
+    plan_id: String,
+    task_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subtask_index: Option<usize>,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+}
+
+/// Update task or subtask status
+async fn update_task_status(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateTaskStatusRequest>,
+) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    let mut plan = match storage.load_execution_plan(&req.plan_id) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let status = match req.status.as_str() {
+        "pending" => crate::storage::TaskStatus::Pending,
+        "in_progress" => crate::storage::TaskStatus::InProgress,
+        "completed" => crate::storage::TaskStatus::Completed,
+        "skipped" => crate::storage::TaskStatus::Skipped,
+        "failed" => crate::storage::TaskStatus::Failed,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid status" })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(subtask_idx) = req.subtask_index {
+        // Update subtask
+        plan.set_subtask_status(req.task_index, subtask_idx, status);
+        if let Some(notes) = &req.notes {
+            if let Some(task) = plan.tasks.get_mut(req.task_index) {
+                if let Some(subtask) = task.subtasks.get_mut(subtask_idx) {
+                    subtask.notes = Some(notes.clone());
+                }
+            }
+        }
+    } else {
+        // Update task
+        plan.set_task_status(req.task_index, status);
+        if let Some(notes) = &req.notes {
+            if let Some(task) = plan.tasks.get_mut(req.task_index) {
+                task.notes = Some(notes.clone());
+            }
+        }
+    }
+
+    // Check if all tasks are complete and mark plan complete
+    if plan.is_complete() && plan.status == crate::storage::PlanStatus::Active {
+        plan.status = crate::storage::PlanStatus::Completed;
+        // Clear current plan pointer since it's done
+        let _ = storage.clear_current_plan();
+    }
+
+    match storage.save_execution_plan(&plan) {
+        Ok(_) => {
+            tracing::info!(
+                "Updated task status: plan={}, task={}, subtask={:?}, status={:?}",
+                plan.id,
+                req.task_index,
+                req.subtask_index,
+                status
+            );
+            (StatusCode::OK, Json(plan)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Delete plan request
+#[derive(Debug, Deserialize)]
+struct DeletePlanRequest {
+    plan_id: String,
+}
+
+/// Delete an execution plan
+async fn delete_plan(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeletePlanRequest>,
+) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    match storage.delete_execution_plan(&req.plan_id) {
+        Ok(()) => {
+            tracing::info!("Deleted plan: {}", req.plan_id);
             (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
         }
         Err(e) => (

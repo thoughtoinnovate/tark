@@ -132,6 +132,7 @@ impl TarkStorage {
         std::fs::create_dir_all(project_root.join("mcp"))?;
         std::fs::create_dir_all(project_root.join("plugins"))?;
         std::fs::create_dir_all(project_root.join("sessions"))?;
+        std::fs::create_dir_all(project_root.join("sessions").join("plans"))?;
 
         Ok(Self {
             project_root,
@@ -347,6 +348,109 @@ impl TarkStorage {
         // If this was the current session, clear the pointer
         if self.get_current_session_id().as_deref() == Some(id) {
             let _ = std::fs::remove_file(self.current_session_file());
+        }
+
+        Ok(())
+    }
+
+    // ========== Execution Plans ==========
+
+    /// Get execution plans directory
+    fn execution_plans_dir(&self) -> PathBuf {
+        self.project_root.join("sessions").join("plans")
+    }
+
+    /// Get current plan file path
+    fn current_plan_file(&self) -> PathBuf {
+        self.execution_plans_dir().join("current")
+    }
+
+    /// Save an execution plan
+    pub fn save_execution_plan(&self, plan: &ExecutionPlan) -> Result<PathBuf> {
+        let path = self.execution_plans_dir().join(format!("{}.json", plan.id));
+        let content = serde_json::to_string_pretty(plan)?;
+        std::fs::write(&path, content)?;
+
+        // Update current plan pointer if this is an active plan
+        if plan.status == PlanStatus::Active || plan.status == PlanStatus::Draft {
+            std::fs::write(self.current_plan_file(), &plan.id)?;
+        }
+
+        Ok(path)
+    }
+
+    /// Load an execution plan by ID
+    pub fn load_execution_plan(&self, id: &str) -> Result<ExecutionPlan> {
+        let path = self.execution_plans_dir().join(format!("{}.json", id));
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str(&content).context("Failed to parse execution plan")
+    }
+
+    /// Get the current plan ID
+    pub fn get_current_plan_id(&self) -> Option<String> {
+        let path = self.current_plan_file();
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    /// Set the current plan ID
+    pub fn set_current_plan(&self, id: &str) -> Result<()> {
+        std::fs::write(self.current_plan_file(), id)?;
+        Ok(())
+    }
+
+    /// Clear current plan pointer
+    pub fn clear_current_plan(&self) -> Result<()> {
+        let path = self.current_plan_file();
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    /// Load the current execution plan
+    pub fn load_current_execution_plan(&self) -> Result<ExecutionPlan> {
+        if let Some(id) = self.get_current_plan_id() {
+            self.load_execution_plan(&id)
+        } else {
+            Err(anyhow::anyhow!("No active plan"))
+        }
+    }
+
+    /// List all execution plans
+    pub fn list_execution_plans(&self) -> Result<Vec<PlanMeta>> {
+        let dir = self.execution_plans_dir();
+        let mut plans = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(plan) = serde_json::from_str::<ExecutionPlan>(&content) {
+                            plans.push(PlanMeta::from(&plan));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by updated date (most recent first)
+        plans.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(plans)
+    }
+
+    /// Delete an execution plan
+    pub fn delete_execution_plan(&self, id: &str) -> Result<()> {
+        let path = self.execution_plans_dir().join(format!("{}.json", id));
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+
+        // If this was the current plan, clear the pointer
+        if self.get_current_plan_id().as_deref() == Some(id) {
+            let _ = std::fs::remove_file(self.current_plan_file());
         }
 
         Ok(())
@@ -1222,6 +1326,397 @@ impl From<&ChatSession> for SessionMeta {
             model: session.model.clone(),
             mode: session.mode.clone(),
             message_count: session.messages.len(),
+        }
+    }
+}
+
+// ========== Execution Plans ==========
+
+/// Task status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+    Skipped,
+    Failed,
+}
+
+impl std::fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskStatus::Pending => write!(f, "⬜ pending"),
+            TaskStatus::InProgress => write!(f, "🔄 in_progress"),
+            TaskStatus::Completed => write!(f, "✅ completed"),
+            TaskStatus::Skipped => write!(f, "⏭️ skipped"),
+            TaskStatus::Failed => write!(f, "❌ failed"),
+        }
+    }
+}
+
+/// A subtask within a task
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanSubtask {
+    pub id: String,
+    pub description: String,
+    pub status: TaskStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// A task in an execution plan
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanTask {
+    pub id: String,
+    pub description: String,
+    pub status: TaskStatus,
+    pub subtasks: Vec<PlanSubtask>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+impl PlanTask {
+    /// Check if all subtasks are completed
+    pub fn is_complete(&self) -> bool {
+        if self.subtasks.is_empty() {
+            self.status == TaskStatus::Completed || self.status == TaskStatus::Skipped
+        } else {
+            self.subtasks
+                .iter()
+                .all(|s| s.status == TaskStatus::Completed || s.status == TaskStatus::Skipped)
+        }
+    }
+
+    /// Get progress as (completed, total)
+    pub fn progress(&self) -> (usize, usize) {
+        if self.subtasks.is_empty() {
+            let done = if self.status == TaskStatus::Completed || self.status == TaskStatus::Skipped
+            {
+                1
+            } else {
+                0
+            };
+            (done, 1)
+        } else {
+            let completed = self
+                .subtasks
+                .iter()
+                .filter(|s| s.status == TaskStatus::Completed || s.status == TaskStatus::Skipped)
+                .count();
+            (completed, self.subtasks.len())
+        }
+    }
+}
+
+/// Execution plan status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanStatus {
+    #[default]
+    Draft,
+    Active,
+    Paused,
+    Completed,
+    Abandoned,
+}
+
+/// An execution plan with tasks and subtasks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionPlan {
+    /// Unique plan ID (derived from title, max 10 words)
+    pub id: String,
+    /// Plan title/name
+    pub title: String,
+    /// Original prompt that generated this plan
+    pub original_prompt: String,
+    /// Plan status
+    pub status: PlanStatus,
+    /// Creation timestamp
+    pub created_at: DateTime<Utc>,
+    /// Last updated timestamp
+    pub updated_at: DateTime<Utc>,
+    /// Tasks in this plan
+    pub tasks: Vec<PlanTask>,
+    /// Index of current task being executed (for resume)
+    pub current_task_index: usize,
+    /// Index of current subtask within current task
+    pub current_subtask_index: usize,
+    /// Session ID this plan is associated with
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Notes/refinements added to the plan
+    #[serde(default)]
+    pub refinements: Vec<PlanRefinement>,
+}
+
+/// A refinement/modification to the plan
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanRefinement {
+    pub timestamp: DateTime<Utc>,
+    pub description: String,
+}
+
+impl ExecutionPlan {
+    /// Create a new plan from a prompt
+    pub fn new(title: &str, original_prompt: &str) -> Self {
+        let now = Utc::now();
+        // Generate ID from title (max 10 words, sanitized)
+        let id = Self::generate_id(title);
+
+        Self {
+            id,
+            title: title.to_string(),
+            original_prompt: original_prompt.to_string(),
+            status: PlanStatus::Draft,
+            created_at: now,
+            updated_at: now,
+            tasks: Vec::new(),
+            current_task_index: 0,
+            current_subtask_index: 0,
+            session_id: None,
+            refinements: Vec::new(),
+        }
+    }
+
+    /// Generate plan ID from title (max 10 words, sanitized)
+    fn generate_id(title: &str) -> String {
+        let words: Vec<&str> = title.split_whitespace().take(10).collect();
+
+        let base = words
+            .join("_")
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+
+        // Add timestamp suffix for uniqueness
+        let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        format!("{}_{}", base, timestamp)
+    }
+
+    /// Add a task to the plan
+    pub fn add_task(&mut self, description: &str) -> &mut PlanTask {
+        let task_id = format!("task_{}", self.tasks.len() + 1);
+        self.tasks.push(PlanTask {
+            id: task_id,
+            description: description.to_string(),
+            status: TaskStatus::Pending,
+            subtasks: Vec::new(),
+            notes: None,
+        });
+        self.updated_at = Utc::now();
+        self.tasks.last_mut().unwrap()
+    }
+
+    /// Add a subtask to a task
+    pub fn add_subtask(
+        &mut self,
+        task_index: usize,
+        description: &str,
+    ) -> Option<&mut PlanSubtask> {
+        if let Some(task) = self.tasks.get_mut(task_index) {
+            let subtask_id = format!("{}_sub_{}", task.id, task.subtasks.len() + 1);
+            task.subtasks.push(PlanSubtask {
+                id: subtask_id,
+                description: description.to_string(),
+                status: TaskStatus::Pending,
+                notes: None,
+            });
+            self.updated_at = Utc::now();
+            task.subtasks.last_mut()
+        } else {
+            None
+        }
+    }
+
+    /// Mark a task as complete
+    pub fn complete_task(&mut self, task_index: usize) {
+        if let Some(task) = self.tasks.get_mut(task_index) {
+            task.status = TaskStatus::Completed;
+            // Also mark all subtasks as complete
+            for subtask in &mut task.subtasks {
+                if subtask.status == TaskStatus::Pending || subtask.status == TaskStatus::InProgress
+                {
+                    subtask.status = TaskStatus::Completed;
+                }
+            }
+            self.updated_at = Utc::now();
+        }
+    }
+
+    /// Mark a subtask as complete
+    pub fn complete_subtask(&mut self, task_index: usize, subtask_index: usize) {
+        if let Some(task) = self.tasks.get_mut(task_index) {
+            if let Some(subtask) = task.subtasks.get_mut(subtask_index) {
+                subtask.status = TaskStatus::Completed;
+                self.updated_at = Utc::now();
+
+                // Check if all subtasks are done, mark task complete
+                if task.is_complete() {
+                    task.status = TaskStatus::Completed;
+                }
+            }
+        }
+    }
+
+    /// Set task status
+    pub fn set_task_status(&mut self, task_index: usize, status: TaskStatus) {
+        if let Some(task) = self.tasks.get_mut(task_index) {
+            task.status = status;
+            self.updated_at = Utc::now();
+        }
+    }
+
+    /// Set subtask status
+    pub fn set_subtask_status(
+        &mut self,
+        task_index: usize,
+        subtask_index: usize,
+        status: TaskStatus,
+    ) {
+        if let Some(task) = self.tasks.get_mut(task_index) {
+            if let Some(subtask) = task.subtasks.get_mut(subtask_index) {
+                subtask.status = status;
+                self.updated_at = Utc::now();
+            }
+        }
+    }
+
+    /// Get next pending task/subtask for execution
+    pub fn get_next_pending(&self) -> Option<(usize, Option<usize>)> {
+        for (task_idx, task) in self.tasks.iter().enumerate() {
+            if task.status == TaskStatus::Pending || task.status == TaskStatus::InProgress {
+                // Check subtasks first
+                for (sub_idx, subtask) in task.subtasks.iter().enumerate() {
+                    if subtask.status == TaskStatus::Pending {
+                        return Some((task_idx, Some(sub_idx)));
+                    }
+                }
+                // No pending subtasks, return task itself if no subtasks
+                if task.subtasks.is_empty() && task.status == TaskStatus::Pending {
+                    return Some((task_idx, None));
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if plan is complete
+    pub fn is_complete(&self) -> bool {
+        self.tasks.iter().all(|t| t.is_complete())
+    }
+
+    /// Get overall progress as (completed, total)
+    pub fn progress(&self) -> (usize, usize) {
+        let mut completed = 0;
+        let mut total = 0;
+
+        for task in &self.tasks {
+            let (c, t) = task.progress();
+            completed += c;
+            total += t;
+        }
+
+        (completed, total)
+    }
+
+    /// Add a refinement note
+    pub fn add_refinement(&mut self, description: &str) {
+        self.refinements.push(PlanRefinement {
+            timestamp: Utc::now(),
+            description: description.to_string(),
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Format plan as markdown checklist
+    pub fn to_markdown(&self) -> String {
+        let mut md = String::new();
+
+        md.push_str(&format!("# {}\n\n", self.title));
+        md.push_str(&format!("**Status:** {:?}\n", self.status));
+
+        let (done, total) = self.progress();
+        md.push_str(&format!(
+            "**Progress:** {}/{} ({:.0}%)\n\n",
+            done,
+            total,
+            if total > 0 {
+                (done as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            }
+        ));
+
+        md.push_str("## Tasks\n\n");
+
+        for (i, task) in self.tasks.iter().enumerate() {
+            let checkbox = match task.status {
+                TaskStatus::Completed | TaskStatus::Skipped => "[x]",
+                _ => "[ ]",
+            };
+            md.push_str(&format!("{}. {} {}\n", i + 1, checkbox, task.description));
+
+            for (j, subtask) in task.subtasks.iter().enumerate() {
+                let sub_checkbox = match subtask.status {
+                    TaskStatus::Completed | TaskStatus::Skipped => "[x]",
+                    _ => "[ ]",
+                };
+                md.push_str(&format!(
+                    "   {}.{}. {} {}\n",
+                    i + 1,
+                    j + 1,
+                    sub_checkbox,
+                    subtask.description
+                ));
+            }
+        }
+
+        if !self.refinements.is_empty() {
+            md.push_str("\n## Refinements\n\n");
+            for r in &self.refinements {
+                md.push_str(&format!(
+                    "- {} ({})\n",
+                    r.description,
+                    r.timestamp.format("%Y-%m-%d %H:%M")
+                ));
+            }
+        }
+
+        md
+    }
+}
+
+/// Plan metadata for listing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanMeta {
+    pub id: String,
+    pub title: String,
+    pub status: PlanStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub task_count: usize,
+    pub progress: (usize, usize),
+}
+
+impl From<&ExecutionPlan> for PlanMeta {
+    fn from(plan: &ExecutionPlan) -> Self {
+        Self {
+            id: plan.id.clone(),
+            title: plan.title.clone(),
+            status: plan.status,
+            created_at: plan.created_at,
+            updated_at: plan.updated_at,
+            task_count: plan.tasks.len(),
+            progress: plan.progress(),
         }
     }
 }

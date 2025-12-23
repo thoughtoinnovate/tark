@@ -2162,6 +2162,346 @@ local function save_current_session()
     -- This is called after each message exchange
 end
 
+-- ========== Execution Plans ==========
+
+-- Current plan state
+local current_plan_id = nil
+
+-- Show current plan status
+local function show_plan_status()
+    local url = get_server_url() .. '/plans/current'
+    local curl = require('plenary.curl')
+    
+    curl.get(url, {
+        callback = function(response)
+            vim.schedule(function()
+                if response.status == 200 then
+                    local ok, plan = pcall(vim.json.decode, response.body)
+                    if ok and plan.id then
+                        current_plan_id = plan.id
+                        
+                        -- Format plan status
+                        local lines = {
+                            '📋 **Current Plan:** ' .. plan.title,
+                            '**Status:** ' .. (plan.status or 'draft'),
+                            '',
+                        }
+                        
+                        -- Calculate progress
+                        local total = 0
+                        local done = 0
+                        for _, task in ipairs(plan.tasks or {}) do
+                            if #task.subtasks > 0 then
+                                for _, sub in ipairs(task.subtasks) do
+                                    total = total + 1
+                                    if sub.status == 'completed' or sub.status == 'skipped' then
+                                        done = done + 1
+                                    end
+                                end
+                            else
+                                total = total + 1
+                                if task.status == 'completed' or task.status == 'skipped' then
+                                    done = done + 1
+                                end
+                            end
+                        end
+                        
+                        local pct = total > 0 and math.floor((done / total) * 100) or 0
+                        table.insert(lines, string.format('**Progress:** %d/%d (%d%%)', done, total, pct))
+                        table.insert(lines, '')
+                        table.insert(lines, '**Tasks:**')
+                        
+                        -- Show tasks
+                        for i, task in ipairs(plan.tasks or {}) do
+                            local status_icon = task.status == 'completed' and '✅' or 
+                                               task.status == 'in_progress' and '🔄' or 
+                                               task.status == 'skipped' and '⏭️' or 
+                                               task.status == 'failed' and '❌' or '⬜'
+                            table.insert(lines, string.format('%d. %s %s', i, status_icon, task.description))
+                            
+                            -- Show subtasks
+                            for j, sub in ipairs(task.subtasks or {}) do
+                                local sub_icon = sub.status == 'completed' and '✅' or 
+                                                sub.status == 'in_progress' and '🔄' or 
+                                                sub.status == 'skipped' and '⏭️' or 
+                                                sub.status == 'failed' and '❌' or '⬜'
+                                table.insert(lines, string.format('   %d.%d. %s %s', i, j, sub_icon, sub.description))
+                            end
+                        end
+                        
+                        -- Show next action
+                        table.insert(lines, '')
+                        local next_task = nil
+                        for i, task in ipairs(plan.tasks or {}) do
+                            if task.status ~= 'completed' and task.status ~= 'skipped' then
+                                for j, sub in ipairs(task.subtasks or {}) do
+                                    if sub.status ~= 'completed' and sub.status ~= 'skipped' then
+                                        next_task = string.format('Task %d.%d: %s', i, j, sub.description)
+                                        break
+                                    end
+                                end
+                                if not next_task and #task.subtasks == 0 then
+                                    next_task = string.format('Task %d: %s', i, task.description)
+                                end
+                                if next_task then break end
+                            end
+                        end
+                        
+                        if next_task then
+                            table.insert(lines, '**Next:** ' .. next_task)
+                            table.insert(lines, '')
+                            table.insert(lines, '_Use `/plan-next` to execute next task, `/plan-done [task]` to mark complete_')
+                        else
+                            table.insert(lines, '🎉 **All tasks completed!**')
+                        end
+                        
+                        append_message('system', table.concat(lines, '\n'))
+                    else
+                        append_message('system', '❌ *Invalid plan data*')
+                    end
+                else
+                    append_message('system', '📋 *No active plan. Use `/plan-create` to start one.*')
+                end
+            end)
+        end,
+    })
+end
+
+-- List all plans
+local function show_plan_list()
+    local url = get_server_url() .. '/plans'
+    local curl = require('plenary.curl')
+    
+    curl.get(url, {
+        callback = function(response)
+            vim.schedule(function()
+                if response.status ~= 200 then
+                    append_message('system', '❌ *Failed to load plans*')
+                    return
+                end
+                
+                local ok, plans = pcall(vim.json.decode, response.body)
+                if not ok or not plans or #plans == 0 then
+                    append_message('system', '📋 *No plans found. Use `/plan-create` to start one.*')
+                    return
+                end
+                
+                -- Format plans for display
+                local items = {}
+                for _, plan in ipairs(plans) do
+                    local progress = plan.progress or {0, 0}
+                    local pct = progress[2] > 0 and math.floor((progress[1] / progress[2]) * 100) or 0
+                    local status_icon = plan.status == 'completed' and '✅' or 
+                                       plan.status == 'active' and '🔄' or 
+                                       plan.status == 'paused' and '⏸️' or 
+                                       plan.status == 'abandoned' and '🚫' or '📝'
+                    
+                    local label = string.format('%s %s (%d%%, %d tasks)', 
+                        status_icon, plan.title, pct, plan.task_count)
+                    
+                    table.insert(items, {
+                        label = label,
+                        id = plan.id,
+                        title = plan.title,
+                    })
+                end
+                
+                -- Use our Vim-friendly picker
+                show_picker(items, {
+                    title = 'Execution Plans',
+                    prompt = 'Select a plan:',
+                    format_item = function(item) return item.label end,
+                }, function(item)
+                    if item then
+                        -- Load the selected plan
+                        load_plan(item.id)
+                    end
+                end)
+            end)
+        end,
+    })
+end
+
+-- Load a specific plan
+local function load_plan(plan_id)
+    local url = get_server_url() .. '/plans/update'
+    local curl = require('plenary.curl')
+    
+    -- First set this as current plan
+    local body = vim.json.encode({ 
+        plan_id = plan_id,
+        status = 'active' 
+    })
+    
+    curl.post(url, {
+        body = body,
+        headers = { ['Content-Type'] = 'application/json' },
+        callback = function(response)
+            vim.schedule(function()
+                if response.status == 200 then
+                    local ok, plan = pcall(vim.json.decode, response.body)
+                    if ok and plan.id then
+                        current_plan_id = plan.id
+                        append_message('system', '📋 *Loaded plan: ' .. plan.title .. '*')
+                        show_plan_status()
+                    end
+                else
+                    append_message('system', '❌ *Failed to load plan*')
+                end
+            end)
+        end,
+    })
+end
+
+-- Mark task/subtask as done
+local function mark_task_done(task_spec, status)
+    if not current_plan_id then
+        append_message('system', '❌ *No active plan. Use `/plan-status` to check current plan.*')
+        return
+    end
+    
+    status = status or 'completed'
+    
+    -- Parse task spec: "1" for task 1, "1.2" for task 1 subtask 2
+    local task_idx, subtask_idx = task_spec:match('^(%d+)%.?(%d*)$')
+    if not task_idx then
+        append_message('system', '❌ *Invalid task format. Use: 1 or 1.2*')
+        return
+    end
+    
+    task_idx = tonumber(task_idx) - 1  -- Convert to 0-indexed
+    subtask_idx = subtask_idx ~= '' and (tonumber(subtask_idx) - 1) or nil
+    
+    local url = get_server_url() .. '/plans/task/status'
+    local curl = require('plenary.curl')
+    
+    local body = vim.json.encode({
+        plan_id = current_plan_id,
+        task_index = task_idx,
+        subtask_index = subtask_idx,
+        status = status,
+    })
+    
+    curl.post(url, {
+        body = body,
+        headers = { ['Content-Type'] = 'application/json' },
+        callback = function(response)
+            vim.schedule(function()
+                if response.status == 200 then
+                    local status_text = status == 'completed' and 'completed ✅' or 
+                                       status == 'skipped' and 'skipped ⏭️' or status
+                    append_message('system', string.format('📋 *Task %s marked as %s*', task_spec, status_text))
+                    show_plan_status()
+                else
+                    append_message('system', '❌ *Failed to update task status*')
+                end
+            end)
+        end,
+    })
+end
+
+-- Execute next pending task
+local function execute_next_task()
+    if not current_plan_id then
+        append_message('system', '❌ *No active plan. Use `/plan-status` to check current plan.*')
+        return
+    end
+    
+    local url = get_server_url() .. '/plans/current'
+    local curl = require('plenary.curl')
+    
+    curl.get(url, {
+        callback = function(response)
+            vim.schedule(function()
+                if response.status ~= 200 then
+                    append_message('system', '❌ *Failed to load plan*')
+                    return
+                end
+                
+                local ok, plan = pcall(vim.json.decode, response.body)
+                if not ok then
+                    append_message('system', '❌ *Invalid plan data*')
+                    return
+                end
+                
+                -- Find next pending task
+                local next_desc = nil
+                local task_spec = nil
+                for i, task in ipairs(plan.tasks or {}) do
+                    if task.status ~= 'completed' and task.status ~= 'skipped' then
+                        for j, sub in ipairs(task.subtasks or {}) do
+                            if sub.status ~= 'completed' and sub.status ~= 'skipped' then
+                                next_desc = sub.description
+                                task_spec = string.format('%d.%d', i, j)
+                                break
+                            end
+                        end
+                        if not next_desc and #task.subtasks == 0 then
+                            next_desc = task.description
+                            task_spec = tostring(i)
+                        end
+                        if next_desc then break end
+                    end
+                end
+                
+                if not next_desc then
+                    append_message('system', '🎉 *All tasks completed!*')
+                    return
+                end
+                
+                -- Mark as in progress
+                mark_task_done(task_spec, 'in_progress')
+                
+                -- Send task to agent
+                local msg = string.format(
+                    '**Executing Plan Task %s:**\n\n%s\n\n_From plan: %s_',
+                    task_spec, next_desc, plan.title
+                )
+                
+                -- Ensure we're in build mode for execution
+                if current_mode == 'plan' then
+                    append_message('system', '⚠️ *Switching to build mode for execution...*')
+                    current_mode = 'build'
+                    update_chat_window_title()
+                end
+                
+                -- Send to agent
+                send_message(next_desc)
+            end)
+        end,
+    })
+end
+
+-- Add refinement to current plan
+local function refine_plan(refinement)
+    if not current_plan_id then
+        append_message('system', '❌ *No active plan to refine.*')
+        return
+    end
+    
+    local url = get_server_url() .. '/plans/update'
+    local curl = require('plenary.curl')
+    
+    local body = vim.json.encode({
+        plan_id = current_plan_id,
+        refinement = refinement,
+    })
+    
+    curl.post(url, {
+        body = body,
+        headers = { ['Content-Type'] = 'application/json' },
+        callback = function(response)
+            vim.schedule(function()
+                if response.status == 200 then
+                    append_message('system', '📋 *Plan refined: ' .. refinement .. '*')
+                else
+                    append_message('system', '❌ *Failed to refine plan*')
+                end
+            end)
+        end,
+    })
+end
+
 -- Clear chat history
 local function clear_chat()
     local buf = get_chat_buffer()
@@ -2250,6 +2590,14 @@ slash_commands = {
                 '`/new` - Start a new chat session',
                 '`/session` - List and switch sessions',
                 '`/session [id]` - Switch to specific session',
+                '',
+                '**Execution Plans:**',
+                '`/plan-status` or `/ps` - Show current plan status',
+                '`/plan-list` or `/pl` - List all plans',
+                '`/plan-next` or `/pn` - Execute next pending task',
+                '`/plan-done [task]` or `/pd` - Mark task done (e.g., 1 or 1.2)',
+                '`/plan-skip [task]` - Skip a task',
+                '`/plan-refine [note]` or `/pr` - Add refinement note',
                 '',
                 '`/exit` or `/q` - Close chat window',
                 '',
@@ -2648,6 +2996,72 @@ slash_commands = {
         end,
     },
     ['sessions'] = { alias = 'session' },
+    
+    -- Execution Plan commands
+    ['plan-status'] = {
+        description = 'Show current plan status',
+        usage = '/plan-status',
+        handler = function()
+            show_plan_status()
+        end,
+    },
+    ['ps'] = { alias = 'plan-status' },
+    
+    ['plan-list'] = {
+        description = 'List all plans',
+        usage = '/plan-list',
+        handler = function()
+            show_plan_list()
+        end,
+    },
+    ['pl'] = { alias = 'plan-list' },
+    
+    ['plan-done'] = {
+        description = 'Mark task as done',
+        usage = '/plan-done [task] (e.g., 1 or 1.2)',
+        handler = function(args)
+            if not args or args == '' then
+                append_message('system', '❌ *Usage: /plan-done 1 (task) or /plan-done 1.2 (subtask)*')
+                return
+            end
+            mark_task_done(args:gsub('^%s+', ''):gsub('%s+$', ''), 'completed')
+        end,
+    },
+    ['pd'] = { alias = 'plan-done' },
+    
+    ['plan-skip'] = {
+        description = 'Skip a task',
+        usage = '/plan-skip [task]',
+        handler = function(args)
+            if not args or args == '' then
+                append_message('system', '❌ *Usage: /plan-skip 1 (task) or /plan-skip 1.2 (subtask)*')
+                return
+            end
+            mark_task_done(args:gsub('^%s+', ''):gsub('%s+$', ''), 'skipped')
+        end,
+    },
+    
+    ['plan-next'] = {
+        description = 'Execute next pending task',
+        usage = '/plan-next',
+        handler = function()
+            execute_next_task()
+        end,
+    },
+    ['pn'] = { alias = 'plan-next' },
+    
+    ['plan-refine'] = {
+        description = 'Add refinement to current plan',
+        usage = '/plan-refine [note]',
+        handler = function(args)
+            if not args or args == '' then
+                append_message('system', '❌ *Usage: /plan-refine Add tests for edge cases*')
+                return
+            end
+            refine_plan(args)
+        end,
+    },
+    ['pr'] = { alias = 'plan-refine' },
 }
 
 -- Parse and execute slash commands
