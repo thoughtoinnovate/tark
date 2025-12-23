@@ -1,18 +1,13 @@
---- LSP Proxy Server for tark
---- Provides HTTP endpoints for the tark agent to call Neovim's LSP
---- Uses dynamic port binding (port 0) to support multiple Neovim instances
----@module tark.lsp_server
+-- LSP Proxy Server for tark
+-- Provides HTTP endpoints for the tark agent to call Neovim's LSP
+-- Uses dynamic port binding (port 0) to support multiple Neovim instances
 
 local M = {}
+local lsp = require('tark.lsp')
 
 M.port = nil
 M.server = nil
 M.clients = {}
-
--- Lazy-load LSP module
-local function get_lsp()
-    return require('tark.lsp')
-end
 
 -- HTTP response helpers
 local function http_response(status, body)
@@ -80,7 +75,7 @@ handlers['/lsp/diagnostics'] = function(req, callback)
         return
     end
     
-    local diags = get_lsp().get_diagnostics(bufnr, nil, nil)
+    local diags = lsp.get_diagnostics(bufnr, nil, nil)
     callback(http_ok({ diagnostics = diags }))
 end
 
@@ -98,7 +93,7 @@ handlers['/lsp/symbols'] = function(req, callback)
         return
     end
     
-    get_lsp().get_symbols_async(bufnr, function(symbols)
+    lsp.get_symbols_async(bufnr, function(symbols)
         callback(http_ok({ symbols = symbols }))
     end)
 end
@@ -120,7 +115,7 @@ handlers['/lsp/hover'] = function(req, callback)
         return
     end
     
-    get_lsp().get_hover_async(bufnr, line, col, function(hover)
+    lsp.get_hover_async(bufnr, line, col, function(hover)
         callback(http_ok({ hover = hover }))
     end)
 end
@@ -142,7 +137,7 @@ handlers['/lsp/definition'] = function(req, callback)
         return
     end
     
-    get_lsp().get_definition_async(bufnr, line, col, function(locations)
+    lsp.get_definition_async(bufnr, line, col, function(locations)
         if locations then
             -- Read preview lines for each location
             for _, loc in ipairs(locations) do
@@ -173,7 +168,7 @@ handlers['/lsp/references'] = function(req, callback)
         return
     end
     
-    get_lsp().get_references_async(bufnr, line, col, function(refs)
+    lsp.get_references_async(bufnr, line, col, function(refs)
         if refs then
             -- Read preview lines for each reference
             for _, ref in ipairs(refs) do
@@ -204,7 +199,7 @@ handlers['/lsp/signature'] = function(req, callback)
         return
     end
     
-    get_lsp().get_signature_async(bufnr, line, col, function(sig)
+    lsp.get_signature_async(bufnr, line, col, function(sig)
         callback(http_ok({ signature = sig }))
     end)
 end
@@ -220,12 +215,14 @@ local function handle_client(client)
     
     client:read_start(function(err, data)
         if err then
+            client:read_stop()
             client:close()
             return
         end
         
         if not data then
             -- Connection closed
+            client:read_stop()
             client:close()
             return
         end
@@ -253,6 +250,7 @@ local function handle_client(client)
         local req, parse_err = parse_request(buffer)
         if not req then
             local response = http_error(parse_err or 'Parse error')
+            client:read_stop()
             client:write(response, function()
                 client:close()
             end)
@@ -263,6 +261,7 @@ local function handle_client(client)
         local handler = handlers[req.path]
         if not handler then
             local response = http_error('Unknown endpoint: ' .. req.path)
+            client:read_stop()
             client:write(response, function()
                 client:close()
             end)
@@ -270,6 +269,7 @@ local function handle_client(client)
         end
         
         -- Execute handler (async)
+        client:read_stop()  -- Stop reading to prevent further data
         vim.schedule(function()
             handler(req, function(response)
                 client:write(response, function()
@@ -357,4 +357,3 @@ function M.get_port()
 end
 
 return M
-
