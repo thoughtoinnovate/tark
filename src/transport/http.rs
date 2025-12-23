@@ -27,6 +27,8 @@ struct AppState {
     current_provider: RwLock<String>,
     current_model: RwLock<String>,
     current_mode: RwLock<String>,
+    window_style: RwLock<String>,
+    window_position: RwLock<String>,
     current_cwd: RwLock<PathBuf>,
     chat_agent: RwLock<ChatAgent>,
     working_dir: PathBuf,
@@ -284,6 +286,8 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         current_provider: RwLock::new(default_provider),
         current_model: RwLock::new(default_model),
         current_mode: RwLock::new("build".to_string()),
+        window_style: RwLock::new("split".to_string()),
+        window_position: RwLock::new("right".to_string()),
         current_cwd: RwLock::new(working_dir.clone()),
         chat_agent: RwLock::new(chat_agent),
         working_dir,
@@ -814,6 +818,8 @@ struct SessionResponse {
     provider: String,
     model: String,
     mode: String,
+    style: String,
+    position: String,
 }
 
 /// Get current session state
@@ -821,11 +827,15 @@ async fn get_session(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let provider = state.current_provider.read().await.clone();
     let model = state.current_model.read().await.clone();
     let mode = state.current_mode.read().await.clone();
+    let style = state.window_style.read().await.clone();
+    let position = state.window_position.read().await.clone();
 
     Json(SessionResponse {
         provider,
         model,
         mode,
+        style,
+        position,
     })
 }
 
@@ -835,6 +845,8 @@ struct SaveSessionRequest {
     provider: Option<String>,
     model: Option<String>,
     mode: Option<String>,
+    style: Option<String>,
+    position: Option<String>,
 }
 
 /// Save current session to .tark
@@ -854,6 +866,14 @@ async fn save_session(
     if let Some(mode) = &req.mode {
         let mut current = state.current_mode.write().await;
         *current = mode.clone();
+    }
+    if let Some(style) = &req.style {
+        let mut current = state.window_style.write().await;
+        *current = style.clone();
+    }
+    if let Some(position) = &req.position {
+        let mut current = state.window_position.write().await;
+        *current = position.clone();
     }
 
     // Save to storage

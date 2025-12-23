@@ -2208,6 +2208,8 @@ slash_commands = {
             else
                 M.config.window.position = 'right'
             end
+            -- Save layout preference
+            if M.save_session then M.save_session() end
             -- Reopen to apply
             M.close()
             vim.defer_fn(function() M.open() end, 50)
@@ -2224,6 +2226,8 @@ slash_commands = {
             else
                 M.config.window.position = 'right'
             end
+            -- Save layout preference
+            if M.save_session then M.save_session() end
             -- Reopen to apply
             M.close()
             vim.defer_fn(function() M.open() end, 50)
@@ -2235,6 +2239,8 @@ slash_commands = {
         usage = '/popup',
         handler = function()
             M.config.window.style = 'popup'
+            -- Save layout preference
+            if M.save_session then M.save_session() end
             -- Reopen to apply
             M.close()
             vim.defer_fn(function() M.open() end, 50)
@@ -2256,6 +2262,8 @@ slash_commands = {
                 M.config.window.style = 'split'
                 append_message('system', '📐 Layout: split (docked)')
             end
+            -- Save layout preference
+            if M.save_session then M.save_session() end
             -- Reopen to apply
             M.close()
             vim.defer_fn(function() M.open() end, 50)
@@ -2745,7 +2753,7 @@ function M.setup(opts)
     -- Pre-fetch models database from models.dev
     fetch_models_db()
     
-    -- Restore session from server (provider, model, mode)
+    -- Restore session from server (provider, model, mode, style, position)
     vim.fn.jobstart({
         'curl', '-s', M.config.server_url .. '/session',
     }, {
@@ -2763,6 +2771,12 @@ function M.setup(opts)
                     if resp.mode then
                         current_mode = resp.mode
                     end
+                    if resp.style then
+                        M.config.window.style = resp.style
+                    end
+                    if resp.position then
+                        M.config.window.position = resp.position
+                    end
                 end
             end
         end,
@@ -2775,6 +2789,8 @@ local function save_session()
         provider = current_provider,
         model = current_model,
         mode = current_mode,
+        style = M.config.window.style,
+        position = M.config.window.position,
     })
     
     vim.fn.jobstart({
