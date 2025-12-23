@@ -168,8 +168,16 @@ impl CompletionEngine {
 
     /// Build enhanced prefix with LSP context information
     fn build_enhanced_prefix(&self, prefix: &str, request: &CompletionRequest) -> String {
+        // Use context if we have LSP or any fallback data (symbols/diagnostics/type)
         let ctx = match &request.lsp_context {
-            Some(ctx) if ctx.has_lsp => ctx,
+            Some(ctx)
+                if ctx.has_lsp
+                    || !ctx.symbols.is_empty()
+                    || !ctx.diagnostics.is_empty()
+                    || ctx.cursor_type.is_some() =>
+            {
+                ctx
+            }
             _ => return prefix.to_string(),
         };
 

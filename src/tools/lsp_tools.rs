@@ -235,6 +235,80 @@ impl CodeAnalyzer {
         Self { working_dir }
     }
 
+    /// Parse provided content and extract symbols (fallback when LSP is unavailable)
+    pub fn extract_symbols_from_str(
+        &self,
+        file_path: &Path,
+        content: &str,
+    ) -> Result<Vec<Symbol>> {
+        let extension = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+        let language = Self::get_language(extension)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported language: {}", extension))?;
+
+        let query_str = Self::get_symbols_query(extension)
+            .ok_or_else(|| anyhow::anyhow!("No query for language: {}", extension))?;
+
+        let mut parser = Parser::new();
+        parser.set_language(&language)?;
+
+        let tree = parser
+            .parse(content, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+
+        let query = Query::new(&language, query_str)?;
+        let mut cursor = QueryCursor::new();
+        let matches = cursor.matches(&query, tree.root_node(), content.as_bytes());
+
+        let mut symbols = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+
+        for m in matches {
+            for cap in m.captures {
+                let name_node = cap
+                    .node
+                    .child_by_field_name("name")
+                    .or_else(|| {
+                        // Some queries label the capture directly
+                        if cap.index % 2 == 0 {
+                            Some(cap.node)
+                        } else {
+                            None
+                        }
+                    });
+
+                if let Some(name_node) = name_node {
+                    let name = name_node.utf8_text(content.as_bytes())?.to_string();
+                    let start = name_node.start_position();
+                    let end = name_node.end_position();
+
+                    // Determine symbol kind based on capture name
+                    let capture_name = query.capture_names()[cap.index as usize].clone();
+                    let kind = Self::capture_to_kind(&capture_name);
+
+                    // Extract signature (line where the symbol is defined)
+                    let signature = lines
+                        .get(start.row)
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+
+                    symbols.push(Symbol {
+                        name,
+                        kind,
+                        file: file_path.display().to_string(),
+                        line: start.row,
+                        column: start.column,
+                        end_line: end.row,
+                        signature,
+                        doc_comment: None,
+                    });
+                }
+            }
+        }
+
+        Ok(symbols)
+    }
+
     /// Get the tree-sitter language for a file extension
     fn get_language(extension: &str) -> Option<Language> {
         match extension {
@@ -289,6 +363,36 @@ impl CodeAnalyzer {
             "#,
             ),
             _ => None,
+        }
+    }
+
+    /// Map tree-sitter capture names to SymbolKind
+    fn capture_to_kind(capture: &str) -> SymbolKind {
+        let lower = capture.to_lowercase();
+        if lower.contains("class") {
+            SymbolKind::Class
+        } else if lower.contains("struct") {
+            SymbolKind::Struct
+        } else if lower.contains("trait") {
+            SymbolKind::Trait
+        } else if lower.contains("enum") {
+            SymbolKind::Enum
+        } else if lower.contains("interface") {
+            SymbolKind::Interface
+        } else if lower.contains("method") {
+            SymbolKind::Method
+        } else if lower.contains("fn") || lower.contains("function") {
+            SymbolKind::Function
+        } else if lower.contains("type") {
+            SymbolKind::Type
+        } else if lower.contains("mod") || lower.contains("module") {
+            SymbolKind::Module
+        } else if lower.contains("const") || lower.contains("static") {
+            SymbolKind::Constant
+        } else if lower.contains("var") || lower.contains("field") {
+            SymbolKind::Variable
+        } else {
+            SymbolKind::Variable
         }
     }
 

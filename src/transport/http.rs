@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::llm::{self, LlmProvider};
 use crate::storage::usage::UsageTracker;
 use crate::storage::TarkStorage;
-use crate::tools::ToolRegistry;
+use crate::tools::{CodeAnalyzer, ToolRegistry};
 use anyhow::Result;
 use axum::{
     extract::State,
@@ -497,7 +497,7 @@ async fn handle_inline_completion(
         );
 
     // Convert HTTP LSP context to completion engine LSP context
-    let lsp_context = req.context.map(|ctx| crate::completion::LspContext {
+    let mut lsp_context = req.context.map(|ctx| crate::completion::LspContext {
         language: ctx.language,
         diagnostics: ctx
             .diagnostics
@@ -523,6 +523,39 @@ async fn handle_inline_completion(
             .collect(),
         has_lsp: ctx.has_lsp,
     });
+
+    // Tree-sitter fallback: if no LSP and no symbols, try to extract symbols locally
+    if lsp_context
+        .as_ref()
+        .map_or(true, |ctx| !ctx.has_lsp && ctx.symbols.is_empty())
+    {
+        let analyzer = CodeAnalyzer::new(state.working_dir.clone());
+        let file_path = PathBuf::from(&req.file_path);
+        if let Ok(symbols) = analyzer.extract_symbols_from_str(&file_path, &req.file_content) {
+            if !symbols.is_empty() {
+                let mapped: Vec<_> = symbols
+                    .into_iter()
+                    .map(|s| crate::completion::SymbolInfo {
+                        name: s.name,
+                        kind: s.kind.to_string(),
+                        line: s.line,
+                        detail: s
+                            .signature
+                            .or(s.doc_comment)
+                            .filter(|d| !d.is_empty()),
+                    })
+                    .collect();
+
+                lsp_context = Some(crate::completion::LspContext {
+                    language: None,
+                    diagnostics: vec![],
+                    cursor_type: None,
+                    symbols: mapped,
+                    has_lsp: false,
+                });
+            }
+        }
+    }
 
     let completion_req = CompletionRequest {
         file_path: PathBuf::from(&req.file_path),
