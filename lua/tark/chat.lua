@@ -53,6 +53,8 @@ local chat_buf = nil
 local chat_win = nil
 local input_buf = nil
 local input_win = nil
+local tasks_buf = nil
+local tasks_win = nil
 local current_provider = 'ollama'      -- Backend protocol for API calls
 local current_provider_id = 'ollama'   -- Actual provider identity for display
 
@@ -61,6 +63,12 @@ local prompt_history = {}
 local prompt_history_index = 0  -- 0 = current input, 1 = most recent, etc.
 local prompt_history_max = 100  -- Max prompts to remember
 local prompt_current_input = ''  -- Temporary storage for current input when navigating
+
+-- Task queue for non-blocking multi-prompt handling
+local task_queue = {}  -- Array of {id, prompt, status, timestamp}
+local task_id_counter = 0
+local queue_processing = false  -- Is a task currently being processed?
+local focused_window = 'input'  -- 'input', 'chat', or 'tasks'
 
 -- Store last modified files for diff view
 local last_modified_files = {}
@@ -843,6 +851,7 @@ local function get_command_completions()
         { word = '/gpt', menu = 'Quick switch to OpenAI', kind = '🧠' },
         { word = '/clear', menu = 'Clear chat history & stats', kind = '🗑️' },
         { word = '/c', menu = 'Clear (short)', kind = '🗑️' },
+        { word = '/tasks', menu = 'Focus task queue window', kind = '📋' },
         { word = '/stats', menu = 'Show session statistics', kind = '📊' },
         { word = '/s', menu = 'Stats (short)', kind = '📊' },
         { word = '/cost', menu = 'Show model pricing info', kind = '💰' },
@@ -1064,6 +1073,90 @@ local response_start_time = nil
 
 -- Create namespace for extmarks
 local ns_id = vim.api.nvim_create_namespace('tark_chat_highlights')
+
+-- Task queue management functions
+local function add_to_queue(prompt)
+    task_id_counter = task_id_counter + 1
+    table.insert(task_queue, {
+        id = task_id_counter,
+        prompt = prompt,
+        status = 'queued',
+        timestamp = os.time(),
+    })
+    update_tasks_window()
+    return task_id_counter
+end
+
+local function remove_from_queue(index)
+    if index > 0 and index <= #task_queue then
+        table.remove(task_queue, index)
+        update_tasks_window()
+        return true
+    end
+    return false
+end
+
+local function update_tasks_window()
+    if not tasks_buf or not vim.api.nvim_buf_is_valid(tasks_buf) then
+        return
+    end
+    
+    local lines = {}
+    if #task_queue == 0 then
+        table.insert(lines, ' No tasks')
+        table.insert(lines, '')
+        table.insert(lines, ' Press i to')
+        table.insert(lines, ' add tasks')
+    else
+        table.insert(lines, ' Tasks (' .. #task_queue .. ')')
+        table.insert(lines, '')
+        for i, task in ipairs(task_queue) do
+            local icon = task.status == 'processing' and '⏳' or '⏸'
+            local preview = task.prompt:gsub('\n', ' ')
+            if #preview > 18 then
+                preview = preview:sub(1, 15) .. '...'
+            end
+            table.insert(lines, string.format(' %s %d. %s', icon, i, preview))
+        end
+    end
+    
+    pcall(function()
+        vim.api.nvim_buf_set_option(tasks_buf, 'modifiable', true)
+        vim.api.nvim_buf_set_lines(tasks_buf, 0, -1, false, lines)
+        vim.api.nvim_buf_set_option(tasks_buf, 'modifiable', false)
+    end)
+end
+
+-- Forward declaration for send_message_internal
+local send_message_internal
+
+-- Process next task in queue (called after task completion)
+local function process_next_task()
+    if queue_processing or #task_queue == 0 then
+        return
+    end
+    
+    -- Get the first task
+    local task = task_queue[1]
+    if not task then
+        return
+    end
+    
+    -- Mark as processing
+    task.status = 'processing'
+    queue_processing = true
+    update_tasks_window()
+    
+    -- Send the message
+    send_message_internal(task.prompt, function()
+        -- On completion, remove from queue and process next
+        vim.schedule(function()
+            queue_processing = false
+            remove_from_queue(1)  -- Remove first task
+            process_next_task()   -- Process next if available
+        end)
+    end)
+end
 
 -- Get user accent highlight based on current mode
 local function get_user_accent_hl()
@@ -1428,9 +1521,12 @@ local function stop_status_polling()
     last_status = ''
 end
 
--- Send a message to the chat server
-local function send_message(message)
+-- Internal message sending (called by queue processor)
+send_message_internal = function(message, completion_callback)
     if not message or message == '' then
+        if completion_callback then
+            completion_callback()
+        end
         return
     end
 
@@ -1498,6 +1594,13 @@ local function send_message(message)
                 
                 -- Mark agent as not running
                 agent_running = false
+                
+                -- Call completion callback if provided
+                if completion_callback then
+                    vim.schedule(function()
+                        completion_callback()
+                    end)
+                end
                 
                 -- Finalize thinking section - replace with collapsed summary
                 local current_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
@@ -1745,6 +1848,12 @@ local function send_message(message)
                 stop_status_polling()
                 stop_loading_animation()
                 agent_running = false
+                
+                -- Call completion callback if provided
+                if completion_callback then
+                    completion_callback()
+                end
+                
                 if data and data[1] and data[1] ~= '' then
                     local err_msg = table.concat(data, '')
                     append_message('system', '❌ *Error: Could not connect to server. Run: tark serve*')
@@ -1762,6 +1871,11 @@ local function send_message(message)
                     stop_status_polling()
                     agent_running = false
                     
+                    -- Call completion callback if provided
+                    if completion_callback then
+                        completion_callback()
+                    end
+                    
                     if exit_code == 28 then
                         -- curl exit code 28 = timeout
                         append_message('system', '⏱️ *Request timed out after 5 minutes. The server may still be processing.*')
@@ -1776,6 +1890,24 @@ local function send_message(message)
             end)
         end,
     })
+end
+
+-- Public send_message: adds to queue or processes immediately
+local function send_message(message)
+    if not message or message == '' then
+        return
+    end
+    
+    -- If agent is busy, add to queue
+    if agent_running or queue_processing then
+        add_to_queue(message)
+        append_message('system', string.format('➕ *Task added to queue (#%d)*', #task_queue))
+        return
+    end
+    
+    -- Otherwise, process immediately (start the queue)
+    add_to_queue(message)
+    process_next_task()
 end
 
 -- Switch to a specific provider
@@ -2649,6 +2781,21 @@ slash_commands = {
     },
     ['c'] = { alias = 'clear' },
     
+    -- Tasks command (focus tasks window)
+    ['tasks'] = {
+        description = 'Focus task queue window',
+        usage = '/tasks',
+        handler = function()
+            if tasks_win and vim.api.nvim_win_is_valid(tasks_win) then
+                focused_window = 'tasks'
+                vim.api.nvim_set_current_win(tasks_win)
+                append_message('system', '📋 *Switched to tasks window. Press `dd` to delete, `i` to add new task, `j`/`k` to navigate.*')
+            else
+                append_message('system', '❌ *Task window not available*')
+            end
+        end,
+    },
+    
     -- Help command
     ['help'] = {
         description = 'Show available commands',
@@ -2664,6 +2811,8 @@ slash_commands = {
                 '  • `/model ollama` - Switch to Ollama (local)',
                 '',
                 '`/clear` or `/c` - Clear chat history and reset stats',
+                '',
+                '`/tasks` - Focus task queue window (press `i` to return to input)',
                 '',
                 '`/compact` - Summarize conversation to save context (for large codebases)',
                 '',
@@ -3374,9 +3523,13 @@ function M.open(initial_message)
             { cost_part_t, 'String' },
         }
         
+        -- Adjust width to make room for tasks window
+        local tasks_width = 22
+        local chat_width = width - tasks_width
+        
         chat_win = vim.api.nvim_open_win(buf, false, {
             relative = 'editor',
-            width = width,
+            width = chat_width,
             height = height,
             col = col,
             row = row,
@@ -3385,6 +3538,76 @@ function M.open(initial_message)
             title = title_config,
             title_pos = 'left',
         })
+
+        -- Create tasks window (slim, on the right)
+        local tasks = vim.api.nvim_create_buf(false, true)
+        tasks_buf = tasks
+        vim.api.nvim_buf_set_option(tasks, 'buftype', 'nofile')
+        vim.api.nvim_buf_set_option(tasks, 'filetype', 'tark-tasks')
+        vim.api.nvim_buf_set_option(tasks, 'modifiable', false)
+        
+        tasks_win = vim.api.nvim_open_win(tasks, false, {
+            relative = 'editor',
+            width = tasks_width,
+            height = height,
+            col = col + chat_width,
+            row = row,
+            style = 'minimal',
+            border = M.config.window.border,
+            title = {
+                { ' Tasks ', 'FloatTitle' },
+            },
+            title_pos = 'center',
+        })
+        
+        -- Configure tasks window options
+        vim.api.nvim_win_set_option(tasks_win, 'number', false)
+        vim.api.nvim_win_set_option(tasks_win, 'relativenumber', false)
+        vim.api.nvim_win_set_option(tasks_win, 'signcolumn', 'no')
+        vim.api.nvim_win_set_option(tasks_win, 'wrap', true)
+        vim.api.nvim_win_set_option(tasks_win, 'linebreak', true)
+        vim.api.nvim_win_set_option(tasks_win, 'winfixwidth', true)
+        vim.api.nvim_win_set_option(tasks_win, 'winfixheight', true)
+        
+        -- Set up keymappings for tasks window
+        vim.api.nvim_buf_set_keymap(tasks, 'n', 'dd', '', {
+            noremap = true,
+            silent = true,
+            callback = function()
+                local line = vim.api.nvim_win_get_cursor(tasks_win)[1]
+                -- Line 1 is header, line 2 is empty, tasks start at line 3
+                local task_idx = line - 2
+                if task_idx > 0 and task_idx <= #task_queue then
+                    remove_from_queue(task_idx)
+                    vim.notify(string.format('Removed task #%d', task_idx), vim.log.levels.INFO)
+                end
+            end,
+        })
+        
+        vim.api.nvim_buf_set_keymap(tasks, 'n', 'i', '', {
+            noremap = true,
+            silent = true,
+            callback = function()
+                -- Switch focus to input window
+                focused_window = 'input'
+                vim.api.nvim_set_current_win(input_win)
+                vim.cmd('startinsert')
+            end,
+        })
+        
+        vim.api.nvim_buf_set_keymap(tasks, 'n', '<CR>', '', {
+            noremap = true,
+            silent = true,
+            callback = function()
+                -- Switch focus to input window
+                focused_window = 'input'
+                vim.api.nvim_set_current_win(input_win)
+                vim.cmd('startinsert')
+            end,
+        })
+        
+        -- Initialize tasks display
+        update_tasks_window()
 
         -- Create input window with mode-specific title (mode badge is HERE, not in chat window)
         local mode_icons = { plan = '◇', build = '◆', review = '◈' }
@@ -3689,6 +3912,10 @@ function M.close()
     if chat_win and vim.api.nvim_win_is_valid(chat_win) then
         vim.api.nvim_win_close(chat_win, true)
         chat_win = nil
+    end
+    if tasks_win and vim.api.nvim_win_is_valid(tasks_win) then
+        vim.api.nvim_win_close(tasks_win, true)
+        tasks_win = nil
     end
     if input_win and vim.api.nvim_win_is_valid(input_win) then
         vim.api.nvim_win_close(input_win, true)
