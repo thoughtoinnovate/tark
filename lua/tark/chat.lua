@@ -2793,16 +2793,15 @@ end
 -- Export save function
 M.save_session = save_session
 
--- Test helpers (only used in test mode)
-if vim.g.tark_test_mode then
-    M._test_get_current_provider = function() return current_provider end
-    M._test_get_current_provider_id = function() return current_provider_id end
-    M._test_get_current_model = function() return current_model end
-    M._test_set_provider_state = function(provider, provider_id, model)
-        current_provider = provider
-        current_provider_id = provider_id
-        current_model = model
-    end
+-- Test helpers (always export, but document as test-only)
+-- These functions should only be used in automated tests
+M._test_get_current_provider = function() return current_provider end
+M._test_get_current_provider_id = function() return current_provider_id end
+M._test_get_current_model = function() return current_model end
+M._test_set_provider_state = function(provider, provider_id, model)
+    current_provider = provider
+    current_provider_id = provider_id
+    current_model = model
 end
 
 return M
