@@ -2125,6 +2125,20 @@ local function show_session_picker()
                     local mode = session.mode or 'build'
                     local provider = session.provider or 'ollama'
                     
+                    -- Determine status indicator
+                    local status_icon = ''
+                    local status_text = ''
+                    if session.is_current and session.agent_running then
+                        status_icon = '🔄 '
+                        status_text = ' - Working'
+                    elseif session.is_current then
+                        status_icon = '⏸️ '
+                        status_text = ' - Current'
+                    else
+                        status_icon = '   '  -- 3 spaces for alignment
+                        status_text = ''
+                    end
+                    
                     -- Format date
                     local date_str = ''
                     if session.updated_at then
@@ -2135,8 +2149,8 @@ local function show_session_picker()
                         end
                     end
                     
-                    local label = string.format('%s [%s] (%d msgs, %s) %s', 
-                        name, provider, msg_count, mode, date_str)
+                    local label = string.format('%s%s [%s] (%d msgs, %s) %s%s', 
+                        status_icon, name, provider, msg_count, mode, date_str, status_text)
                     
                     table.insert(items, {
                         label = label,

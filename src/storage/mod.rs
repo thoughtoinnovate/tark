@@ -1313,6 +1313,10 @@ pub struct SessionMeta {
     pub model: String,
     pub mode: String,
     pub message_count: usize,
+    /// Is this the current active session
+    pub is_current: bool,
+    /// Is agent currently processing in this session
+    pub agent_running: bool,
 }
 
 impl From<&ChatSession> for SessionMeta {
@@ -1326,6 +1330,8 @@ impl From<&ChatSession> for SessionMeta {
             model: session.model.clone(),
             mode: session.mode.clone(),
             message_count: session.messages.len(),
+            is_current: false,    // Will be set by caller
+            agent_running: false, // Will be set by caller
         }
     }
 }

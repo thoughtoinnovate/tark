@@ -1155,7 +1155,23 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     };
 
     match storage.list_sessions() {
-        Ok(sessions) => (StatusCode::OK, Json(sessions)).into_response(),
+        Ok(mut sessions) => {
+            // Get current session ID
+            let current_session_id = storage.get_current_session_id();
+
+            // Check if agent is running
+            use std::sync::atomic::Ordering;
+            let agent_running = state.interrupt_flag.load(Ordering::SeqCst);
+
+            // Annotate sessions with status
+            for session in &mut sessions {
+                let is_current = current_session_id.as_ref() == Some(&session.id);
+                session.is_current = is_current;
+                session.agent_running = is_current && agent_running;
+            }
+
+            (StatusCode::OK, Json(sessions)).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
