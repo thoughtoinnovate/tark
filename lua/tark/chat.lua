@@ -2589,6 +2589,51 @@ function M.open(initial_message)
         -- For floating prompt, prevent resize by maximize plugins
         vim.api.nvim_win_set_option(input_win, 'winfixheight', true)
         vim.api.nvim_win_set_option(input_win, 'winfixwidth', true)
+        
+        -- Function to update footer with Vim mode
+        local function update_input_footer()
+            if not input_win or not vim.api.nvim_win_is_valid(input_win) then return end
+            
+            -- Get current Vim mode
+            local mode = vim.api.nvim_get_mode().mode
+            local vim_mode_text, vim_mode_hl
+            if mode == 'i' or mode == 'ic' or mode == 'ix' then
+                vim_mode_text = ' INSERT '
+                vim_mode_hl = 'TarkModeBuild'  -- Green
+            elseif mode == 'v' or mode == 'V' or mode == '' then
+                vim_mode_text = ' VISUAL '
+                vim_mode_hl = 'TarkModeReview'  -- Yellow
+            elseif mode == 'R' or mode == 'Rv' then
+                vim_mode_text = ' REPLACE '
+                vim_mode_hl = 'WarningMsg'
+            else
+                vim_mode_text = ' NORMAL '
+                vim_mode_hl = 'TarkModePlan'  -- Blue
+            end
+            
+            local config = vim.api.nvim_win_get_config(input_win)
+            config.footer = {
+                { vim_mode_text, vim_mode_hl },
+                { ' tab ', 'Comment' },
+                { current_mode == 'plan' and 'build' or 'plan', get_mode_highlight(current_mode == 'plan' and 'build' or 'plan', false) },
+                { '  /', 'Comment' },
+                { 'commands ', 'FloatBorder' },
+            }
+            vim.api.nvim_win_set_config(input_win, config)
+        end
+        
+        -- Set up autocmd to update footer on mode change
+        local augroup = vim.api.nvim_create_augroup('TarkInputMode', { clear = true })
+        vim.api.nvim_create_autocmd('ModeChanged', {
+            group = augroup,
+            buffer = input,
+            callback = function()
+                vim.schedule(update_input_footer)
+            end,
+        })
+        
+        -- Initial update
+        update_input_footer()
     end
 
     -- Helper function to process input
