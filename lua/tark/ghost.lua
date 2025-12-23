@@ -7,6 +7,12 @@ local ns_id = vim.api.nvim_create_namespace('tark_ghost_text')
 local current_completion = nil
 local debounce_timer = nil
 local enabled = true
+local function set_enabled(state)
+    enabled = state
+    if not enabled then
+        M.dismiss()
+    end
+end
 
 M.config = {
     server_url = 'http://localhost:8765',
@@ -135,10 +141,11 @@ end
 ---Get statusline component string
 ---@return string
 function M.statusline()
+    local icon = enabled and '🛰' or '⏻'
     if session_stats.requests == 0 then
-        return ''
+        return icon
     end
-    
+
     local total_tokens = session_stats.input_tokens + session_stats.output_tokens
     local accept_rate = session_stats.requests > 0 
         and math.floor((session_stats.accepted / session_stats.requests) * 100) 
@@ -159,7 +166,7 @@ function M.statusline()
         table.insert(parts, format_cost(session_stats.total_cost))
     end
     
-    return table.concat(parts, ' · ')
+    return icon .. ' ' .. table.concat(parts, ' · ')
 end
 
 ---Get detailed stats as formatted lines
@@ -399,11 +406,19 @@ end
 
 -- Toggle ghost text on/off
 function M.toggle()
-    enabled = not enabled
-    if not enabled then
-        M.dismiss()
-    end
+    set_enabled(not enabled)
     vim.notify('Ghost text ' .. (enabled and 'enabled' or 'disabled'), vim.log.levels.INFO)
+end
+
+-- Explicit enable/disable helpers
+function M.enable()
+    set_enabled(true)
+    vim.notify('Ghost text enabled', vim.log.levels.INFO)
+end
+
+function M.disable()
+    set_enabled(false)
+    vim.notify('Ghost text disabled', vim.log.levels.INFO)
 end
 
 -- Check if we have a visible ghost completion

@@ -190,6 +190,22 @@ local function setup_commands()
             vim.notify('Ghost text is disabled in config', vim.log.levels.WARN)
         end
     end, { desc = 'Toggle ghost text' })
+
+    vim.api.nvim_create_user_command('TarkCompletionEnable', function()
+        if M.config.ghost_text.enabled then
+            get_ghost().enable()
+        else
+            vim.notify('Ghost text is disabled in config', vim.log.levels.WARN)
+        end
+    end, { desc = 'Enable ghost text completions' })
+
+    vim.api.nvim_create_user_command('TarkCompletionDisable', function()
+        if M.config.ghost_text.enabled then
+            get_ghost().disable()
+        else
+            vim.notify('Ghost text is disabled in config', vim.log.levels.WARN)
+        end
+    end, { desc = 'Disable ghost text completions' })
     
     vim.api.nvim_create_user_command('TarkGhostTrigger', function()
         if M.config.ghost_text.enabled then
