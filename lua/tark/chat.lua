@@ -617,46 +617,6 @@ local function get_chat_buffer()
     vim.api.nvim_buf_set_option(chat_buf, 'bufhidden', 'hide')
     vim.api.nvim_buf_set_option(chat_buf, 'filetype', 'markdown')
     vim.api.nvim_buf_set_name(chat_buf, 'tark-chat')
-    
-    -- Start with buffer modifiable (will be protected after adding prompt)
-    vim.api.nvim_buf_set_option(chat_buf, 'modifiable', true)
-    
-    -- Add buffer protection: only allow editing the prompt line (last line)
-    local augroup = vim.api.nvim_create_augroup('TarkChatProtection', { clear = true })
-    
-    vim.api.nvim_create_autocmd({'TextChanged', 'TextChangedI'}, {
-        group = augroup,
-        buffer = chat_buf,
-        callback = function()
-            -- Always keep buffer modifiable for the prompt line
-            -- Protection is handled by making buffer non-modifiable when needed
-            local total_lines = vim.api.nvim_buf_line_count(chat_buf)
-            local last_line = vim.api.nvim_buf_get_lines(chat_buf, total_lines - 1, total_lines, false)[1] or ''
-            
-            -- Ensure prompt line exists
-            if not last_line:match('^> ') then
-                vim.schedule(function()
-                    add_prompt_line()
-                end)
-            end
-        end,
-    })
-    
-    -- Protect against deleting lines above the prompt
-    vim.api.nvim_create_autocmd('BufModifiedSet', {
-        group = augroup,
-        buffer = chat_buf,
-        callback = function()
-            -- Keep track of valid prompt line
-            local total_lines = vim.api.nvim_buf_line_count(chat_buf)
-            if total_lines < 3 then
-                -- Buffer too small, restore prompt
-                vim.schedule(function()
-                    add_prompt_line()
-                end)
-            end
-        end,
-    })
 
     return chat_buf
 end
@@ -883,9 +843,7 @@ local function add_prompt_line()
     -- Add separator and prompt if not already there
     if not last_line:match('^> ') then
         local separator = string.rep('─', 80)
-        vim.api.nvim_buf_set_option(chat_buf, 'modifiable', true)
         vim.api.nvim_buf_set_lines(chat_buf, -1, -1, false, {'', separator, '> '})
-        vim.api.nvim_buf_set_option(chat_buf, 'modifiable', false)
         prompt_line_start = vim.api.nvim_buf_line_count(chat_buf)
     end
 end
@@ -911,9 +869,7 @@ local function clear_prompt_line()
     end
     
     local last_line_num = vim.api.nvim_buf_line_count(chat_buf)
-    vim.api.nvim_buf_set_option(chat_buf, 'modifiable', true)
     vim.api.nvim_buf_set_lines(chat_buf, last_line_num - 1, last_line_num, false, {'> '})
-    vim.api.nvim_buf_set_option(chat_buf, 'modifiable', false)
 end
 
 -- Append a message to the chat
@@ -1080,8 +1036,6 @@ local function append_message(role, content)
     end
 
     if #new_lines > 0 then
-        vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-        
         -- Find where to insert (before prompt line)
         local total_lines = vim.api.nvim_buf_line_count(buf)
         local insert_pos = total_lines
@@ -1095,8 +1049,6 @@ local function append_message(role, content)
         end
         
         vim.api.nvim_buf_set_lines(buf, insert_pos, insert_pos, false, new_lines)
-        
-        vim.api.nvim_buf_set_option(buf, 'modifiable', false)
         
         -- Apply highlights using extmarks
         for _, range in ipairs(highlight_ranges) do
@@ -2705,7 +2657,7 @@ end
 
 -- Check if chat is open
 function M.is_open()
-    return (chat_win and vim.api.nvim_win_is_valid(chat_win))
+    return (chat_win ~= nil and vim.api.nvim_win_is_valid(chat_win)) == true
 end
 
 -- Toggle chat window
