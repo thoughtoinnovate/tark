@@ -527,7 +527,7 @@ async fn handle_inline_completion(
     // Tree-sitter fallback: if no LSP and no symbols, try to extract symbols locally
     if lsp_context
         .as_ref()
-        .map_or(true, |ctx| !ctx.has_lsp && ctx.symbols.is_empty())
+        .is_none_or(|ctx| !ctx.has_lsp && ctx.symbols.is_empty())
     {
         let analyzer = CodeAnalyzer::new(state.working_dir.clone());
         let file_path = PathBuf::from(&req.file_path);
@@ -539,10 +539,7 @@ async fn handle_inline_completion(
                         name: s.name,
                         kind: s.kind.to_string(),
                         line: s.line,
-                        detail: s
-                            .signature
-                            .or(s.doc_comment)
-                            .filter(|d| !d.is_empty()),
+                        detail: s.signature.or(s.doc_comment).filter(|d| !d.is_empty()),
                     })
                     .collect();
 

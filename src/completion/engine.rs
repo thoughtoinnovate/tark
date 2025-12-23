@@ -193,11 +193,7 @@ impl CompletionEngine {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
-        context_hints.push(format!(
-            "// File: {} ({})",
-            filename,
-            language_hint
-        ));
+        context_hints.push(format!("// File: {} ({})", filename, language_hint));
         context_hints.push(format!(
             "// Cursor: line {}, col {}",
             request.cursor_line + 1,

@@ -236,11 +236,7 @@ impl CodeAnalyzer {
     }
 
     /// Parse provided content and extract symbols (fallback when LSP is unavailable)
-    pub fn extract_symbols_from_str(
-        &self,
-        file_path: &Path,
-        content: &str,
-    ) -> Result<Vec<Symbol>> {
+    pub fn extract_symbols_from_str(&self, file_path: &Path, content: &str) -> Result<Vec<Symbol>> {
         let extension = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let language = Self::get_language(extension)
@@ -265,17 +261,14 @@ impl CodeAnalyzer {
 
         for m in matches {
             for cap in m.captures {
-                let name_node = cap
-                    .node
-                    .child_by_field_name("name")
-                    .or_else(|| {
-                        // Some queries label the capture directly
-                        if cap.index % 2 == 0 {
-                            Some(cap.node)
-                        } else {
-                            None
-                        }
-                    });
+                let name_node = cap.node.child_by_field_name("name").or({
+                    // Some queries label the capture directly
+                    if cap.index % 2 == 0 {
+                        Some(cap.node)
+                    } else {
+                        None
+                    }
+                });
 
                 if let Some(name_node) = name_node {
                     let name = name_node.utf8_text(content.as_bytes())?.to_string();
@@ -283,8 +276,8 @@ impl CodeAnalyzer {
                     let end = name_node.end_position();
 
                     // Determine symbol kind based on capture name
-                    let capture_name = query.capture_names()[cap.index as usize].clone();
-                    let kind = Self::capture_to_kind(&capture_name);
+                    let capture_name = &query.capture_names()[cap.index as usize];
+                    let kind = Self::capture_to_kind(capture_name);
 
                     // Extract signature (line where the symbol is defined)
                     let signature = lines
@@ -389,8 +382,6 @@ impl CodeAnalyzer {
             SymbolKind::Module
         } else if lower.contains("const") || lower.contains("static") {
             SymbolKind::Constant
-        } else if lower.contains("var") || lower.contains("field") {
-            SymbolKind::Variable
         } else {
             SymbolKind::Variable
         }
