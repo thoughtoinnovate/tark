@@ -16,6 +16,21 @@ function M.has_lsp(bufnr)
     return #clients > 0
 end
 
+---Check if any LSP client supports a specific method
+---@param bufnr number|nil Buffer number
+---@param method string LSP method name
+---@return boolean
+function M.supports_method(bufnr, method)
+    bufnr = bufnr or vim.api.nvim_get_current_buf()
+    local clients = vim.lsp.get_active_clients({ bufnr = bufnr })
+    for _, client in ipairs(clients) do
+        if client.supports_method(method) then
+            return true
+        end
+    end
+    return false
+end
+
 ---Get the first LSP client for buffer
 ---@param bufnr number|nil
 ---@return table|nil
@@ -77,7 +92,7 @@ end
 function M.get_hover_async(bufnr, line, col, callback)
     bufnr = bufnr or vim.api.nvim_get_current_buf()
     
-    if not M.has_lsp(bufnr) then
+    if not M.has_lsp(bufnr) or not M.supports_method(bufnr, 'textDocument/hover') then
         vim.schedule(function() callback(nil) end)
         return
     end
@@ -141,6 +156,12 @@ function M.get_symbols_async(bufnr, callback)
         return
     end
     
+    -- Check if any LSP server supports documentSymbol
+    if not M.supports_method(bufnr, 'textDocument/documentSymbol') then
+        vim.schedule(function() callback({}) end)
+        return
+    end
+    
     local params = {
         textDocument = vim.lsp.util.make_text_document_params(bufnr),
     }
@@ -194,7 +215,7 @@ end
 function M.get_definition_async(bufnr, line, col, callback)
     bufnr = bufnr or vim.api.nvim_get_current_buf()
     
-    if not M.has_lsp(bufnr) then
+    if not M.has_lsp(bufnr) or not M.supports_method(bufnr, 'textDocument/definition') then
         vim.schedule(function() callback(nil) end)
         return
     end
@@ -248,7 +269,7 @@ end
 function M.get_references_async(bufnr, line, col, callback)
     bufnr = bufnr or vim.api.nvim_get_current_buf()
     
-    if not M.has_lsp(bufnr) then
+    if not M.has_lsp(bufnr) or not M.supports_method(bufnr, 'textDocument/references') then
         vim.schedule(function() callback(nil) end)
         return
     end
@@ -288,7 +309,7 @@ end
 function M.get_signature_async(bufnr, line, col, callback)
     bufnr = bufnr or vim.api.nvim_get_current_buf()
     
-    if not M.has_lsp(bufnr) then
+    if not M.has_lsp(bufnr) or not M.supports_method(bufnr, 'textDocument/signatureHelp') then
         vim.schedule(function() callback(nil) end)
         return
     end
