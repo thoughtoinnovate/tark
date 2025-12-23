@@ -56,6 +56,12 @@ local input_win = nil
 local current_provider = 'ollama'      -- Backend protocol for API calls
 local current_provider_id = 'ollama'   -- Actual provider identity for display
 
+-- Prompt history for navigation (like shell history)
+local prompt_history = {}
+local prompt_history_index = 0  -- 0 = current input, 1 = most recent, etc.
+local prompt_history_max = 100  -- Max prompts to remember
+local prompt_current_input = ''  -- Temporary storage for current input when navigating
+
 -- Store last modified files for diff view
 local last_modified_files = {}
 
@@ -2591,6 +2597,16 @@ function M.open(initial_message)
             local lines = vim.api.nvim_buf_get_lines(input, 0, -1, false)
             local message = table.concat(lines, '\n'):gsub('^%s+', ''):gsub('%s+$', '')
             if message and message ~= '' then
+                -- Add to prompt history (avoid duplicates at top)
+                if #prompt_history == 0 or prompt_history[1] ~= message then
+                    table.insert(prompt_history, 1, message)
+                    if #prompt_history > prompt_history_max then
+                        table.remove(prompt_history)
+                    end
+                end
+                prompt_history_index = 0  -- Reset navigation
+                prompt_current_input = ''
+                
                 vim.api.nvim_buf_set_lines(input, 0, -1, false, {})
                 process_input(message)
             end
@@ -2662,6 +2678,70 @@ function M.open(initial_message)
 
     -- Escape just exits insert mode (doesn't close window)
     -- Use <leader>ec to toggle/close the chat window
+    
+    -- Prompt history navigation (like shell history)
+    local function history_prev()
+        if #prompt_history == 0 then return end
+        
+        -- Save current input if starting navigation
+        if prompt_history_index == 0 then
+            local lines = vim.api.nvim_buf_get_lines(input, 0, -1, false)
+            prompt_current_input = table.concat(lines, '\n')
+        end
+        
+        -- Move to older prompt
+        if prompt_history_index < #prompt_history then
+            prompt_history_index = prompt_history_index + 1
+            vim.api.nvim_buf_set_lines(input, 0, -1, false, 
+                vim.split(prompt_history[prompt_history_index], '\n'))
+        end
+    end
+    
+    local function history_next()
+        if prompt_history_index == 0 then return end
+        
+        -- Move to newer prompt
+        prompt_history_index = prompt_history_index - 1
+        
+        if prompt_history_index == 0 then
+            -- Restore original input
+            vim.api.nvim_buf_set_lines(input, 0, -1, false, 
+                vim.split(prompt_current_input, '\n'))
+        else
+            vim.api.nvim_buf_set_lines(input, 0, -1, false, 
+                vim.split(prompt_history[prompt_history_index], '\n'))
+        end
+    end
+    
+    -- Up/Down in normal mode - navigate history
+    vim.keymap.set('n', '<Up>', history_prev, { buffer = input, silent = true, desc = 'Previous prompt' })
+    vim.keymap.set('n', '<Down>', history_next, { buffer = input, silent = true, desc = 'Next prompt' })
+    vim.keymap.set('n', 'k', history_prev, { buffer = input, silent = true, desc = 'Previous prompt' })
+    vim.keymap.set('n', 'j', history_next, { buffer = input, silent = true, desc = 'Next prompt' })
+    
+    -- Up/Down in insert mode - navigate history when at first/last line
+    vim.keymap.set('i', '<Up>', function()
+        local cursor = vim.api.nvim_win_get_cursor(0)
+        if cursor[1] == 1 then
+            -- At first line, navigate history
+            history_prev()
+            return ''
+        end
+        -- Normal up movement
+        return vim.api.nvim_replace_termcodes('<Up>', true, false, true)
+    end, { buffer = input, expr = true, silent = true })
+    
+    vim.keymap.set('i', '<Down>', function()
+        local cursor = vim.api.nvim_win_get_cursor(0)
+        local line_count = vim.api.nvim_buf_line_count(input)
+        if cursor[1] == line_count then
+            -- At last line, navigate history
+            history_next()
+            return ''
+        end
+        -- Normal down movement
+        return vim.api.nvim_replace_termcodes('<Down>', true, false, true)
+    end, { buffer = input, expr = true, silent = true })
     
     -- q to close (only in normal mode) - optional quick close
     vim.keymap.set('n', 'q', function()
