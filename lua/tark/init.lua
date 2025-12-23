@@ -187,9 +187,23 @@ local function setup_commands()
             end
         end
         
-        -- Remove existing binary to force re-download
+        -- Clean up all old binaries and related files
         local data_dir = vim.fn.stdpath('data') .. '/tark'
-        os.remove(data_dir .. '/tark')
+        local old_files = {
+            '/tark',                    -- Main binary
+            '/tark-darwin-arm64',       -- macOS ARM
+            '/tark-darwin-x86_64',      -- macOS Intel
+            '/tark-linux-x86_64',       -- Linux x64
+            '/tark-linux-arm64',        -- Linux ARM
+            '/tark-windows-x86_64.exe', -- Windows x64
+            '/tark-windows-arm64.exe',  -- Windows ARM
+            '/tark.sha256',             -- Checksum file
+            '/tark.tmp',                -- Temp download file
+        }
+        for _, file in ipairs(old_files) do
+            os.remove(data_dir .. file)
+        end
+        vim.notify('tark: Cleaned up old binaries', vim.log.levels.DEBUG)
         
         get_server().download_binary(function(success)
             if success then
