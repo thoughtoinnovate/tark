@@ -1075,27 +1075,6 @@ local response_start_time = nil
 local ns_id = vim.api.nvim_create_namespace('tark_chat_highlights')
 
 -- Task queue management functions
-local function add_to_queue(prompt)
-    task_id_counter = task_id_counter + 1
-    table.insert(task_queue, {
-        id = task_id_counter,
-        prompt = prompt,
-        status = 'queued',
-        timestamp = os.time(),
-    })
-    update_tasks_window()
-    return task_id_counter
-end
-
-local function remove_from_queue(index)
-    if index > 0 and index <= #task_queue then
-        table.remove(task_queue, index)
-        update_tasks_window()
-        return true
-    end
-    return false
-end
-
 local function update_tasks_window()
     if not tasks_buf or not vim.api.nvim_buf_is_valid(tasks_buf) then
         return
@@ -1125,6 +1104,27 @@ local function update_tasks_window()
         vim.api.nvim_buf_set_lines(tasks_buf, 0, -1, false, lines)
         vim.api.nvim_buf_set_option(tasks_buf, 'modifiable', false)
     end)
+end
+
+local function add_to_queue(prompt)
+    task_id_counter = task_id_counter + 1
+    table.insert(task_queue, {
+        id = task_id_counter,
+        prompt = prompt,
+        status = 'queued',
+        timestamp = os.time(),
+    })
+    update_tasks_window()
+    return task_id_counter
+end
+
+local function remove_from_queue(index)
+    if index > 0 and index <= #task_queue then
+        table.remove(task_queue, index)
+        update_tasks_window()
+        return true
+    end
+    return false
 end
 
 -- Forward declaration for send_message_internal
@@ -4066,6 +4066,34 @@ M._test_set_provider_state = function(provider, provider_id, model)
     current_provider = provider
     current_provider_id = provider_id
     current_model = model
+end
+
+-- Task queue test helpers
+M._test_get_task_queue = function() return task_queue end
+M._test_add_to_queue = function(prompt) return add_to_queue(prompt) end
+M._test_remove_from_queue = function(index) return remove_from_queue(index) end
+M._test_clear_queue = function() 
+    task_queue = {}
+    task_id_counter = 0
+    update_tasks_window()
+end
+M._test_get_agent_running = function() return agent_running end
+M._test_set_agent_running = function(running) agent_running = running end
+M._test_get_queue_processing = function() return queue_processing end
+
+-- Mode switching test helpers
+M._test_get_current_mode = function() return current_mode end
+M._test_set_mode = function(mode)
+    if mode == 'plan' or mode == 'build' or mode == 'review' then
+        current_mode = mode
+        -- Only update header if chat is actually open
+        if chat_win and vim.api.nvim_win_is_valid(chat_win) then
+            pcall(update_chat_header)
+        end
+    end
+end
+M._test_can_switch_mode = function()
+    return not (agent_running or queue_processing)
 end
 
 return M

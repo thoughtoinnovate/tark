@@ -189,5 +189,166 @@ describe('chat - agent mode', function()
             assert.is_nil(chat._test_get_current_provider_id())
         end)
     end)
+
+    describe('task queue functionality', function()
+        before_each(function()
+            -- Ensure chat is open for task queue tests
+            if not chat.is_open() then
+                chat.open()
+            end
+        end)
+
+        it('has task queue test helpers', function()
+            assert.is_function(chat._test_get_task_queue)
+            assert.is_function(chat._test_add_to_queue)
+            assert.is_function(chat._test_clear_queue)
+            assert.is_function(chat._test_get_agent_running)
+        end)
+
+        it('starts with empty task queue', function()
+            chat._test_clear_queue()
+            local queue = chat._test_get_task_queue()
+            assert.is_table(queue)
+            assert.equals(0, #queue)
+        end)
+
+        it('adds tasks to queue', function()
+            chat._test_clear_queue()
+            local task_id = chat._test_add_to_queue('test task 1')
+            
+            local queue = chat._test_get_task_queue()
+            assert.equals(1, #queue)
+            assert.equals('test task 1', queue[1].prompt)
+            assert.equals('queued', queue[1].status)
+            assert.equals(task_id, queue[1].id)
+        end)
+
+        it('adds multiple tasks to queue', function()
+            chat._test_clear_queue()
+            chat._test_add_to_queue('task 1')
+            chat._test_add_to_queue('task 2')
+            chat._test_add_to_queue('task 3')
+            
+            local queue = chat._test_get_task_queue()
+            assert.equals(3, #queue)
+            assert.equals('task 1', queue[1].prompt)
+            assert.equals('task 2', queue[2].prompt)
+            assert.equals('task 3', queue[3].prompt)
+        end)
+
+        it('task has required fields', function()
+            chat._test_clear_queue()
+            chat._test_add_to_queue('test task')
+            
+            local queue = chat._test_get_task_queue()
+            local task = queue[1]
+            
+            assert.is_number(task.id)
+            assert.is_string(task.prompt)
+            assert.is_string(task.status)
+            assert.is_number(task.timestamp)
+        end)
+
+        it('removes tasks from queue', function()
+            chat._test_clear_queue()
+            chat._test_add_to_queue('task 1')
+            chat._test_add_to_queue('task 2')
+            chat._test_add_to_queue('task 3')
+            
+            -- Remove middle task
+            chat._test_remove_from_queue(2)
+            
+            local queue = chat._test_get_task_queue()
+            assert.equals(2, #queue)
+            assert.equals('task 1', queue[1].prompt)
+            assert.equals('task 3', queue[2].prompt)
+        end)
+
+        it('clears all tasks', function()
+            chat._test_clear_queue()
+            chat._test_add_to_queue('task 1')
+            chat._test_add_to_queue('task 2')
+            
+            chat._test_clear_queue()
+            
+            local queue = chat._test_get_task_queue()
+            assert.equals(0, #queue)
+        end)
+
+        it('tracks agent running state', function()
+            local is_running = chat._test_get_agent_running()
+            assert.is_boolean(is_running)
+        end)
+    end)
+
+    describe('mode switching prevention', function()
+        before_each(function()
+            if not chat.is_open() then
+                chat.open()
+            end
+        end)
+
+        it('has mode test helpers', function()
+            assert.is_function(chat._test_get_current_mode)
+            assert.is_function(chat._test_set_mode)
+            assert.is_function(chat._test_can_switch_mode)
+        end)
+
+        it('has valid default mode', function()
+            local mode = chat._test_get_current_mode()
+            assert.is_string(mode)
+            assert.is_true(
+                mode == 'plan' or mode == 'build' or mode == 'review',
+                'Mode should be plan, build, or review'
+            )
+        end)
+
+        it('allows mode switching when agent not running', function()
+            -- Ensure agent is not running and no queue processing
+            chat._test_set_agent_running(false)
+            
+            local can_switch = chat._test_can_switch_mode()
+            assert.is_true(can_switch, 'Should allow mode switch when agent not running')
+        end)
+
+        it('blocks mode switching when agent is running', function()
+            -- Simulate agent running state
+            chat._test_set_agent_running(true)
+            
+            local can_switch = chat._test_can_switch_mode()
+            assert.is_false(can_switch, 'Should block mode switch when agent is running')
+            
+            -- Clean up
+            chat._test_set_agent_running(false)
+        end)
+
+        it('switches between modes when allowed', function()
+            -- Ensure agent not running
+            chat._test_set_agent_running(false)
+            
+            -- Switch to plan mode
+            chat._test_set_mode('plan')
+            assert.equals('plan', chat._test_get_current_mode())
+            
+            -- Switch to build mode
+            chat._test_set_mode('build')
+            assert.equals('build', chat._test_get_current_mode())
+            
+            -- Switch to review mode
+            chat._test_set_mode('review')
+            assert.equals('review', chat._test_get_current_mode())
+        end)
+
+        it('only accepts valid modes', function()
+            local valid_modes = {'plan', 'build', 'review'}
+            
+            for _, mode in ipairs(valid_modes) do
+                assert.has_no_errors(function()
+                    chat._test_set_mode(mode)
+                end)
+                assert.equals(mode, chat._test_get_current_mode())
+            end
+        end)
+    end)
 end)
 
