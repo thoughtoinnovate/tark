@@ -1434,6 +1434,9 @@ local function send_message(message)
         return
     end
 
+    -- Mark agent as running
+    agent_running = true
+    
     append_message('user', message)
 
     -- Show animated loading indicator
@@ -1485,6 +1488,9 @@ local function send_message(message)
                 -- Stop loading animation and status polling
                 stop_loading_animation()
                 stop_status_polling()
+                
+                -- Mark agent as not running
+                agent_running = false
                 
                 -- Finalize thinking section - replace with collapsed summary
                 local current_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
@@ -2502,6 +2508,48 @@ local function refine_plan(refinement)
     })
 end
 
+-- ========== Agent Interrupt ==========
+
+-- Flag to track if we're currently waiting for agent response
+local agent_running = false
+
+-- Interrupt the agent
+local function interrupt_agent()
+    if not agent_running then
+        append_message('system', '💡 *No operation in progress*')
+        return
+    end
+    
+    local url = get_server_url() .. '/interrupt'
+    local curl = require('plenary.curl')
+    
+    append_message('system', '⛔ *Sending interrupt signal...*')
+    
+    curl.post(url, {
+        callback = function(response)
+            vim.schedule(function()
+                if response.status == 200 then
+                    agent_running = false
+                    append_message('system', '🛑 *Agent interrupted successfully*')
+                    update_chat_window_title()
+                else
+                    append_message('system', '⚠️ *Interrupt may not have been received*')
+                end
+            end)
+        end,
+    })
+end
+
+-- Set agent running state (called from send_message)
+local function set_agent_running(running)
+    agent_running = running
+end
+
+-- Check if agent is running
+local function is_agent_running()
+    return agent_running
+end
+
 -- Clear chat history
 local function clear_chat()
     local buf = get_chat_buffer()
@@ -2599,6 +2647,8 @@ slash_commands = {
                 '`/plan-skip [task]` - Skip a task',
                 '`/plan-refine [note]` or `/pr` - Add refinement note',
                 '',
+                '**Control:**',
+                '`/interrupt` or `/stop` - Stop current agent operation (also Ctrl+C)',
                 '`/exit` or `/q` - Close chat window',
                 '',
                 '**Layout:**',
@@ -3062,6 +3112,17 @@ slash_commands = {
         end,
     },
     ['pr'] = { alias = 'plan-refine' },
+    
+    -- Interrupt command
+    ['interrupt'] = {
+        description = 'Interrupt the current agent operation',
+        usage = '/interrupt',
+        handler = function()
+            interrupt_agent()
+        end,
+    },
+    ['stop'] = { alias = 'interrupt' },
+    ['cancel'] = { alias = 'interrupt' },
 }
 
 -- Parse and execute slash commands
@@ -3411,6 +3472,18 @@ function M.open(initial_message)
     vim.keymap.set('i', '<C-CR>', function()
         vim.cmd('stopinsert')
         do_send()
+    end, { buffer = input, silent = true, nowait = true })
+    
+    -- Ctrl+C to interrupt agent
+    vim.keymap.set({ 'n', 'i' }, '<C-c>', function()
+        if agent_running then
+            interrupt_agent()
+        else
+            -- Default behavior (exit insert mode if in insert)
+            if vim.fn.mode() == 'i' then
+                vim.cmd('stopinsert')
+            end
+        end
     end, { buffer = input, silent = true, nowait = true })
 
     -- '/' triggers slash command completion

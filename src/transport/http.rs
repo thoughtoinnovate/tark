@@ -94,6 +94,8 @@ struct AppState {
     session_id: String,
     /// Current chat session for multi-session management
     current_chat_session: RwLock<Option<crate::storage::ChatSession>>,
+    /// Flag to interrupt current agent operation
+    interrupt_flag: std::sync::atomic::AtomicBool,
 }
 
 /// LSP context from Neovim plugin
@@ -376,11 +378,13 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         usage_tracker,
         session_id,
         current_chat_session: RwLock::new(current_chat_session),
+        interrupt_flag: std::sync::atomic::AtomicBool::new(false),
     });
 
     // Build router
     let app = Router::new()
         .route("/health", get(health_check))
+        .route("/interrupt", post(interrupt_agent))
         .route("/providers", get(list_providers))
         .route("/provider", post(set_provider))
         .route("/complete", post(handle_completion))
@@ -453,6 +457,40 @@ async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse
         version: env!("CARGO_PKG_VERSION").to_string(),
         current_provider: current,
     })
+}
+
+/// Interrupt the current agent operation
+async fn interrupt_agent(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use std::sync::atomic::Ordering;
+
+    // Set the interrupt flag
+    state.interrupt_flag.store(true, Ordering::SeqCst);
+
+    // Clear status
+    clear_status().await;
+
+    tracing::info!("Agent interrupted by user");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "message": "Agent interrupted"
+        })),
+    )
+        .into_response()
+}
+
+/// Check if agent should be interrupted
+fn check_interrupt(state: &Arc<AppState>) -> bool {
+    use std::sync::atomic::Ordering;
+    state.interrupt_flag.load(Ordering::SeqCst)
+}
+
+/// Clear the interrupt flag (called at start of new operation)
+fn clear_interrupt(state: &Arc<AppState>) {
+    use std::sync::atomic::Ordering;
+    state.interrupt_flag.store(false, Ordering::SeqCst);
 }
 
 async fn list_providers(State(state): State<Arc<AppState>>) -> Json<ProvidersResponse> {
@@ -879,13 +917,35 @@ async fn handle_chat(
         agent.reset();
     }
 
+    // Clear any previous interrupt flag before starting
+    clear_interrupt(&state);
+
     // Set status to thinking
     update_status("Thinking...", None, None, 0).await;
 
-    let result = agent.chat(&req.message).await;
+    // Clone state for interrupt checking during chat
+    let state_clone = Arc::clone(&state);
+    let result = agent
+        .chat_with_interrupt(&req.message, move || check_interrupt(&state_clone))
+        .await;
 
     // Clear status when done
     clear_status().await;
+
+    // Check if we were interrupted
+    if check_interrupt(&state) {
+        clear_interrupt(&state);
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "response": "⚠️ *Operation interrupted by user*",
+                "interrupted": true,
+                "provider": final_provider,
+                "mode": mode_str,
+            })),
+        )
+            .into_response();
+    }
 
     match result {
         Ok(response) => {

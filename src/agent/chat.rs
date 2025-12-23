@@ -809,4 +809,310 @@ impl ChatAgent {
         self.context.clear();
         self.context.add_system(get_system_prompt(self.mode));
     }
+
+    /// Process a user message with interrupt checking
+    /// The interrupt_check function is called before each LLM call and tool execution
+    pub async fn chat_with_interrupt<F>(
+        &mut self,
+        user_message: &str,
+        interrupt_check: F,
+    ) -> Result<AgentResponse>
+    where
+        F: Fn() -> bool + Send + Sync,
+    {
+        // Track if auto-compaction happens
+        let mut auto_compacted = false;
+
+        // Check for interrupt before starting
+        if interrupt_check() {
+            return Ok(AgentResponse {
+                text: "⚠️ *Operation interrupted*".to_string(),
+                tool_calls_made: 0,
+                tool_call_log: vec![],
+                auto_compacted: false,
+                context_usage_percent: self.context.usage_percentage(),
+                usage: None,
+            });
+        }
+
+        // Auto-compact if context is near limit (80%+)
+        if self.context.is_near_limit() {
+            let usage = self.context.usage_percentage();
+            tracing::info!("Context at {}%, triggering auto-compaction...", usage);
+            self.auto_compact().await?;
+            auto_compacted = true;
+        }
+
+        self.context.add_user(user_message);
+
+        let tool_definitions = self.tools.definitions();
+        let mut iterations = 0;
+        let mut total_tool_calls = 0;
+        let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
+        let mut accumulated_usage = crate::llm::TokenUsage::default();
+
+        loop {
+            // Check for interrupt at start of each iteration
+            if interrupt_check() {
+                tracing::info!("Agent interrupted during processing");
+                self.context
+                    .add_assistant("⚠️ *Operation interrupted by user*");
+                return Ok(AgentResponse {
+                    text: "⚠️ *Operation interrupted by user*".to_string(),
+                    tool_calls_made: total_tool_calls,
+                    tool_call_log,
+                    auto_compacted,
+                    context_usage_percent: self.context.usage_percentage(),
+                    usage: Some(accumulated_usage),
+                });
+            }
+
+            if iterations >= self.max_iterations {
+                self.context.add_assistant(
+                    "I've reached the maximum number of steps. Here's what I've done so far. Let me know if you'd like me to continue.",
+                );
+                break;
+            }
+
+            // Check context size before each LLM call
+            let estimated_tokens = self.context.estimate_total_tokens();
+            tracing::debug!("Context size: ~{} tokens", estimated_tokens);
+
+            let response = self
+                .llm
+                .chat(self.context.messages(), Some(&tool_definitions))
+                .await?;
+
+            // Check for interrupt after LLM response
+            if interrupt_check() {
+                tracing::info!("Agent interrupted after LLM response");
+                self.context
+                    .add_assistant("⚠️ *Operation interrupted by user*");
+                return Ok(AgentResponse {
+                    text: "⚠️ *Operation interrupted by user*".to_string(),
+                    tool_calls_made: total_tool_calls,
+                    tool_call_log,
+                    auto_compacted,
+                    context_usage_percent: self.context.usage_percentage(),
+                    usage: Some(accumulated_usage),
+                });
+            }
+
+            // Accumulate usage from this response
+            if let Some(usage) = response.usage() {
+                accumulated_usage.input_tokens += usage.input_tokens;
+                accumulated_usage.output_tokens += usage.output_tokens;
+                accumulated_usage.total_tokens += usage.total_tokens;
+            }
+
+            iterations += 1;
+
+            match response {
+                LlmResponse::Text { text, .. } => {
+                    self.context.add_assistant(&text);
+                    let context_usage_percent = self.context.usage_percentage();
+                    return Ok(AgentResponse {
+                        text,
+                        tool_calls_made: total_tool_calls,
+                        tool_call_log,
+                        auto_compacted,
+                        context_usage_percent,
+                        usage: Some(accumulated_usage),
+                    });
+                }
+                LlmResponse::ToolCalls { calls, .. } => {
+                    total_tool_calls += calls.len();
+
+                    // First, add the assistant message with tool calls
+                    self.context.add_assistant_tool_calls(&calls);
+
+                    // Execute each tool call with interrupt checking
+                    for (i, call) in calls.iter().enumerate() {
+                        // Check for interrupt before each tool execution
+                        if interrupt_check() {
+                            tracing::info!(
+                                "Agent interrupted before tool execution: {}",
+                                call.name
+                            );
+                            self.context
+                                .add_tool_result(&call.id, "⚠️ Interrupted by user");
+                            return Ok(AgentResponse {
+                                text: format!(
+                                    "⚠️ *Operation interrupted before executing {}*",
+                                    call.name
+                                ),
+                                tool_calls_made: total_tool_calls,
+                                tool_call_log,
+                                auto_compacted,
+                                context_usage_percent: self.context.usage_percentage(),
+                                usage: Some(accumulated_usage),
+                            });
+                        }
+
+                        // Update status
+                        let tool_arg = call
+                            .arguments
+                            .get("path")
+                            .or_else(|| call.arguments.get("pattern"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        update_status(
+                            &format!("[{}/{}] {}", i + 1, calls.len(), call.name),
+                            tool_arg.as_deref(),
+                            None,
+                            0,
+                        )
+                        .await;
+
+                        tracing::debug!(
+                            "Executing tool: {} with args: {} (mode: {:?})",
+                            call.name,
+                            call.arguments,
+                            self.mode
+                        );
+
+                        let result = self
+                            .tools
+                            .execute(&call.name, call.arguments.clone())
+                            .await?;
+
+                        if !result.success && result.output.contains("Unknown tool") {
+                            tracing::warn!(
+                                "Tool '{}' not available in {:?} mode - model hallucinated this call",
+                                call.name,
+                                self.mode
+                            );
+                        }
+
+                        // Log the tool call
+                        let preview = if result.output.len() > 200 {
+                            format!("{}...", &result.output[..200])
+                        } else {
+                            result.output.clone()
+                        };
+                        tool_call_log.push(ToolCallLog {
+                            tool: call.name.clone(),
+                            args: call.arguments.clone(),
+                            result_preview: preview,
+                        });
+
+                        self.context.add_tool_result(&call.id, &result.output);
+                    }
+                }
+                LlmResponse::Mixed {
+                    text, tool_calls, ..
+                } => {
+                    if tool_calls.is_empty() {
+                        if let Some(text) = text {
+                            self.context.add_assistant(&text);
+                        }
+
+                        let last_text = self
+                            .context
+                            .messages()
+                            .last()
+                            .and_then(|m| m.content.as_text())
+                            .unwrap_or("Done.")
+                            .to_string();
+
+                        let context_usage_percent = self.context.usage_percentage();
+                        return Ok(AgentResponse {
+                            text: last_text,
+                            tool_calls_made: total_tool_calls,
+                            tool_call_log,
+                            auto_compacted,
+                            context_usage_percent,
+                            usage: Some(accumulated_usage),
+                        });
+                    }
+
+                    total_tool_calls += tool_calls.len();
+                    self.context.add_assistant_tool_calls(&tool_calls);
+
+                    // Execute tool calls with interrupt checking
+                    for (i, call) in tool_calls.iter().enumerate() {
+                        if interrupt_check() {
+                            tracing::info!(
+                                "Agent interrupted before tool execution: {}",
+                                call.name
+                            );
+                            self.context
+                                .add_tool_result(&call.id, "⚠️ Interrupted by user");
+                            return Ok(AgentResponse {
+                                text: format!(
+                                    "⚠️ *Operation interrupted before executing {}*",
+                                    call.name
+                                ),
+                                tool_calls_made: total_tool_calls,
+                                tool_call_log,
+                                auto_compacted,
+                                context_usage_percent: self.context.usage_percentage(),
+                                usage: Some(accumulated_usage),
+                            });
+                        }
+
+                        let tool_arg = call
+                            .arguments
+                            .get("path")
+                            .or_else(|| call.arguments.get("pattern"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        update_status(
+                            &format!("[{}/{}] {}", i + 1, tool_calls.len(), call.name),
+                            tool_arg.as_deref(),
+                            None,
+                            0,
+                        )
+                        .await;
+
+                        let result = self
+                            .tools
+                            .execute(&call.name, call.arguments.clone())
+                            .await?;
+
+                        if !result.success && result.output.contains("Unknown tool") {
+                            tracing::warn!(
+                                "Tool '{}' not available in {:?} mode - model hallucinated this call",
+                                call.name,
+                                self.mode
+                            );
+                        }
+
+                        let preview = if result.output.len() > 200 {
+                            format!("{}...", &result.output[..200])
+                        } else {
+                            result.output.clone()
+                        };
+                        tool_call_log.push(ToolCallLog {
+                            tool: call.name.clone(),
+                            args: call.arguments.clone(),
+                            result_preview: preview,
+                        });
+
+                        self.context.add_tool_result(&call.id, &result.output);
+                    }
+                }
+            }
+        }
+
+        let last_text = self
+            .context
+            .messages()
+            .last()
+            .and_then(|m| m.content.as_text())
+            .unwrap_or("Done.")
+            .to_string();
+
+        let context_usage_percent = self.context.usage_percentage();
+        Ok(AgentResponse {
+            text: last_text,
+            tool_calls_made: total_tool_calls,
+            tool_call_log,
+            auto_compacted,
+            context_usage_percent,
+            usage: Some(accumulated_usage),
+        })
+    }
 }
