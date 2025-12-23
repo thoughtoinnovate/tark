@@ -173,7 +173,7 @@ describe('lsp - LSP helpers', function()
     end)
 
     describe('return values', function()
-        it('async functions call callback with nil when no LSP', function()
+        it('async functions call callback with context when no LSP', function()
             local bufnr = vim.api.nvim_get_current_buf()
             local result = 'not_called'
             
@@ -183,9 +183,10 @@ describe('lsp - LSP helpers', function()
             
             vim.wait(100, function() return result ~= 'not_called' end)
             
-            -- When no LSP, should return nil
+            -- When no LSP, should return context with has_lsp = false
             if not lsp.has_lsp(bufnr) then
-                assert.is_nil(result)
+                assert.is_table(result)
+                assert.is_false(result.has_lsp)
             end
         end)
     end)

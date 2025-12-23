@@ -108,6 +108,11 @@ describe('tark - main module', function()
     end)
 
     describe('commands registration', function()
+        -- Commands are only registered after setup() is called
+        before_each(function()
+            tark.setup({})
+        end)
+
         it('TarkServerStart command exists', function()
             local commands = vim.api.nvim_get_commands({})
             assert.is_not_nil(commands.TarkServerStart)

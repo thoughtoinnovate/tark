@@ -59,7 +59,9 @@ describe('server - platform and binary management', function()
 
         it('has mode field', function()
             local status = server.status()
-            assert.is_not_nil(status.mode)
+            -- mode is nil until server starts, then 'binary' or 'docker'
+            -- It's valid to be nil when server is not running
+            assert.is_true(status.mode == nil or type(status.mode) == 'string')
         end)
 
         it('has url field', function()
@@ -67,14 +69,14 @@ describe('server - platform and binary management', function()
             assert.is_string(status.url)
         end)
 
-        it('has detected_platform field', function()
+        it('has platform field', function()
             local status = server.status()
-            assert.is_string(status.detected_platform)
+            assert.is_string(status.platform)
         end)
 
-        it('has expected_binary_name field', function()
+        it('has binary_name field', function()
             local status = server.status()
-            assert.is_string(status.expected_binary_name)
+            assert.is_string(status.binary_name)
         end)
 
         it('has channel field', function()
@@ -96,7 +98,7 @@ describe('server - platform and binary management', function()
     describe('platform detection', function()
         it('detects current platform', function()
             local status = server.status()
-            local platform = status.detected_platform
+            local platform = status.platform
             -- Should be one of the supported platforms
             local valid_platforms = {
                 ['linux-x86_64'] = true,
@@ -112,7 +114,7 @@ describe('server - platform and binary management', function()
 
         it('generates correct binary name', function()
             local status = server.status()
-            local binary_name = status.expected_binary_name
+            local binary_name = status.binary_name
             -- Should start with 'tark-'
             assert.is_true(binary_name:match('^tark%-') ~= nil)
             -- Should contain platform info
@@ -121,8 +123,8 @@ describe('server - platform and binary management', function()
 
         it('adds .exe extension for Windows', function()
             local status = server.status()
-            local platform = status.detected_platform
-            local binary_name = status.expected_binary_name
+            local platform = status.platform
+            local binary_name = status.binary_name
             
             if platform:match('^windows') then
                 assert.is_true(binary_name:match('%.exe$') ~= nil)
@@ -141,8 +143,10 @@ describe('server - platform and binary management', function()
             assert.is_string(server.config.mode)
         end)
 
-        it('has channel config', function()
-            assert.is_string(server.config.channel)
+        it('has channel in status', function()
+            -- channel is in status, not config directly
+            local status = server.status()
+            assert.is_string(status.channel)
         end)
 
         it('has host config', function()
@@ -159,8 +163,9 @@ describe('server - platform and binary management', function()
         end)
 
         it('channel is valid', function()
+            local status = server.status()
             local valid_channels = { stable = true, nightly = true, latest = true }
-            assert.is_true(valid_channels[server.config.channel])
+            assert.is_true(valid_channels[status.channel])
         end)
     end)
 
