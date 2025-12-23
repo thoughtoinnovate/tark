@@ -193,7 +193,20 @@ local function setup_commands()
         
         get_server().download_binary(function(success)
             if success then
-                vim.notify('tark: Binary ready! Run :TarkServerRestart', vim.log.levels.INFO)
+                -- Auto-restart server if it was running (to use the new binary)
+                local status = get_server().status()
+                if status.running then
+                    vim.notify('tark: Restarting server with new binary...', vim.log.levels.INFO)
+                    get_server().restart(function(restart_success)
+                        if restart_success then
+                            vim.notify('tark: Server restarted with new binary ✓', vim.log.levels.INFO)
+                        else
+                            vim.notify('tark: Server restart failed. Try :TarkServerRestart manually', vim.log.levels.WARN)
+                        end
+                    end)
+                else
+                    vim.notify('tark: Binary ready! Run :TarkServerStart', vim.log.levels.INFO)
+                end
             end
         end)
     end, { 
