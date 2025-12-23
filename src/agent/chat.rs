@@ -255,6 +255,12 @@ impl ChatAgent {
 
     /// Update the agent's mode and tools while preserving conversation history
     pub fn update_mode(&mut self, tools: ToolRegistry, mode: AgentMode) {
+        let tool_names: Vec<_> = tools.definitions().iter().map(|t| t.name.clone()).collect();
+        tracing::info!(
+            "Mode changed to {:?} - available tools: {:?}",
+            mode,
+            tool_names
+        );
         self.tools = tools;
         self.mode = mode;
         // Update the system prompt in context (replace the first system message)
@@ -490,15 +496,27 @@ impl ChatAgent {
                         .await;
 
                         tracing::debug!(
-                            "Executing tool: {} with args: {}",
+                            "Executing tool: {} with args: {} (mode: {:?})",
                             call.name,
-                            call.arguments
+                            call.arguments,
+                            self.mode
                         );
 
+                        // Execute tool - registry isolation ensures only available tools can run
+                        // If tool doesn't exist in registry, execute() returns "Unknown tool" error
                         let result = self
                             .tools
                             .execute(&call.name, call.arguments.clone())
                             .await?;
+
+                        // Log if a tool was rejected (helps debug hallucinated tool calls)
+                        if !result.success && result.output.contains("Unknown tool") {
+                            tracing::warn!(
+                                "Tool '{}' not available in {:?} mode - model hallucinated this call",
+                                call.name,
+                                self.mode
+                            );
+                        }
 
                         tracing::debug!("Tool result: {:?}", result);
 
@@ -612,15 +630,26 @@ impl ChatAgent {
                         .await;
 
                         tracing::debug!(
-                            "Executing tool: {} with args: {}",
+                            "Executing tool: {} with args: {} (mode: {:?})",
                             call.name,
-                            call.arguments
+                            call.arguments,
+                            self.mode
                         );
 
+                        // Execute tool - registry isolation ensures only available tools can run
                         let result = self
                             .tools
                             .execute(&call.name, call.arguments.clone())
                             .await?;
+
+                        // Log if a tool was rejected
+                        if !result.success && result.output.contains("Unknown tool") {
+                            tracing::warn!(
+                                "Tool '{}' not available in {:?} mode - model hallucinated this call",
+                                call.name,
+                                self.mode
+                            );
+                        }
 
                         tracing::debug!("Tool result: {:?}", result);
 
