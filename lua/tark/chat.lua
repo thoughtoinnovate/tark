@@ -1588,6 +1588,7 @@ local function send_message(message)
                         -- Update provider if changed
                         if resp.provider then
                             current_provider = resp.provider
+                            current_provider_id = resp.provider  -- Keep display in sync
                         end
                         
                         -- Always update header to show new stats
@@ -1647,6 +1648,7 @@ local function switch_provider(new_provider, skip_message)
                     local ok, resp = pcall(vim.fn.json_decode, table.concat(data, ''))
                     if ok and resp and resp.success then
                         current_provider = new_provider
+                        current_provider_id = new_provider  -- Update display provider too
                         update_chat_header()
                         append_message('system', '✅ *Switched to ' .. new_provider .. '*')
                         -- Clear history with new provider
@@ -2783,6 +2785,7 @@ function M.setup(opts)
                 if ok and resp then
                     if resp.provider then
                         current_provider = resp.provider
+                        current_provider_id = resp.provider  -- Keep display in sync
                     end
                     if resp.model then
                         current_model = resp.model
