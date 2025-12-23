@@ -1980,6 +1980,188 @@ local function quick_switch_provider(provider_name)
     switch_provider(provider_name)
 end
 
+-- ========== Multi-Session Management ==========
+
+-- Current session info
+local current_session_id = nil
+local current_session_name = nil
+
+-- Create a new session
+local function create_new_session()
+    local url = get_server_url() .. '/sessions/new'
+    local curl = require('plenary.curl')
+    
+    append_message('system', '🆕 *Creating new session...*')
+    
+    curl.post(url, {
+        callback = function(response)
+            vim.schedule(function()
+                if response.status == 200 then
+                    local ok, data = pcall(vim.json.decode, response.body)
+                    if ok and data.id then
+                        current_session_id = data.id
+                        current_session_name = data.name or 'New Session'
+                        
+                        -- Clear chat display
+                        local buf = get_chat_buffer()
+                        vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
+                        reset_stats()
+                        update_chat_header()
+                        update_chat_window_title()
+                        
+                        append_message('system', '✅ *New session created!* Start typing to begin.')
+                    else
+                        append_message('system', '❌ *Failed to create session: Invalid response*')
+                    end
+                else
+                    append_message('system', '❌ *Failed to create session: ' .. (response.body or 'Unknown error') .. '*')
+                end
+            end)
+        end,
+    })
+end
+
+-- Switch to a specific session
+local function switch_to_session(session_id)
+    local url = get_server_url() .. '/sessions/switch'
+    local curl = require('plenary.curl')
+    
+    append_message('system', '🔄 *Switching to session...*')
+    
+    local body = vim.json.encode({ session_id = session_id })
+    
+    curl.post(url, {
+        body = body,
+        headers = { ['Content-Type'] = 'application/json' },
+        callback = function(response)
+            vim.schedule(function()
+                if response.status == 200 then
+                    local ok, data = pcall(vim.json.decode, response.body)
+                    if ok and data.id then
+                        current_session_id = data.id
+                        current_session_name = data.name or 'Session'
+                        
+                        -- Update provider/model from session
+                        if data.provider then
+                            current_provider = data.provider
+                            current_provider_id = data.provider
+                        end
+                        if data.model then
+                            current_model = data.model
+                        end
+                        if data.mode then
+                            current_mode = data.mode
+                        end
+                        
+                        -- Clear and restore chat display
+                        local buf = get_chat_buffer()
+                        vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
+                        
+                        -- Restore messages from session
+                        if data.messages then
+                            for _, msg in ipairs(data.messages) do
+                                if msg.role == 'user' then
+                                    append_message('user', msg.content)
+                                elseif msg.role == 'assistant' then
+                                    append_message('assistant', msg.content)
+                                end
+                            end
+                        end
+                        
+                        -- Update stats
+                        if data.input_tokens then session_input_tokens = data.input_tokens end
+                        if data.output_tokens then session_output_tokens = data.output_tokens end
+                        if data.total_cost then session_cost = data.total_cost end
+                        
+                        update_chat_header()
+                        update_chat_window_title()
+                        
+                        local msg_count = data.messages and #data.messages or 0
+                        append_message('system', string.format('✅ *Switched to session: %s* (%d messages)', data.name or session_id, msg_count))
+                    else
+                        append_message('system', '❌ *Failed to switch session: Invalid response*')
+                    end
+                elseif response.status == 404 then
+                    append_message('system', '❌ *Session not found: ' .. session_id .. '*')
+                else
+                    append_message('system', '❌ *Failed to switch session: ' .. (response.body or 'Unknown error') .. '*')
+                end
+            end)
+        end,
+    })
+end
+
+-- Show session picker
+local function show_session_picker()
+    local url = get_server_url() .. '/sessions'
+    local curl = require('plenary.curl')
+    
+    curl.get(url, {
+        callback = function(response)
+            vim.schedule(function()
+                if response.status ~= 200 then
+                    append_message('system', '❌ *Failed to load sessions*')
+                    return
+                end
+                
+                local ok, sessions = pcall(vim.json.decode, response.body)
+                if not ok or not sessions or #sessions == 0 then
+                    append_message('system', '📂 *No sessions found. Type a message to start a new session, or use `/new` to create one.*')
+                    return
+                end
+                
+                -- Format sessions for display
+                local items = {}
+                for _, session in ipairs(sessions) do
+                    local name = session.name or 'Unnamed'
+                    if name == '' then name = 'Unnamed' end
+                    local msg_count = session.message_count or 0
+                    local mode = session.mode or 'build'
+                    local provider = session.provider or 'ollama'
+                    
+                    -- Format date
+                    local date_str = ''
+                    if session.updated_at then
+                        -- Parse ISO date and format
+                        local year, month, day, hour, min = session.updated_at:match('(%d+)-(%d+)-(%d+)T(%d+):(%d+)')
+                        if year then
+                            date_str = string.format('%s/%s %s:%s', month, day, hour, min)
+                        end
+                    end
+                    
+                    local label = string.format('%s [%s] (%d msgs, %s) %s', 
+                        name, provider, msg_count, mode, date_str)
+                    
+                    table.insert(items, {
+                        label = label,
+                        id = session.id,
+                        name = session.name,
+                    })
+                end
+                
+                -- Use our Vim-friendly picker
+                show_picker(items, {
+                    title = 'Chat Sessions',
+                    prompt = 'Select session to switch to:',
+                    format_item = function(item) return item.label end,
+                }, function(item)
+                    if item then
+                        switch_to_session(item.id)
+                    end
+                end)
+            end)
+        end,
+    })
+end
+
+-- Save current session (called after each message)
+local function save_current_session()
+    if not current_session_id then return end
+    
+    -- The server handles saving automatically, but we can trigger a save
+    -- This is called after each message exchange
+end
+
 -- Clear chat history
 local function clear_chat()
     local buf = get_chat_buffer()
@@ -2063,6 +2245,11 @@ slash_commands = {
                 '',
                 '`/usage` - Show usage summary (tokens, costs, sessions)',
                 '`/usage-open` - Open usage dashboard in browser',
+                '',
+                '**Sessions:**',
+                '`/new` - Start a new chat session',
+                '`/session` - List and switch sessions',
+                '`/session [id]` - Switch to specific session',
                 '',
                 '`/exit` or `/q` - Close chat window',
                 '',
@@ -2438,6 +2625,29 @@ slash_commands = {
             vim.cmd('TarkUsageOpen')
         end,
     },
+    
+    -- Session management commands
+    ['new'] = {
+        description = 'Start a new chat session',
+        usage = '/new',
+        handler = function()
+            create_new_session()
+        end,
+    },
+    ['session'] = {
+        description = 'List and switch sessions',
+        usage = '/session [id]',
+        handler = function(args)
+            if args and args ~= '' then
+                -- Switch to specific session
+                switch_to_session(args:gsub('^%s+', ''):gsub('%s+$', ''))
+            else
+                -- Show session picker
+                show_session_picker()
+            end
+        end,
+    },
+    ['sessions'] = { alias = 'session' },
 }
 
 -- Parse and execute slash commands

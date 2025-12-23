@@ -277,6 +277,90 @@ impl ChatAgent {
         self.mode
     }
 
+    /// Clear conversation history (keeps system prompt)
+    pub fn clear_history(&mut self) {
+        // Get the current system prompt
+        let system_prompt = get_system_prompt(self.mode);
+
+        // Clear and reinitialize with system prompt
+        self.context.clear();
+        self.context.add_system(system_prompt);
+
+        tracing::info!("Conversation history cleared");
+    }
+
+    /// Restore conversation from a saved session
+    pub fn restore_from_session(&mut self, session: &crate::storage::ChatSession) {
+        // Clear existing history
+        let system_prompt = get_system_prompt(self.mode);
+        self.context.clear();
+        self.context.add_system(system_prompt);
+
+        // Restore messages from session
+        for msg in &session.messages {
+            match msg.role.as_str() {
+                "user" => self.context.add_user(&msg.content),
+                "assistant" => self.context.add_assistant(&msg.content),
+                "tool" => {
+                    if let Some(tool_call_id) = &msg.tool_call_id {
+                        self.context.add_tool_result(tool_call_id, &msg.content);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        tracing::info!(
+            "Restored {} messages from session '{}'",
+            session.messages.len(),
+            session.name
+        );
+    }
+
+    /// Get current conversation messages for saving
+    pub fn get_messages_for_session(&self) -> Vec<crate::storage::SessionMessage> {
+        use crate::storage::SessionMessage;
+
+        self.context
+            .messages()
+            .iter()
+            .filter(|m| m.role != Role::System) // Don't save system prompt
+            .filter_map(|m| {
+                let role = match m.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                    Role::Tool => "tool",
+                    Role::System => return None,
+                };
+
+                let content = match &m.content {
+                    MessageContent::Text(t) => t.clone(),
+                    MessageContent::Parts(parts) => {
+                        // Extract text from parts
+                        parts
+                            .iter()
+                            .map(|p| match p {
+                                ContentPart::Text { text } => text.clone(),
+                                ContentPart::ToolUse { name, input, .. } => {
+                                    format!("[Tool: {} with {:?}]", name, input)
+                                }
+                                ContentPart::ToolResult { content, .. } => content.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
+                };
+
+                Some(SessionMessage {
+                    role: role.to_string(),
+                    content,
+                    timestamp: chrono::Utc::now(),
+                    tool_call_id: m.tool_call_id.clone(),
+                })
+            })
+            .collect()
+    }
+
     /// Auto-compact context by summarizing older messages
     async fn auto_compact(&mut self) -> Result<()> {
         let messages = self.context.messages();

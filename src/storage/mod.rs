@@ -131,6 +131,7 @@ impl TarkStorage {
         std::fs::create_dir_all(project_root.join("rules"))?;
         std::fs::create_dir_all(project_root.join("mcp"))?;
         std::fs::create_dir_all(project_root.join("plugins"))?;
+        std::fs::create_dir_all(project_root.join("sessions"))?;
 
         Ok(Self {
             project_root,
@@ -240,6 +241,114 @@ impl TarkStorage {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
+        Ok(())
+    }
+
+    // ========== Chat Sessions ==========
+
+    /// Get sessions directory
+    fn sessions_dir(&self) -> PathBuf {
+        self.project_root.join("sessions")
+    }
+
+    /// Get current session ID file path
+    fn current_session_file(&self) -> PathBuf {
+        self.sessions_dir().join("current")
+    }
+
+    /// Save a chat session
+    pub fn save_session(&self, session: &ChatSession) -> Result<PathBuf> {
+        let path = self.sessions_dir().join(format!("{}.json", session.id));
+        let content = serde_json::to_string_pretty(session)?;
+        std::fs::write(&path, content)?;
+
+        // Update current session pointer
+        std::fs::write(self.current_session_file(), &session.id)?;
+
+        Ok(path)
+    }
+
+    /// Load a chat session by ID
+    pub fn load_session(&self, id: &str) -> Result<ChatSession> {
+        let path = self.sessions_dir().join(format!("{}.json", id));
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str(&content).context("Failed to parse session")
+    }
+
+    /// Get the current session ID
+    pub fn get_current_session_id(&self) -> Option<String> {
+        let path = self.current_session_file();
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    /// Set the current session ID
+    pub fn set_current_session(&self, id: &str) -> Result<()> {
+        std::fs::write(self.current_session_file(), id)?;
+        Ok(())
+    }
+
+    /// Load the current session (most recently used)
+    pub fn load_current_session(&self) -> Result<ChatSession> {
+        if let Some(id) = self.get_current_session_id() {
+            self.load_session(&id)
+        } else {
+            // No current session - find most recently updated
+            let sessions = self.list_sessions()?;
+            if let Some(meta) = sessions.first() {
+                self.load_session(&meta.id)
+            } else {
+                // No sessions exist - create new one
+                let session = ChatSession::new();
+                self.save_session(&session)?;
+                Ok(session)
+            }
+        }
+    }
+
+    /// List all chat sessions
+    pub fn list_sessions(&self) -> Result<Vec<SessionMeta>> {
+        let dir = self.sessions_dir();
+        let mut sessions = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(session) = serde_json::from_str::<ChatSession>(&content) {
+                            sessions.push(SessionMeta::from(&session));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by updated date (most recent first)
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(sessions)
+    }
+
+    /// Create a new session and set it as current
+    pub fn create_new_session(&self) -> Result<ChatSession> {
+        let session = ChatSession::new();
+        self.save_session(&session)?;
+        Ok(session)
+    }
+
+    /// Delete a session
+    pub fn delete_session(&self, id: &str) -> Result<()> {
+        let path = self.sessions_dir().join(format!("{}.json", id));
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+
+        // If this was the current session, clear the pointer
+        if self.get_current_session_id().as_deref() == Some(id) {
+            let _ = std::fs::remove_file(self.current_session_file());
+        }
+
         Ok(())
     }
 
@@ -961,6 +1070,160 @@ pub struct ConversationSummary {
     pub created_at: DateTime<Utc>,
     pub message_count: usize,
     pub mode: String,
+}
+
+// ========== Chat Sessions ==========
+
+/// A chat session with conversation history
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSession {
+    /// Unique session ID
+    pub id: String,
+    /// Session name (derived from first prompt or auto-generated)
+    pub name: String,
+    /// Creation timestamp
+    pub created_at: DateTime<Utc>,
+    /// Last activity timestamp
+    pub updated_at: DateTime<Utc>,
+    /// Current provider
+    pub provider: String,
+    /// Current model
+    pub model: String,
+    /// Current agent mode (plan/build/review)
+    pub mode: String,
+    /// Window style (split/sidepane/popup)
+    pub window_style: String,
+    /// Window position
+    pub window_position: String,
+    /// Conversation messages
+    pub messages: Vec<SessionMessage>,
+    /// Total input tokens used
+    pub input_tokens: usize,
+    /// Total output tokens used
+    pub output_tokens: usize,
+    /// Total cost
+    pub total_cost: f64,
+}
+
+impl ChatSession {
+    /// Create a new session
+    pub fn new() -> Self {
+        let now = Utc::now();
+        let id = format!("session_{}", now.format("%Y%m%d_%H%M%S_%3f"));
+        Self {
+            id,
+            name: String::new(), // Will be set from first prompt
+            created_at: now,
+            updated_at: now,
+            provider: "ollama".to_string(),
+            model: String::new(),
+            mode: "build".to_string(),
+            window_style: "sidepane".to_string(),
+            window_position: "right".to_string(),
+            messages: Vec::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            total_cost: 0.0,
+        }
+    }
+
+    /// Set session name (truncated from first prompt)
+    pub fn set_name_from_prompt(&mut self, prompt: &str) {
+        if self.name.is_empty() {
+            // Truncate to 50 chars, clean up whitespace
+            let name = prompt
+                .lines()
+                .next()
+                .unwrap_or(prompt)
+                .chars()
+                .take(50)
+                .collect::<String>()
+                .trim()
+                .to_string();
+            self.name = if name.is_empty() {
+                format!("Session {}", self.created_at.format("%H:%M"))
+            } else if name.len() < prompt.len() {
+                format!("{}...", name)
+            } else {
+                name
+            };
+        }
+    }
+
+    /// Add a message to the session
+    pub fn add_message(&mut self, role: &str, content: &str) {
+        self.messages.push(SessionMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            timestamp: Utc::now(),
+            tool_call_id: None,
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Add a tool message
+    pub fn add_tool_message(&mut self, tool_call_id: &str, content: &str) {
+        self.messages.push(SessionMessage {
+            role: "tool".to_string(),
+            content: content.to_string(),
+            timestamp: Utc::now(),
+            tool_call_id: Some(tool_call_id.to_string()),
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Clear messages but keep settings
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+        self.input_tokens = 0;
+        self.output_tokens = 0;
+        self.total_cost = 0.0;
+        self.updated_at = Utc::now();
+    }
+}
+
+impl Default for ChatSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A message in a chat session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessage {
+    pub role: String,
+    pub content: String,
+    pub timestamp: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+/// Session metadata for listing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMeta {
+    pub id: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub provider: String,
+    pub model: String,
+    pub mode: String,
+    pub message_count: usize,
+}
+
+impl From<&ChatSession> for SessionMeta {
+    fn from(session: &ChatSession) -> Self {
+        Self {
+            id: session.id.clone(),
+            name: session.name.clone(),
+            created_at: session.created_at,
+            updated_at: session.updated_at,
+            provider: session.provider.clone(),
+            model: session.model.clone(),
+            mode: session.mode.clone(),
+            message_count: session.messages.len(),
+        }
+    }
 }
 
 /// Summary of a plan

@@ -92,6 +92,8 @@ struct AppState {
     storage: Option<TarkStorage>,
     usage_tracker: Option<Arc<UsageTracker>>,
     session_id: String,
+    /// Current chat session for multi-session management
+    current_chat_session: RwLock<Option<crate::storage::ChatSession>>,
 }
 
 /// LSP context from Neovim plugin
@@ -291,7 +293,7 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
             Ok(tracker) => {
                 let host = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string());
                 let username = whoami::username();
-                
+
                 // Extract project name from working directory
                 let project_name = working_dir
                     .file_name()
@@ -344,6 +346,22 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
     let chat_agent =
         ChatAgent::new(provider, tools).with_max_iterations(config.agent.max_iterations);
 
+    // Load or create current chat session
+    let current_chat_session = if let Some(ref s) = storage {
+        match s.load_current_session() {
+            Ok(session) => {
+                tracing::info!("Loaded existing session: {} ({})", session.name, session.id);
+                Some(session)
+            }
+            Err(e) => {
+                tracing::debug!("No existing session, will create on first message: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         current_provider: RwLock::new(default_provider),
         current_model: RwLock::new(default_model),
@@ -357,6 +375,7 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         storage,
         usage_tracker,
         session_id,
+        current_chat_session: RwLock::new(current_chat_session),
     });
 
     // Build router
@@ -370,6 +389,12 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         .route("/chat/status", get(get_status))
         .route("/session", get(get_session))
         .route("/session/save", post(save_session))
+        // Multi-session management
+        .route("/sessions", get(list_sessions))
+        .route("/sessions/current", get(get_current_session_data))
+        .route("/sessions/new", post(create_new_session))
+        .route("/sessions/switch", post(switch_session))
+        .route("/sessions/delete", post(delete_session))
         // Usage dashboard and API
         .route("/usage", get(usage_dashboard))
         .route("/api/usage/summary", get(usage_summary))
@@ -858,7 +883,9 @@ async fn handle_chat(
     match result {
         Ok(response) => {
             // Log usage if tracker is available
-            if let (Some(ref tracker), Some(ref usage)) = (&state.usage_tracker, &response.usage) {
+            let calculated_cost = if let (Some(ref tracker), Some(ref usage)) =
+                (&state.usage_tracker, &response.usage)
+            {
                 let provider = state.current_provider.read().await.clone();
                 let model = state.current_model.read().await.clone();
                 let mode = state.current_mode.read().await.clone();
@@ -887,6 +914,44 @@ async fn handle_chat(
                         tracing::error!("Failed to log usage: {}", e);
                     }
                 });
+
+                cost
+            } else {
+                0.0
+            };
+
+            // Save chat session
+            if let Some(ref storage) = state.storage {
+                let mut session_lock = state.current_chat_session.write().await;
+                let session = session_lock.get_or_insert_with(|| {
+                    let mut new_session = crate::storage::ChatSession::new();
+                    // Set name from first prompt
+                    new_session.set_name_from_prompt(&req.message);
+                    new_session
+                });
+
+                // Update session state
+                session.provider = state.current_provider.read().await.clone();
+                session.model = state.current_model.read().await.clone();
+                session.mode = mode_str.clone();
+                session.window_style = state.window_style.read().await.clone();
+                session.window_position = state.window_position.read().await.clone();
+
+                // Add messages
+                session.add_message("user", &req.message);
+                session.add_message("assistant", &response.text);
+
+                // Update token stats
+                if let Some(ref usage) = response.usage {
+                    session.input_tokens += usage.input_tokens as usize;
+                    session.output_tokens += usage.output_tokens as usize;
+                }
+                session.total_cost += calculated_cost;
+
+                // Save session
+                if let Err(e) = storage.save_session(session) {
+                    tracing::warn!("Failed to save chat session: {}", e);
+                }
             }
 
             (
@@ -1008,6 +1073,174 @@ async fn save_session(
     }
 
     (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
+}
+
+// ========== Multi-Session Management ==========
+
+/// List all sessions for this project
+async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    match storage.list_sessions() {
+        Ok(sessions) => (StatusCode::OK, Json(sessions)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Get current session with full data
+async fn get_current_session_data(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    match storage.load_current_session() {
+        Ok(session) => (StatusCode::OK, Json(session)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Create a new session
+async fn create_new_session(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    match storage.create_new_session() {
+        Ok(session) => {
+            // Also clear the agent conversation history for fresh start
+            {
+                let mut agent = state.chat_agent.write().await;
+                agent.clear_history();
+            }
+            tracing::info!("Created new session: {}", session.id);
+            (StatusCode::OK, Json(session)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Switch session request
+#[derive(Debug, Deserialize)]
+struct SwitchSessionRequest {
+    session_id: String,
+}
+
+/// Switch to a different session
+async fn switch_session(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SwitchSessionRequest>,
+) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    // Load the session
+    match storage.load_session(&req.session_id) {
+        Ok(session) => {
+            // Update current session pointer
+            if let Err(e) = storage.set_current_session(&req.session_id) {
+                tracing::warn!("Failed to set current session: {}", e);
+            }
+
+            // Update in-memory state to match session
+            {
+                let mut provider = state.current_provider.write().await;
+                *provider = session.provider.clone();
+            }
+            {
+                let mut model = state.current_model.write().await;
+                *model = session.model.clone();
+            }
+            {
+                let mut mode = state.current_mode.write().await;
+                *mode = session.mode.clone();
+            }
+            {
+                let mut style = state.window_style.write().await;
+                *style = session.window_style.clone();
+            }
+            {
+                let mut position = state.window_position.write().await;
+                *position = session.window_position.clone();
+            }
+
+            // Restore agent history from session messages
+            {
+                let mut agent = state.chat_agent.write().await;
+                agent.restore_from_session(&session);
+            }
+
+            tracing::info!("Switched to session: {} ({})", session.name, session.id);
+            (StatusCode::OK, Json(session)).into_response()
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Session not found: {}", e) })),
+        )
+            .into_response(),
+    }
+}
+
+/// Delete session request
+#[derive(Debug, Deserialize)]
+struct DeleteSessionRequest {
+    session_id: String,
+}
+
+/// Delete a session
+async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeleteSessionRequest>,
+) -> impl IntoResponse {
+    let Some(ref storage) = state.storage else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Storage not initialized" })),
+        )
+            .into_response();
+    };
+
+    match storage.delete_session(&req.session_id) {
+        Ok(()) => {
+            tracing::info!("Deleted session: {}", req.session_id);
+            (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 // ========== Usage Dashboard Endpoints ==========

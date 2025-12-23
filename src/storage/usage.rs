@@ -75,14 +75,19 @@ impl UsageTracker {
     }
 
     /// Create a new session with auto-generated name from project folder
-    pub fn create_session(&self, host: &str, username: &str, project_name: Option<&str>) -> Result<Session> {
+    pub fn create_session(
+        &self,
+        host: &str,
+        username: &str,
+        project_name: Option<&str>,
+    ) -> Result<Session> {
         // Generate session name: project_name + timestamp
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let session_name = match project_name {
             Some(name) if !name.is_empty() => format!("{}_{}", name, timestamp),
             _ => format!("session_{}", timestamp),
         };
-        
+
         let session = Session {
             id: uuid::Uuid::new_v4().to_string(),
             name: Some(session_name),
@@ -654,7 +659,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let tracker = UsageTracker::new(tmp.path()).unwrap();
 
-        let session = tracker.create_session("test-host", "test-user", Some("my-project")).unwrap();
+        let session = tracker
+            .create_session("test-host", "test-user", Some("my-project"))
+            .unwrap();
         assert!(!session.id.is_empty());
         assert_eq!(session.host, "test-host");
         assert_eq!(session.username, "test-user");
@@ -666,7 +673,9 @@ mod tests {
     fn test_log_usage() {
         let tmp = TempDir::new().unwrap();
         let tracker = UsageTracker::new(tmp.path()).unwrap();
-        let session = tracker.create_session("host", "user", Some("test-project")).unwrap();
+        let session = tracker
+            .create_session("host", "user", Some("test-project"))
+            .unwrap();
 
         tracker
             .log_usage(UsageLog {
@@ -691,7 +700,9 @@ mod tests {
     fn test_get_usage_by_model() {
         let tmp = TempDir::new().unwrap();
         let tracker = UsageTracker::new(tmp.path()).unwrap();
-        let session = tracker.create_session("host", "user", Some("test-project")).unwrap();
+        let session = tracker
+            .create_session("host", "user", Some("test-project"))
+            .unwrap();
 
         // Log usage for two models
         tracker
@@ -732,7 +743,9 @@ mod tests {
     fn test_get_usage_by_mode() {
         let tmp = TempDir::new().unwrap();
         let tracker = UsageTracker::new(tmp.path()).unwrap();
-        let session = tracker.create_session("host", "user", Some("test-project")).unwrap();
+        let session = tracker
+            .create_session("host", "user", Some("test-project"))
+            .unwrap();
 
         // Log chat and completion usage
         tracker
@@ -773,7 +786,9 @@ mod tests {
     async fn test_cleanup_older_than() {
         let tmp = TempDir::new().unwrap();
         let tracker = UsageTracker::new(tmp.path()).unwrap();
-        let session = tracker.create_session("host", "user", Some("test-project")).unwrap();
+        let session = tracker
+            .create_session("host", "user", Some("test-project"))
+            .unwrap();
 
         // Log some usage
         for _ in 0..5 {
