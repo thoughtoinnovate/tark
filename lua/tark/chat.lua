@@ -36,9 +36,10 @@ end
 
 local chat_buf = nil
 local chat_win = nil
+local input_buf = nil
+local input_win = nil
 local current_provider = 'ollama'      -- Backend protocol for API calls
 local current_provider_id = 'ollama'   -- Actual provider identity for display
-local prompt_line_start = nil  -- Track where prompt starts in buffer
 
 -- Store last modified files for diff view
 local last_modified_files = {}
@@ -501,7 +502,63 @@ local function is_floating_window(win)
     return config.relative ~= nil and config.relative ~= ''
 end
 
--- Note: update_input_window_title removed - no longer needed with single-window design
+-- Update input window title with current mode (OpenCode style)
+local function update_input_window_title()
+    if not input_win or not vim.api.nvim_win_is_valid(input_win) then
+        return
+    end
+    
+    -- Mode with model name (like OpenCode)
+    local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
+    local mode_icons = { plan = '◇', build = '◆', review = '◈' }
+    local mode_icon = mode_icons[current_mode] or '◆'
+    local model_name = current_model or model_mappings[current_provider] or 'GPT-4o'
+    local model_short = model_name:match('[^/]+$') or model_name
+    
+    -- Use actual provider identity for display (not backend protocol)
+    local provider_display = current_provider_id or current_provider
+    for _, p in ipairs(providers_info) do
+        if p.id == current_provider_id then
+            -- Extract first word from provider name, e.g., "Google" from "Google (Gemini)"
+            provider_display = p.name:match('^(%w+)') or p.id
+            break
+        end
+    end
+    local provider_label = provider_display:sub(1,1):upper() .. provider_display:sub(2)
+    
+    -- Mode-specific highlight (colored background for instant recognition)
+    local mode_hl = get_mode_highlight(current_mode, true)
+    
+    -- Check if this is a floating window or a split window
+    if is_floating_window(input_win) then
+        -- Floating window: use title/footer
+        local config = vim.api.nvim_win_get_config(input_win)
+        config.title = {
+            { ' ' .. mode_label .. ' ', mode_hl },
+            { ' ' .. model_short .. ' ', 'Comment' },
+            { provider_label .. ' ', 'FloatBorder' },
+        }
+        config.title_pos = 'left'
+        
+        -- Add footer text (keybindings) with mode-aware hint
+        local mode_hint = current_mode == 'plan' and 'build' or 'plan'
+        config.footer = {
+            { ' tab ', 'Comment' },
+            { mode_hint, get_mode_highlight(mode_hint, false) },
+            { '  /', 'Comment' },
+            { 'commands ', 'FloatBorder' },
+        }
+        config.footer_pos = 'left'
+        
+        vim.api.nvim_win_set_config(input_win, config)
+    else
+        -- Split window: use statusline
+        local mode_hint = current_mode == 'plan' and 'build' or 'plan'
+        vim.api.nvim_win_set_option(input_win, 'statusline',
+            string.format('%%#TarkMode%s# %s %s %%#Comment# %s %%#FloatBorder# %s %%#Comment# tab:%s  /:commands %%#Normal#',
+                mode_label, mode_icon, mode_label, model_short, provider_label, mode_hint))
+    end
+end
 
 -- Update chat window title with current stats
 local function update_chat_window_title()
@@ -581,6 +638,9 @@ local function update_chat_window_title()
             string.format('%%#FloatTitle#%s%%#Normal# %%#%s#%s%%#Normal# %%#String#%s%%#Normal#',
                 model_part, context_hl, context_part, cost_part))
     end
+    
+    -- Also update input title
+    update_input_window_title()
 end
 
 -- Update session stats and refresh UI
@@ -831,45 +891,22 @@ _G.tark_slash_complete = slash_command_complete
 _G.tark_file_complete = file_reference_complete
 
 -- Create the input buffer
--- Add prompt line at bottom of chat buffer
-local function add_prompt_line()
-    if not chat_buf or not vim.api.nvim_buf_is_valid(chat_buf) then
-        return
+local function get_input_buffer()
+    if input_buf and vim.api.nvim_buf_is_valid(input_buf) then
+        return input_buf
     end
-    
-    local lines = vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false)
-    local last_line = lines[#lines] or ''
-    
-    -- Add separator and prompt if not already there
-    if not last_line:match('^> ') then
-        local separator = string.rep('─', 80)
-        vim.api.nvim_buf_set_lines(chat_buf, -1, -1, false, {'', separator, '> '})
-        prompt_line_start = vim.api.nvim_buf_line_count(chat_buf)
-    end
-end
 
--- Get text from prompt line
-local function get_prompt_text()
-    if not chat_buf or not vim.api.nvim_buf_is_valid(chat_buf) then
-        return ''
-    end
+    input_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_option(input_buf, 'buftype', 'nofile')
+    vim.api.nvim_buf_set_option(input_buf, 'bufhidden', 'hide')
+    vim.api.nvim_buf_set_name(input_buf, 'tark-input')
     
-    local last_line_num = vim.api.nvim_buf_line_count(chat_buf)
-    local last_line = vim.api.nvim_buf_get_lines(chat_buf, last_line_num - 1, last_line_num, false)[1] or ''
-    
-    -- Extract text after '> '
-    local text = last_line:match('^> (.*)') or ''
-    return text
-end
+    -- Set custom omnifunc for slash commands (triggered with C-x C-o)
+    vim.api.nvim_buf_set_option(input_buf, 'omnifunc', 'v:lua.tark_slash_complete')
+    -- Set custom completefunc for @ file references (triggered with C-x C-u)
+    vim.api.nvim_buf_set_option(input_buf, 'completefunc', 'v:lua.tark_file_complete')
 
--- Clear prompt line
-local function clear_prompt_line()
-    if not chat_buf or not vim.api.nvim_buf_is_valid(chat_buf) then
-        return
-    end
-    
-    local last_line_num = vim.api.nvim_buf_line_count(chat_buf)
-    vim.api.nvim_buf_set_lines(chat_buf, last_line_num - 1, last_line_num, false, {'> '})
+    return input_buf
 end
 
 -- Append a message to the chat
@@ -1036,23 +1073,11 @@ local function append_message(role, content)
     end
 
     if #new_lines > 0 then
-        -- Find where to insert (before prompt line)
-        local total_lines = vim.api.nvim_buf_line_count(buf)
-        local insert_pos = total_lines
-        
-        -- Check if last line is prompt (starts with '> ')
-        local last_line = vim.api.nvim_buf_get_lines(buf, total_lines - 1, total_lines, false)[1] or ''
-        if last_line:match('^> ') then
-            -- Insert before the separator and prompt (3 lines: empty, separator, prompt)
-            insert_pos = total_lines - 3
-            if insert_pos < 0 then insert_pos = 0 end
-        end
-        
-        vim.api.nvim_buf_set_lines(buf, insert_pos, insert_pos, false, new_lines)
+        vim.api.nvim_buf_set_lines(buf, start_line, start_line, false, new_lines)
         
         -- Apply highlights using extmarks
         for _, range in ipairs(highlight_ranges) do
-            pcall(vim.api.nvim_buf_add_highlight, buf, ns_id, range.hl, range.line + insert_pos, range.col_start, range.col_end)
+            pcall(vim.api.nvim_buf_add_highlight, buf, ns_id, range.hl, range.line, range.col_start, range.col_end)
         end
     end
 
@@ -2329,17 +2354,12 @@ function M.open(initial_message)
     end
 
     local buf = get_chat_buffer()
+    local input = get_input_buffer()
 
-    -- Initialize header and add prompt line
+    -- Initialize header
     update_chat_header()
-    add_prompt_line()
 
-    -- Calculate window dimensions
-    local editor_width = vim.o.columns
-    local editor_height = vim.o.lines
-    local width, height, col, row
-
-    -- SPLIT MODE: Create proper docked split that resizes other content
+    -- SPLIT MODE: Create proper docked split windows that resize other content
     if M.config.window.style == 'split' then
         -- Create vertical split on right or left
         if M.config.window.position == 'left' then
@@ -2356,7 +2376,7 @@ function M.open(initial_message)
         local split_width = M.config.window.split_width or 80
         vim.api.nvim_win_set_width(chat_win, split_width)
         
-        -- Configure window options
+        -- Configure window options for chat
         vim.api.nvim_win_set_option(chat_win, 'number', false)
         vim.api.nvim_win_set_option(chat_win, 'relativenumber', false)
         vim.api.nvim_win_set_option(chat_win, 'signcolumn', 'no')
@@ -2364,12 +2384,35 @@ function M.open(initial_message)
         vim.api.nvim_win_set_option(chat_win, 'linebreak', true)
         vim.api.nvim_win_set_option(chat_win, 'winfixwidth', true)
         
-        -- Set statusline for split mode
+        -- Create horizontal split at bottom of chat for input
+        vim.cmd('belowright split')
+        input_win = vim.api.nvim_get_current_win()
+        vim.api.nvim_win_set_buf(input_win, input)
+        
+        -- Set input height (3-5 lines)
+        local input_height = 5
+        vim.api.nvim_win_set_height(input_win, input_height)
+        
+        -- Configure window options for input
+        vim.api.nvim_win_set_option(input_win, 'number', false)
+        vim.api.nvim_win_set_option(input_win, 'relativenumber', false)
+        vim.api.nvim_win_set_option(input_win, 'signcolumn', 'no')
+        vim.api.nvim_win_set_option(input_win, 'wrap', true)
+        vim.api.nvim_win_set_option(input_win, 'winfixheight', true)
+        vim.api.nvim_win_set_option(input_win, 'winfixwidth', true)
+        
+        -- Set statusline for split mode to show info (replaces floating title/footer)
         local mode_icons = { plan = '◇', build = '◆', review = '◈' }
         local mode_icon = mode_icons[current_mode] or '◆'
         local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
         local model_name = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
         
+        -- Chat window statusline shows model and context
+        vim.api.nvim_win_set_option(chat_win, 'statusline', 
+            string.format('%%#FloatTitle# %s %%#Comment# [0%%%%] 0/128K %%#String# $0.0000 %%#Normal#', model_name))
+        
+        -- Input window statusline shows mode
+        -- Get proper provider display name
         local provider_display_sl = current_provider_id or current_provider
         for _, p in ipairs(providers_info) do
             if p.id == current_provider_id then
@@ -2377,14 +2420,21 @@ function M.open(initial_message)
                 break
             end
         end
-        
-        vim.api.nvim_win_set_option(chat_win, 'statusline',
-            string.format('%%#TarkMode%s# %s %s %%#Comment# %s | %s %%#FloatBorder# [0%%%%] 0/128K %%#String# $0.0000 %%#Normal#',
-                mode_label, mode_icon, mode_label, model_name,
+        vim.api.nvim_win_set_option(input_win, 'statusline',
+            string.format('%%#TarkMode%s# %s %s %%#Comment# %s %%#FloatBorder# %s %%#Comment# tab:mode  /:commands %%#Normal#',
+                current_mode:sub(1,1):upper() .. current_mode:sub(2), mode_icon, mode_label, model_name, 
                 provider_display_sl:sub(1,1):upper() .. provider_display_sl:sub(2)))
+        
+        -- Focus input window
+        vim.api.nvim_set_current_win(input_win)
     
     -- FLOATING MODES (sidepane/popup)
     else
+        local editor_width = vim.o.columns
+        local editor_height = vim.o.lines
+        local input_height = 3
+        local width, height, col, row
+        
         -- Calculate dimensions based on style
         if M.config.window.style == 'sidepane' then
             -- SIDEPANE MODE: Full height, intelligent width on right
@@ -2401,7 +2451,7 @@ function M.open(initial_message)
             width = math.min(M.config.window.max_width or 100, width)
             
             -- Full height (minus statusline, cmdline, tabline)
-            height = editor_height - 4
+            height = editor_height - input_height - 4
             
             -- Position on right edge
             if M.config.window.position == 'left' then
@@ -2411,38 +2461,23 @@ function M.open(initial_message)
             end
             row = 0
         else
-            -- POPUP MODE: Centered floating window (60% of screen)
-            width = math.floor(editor_width * 0.6)
-            height = math.floor(editor_height * 0.6)
+            -- POPUP MODE: Centered floating window
+            width = M.config.window.width
+            height = M.config.window.height
             col = math.floor((editor_width - width) / 2)
-            row = math.floor((editor_height - height) / 2)
+            row = math.floor((editor_height - height - input_height - 4) / 2)
         end
 
-        -- Build title (model | context | cost | mode)
+        -- Build initial chat title (model | context | cost)
         local model_name_t = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
-        local mode_icons = { plan = '◇', build = '◆', review = '◈' }
-        local mode_icon = mode_icons[current_mode] or '◆'
-        local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
-        local input_mode_hl = get_mode_highlight(current_mode, true)
         
-        -- Layout: [Mode Icon Mode] Model ... [0%] 0/128K ... [$0.0000]
-        local mode_part_t = string.format(' %s %s ', mode_icon, mode_label)
+        -- Layout: [Model] ... [0%] 0/128K ... [$0.0000]
         local model_part_t = string.format(' %s ', model_name_t)
         local context_part_t = string.format('[0%%] 0/%s', format_number(128000))
         local cost_part_t = '$0.0000 '
         
-        -- Get provider display name
-        local provider_display_t = current_provider_id or current_provider
-        for _, p in ipairs(providers_info) do
-            if p.id == current_provider_id then
-                provider_display_t = p.name:match('^(%w+)') or p.id
-                break
-            end
-        end
-        local provider_label_t = provider_display_t:sub(1,1):upper() .. provider_display_t:sub(2)
-        
-        -- INTELLIGENT PADDING for title
-        local left_width_t = display_width(mode_part_t) + display_width(model_part_t)
+        -- INTELLIGENT PADDING: Left-align left, Center center, Right-align right
+        local left_width_t = display_width(model_part_t)
         local center_width_t = display_width(context_part_t)
         local right_width_t = display_width(cost_part_t)
         local usable_width_t = width - 2  -- Account for border chars
@@ -2459,7 +2494,6 @@ function M.open(initial_message)
         if right_pad_t < 1 then right_pad_t = 1 end
         
         local title_config = {
-            { mode_part_t, input_mode_hl },
             { model_part_t, 'FloatTitle' },
             { string.rep(' ', left_pad_t), 'FloatBorder' },
             { context_part_t, 'Comment' },
@@ -2467,7 +2501,7 @@ function M.open(initial_message)
             { cost_part_t, 'String' },
         }
         
-        chat_win = vim.api.nvim_open_win(buf, true, {
+        chat_win = vim.api.nvim_open_win(buf, false, {
             relative = 'editor',
             width = width,
             height = height,
@@ -2477,59 +2511,68 @@ function M.open(initial_message)
             border = M.config.window.border,
             title = title_config,
             title_pos = 'left',
+        })
+
+        -- Create input window with mode-specific title (mode badge is HERE, not in chat window)
+        local mode_icons = { plan = '◇', build = '◆', review = '◈' }
+        local mode_icon = mode_icons[current_mode] or '◆'
+        local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
+        local input_mode_hl = get_mode_highlight(current_mode, true)
+        local input_mode_part = string.format(' %s %s ', mode_icon, mode_label)
+        
+        -- Get proper provider display name
+        local provider_display_t = current_provider_id or current_provider
+        for _, p in ipairs(providers_info) do
+            if p.id == current_provider_id then
+                provider_display_t = p.name:match('^(%w+)') or p.id
+                break
+            end
+        end
+        local provider_label_t = provider_display_t:sub(1,1):upper() .. provider_display_t:sub(2)
+        
+        -- Position input window below chat (sidepane: at bottom; popup: below chat)
+        local input_row = M.config.window.style == 'sidepane' and (editor_height - input_height - 2) or (row + height + 2)
+        
+        input_win = vim.api.nvim_open_win(input, true, {
+            relative = 'editor',
+            width = width,
+            height = input_height,
+            col = col,
+            row = input_row,
+            style = 'minimal',
+            border = M.config.window.border,
+            title = {
+                { input_mode_part, input_mode_hl },
+                { ' ' .. model_name_t .. ' ', 'Comment' },
+                { provider_label_t .. ' ', 'FloatBorder' },
+            },
+            title_pos = 'left',
             footer = {
-                { ' ↵ send ', 'Comment' },
                 { ' tab ', 'Comment' },
-                { 'mode', 'FloatBorder' },
+                { current_mode == 'plan' and 'build' or 'plan', get_mode_highlight(current_mode == 'plan' and 'build' or 'plan', false) },
                 { '  /', 'Comment' },
                 { 'commands ', 'FloatBorder' },
-                { ' q ', 'Comment' },
-                { 'close', 'FloatBorder' },
             },
             footer_pos = 'left',
         })
-        
-        -- Configure window options
-        vim.api.nvim_win_set_option(chat_win, 'number', false)
-        vim.api.nvim_win_set_option(chat_win, 'relativenumber', false)
-        vim.api.nvim_win_set_option(chat_win, 'signcolumn', 'no')
-        vim.api.nvim_win_set_option(chat_win, 'wrap', true)
-        vim.api.nvim_win_set_option(chat_win, 'linebreak', true)
     end
 
-    -- Helper function to process input from prompt line
+    -- Helper function to process input
     local function do_send()
         vim.schedule(function()
-            local message = get_prompt_text()
+            local lines = vim.api.nvim_buf_get_lines(input, 0, -1, false)
+            local message = table.concat(lines, '\n'):gsub('^%s+', ''):gsub('%s+$', '')
             if message and message ~= '' then
-                clear_prompt_line()
+                vim.api.nvim_buf_set_lines(input, 0, -1, false, {})
                 process_input(message)
             end
         end)
     end
 
-    -- Set up keybindings on the chat buffer
-    -- Move cursor to prompt line for typing
-    local function go_to_prompt()
-        local last_line = vim.api.nvim_buf_line_count(buf)
-        vim.api.nvim_win_set_cursor(chat_win, {last_line, 2})  -- Position after '> '
-    end
+    -- Enter in Normal mode
+    vim.keymap.set('n', '<CR>', do_send, { buffer = input, silent = true, nowait = true })
 
-    -- Enter in Normal mode - send message
-    vim.keymap.set('n', '<CR>', function()
-        -- If on prompt line, send
-        local cursor = vim.api.nvim_win_get_cursor(chat_win)
-        local last_line = vim.api.nvim_buf_line_count(buf)
-        if cursor[1] == last_line then
-            do_send()
-        else
-            -- Otherwise go to prompt
-            go_to_prompt()
-            vim.cmd('startinsert!')
-        end
-    end, { buffer = buf, silent = true, nowait = true })
-
-    -- Enter in Insert mode - send
+    -- Enter in Insert mode - select completion or send
     vim.keymap.set('i', '<CR>', function()
         if vim.fn.pumvisible() == 1 then
             -- Accept the selected completion
@@ -2539,31 +2582,13 @@ function M.open(initial_message)
             do_send()
             return ''
         end
-    end, { buffer = buf, expr = true, silent = true, nowait = true })
+    end, { buffer = input, expr = true, silent = true, nowait = true })
 
     -- Ctrl+Enter as alternative
     vim.keymap.set('i', '<C-CR>', function()
         vim.cmd('stopinsert')
         do_send()
-    end, { buffer = buf, silent = true, nowait = true })
-
-    -- i in normal mode - go to prompt and insert
-    vim.keymap.set('n', 'i', function()
-        go_to_prompt()
-        vim.cmd('startinsert!')
-    end, { buffer = buf, silent = true, nowait = true })
-    
-    -- a in normal mode - go to end of prompt and insert
-    vim.keymap.set('n', 'a', function()
-        go_to_prompt()
-        vim.cmd('startinsert!')
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<End>', true, false, true), 'n', false)
-    end, { buffer = buf, silent = true, nowait = true })
-
-    -- Set custom omnifunc for slash commands (triggered with C-x C-o)
-    vim.api.nvim_buf_set_option(buf, 'omnifunc', 'v:lua.tark_slash_complete')
-    -- Set custom completefunc for @ file references (triggered with C-x C-u)
-    vim.api.nvim_buf_set_option(buf, 'completefunc', 'v:lua.tark_file_complete')
+    end, { buffer = input, silent = true, nowait = true })
 
     -- '/' triggers slash command completion
     vim.keymap.set('i', '/', function()
@@ -2571,15 +2596,13 @@ function M.open(initial_message)
         local col = vim.fn.col('.') - 1
         -- Insert the slash first
         vim.api.nvim_put({ '/' }, 'c', false, true)
-        -- Check if we're on the prompt line and near the start
-        local cursor = vim.api.nvim_win_get_cursor(chat_win)
-        local last_line = vim.api.nvim_buf_line_count(buf)
-        if cursor[1] == last_line and (col <= 2 or line:match('^> *$')) then
+        -- If at start of line (or line is empty), trigger completion
+        if col == 0 or line == '' then
             vim.schedule(function()
                 vim.fn.feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-o>', true, false, true), 'n')
             end)
         end
-    end, { buffer = buf, silent = true, nowait = true })
+    end, { buffer = input, silent = true, nowait = true })
 
     -- '@' triggers file reference completion
     vim.keymap.set('i', '@', function()
@@ -2589,16 +2612,16 @@ function M.open(initial_message)
         vim.schedule(function()
             vim.fn.feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n')
         end)
-    end, { buffer = buf, silent = true, nowait = true })
+    end, { buffer = input, silent = true, nowait = true })
 
-    -- Tab to accept completion or toggle mode
+    -- Tab to accept completion or cycle
     vim.keymap.set('i', '<Tab>', function()
         if vim.fn.pumvisible() == 1 then
             return vim.api.nvim_replace_termcodes('<C-n>', true, false, true)
         else
             return vim.api.nvim_replace_termcodes('<Tab>', true, false, true)
         end
-    end, { buffer = buf, expr = true, silent = true })
+    end, { buffer = input, expr = true, silent = true })
 
     -- Shift-Tab to cycle backwards
     vim.keymap.set('i', '<S-Tab>', function()
@@ -2607,14 +2630,17 @@ function M.open(initial_message)
         else
             return vim.api.nvim_replace_termcodes('<S-Tab>', true, false, true)
         end
-    end, { buffer = buf, expr = true, silent = true })
+    end, { buffer = input, expr = true, silent = true })
 
-    -- q to close (only in normal mode)
+    -- Escape just exits insert mode (doesn't close window)
+    -- Use <leader>ec to toggle/close the chat window
+    
+    -- q to close (only in normal mode) - optional quick close
     vim.keymap.set('n', 'q', function()
         M.close()
-    end, { buffer = buf, silent = true, nowait = true })
+    end, { buffer = input, silent = true, nowait = true })
 
-    -- Tab in normal mode to toggle between plan and build modes
+    -- Tab to toggle between plan and build modes (normal mode)
     vim.keymap.set('n', '<Tab>', function()
         if current_mode == 'plan' then
             current_mode = 'build'
@@ -2626,16 +2652,29 @@ function M.open(initial_message)
         update_chat_header()
         if M.save_session then M.save_session() end
         scroll_to_bottom()
-    end, { buffer = buf, silent = true, desc = 'Toggle plan/build mode' })
+    end, { buffer = input, silent = true, desc = 'Toggle plan/build mode' })
+
+    -- Also add Tab in chat buffer for toggling
+    vim.keymap.set('n', '<Tab>', function()
+        if current_mode == 'plan' then
+            current_mode = 'build'
+            append_message('system', '🔨 **BUILD mode** - Full access to modify files.')
+        else
+            current_mode = 'plan'
+            append_message('system', '📝 **PLAN mode** - Read-only exploration.')
+        end
+        update_chat_header()
+        if M.save_session then M.save_session() end
+        scroll_to_bottom()
+    end, { buffer = chat_buf, silent = true, desc = 'Toggle plan/build mode' })
 
     -- Handle initial message if provided
     if initial_message and initial_message ~= '' then
         process_input(initial_message)
     end
 
-    -- Go to prompt and enter insert mode
-    go_to_prompt()
-    vim.cmd('startinsert!')
+    -- Enter insert mode in input window
+    vim.cmd('startinsert')
 end
 
 -- Close the chat window
@@ -2643,6 +2682,10 @@ function M.close()
     if chat_win and vim.api.nvim_win_is_valid(chat_win) then
         vim.api.nvim_win_close(chat_win, true)
         chat_win = nil
+    end
+    if input_win and vim.api.nvim_win_is_valid(input_win) then
+        vim.api.nvim_win_close(input_win, true)
+        input_win = nil
     end
     
     -- Stop LSP proxy server
@@ -2657,7 +2700,8 @@ end
 
 -- Check if chat is open
 function M.is_open()
-    return (chat_win ~= nil and vim.api.nvim_win_is_valid(chat_win)) == true
+    return (chat_win and vim.api.nvim_win_is_valid(chat_win)) or 
+           (input_win and vim.api.nvim_win_is_valid(input_win))
 end
 
 -- Toggle chat window
