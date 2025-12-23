@@ -1474,17 +1474,24 @@ local function send_message(message)
     
     local req_body = '{' .. table.concat(req_parts, ', ') .. '}'
 
+    -- Track if we've received any response data
+    local response_received = false
+    
     vim.fn.jobstart({
         'curl',
         '-s',
+        '--max-time', '300',  -- 5 minute timeout for long-running operations
         '-X', 'POST',
         '-H', 'Content-Type: application/json',
         '-d', req_body,
         get_server_url() .. '/chat',
     }, {
         stdout_buffered = true,
+        stderr_buffered = true,
         on_stdout = function(_, data)
             vim.schedule(function()
+                response_received = true
+                
                 -- Stop loading animation and status polling
                 stop_loading_animation()
                 stop_status_polling()
@@ -1734,10 +1741,36 @@ local function send_message(message)
         end,
         on_stderr = function(_, data)
             vim.schedule(function()
+                response_received = true
                 stop_status_polling()
                 stop_loading_animation()
+                agent_running = false
                 if data and data[1] and data[1] ~= '' then
+                    local err_msg = table.concat(data, '')
                     append_message('system', '❌ *Error: Could not connect to server. Run: tark serve*')
+                    -- Log stderr for debugging (visible with :messages)
+                    vim.notify('tark curl stderr: ' .. err_msg, vim.log.levels.DEBUG)
+                    scroll_to_bottom()
+                end
+            end)
+        end,
+        on_exit = function(_, exit_code)
+            vim.schedule(function()
+                -- Only handle if no response was received (hung/timeout case)
+                if not response_received then
+                    stop_loading_animation()
+                    stop_status_polling()
+                    agent_running = false
+                    
+                    if exit_code == 28 then
+                        -- curl exit code 28 = timeout
+                        append_message('system', '⏱️ *Request timed out after 5 minutes. The server may still be processing.*')
+                    elseif exit_code ~= 0 then
+                        append_message('system', string.format('❌ *Request failed (exit code: %d). Check server status.*', exit_code))
+                    else
+                        -- Exit code 0 but no data received - server sent empty response
+                        append_message('system', '❌ *Server returned empty response. This may indicate an internal error.*')
+                    end
                     scroll_to_bottom()
                 end
             end)
