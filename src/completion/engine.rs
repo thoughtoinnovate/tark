@@ -119,14 +119,11 @@ impl CompletionEngine {
             request.cursor_col,
         );
 
-        // Build enhanced prefix with LSP context
-        let enhanced_prefix = self.build_enhanced_prefix(&prefix, request);
-
-        // Only use cache if there's no LSP context (context-free completions are stable)
-        // With LSP context, skip cache because the same code at different times may have
-        // different diagnostics/types, so the same prefix/suffix shouldn't reuse cached results
+        // NOTE: Cache is only valid for context-free completions.
+        // With LSP context, the enhanced prefix changes based on current diagnostics/types,
+        // so we cannot safely cache those results (same code at different times = different output).
+        // Only check cache if there's no LSP context.
         if request.lsp_context.is_none() {
-            // Check cache for non-LSP requests
             if let Some(cached) = self.cache.get(&prefix, &suffix) {
                 return Ok(CompletionResponse {
                     line_count: cached.lines().count(),
@@ -142,13 +139,16 @@ impl CompletionEngine {
             .and_then(|ctx| ctx.language.as_deref())
             .unwrap_or_else(|| FimBuilder::detect_language(&request.file_path));
 
+        // Build enhanced prefix with LSP context
+        let enhanced_prefix = self.build_enhanced_prefix(&prefix, request);
+
         // Get completion from LLM
         let completion = self
             .llm
             .complete_fim(&enhanced_prefix, &suffix, language)
             .await?;
 
-        // Cache only if there's no LSP context
+        // Only cache context-free completions (they're deterministic and stable)
         if request.lsp_context.is_none() {
             self.cache.put(&prefix, &suffix, completion.clone());
         }

@@ -215,14 +215,15 @@ local function handle_client(client)
     
     client:read_start(function(err, data)
         if err then
-            client:read_stop()
+            -- Error reading from socket
+            client:read_stop()  -- Per libuv: must stop before close
             client:close()
             return
         end
         
         if not data then
-            -- Connection closed
-            client:read_stop()
+            -- Connection closed (EOF) by peer
+            client:read_stop()  -- Per libuv: must stop before close
             client:close()
             return
         end
@@ -250,7 +251,7 @@ local function handle_client(client)
         local req, parse_err = parse_request(buffer)
         if not req then
             local response = http_error(parse_err or 'Parse error')
-            client:read_stop()
+            client:read_stop()  -- Per libuv: must stop before write+close
             client:write(response, function()
                 client:close()
             end)
@@ -261,15 +262,17 @@ local function handle_client(client)
         local handler = handlers[req.path]
         if not handler then
             local response = http_error('Unknown endpoint: ' .. req.path)
-            client:read_stop()
+            client:read_stop()  -- Per libuv: must stop before write+close
             client:write(response, function()
                 client:close()
             end)
             return
         end
         
+        -- Stop reading before async operations to prevent callback re-entry
+        client:read_stop()
+        
         -- Execute handler (async)
-        client:read_stop()  -- Stop reading to prevent further data
         vim.schedule(function()
             handler(req, function(response)
                 client:write(response, function()
