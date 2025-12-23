@@ -4,8 +4,10 @@ Automated tests for the tark Neovim plugin using plenary.nvim.
 
 ## Requirements
 
-- **Neovim 0.8.0+** (required for plenary.nvim)
+- **Neovim 0.8.0+** (required for plenary.nvim and stdpath('log'))
 - Git (for cloning plenary.nvim)
+
+**Note**: Neovim 0.7.x and earlier will fail with `"log" is not a valid stdpath` error.
 
 ## Running Tests
 
@@ -116,13 +118,18 @@ neovim-tests:
       uses: rhysd/action-setup-vim@v1
       with:
         neovim: true
-        version: stable
-    - name: Run Neovim tests
+        version: stable  # Installs latest stable (0.10+)
+    - name: Verify Neovim version
       run: |
         nvim --version
+        # Checks for Neovim 0.8.0+ requirement
+    - name: Run Neovim tests
+      run: |
         nvim --headless -u tests/minimal_init.lua \
           -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
 ```
+
+The CI workflow uses `rhysd/action-setup-vim` with `version: stable`, which installs the latest stable Neovim release (currently 0.10+). A version check ensures the runner has Neovim 0.8.0 or later.
 
 ## Troubleshooting
 

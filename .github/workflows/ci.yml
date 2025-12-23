@@ -96,9 +96,21 @@ jobs:
           neovim: true
           version: stable
       
-      - name: Run Neovim tests
+      - name: Verify Neovim version
         run: |
           nvim --version
+          # Require Neovim 0.8.0+ for plenary.nvim compatibility
+          VERSION=$(nvim --version | head -1 | grep -oP 'v\K[0-9]+\.[0-9]+')
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          MINOR=$(echo $VERSION | cut -d. -f2)
+          if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 8 ]; then
+            echo "Error: Neovim 0.8.0+ required, found $VERSION"
+            exit 1
+          fi
+          echo "✓ Neovim $VERSION meets minimum requirement (0.8.0+)"
+      
+      - name: Run Neovim tests
+        run: |
           nvim --headless -u tests/minimal_init.lua \
             -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
 

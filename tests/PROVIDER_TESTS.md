@@ -14,6 +14,11 @@ Added `current_provider_id` to track the actual provider separately from the bac
 - `current_provider`: Backend protocol (`'openai'`, `'claude'`, `'ollama'`)
 - `current_provider_id`: Actual provider identity (`'google'`, `'openai'`, `'anthropic'`, `'ollama'`)
 
+## Requirements
+
+- **Neovim 0.8.0+** required (0.10+ recommended)
+- Plenary.nvim (auto-installed by tests/minimal_init.lua)
+
 ## Running the Tests
 
 ### Run all chat tests (including new provider tests)
