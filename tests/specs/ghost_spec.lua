@@ -43,10 +43,12 @@ describe('ghost - completion mode', function()
     end)
 
     describe('token display', function()
-        it('returns empty string when no completions', function()
+        it('returns icon when no completions', function()
             ghost.reset_stats()
             local statusline = ghost.statusline()
-            assert.equals('', statusline)
+            -- Should return icon (🛰 when enabled) even with no completions
+            assert.is_string(statusline)
+            assert.is_true(#statusline > 0)
         end)
 
         it('formats stats lines for display', function()

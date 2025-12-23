@@ -2408,9 +2408,6 @@ function M.open(initial_message)
         vim.api.nvim_win_set_option(input_win, 'wrap', true)
         vim.api.nvim_win_set_option(input_win, 'winfixheight', true)
         vim.api.nvim_win_set_option(input_win, 'winfixwidth', true)
-        -- Cap prompt height so "maximize" actions don't expand input only
-        vim.api.nvim_win_set_option(input_win, 'winminheight', 1)
-        vim.api.nvim_win_set_option(input_win, 'winmaxheight', input_height)
         
         -- Set statusline for split mode to show info (replaces floating title/footer)
         local mode_icons = { plan = '◇', build = '◆', review = '◈' }
@@ -2566,11 +2563,9 @@ function M.open(initial_message)
             },
             footer_pos = 'left',
         })
-        -- For floating prompt, also cap height so maximize plugins don't expand it
+        -- For floating prompt, prevent resize by maximize plugins
         vim.api.nvim_win_set_option(input_win, 'winfixheight', true)
         vim.api.nvim_win_set_option(input_win, 'winfixwidth', true)
-        vim.api.nvim_win_set_option(input_win, 'winminheight', 1)
-        vim.api.nvim_win_set_option(input_win, 'winmaxheight', input_height)
     end
 
     -- Helper function to process input
@@ -2716,8 +2711,9 @@ end
 
 -- Check if chat is open
 function M.is_open()
-    return (chat_win and vim.api.nvim_win_is_valid(chat_win)) or 
-           (input_win and vim.api.nvim_win_is_valid(input_win))
+    if chat_win and vim.api.nvim_win_is_valid(chat_win) then return true end
+    if input_win and vim.api.nvim_win_is_valid(input_win) then return true end
+    return false
 end
 
 -- Toggle chat window
