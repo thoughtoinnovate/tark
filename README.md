@@ -274,6 +274,10 @@ tark serve
 | `/build` | Switch to Build mode (full access) |
 | `/thinking` | Toggle verbose output |
 | `/clear` | Clear chat history |
+| `/split` | Switch to split layout (docked, resizes other windows) |
+| `/sidepane` | Switch to sidepane layout (floating overlay) |
+| `/popup` | Switch to popup layout (centered) |
+| `/layout` | Cycle through split/sidepane/popup layouts |
 | `/usage` | Show usage stats in floating window |
 | `/usage-open` | Open usage dashboard in browser |
 | `/exit` | Close chat window |
@@ -397,8 +401,13 @@ require('tark').setup({
     chat = {
         enabled = true,
         window = {
-            sidepane_width = 0.35,  -- 35% of editor width
-            border = 'rounded',
+            style = 'split',           -- 'split' (docked), 'sidepane' (floating), or 'popup' (centered)
+            position = 'right',        -- 'right' or 'left' (for split/sidepane)
+            split_width = 80,          -- Width in columns for split mode
+            sidepane_width = 0.35,     -- 35% of editor width for sidepane mode
+            width = 80,                -- Width for popup mode
+            height = 20,               -- Height for popup mode
+            border = 'rounded',        -- Border style
         },
     },
     -- LSP integration (enhances completions and agent tools)
