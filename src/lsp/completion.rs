@@ -32,6 +32,7 @@ pub async fn handle_completion(
         cursor_line: position.line as usize,
         cursor_col: position.character as usize,
         related_files: vec![],
+        lsp_context: None, // LSP mode doesn't need additional context
     };
 
     match engine.complete(&request).await {

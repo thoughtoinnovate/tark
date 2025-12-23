@@ -1,4 +1,5 @@
 -- Chat interface for tark with provider selection and slash commands
+-- With LSP proxy integration for enhanced agent capabilities
 
 local M = {}
 
@@ -6,6 +7,7 @@ M.config = {
     server_url = 'http://localhost:8765',
     auto_show_diff = true,  -- Show inline diff in chat when files are modified
     docker_mode = false,    -- If true, server is in Docker (use /workspace as cwd)
+    lsp_proxy = true,       -- Enable LSP proxy for agent tools
     window = {
         style = 'sidepane',  -- 'sidepane' or 'popup'
         position = 'right',  -- 'right' or 'left' (for sidepane)
@@ -17,6 +19,9 @@ M.config = {
         border = 'rounded',
     },
 }
+
+-- LSP proxy port (dynamically assigned when chat opens)
+local lsp_proxy_port = nil
 
 -- Get the cwd to send to server (handles Docker mode)
 local function get_server_cwd()
@@ -1274,7 +1279,22 @@ local function send_message(message)
 
     -- Ensure message is a proper string (escape special characters)
     local clean_message = message:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'):gsub('\t', '\\t')
-    local req_body = '{"message": "' .. clean_message .. '", "clear_history": false, "provider": "' .. current_provider .. '", "cwd": "' .. clean_cwd .. '", "mode": "' .. current_mode .. '"}'
+    
+    -- Build request body with optional LSP proxy port
+    local req_parts = {
+        '"message": "' .. clean_message .. '"',
+        '"clear_history": false',
+        '"provider": "' .. current_provider .. '"',
+        '"cwd": "' .. clean_cwd .. '"',
+        '"mode": "' .. current_mode .. '"',
+    }
+    
+    -- Include LSP proxy port if available
+    if lsp_proxy_port then
+        table.insert(req_parts, '"lsp_proxy_port": ' .. lsp_proxy_port)
+    end
+    
+    local req_body = '{' .. table.concat(req_parts, ', ') .. '}'
 
     vim.fn.jobstart({
         'curl',
@@ -2237,6 +2257,17 @@ end
 
 -- Open the chat window
 function M.open(initial_message)
+    -- Start LSP proxy server if enabled
+    if M.config.lsp_proxy then
+        local ok, lsp_server = pcall(require, 'tark.lsp_server')
+        if ok then
+            lsp_proxy_port = lsp_server.start()
+            if lsp_proxy_port then
+                vim.notify('tark: LSP proxy started on port ' .. lsp_proxy_port, vim.log.levels.DEBUG)
+            end
+        end
+    end
+
     local buf = get_chat_buffer()
     local input = get_input_buffer()
 
@@ -2488,6 +2519,15 @@ function M.close()
     if input_win and vim.api.nvim_win_is_valid(input_win) then
         vim.api.nvim_win_close(input_win, true)
         input_win = nil
+    end
+    
+    -- Stop LSP proxy server
+    if lsp_proxy_port then
+        local ok, lsp_server = pcall(require, 'tark.lsp_server')
+        if ok then
+            lsp_server.stop()
+        end
+        lsp_proxy_port = nil
     end
 end
 

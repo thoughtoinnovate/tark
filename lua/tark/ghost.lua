@@ -1,4 +1,5 @@
 -- Ghost text (inline completions) for tark
+-- With LSP context integration for better completions
 
 local M = {}
 
@@ -11,6 +12,7 @@ M.config = {
     server_url = 'http://localhost:8765',
     debounce_ms = 150,
     hl_group = 'Comment',
+    lsp_context = true,  -- Include LSP context in requests
 }
 
 -- Display ghost text at current cursor position
@@ -51,23 +53,21 @@ local function show_ghost_text(completion, line, col)
     }
 end
 
--- Request completion from the HTTP server
-local function request_completion()
-    if not enabled then
-        return
-    end
-
-    local bufnr = vim.api.nvim_get_current_buf()
-    local cursor = vim.api.nvim_win_get_cursor(0)
-    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    local file_path = vim.api.nvim_buf_get_name(bufnr)
-
-    local req_body = vim.fn.json_encode({
+-- Send the completion request to server
+local function send_completion_request(bufnr, cursor, file_path, file_content, context)
+    local req_data = {
         file_path = file_path,
-        file_content = table.concat(lines, '\n'),
+        file_content = file_content,
         cursor_line = cursor[1] - 1, -- 0-indexed
         cursor_col = cursor[2],
-    })
+    }
+    
+    -- Include LSP context if available
+    if context then
+        req_data.context = context
+    end
+    
+    local req_body = vim.fn.json_encode(req_data)
 
     -- Use curl to make the request asynchronously
     vim.fn.jobstart({
@@ -101,6 +101,46 @@ local function request_completion()
             end
         end,
     })
+end
+
+-- Request completion from the HTTP server
+local function request_completion()
+    if not enabled then
+        return
+    end
+
+    local bufnr = vim.api.nvim_get_current_buf()
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local file_path = vim.api.nvim_buf_get_name(bufnr)
+    local file_content = table.concat(lines, '\n')
+    local line = cursor[1] - 1  -- 0-indexed
+    local col = cursor[2]
+
+    -- If LSP context is disabled, send request immediately
+    if not M.config.lsp_context then
+        send_completion_request(bufnr, cursor, file_path, file_content, nil)
+        return
+    end
+
+    -- Gather LSP context asynchronously, then send request
+    local lsp_ok, lsp = pcall(require, 'tark.lsp')
+    if not lsp_ok then
+        -- LSP module not available, send without context
+        send_completion_request(bufnr, cursor, file_path, file_content, nil)
+        return
+    end
+
+    -- Get context asynchronously (doesn't block UI)
+    lsp.get_completion_context_async(bufnr, line, col, function(context)
+        -- Check if cursor is still in the same position before sending
+        vim.schedule(function()
+            local new_cursor = vim.api.nvim_win_get_cursor(0)
+            if new_cursor[1] == cursor[1] and new_cursor[2] == cursor[2] then
+                send_completion_request(bufnr, cursor, file_path, file_content, context)
+            end
+        end)
+    end)
 end
 
 -- Accept the current completion

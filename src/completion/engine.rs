@@ -9,6 +9,47 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// LSP context information from editor
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LspContext {
+    /// Language/filetype
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Diagnostics near cursor
+    #[serde(default)]
+    pub diagnostics: Vec<DiagnosticInfo>,
+    /// Type info at cursor (from hover)
+    #[serde(default)]
+    pub cursor_type: Option<String>,
+    /// Nearby symbols
+    #[serde(default)]
+    pub symbols: Vec<SymbolInfo>,
+    /// Whether LSP is available
+    #[serde(default)]
+    pub has_lsp: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticInfo {
+    pub line: usize,
+    #[serde(default)]
+    pub col: Option<usize>,
+    pub message: String,
+    #[serde(default)]
+    pub severity: Option<i32>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolInfo {
+    pub name: String,
+    pub kind: String,
+    pub line: usize,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 /// Request for a code completion
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
@@ -23,6 +64,9 @@ pub struct CompletionRequest {
     /// Optional context from related files
     #[serde(default)]
     pub related_files: Vec<FileSnippet>,
+    /// Optional LSP context from editor
+    #[serde(default)]
+    pub lsp_context: Option<LspContext>,
 }
 
 /// A snippet from a related file for context
@@ -83,11 +127,21 @@ impl CompletionEngine {
             });
         }
 
-        // Detect language
-        let language = FimBuilder::detect_language(&request.file_path);
+        // Detect language (prefer LSP context if available)
+        let language = request
+            .lsp_context
+            .as_ref()
+            .and_then(|ctx| ctx.language.as_deref())
+            .unwrap_or_else(|| FimBuilder::detect_language(&request.file_path));
+
+        // Build enhanced prefix with LSP context
+        let enhanced_prefix = self.build_enhanced_prefix(&prefix, request);
 
         // Get completion from LLM
-        let completion = self.llm.complete_fim(&prefix, &suffix, language).await?;
+        let completion = self
+            .llm
+            .complete_fim(&enhanced_prefix, &suffix, language)
+            .await?;
 
         // Cache the result
         self.cache.put(&prefix, &suffix, completion.clone());
@@ -98,6 +152,74 @@ impl CompletionEngine {
             completion,
             line_count,
         })
+    }
+
+    /// Build enhanced prefix with LSP context information
+    fn build_enhanced_prefix(&self, prefix: &str, request: &CompletionRequest) -> String {
+        let ctx = match &request.lsp_context {
+            Some(ctx) if ctx.has_lsp => ctx,
+            _ => return prefix.to_string(),
+        };
+
+        let mut context_hints = Vec::new();
+
+        // Add type info at cursor
+        if let Some(cursor_type) = &ctx.cursor_type {
+            // Clean up the type info (remove markdown formatting)
+            let clean_type = cursor_type
+                .lines()
+                .next()
+                .unwrap_or(cursor_type)
+                .trim()
+                .trim_start_matches("```")
+                .trim_end_matches("```")
+                .trim();
+            if !clean_type.is_empty() && clean_type.len() < 200 {
+                context_hints.push(format!("// Type at cursor: {}", clean_type));
+            }
+        }
+
+        // Add relevant diagnostics (errors near cursor)
+        let cursor_line = request.cursor_line;
+        let nearby_errors: Vec<_> = ctx
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                d.severity.unwrap_or(1) <= 2 && // Error or Warning
+                (d.line as isize - cursor_line as isize).abs() <= 5
+            })
+            .take(2)
+            .collect();
+
+        for diag in nearby_errors {
+            let msg = diag.message.lines().next().unwrap_or(&diag.message);
+            if msg.len() < 100 {
+                context_hints.push(format!("// Line {}: {}", diag.line + 1, msg));
+            }
+        }
+
+        // Add nearby symbol context (just names, not full definitions)
+        let nearby_symbols: Vec<_> = ctx
+            .symbols
+            .iter()
+            .filter(|s| (s.line as isize - cursor_line as isize).abs() <= 20)
+            .take(5)
+            .collect();
+
+        if !nearby_symbols.is_empty() {
+            let symbol_list: Vec<_> = nearby_symbols
+                .iter()
+                .map(|s| format!("{} {}", s.kind, s.name))
+                .collect();
+            context_hints.push(format!("// Nearby: {}", symbol_list.join(", ")));
+        }
+
+        // If we have context hints, prepend them as comments
+        if context_hints.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{}\n{}", context_hints.join("\n"), prefix)
+        }
     }
 
     /// Clear the completion cache

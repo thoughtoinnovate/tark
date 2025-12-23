@@ -118,6 +118,7 @@ pub async fn run_complete(file: &str, line: usize, col: usize) -> Result<()> {
         cursor_line: line.saturating_sub(1), // Convert to 0-indexed
         cursor_col: col,
         related_files: vec![],
+        lsp_context: None, // CLI mode doesn't have LSP context
     };
 
     // Get completion

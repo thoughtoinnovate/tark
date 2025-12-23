@@ -6,6 +6,9 @@
 //! - List symbols (functions, classes, types)
 //! - Get function signatures
 //! - Trace call hierarchy
+//!
+//! When an LSP proxy port is available (from Neovim plugin), tools will
+//! try the proxy first for richer results, falling back to tree-sitter.
 
 use super::{Tool, ToolResult};
 use anyhow::Result;
@@ -15,7 +18,159 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::time::Duration;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
+
+/// Global LSP proxy port (set by chat handler when Neovim provides it)
+static LSP_PROXY_PORT: AtomicU16 = AtomicU16::new(0);
+
+/// Set the LSP proxy port (called when chat request includes port)
+pub fn set_lsp_proxy_port(port: Option<u16>) {
+    LSP_PROXY_PORT.store(port.unwrap_or(0), Ordering::SeqCst);
+}
+
+/// Get the current LSP proxy port (0 = not set)
+pub fn get_lsp_proxy_port() -> Option<u16> {
+    let port = LSP_PROXY_PORT.load(Ordering::SeqCst);
+    if port > 0 {
+        Some(port)
+    } else {
+        None
+    }
+}
+
+/// LSP proxy client for calling Neovim's LSP
+struct LspProxyClient {
+    port: u16,
+    client: reqwest::Client,
+}
+
+impl LspProxyClient {
+    fn new(port: u16) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(50)) // Fast timeout for fallback
+            .build()
+            .unwrap_or_default();
+        Self { port, client }
+    }
+
+    async fn definition(&self, file: &str, line: usize, col: usize) -> Option<Vec<LspLocation>> {
+        let url = format!("http://127.0.0.1:{}/lsp/definition", self.port);
+        let body = json!({ "file": file, "line": line, "col": col });
+
+        let resp = self.client.post(&url).json(&body).send().await.ok()?;
+        let data: serde_json::Value = resp.json().await.ok()?;
+
+        let locations = data.get("locations")?.as_array()?;
+        let result: Vec<LspLocation> = locations
+            .iter()
+            .filter_map(|loc| {
+                Some(LspLocation {
+                    file: loc.get("file")?.as_str()?.to_string(),
+                    line: loc.get("line")?.as_u64()? as usize,
+                    col: loc.get("col")?.as_u64().unwrap_or(0) as usize,
+                    preview: loc
+                        .get("preview")
+                        .and_then(|p| p.as_str())
+                        .map(|s| s.to_string()),
+                })
+            })
+            .collect();
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
+    async fn references(&self, file: &str, line: usize, col: usize) -> Option<Vec<LspLocation>> {
+        let url = format!("http://127.0.0.1:{}/lsp/references", self.port);
+        let body = json!({ "file": file, "line": line, "col": col });
+
+        let resp = self.client.post(&url).json(&body).send().await.ok()?;
+        let data: serde_json::Value = resp.json().await.ok()?;
+
+        let refs = data.get("references")?.as_array()?;
+        let result: Vec<LspLocation> = refs
+            .iter()
+            .filter_map(|loc| {
+                Some(LspLocation {
+                    file: loc.get("file")?.as_str()?.to_string(),
+                    line: loc.get("line")?.as_u64()? as usize,
+                    col: loc.get("col")?.as_u64().unwrap_or(0) as usize,
+                    preview: loc
+                        .get("preview")
+                        .and_then(|p| p.as_str())
+                        .map(|s| s.to_string()),
+                })
+            })
+            .collect();
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
+    async fn hover(&self, file: &str, line: usize, col: usize) -> Option<String> {
+        let url = format!("http://127.0.0.1:{}/lsp/hover", self.port);
+        let body = json!({ "file": file, "line": line, "col": col });
+
+        let resp = self.client.post(&url).json(&body).send().await.ok()?;
+        let data: serde_json::Value = resp.json().await.ok()?;
+
+        data.get("hover")?.as_str().map(|s| s.to_string())
+    }
+
+    async fn symbols(&self, file: &str) -> Option<Vec<LspSymbol>> {
+        let url = format!("http://127.0.0.1:{}/lsp/symbols", self.port);
+        let body = json!({ "file": file });
+
+        let resp = self.client.post(&url).json(&body).send().await.ok()?;
+        let data: serde_json::Value = resp.json().await.ok()?;
+
+        let symbols = data.get("symbols")?.as_array()?;
+        let result: Vec<LspSymbol> = symbols
+            .iter()
+            .filter_map(|sym| {
+                Some(LspSymbol {
+                    name: sym.get("name")?.as_str()?.to_string(),
+                    kind: sym.get("kind")?.as_str()?.to_string(),
+                    line: sym.get("line")?.as_u64()? as usize,
+                    detail: sym
+                        .get("detail")
+                        .and_then(|d| d.as_str())
+                        .map(|s| s.to_string()),
+                })
+            })
+            .collect();
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LspLocation {
+    file: String,
+    line: usize,
+    col: usize,
+    preview: Option<String>,
+}
+
+#[derive(Debug)]
+struct LspSymbol {
+    name: String,
+    kind: String,
+    line: usize,
+    detail: Option<String>,
+}
 
 /// Symbol information extracted from code
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -499,6 +654,54 @@ impl GoToDefinitionTool {
             analyzer: CodeAnalyzer::new(working_dir),
         }
     }
+
+    /// Try LSP proxy first (50ms timeout), returns None if unavailable
+    async fn try_lsp_proxy(&self, file_hint: Option<&str>, symbol: &str) -> Option<ToolResult> {
+        let port = get_lsp_proxy_port()?;
+        let file = file_hint?;
+
+        // For go_to_definition, we need the cursor position
+        // If we have a file hint, try to find the symbol in that file first
+        let content = fs::read_to_string(file).ok()?;
+
+        // Find the symbol in the file
+        for (line_num, line) in content.lines().enumerate() {
+            if let Some(col) = line.find(symbol) {
+                let client = LspProxyClient::new(port);
+                if let Some(locations) = client.definition(file, line_num, col).await {
+                    let mut output = format!(
+                        "Found {} definition(s) for '{}' (via LSP):\n\n",
+                        locations.len(),
+                        symbol
+                    );
+
+                    for loc in &locations {
+                        let rel_path = PathBuf::from(&loc.file)
+                            .strip_prefix(&self.analyzer.working_dir)
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| loc.file.clone());
+
+                        output.push_str(&format!(
+                            "📍 **{}**\n   File: {}\n   Line: {}\n",
+                            symbol,
+                            rel_path,
+                            loc.line + 1
+                        ));
+
+                        if let Some(preview) = &loc.preview {
+                            output.push_str(&format!("   `{}`\n", preview.trim()));
+                        }
+                        output.push('\n');
+                    }
+
+                    return Some(ToolResult::success(output));
+                }
+                break;
+            }
+        }
+
+        None
+    }
 }
 
 #[async_trait]
@@ -534,7 +737,14 @@ impl Tool for GoToDefinitionTool {
         let symbol = params["symbol"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'symbol' parameter"))?;
+        let file_hint = params["file_hint"].as_str();
 
+        // Try LSP proxy first (fast timeout, falls back automatically)
+        if let Some(result) = self.try_lsp_proxy(file_hint, symbol).await {
+            return Ok(result);
+        }
+
+        // Fallback to tree-sitter
         let files = self.analyzer.get_searchable_files(None);
         let definitions = self.analyzer.find_definition(symbol, &files)?;
 

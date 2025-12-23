@@ -33,6 +33,47 @@ struct AppState {
     storage: Option<TarkStorage>,
 }
 
+/// LSP context from Neovim plugin
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LspContext {
+    /// Language/filetype
+    #[serde(default)]
+    language: Option<String>,
+    /// Diagnostics near cursor
+    #[serde(default)]
+    diagnostics: Vec<DiagnosticInfo>,
+    /// Type info at cursor (from hover)
+    #[serde(default)]
+    cursor_type: Option<String>,
+    /// Nearby symbols
+    #[serde(default)]
+    symbols: Vec<SymbolInfo>,
+    /// Whether LSP is available
+    #[serde(default)]
+    has_lsp: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DiagnosticInfo {
+    line: usize,
+    #[serde(default)]
+    col: Option<usize>,
+    message: String,
+    #[serde(default)]
+    severity: Option<i32>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SymbolInfo {
+    name: String,
+    kind: String,
+    line: usize,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
 /// Request for inline completion
 #[derive(Debug, Deserialize)]
 struct InlineCompleteRequest {
@@ -42,6 +83,9 @@ struct InlineCompleteRequest {
     cursor_col: usize,
     #[serde(default)]
     provider: Option<String>,
+    /// LSP context from Neovim plugin
+    #[serde(default)]
+    context: Option<LspContext>,
 }
 
 /// Response for inline completion
@@ -65,6 +109,9 @@ struct ChatRequest {
     /// Agent mode: plan (read-only), build (all tools), review (approval required)
     #[serde(default)]
     mode: Option<String>,
+    /// LSP proxy port from Neovim plugin (dynamic port)
+    #[serde(default)]
+    lsp_proxy_port: Option<u16>,
 }
 
 /// Response for chat
@@ -395,12 +442,41 @@ async fn handle_inline_completion(
             state.config.completion.context_lines_after,
         );
 
+    // Convert HTTP LSP context to completion engine LSP context
+    let lsp_context = req.context.map(|ctx| crate::completion::LspContext {
+        language: ctx.language,
+        diagnostics: ctx
+            .diagnostics
+            .into_iter()
+            .map(|d| crate::completion::DiagnosticInfo {
+                line: d.line,
+                col: d.col,
+                message: d.message,
+                severity: d.severity,
+                source: d.source,
+            })
+            .collect(),
+        cursor_type: ctx.cursor_type,
+        symbols: ctx
+            .symbols
+            .into_iter()
+            .map(|s| crate::completion::SymbolInfo {
+                name: s.name,
+                kind: s.kind,
+                line: s.line,
+                detail: s.detail,
+            })
+            .collect(),
+        has_lsp: ctx.has_lsp,
+    });
+
     let completion_req = CompletionRequest {
         file_path: PathBuf::from(&req.file_path),
         file_content: req.file_content,
         cursor_line: req.cursor_line,
         cursor_col: req.cursor_col,
         related_files: vec![],
+        lsp_context,
     };
 
     match engine.complete(&completion_req).await {
@@ -428,6 +504,9 @@ async fn handle_chat(
     Json(req): Json<ChatRequest>,
 ) -> impl IntoResponse {
     use crate::tools::AgentMode;
+
+    // Set LSP proxy port for tools to use (if provided by Neovim plugin)
+    crate::tools::set_lsp_proxy_port(req.lsp_proxy_port);
 
     // Determine working directory: use request cwd if provided, otherwise server's working dir
     let working_dir = req

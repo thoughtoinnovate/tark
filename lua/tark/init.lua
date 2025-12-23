@@ -41,10 +41,14 @@ M.config = {
             sidepane_width = 0.35,
             border = 'rounded',
         },
+        lsp_proxy = true,  -- Enable LSP proxy for agent tools
     },
-    -- LSP (disabled by default)
+    -- LSP integration
     lsp = {
-        enabled = false,
+        enabled = true,                  -- Enable LSP context in completions/chat
+        context_in_completions = true,   -- Send LSP context with ghost text requests
+        context_in_chat = true,          -- Include buffer context in chat
+        proxy_timeout_ms = 50,           -- Fast fallback to tree-sitter
     },
 }
 
@@ -255,6 +259,7 @@ function M.setup(opts)
     if M.config.ghost_text.enabled then
         local ghost_config = vim.tbl_deep_extend('force', M.config.ghost_text, {
             server_url = string.format('http://%s:%d', M.config.server.host, M.config.server.port),
+            lsp_context = M.config.lsp.enabled and M.config.lsp.context_in_completions,
         })
         get_ghost().setup(ghost_config)
     end
@@ -268,14 +273,10 @@ function M.setup(opts)
         local chat_config = vim.tbl_deep_extend('force', M.config.chat, {
             server_url = string.format('http://%s:%d', M.config.server.host, M.config.server.port),
             docker_mode = is_docker_mode,
+            lsp_proxy = M.config.lsp.enabled and M.config.chat.lsp_proxy,
         })
         -- Chat setup is called when first opened, but we can pass config
         get_chat().setup(chat_config)
-    end
-    
-    -- Setup LSP if enabled
-    if M.config.lsp.enabled then
-        get_lsp().setup(M.config.lsp)
     end
 end
 
