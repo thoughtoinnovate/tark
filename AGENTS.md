@@ -76,9 +76,14 @@ tark/
 
 - **Run all checks before committing**:
   ```bash
+  # Rust checks
   cargo fmt --all -- --check
   cargo clippy --all-targets --all-features -- -D warnings
   cargo test --all-features
+  
+  # Neovim/Lua tests (requires nvim and plenary.nvim)
+  nvim --headless -u tests/minimal_init.lua \
+    -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
   ```
 
 ### Versioning
@@ -199,6 +204,14 @@ cargo build --release
 
 # Test in Neovim (from plugin directory)
 nvim --cmd "set rtp+=." -c "lua require('tark').setup()"
+
+# Run Neovim/Lua tests (requires plenary.nvim)
+nvim --headless -u tests/minimal_init.lua \
+  -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
+
+# Run specific Lua test file
+nvim --headless -u tests/minimal_init.lua \
+  -c "PlenaryBustedFile tests/specs/chat_spec.lua"
 ```
 
 ## After Every Code Change ⚡
@@ -220,15 +233,20 @@ cargo fmt --all -- --check
 # Linting (must pass with zero warnings)
 cargo clippy --all-targets --all-features -- -D warnings
 
-# Tests
+# Rust tests
 cargo test --all-features
+
+# Neovim/Lua tests (if you modified lua/ files)
+nvim --headless -u tests/minimal_init.lua \
+  -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
 ```
 
 ### 3. Fix Any Issues
 
 - **Format errors**: Run `cargo fmt --all`
 - **Clippy warnings**: Fix the code, don't just suppress
-- **Test failures**: Fix the failing tests
+- **Rust test failures**: Fix the failing tests
+- **Lua test failures**: Check `tests/specs/*.lua` for test expectations
 
 ### 4. Update Documentation
 
@@ -276,7 +294,8 @@ Then check GitHub Actions to ensure CI passes.
 □ Code compiles (cargo build)
 □ Format passes (cargo fmt --check)
 □ Clippy passes (cargo clippy -- -D warnings)
-□ Tests pass (cargo test)
+□ Rust tests pass (cargo test)
+□ Lua tests pass (nvim --headless ... PlenaryBustedDirectory)
 □ Documentation updated (if needed)
 □ Versions synced (if needed)
 □ Conventional commit message
