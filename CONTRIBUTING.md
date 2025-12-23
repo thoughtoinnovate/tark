@@ -210,6 +210,8 @@ lua/tark/
 ├── server.lua        # Server management
 ├── chat.lua          # Chat UI
 ├── ghost.lua         # Ghost text
+├── lsp.lua           # LSP integration helpers
+├── lsp_server.lua    # LSP proxy HTTP server
 └── health.lua        # Health checks
 ```
 

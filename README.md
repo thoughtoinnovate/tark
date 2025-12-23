@@ -330,9 +330,12 @@ require('tark').setup({
             border = 'rounded',
         },
     },
-    -- LSP (disabled by default to avoid conflicts)
+    -- LSP integration (enhances completions and agent tools)
     lsp = {
-        enabled = false,
+        enabled = true,                  -- Enable LSP context in completions/chat
+        context_in_completions = true,   -- Send LSP context with ghost text requests
+        context_in_chat = true,          -- Include buffer context in chat
+        proxy_timeout_ms = 50,           -- Fast fallback to tree-sitter
     },
 })
 ```
@@ -404,6 +407,32 @@ This builds the image using Docker on your machine - no Rust toolchain required!
 **Image sizes:**
 - `alpine` (default): ~30MB - Includes shell and curl for debugging
 - `minimal`: ~15MB - Super lightweight, binary + CA certs only (no shell)
+
+### LSP Integration
+
+tark integrates with Neovim's built-in LSP for enhanced completions and agent tools:
+
+| Option | Description |
+|--------|-------------|
+| `lsp.enabled` | Enable LSP integration (default: true) |
+| `lsp.context_in_completions` | Include diagnostics, types, symbols in ghost text requests |
+| `lsp.context_in_chat` | Start LSP proxy for agent tools when chat opens |
+| `lsp.proxy_timeout_ms` | Timeout for LSP proxy calls before falling back to tree-sitter (default: 50ms) |
+
+**How it works:**
+
+1. **Ghost Text**: When you're typing, tark gathers LSP context (diagnostics, hover types, nearby symbols) and sends it with completion requests. This helps the AI understand your code better.
+
+2. **Chat/Agent Tools**: When chat opens, tark starts a lightweight HTTP proxy that exposes Neovim's LSP. Agent tools like `go_to_definition` and `find_references` try the proxy first (50ms timeout), then fall back to tree-sitter if unavailable.
+
+3. **No Configuration Needed**: If you have LSP servers configured in Neovim (e.g., `lua_ls`, `rust_analyzer`), tark automatically uses them. If not, it falls back to tree-sitter.
+
+```lua
+-- Disable LSP integration (use tree-sitter only)
+opts = {
+    lsp = { enabled = false },
+}
+```
 
 ### CLI Config (`~/.config/tark/config.toml`)
 

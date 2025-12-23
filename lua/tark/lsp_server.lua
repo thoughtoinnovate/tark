@@ -1,13 +1,18 @@
--- LSP Proxy Server for tark
--- Provides HTTP endpoints for the tark agent to call Neovim's LSP
--- Uses dynamic port binding (port 0) to support multiple Neovim instances
+--- LSP Proxy Server for tark
+--- Provides HTTP endpoints for the tark agent to call Neovim's LSP
+--- Uses dynamic port binding (port 0) to support multiple Neovim instances
+---@module tark.lsp_server
 
 local M = {}
-local lsp = require('tark.lsp')
 
 M.port = nil
 M.server = nil
 M.clients = {}
+
+-- Lazy-load LSP module
+local function get_lsp()
+    return require('tark.lsp')
+end
 
 -- HTTP response helpers
 local function http_response(status, body)
@@ -75,7 +80,7 @@ handlers['/lsp/diagnostics'] = function(req, callback)
         return
     end
     
-    local diags = lsp.get_diagnostics(bufnr, nil, nil)
+    local diags = get_lsp().get_diagnostics(bufnr, nil, nil)
     callback(http_ok({ diagnostics = diags }))
 end
 
@@ -93,7 +98,7 @@ handlers['/lsp/symbols'] = function(req, callback)
         return
     end
     
-    lsp.get_symbols_async(bufnr, function(symbols)
+    get_lsp().get_symbols_async(bufnr, function(symbols)
         callback(http_ok({ symbols = symbols }))
     end)
 end
@@ -115,7 +120,7 @@ handlers['/lsp/hover'] = function(req, callback)
         return
     end
     
-    lsp.get_hover_async(bufnr, line, col, function(hover)
+    get_lsp().get_hover_async(bufnr, line, col, function(hover)
         callback(http_ok({ hover = hover }))
     end)
 end
@@ -137,7 +142,7 @@ handlers['/lsp/definition'] = function(req, callback)
         return
     end
     
-    lsp.get_definition_async(bufnr, line, col, function(locations)
+    get_lsp().get_definition_async(bufnr, line, col, function(locations)
         if locations then
             -- Read preview lines for each location
             for _, loc in ipairs(locations) do
@@ -168,7 +173,7 @@ handlers['/lsp/references'] = function(req, callback)
         return
     end
     
-    lsp.get_references_async(bufnr, line, col, function(refs)
+    get_lsp().get_references_async(bufnr, line, col, function(refs)
         if refs then
             -- Read preview lines for each reference
             for _, ref in ipairs(refs) do
@@ -199,7 +204,7 @@ handlers['/lsp/signature'] = function(req, callback)
         return
     end
     
-    lsp.get_signature_async(bufnr, line, col, function(sig)
+    get_lsp().get_signature_async(bufnr, line, col, function(sig)
         callback(http_ok({ signature = sig }))
     end)
 end

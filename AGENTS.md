@@ -34,6 +34,8 @@ tark/
 │       ├── server.lua      # Server management (binary/docker)
 │       ├── chat.lua        # Chat UI
 │       ├── ghost.lua       # Ghost text completions
+│       ├── lsp.lua         # LSP integration helpers (async)
+│       ├── lsp_server.lua  # LSP proxy HTTP server
 │       └── health.lua      # :checkhealth integration
 ├── .github/workflows/      # CI/CD
 │   ├── ci.yml              # Tests, build, lint
@@ -123,8 +125,11 @@ tark/
 | `src/agent/chat.rs` | Chat agent logic | Adding agent features |
 | `src/tools/mod.rs` | Tool definitions | Adding new tools |
 | `src/llm/types.rs` | LLM message types | Changing API contracts |
+| `src/completion/engine.rs` | FIM completion logic | Changing completion behavior |
 | `lua/tark/server.lua` | Server management | Binary/Docker handling |
 | `lua/tark/init.lua` | Plugin config | Adding config options |
+| `lua/tark/lsp.lua` | LSP helpers | Adding LSP features |
+| `lua/tark/lsp_server.lua` | LSP proxy server | Adding proxy endpoints |
 | `.github/workflows/release.yml` | Release automation | Adding platforms |
 
 ## Common Tasks
