@@ -77,6 +77,8 @@ tests/
 - ✅ Module functions exist
 - ✅ Config validation
 - ✅ Error handling
+- ✅ Provider state tracking (backend vs display)
+- ✅ Multi-provider support (OpenAI, Claude, Google/Gemini, Ollama)
 
 ### Init Module (`init_spec.lua`)
 - ✅ Module loading

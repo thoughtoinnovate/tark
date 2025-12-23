@@ -38,7 +38,8 @@ local chat_buf = nil
 local chat_win = nil
 local input_buf = nil
 local input_win = nil
-local current_provider = 'ollama'
+local current_provider = 'ollama'      -- Backend protocol for API calls
+local current_provider_id = 'ollama'   -- Actual provider identity for display
 
 -- Store last modified files for diff view
 local last_modified_files = {}
@@ -513,7 +514,17 @@ local function update_input_window_title()
     local mode_icon = mode_icons[current_mode] or '◆'
     local model_name = current_model or model_mappings[current_provider] or 'GPT-4o'
     local model_short = model_name:match('[^/]+$') or model_name
-    local provider_label = current_provider:sub(1,1):upper() .. current_provider:sub(2)
+    
+    -- Use actual provider identity for display (not backend protocol)
+    local provider_display = current_provider_id or current_provider
+    for _, p in ipairs(providers_info) do
+        if p.id == current_provider_id then
+            -- Extract first word from provider name, e.g., "Google" from "Google (Gemini)"
+            provider_display = p.name:match('^(%w+)') or p.id
+            break
+        end
+    end
+    local provider_label = provider_display:sub(1,1):upper() .. provider_display:sub(2)
     
     -- Mode-specific highlight (colored background for instant recognition)
     local mode_hl = get_mode_highlight(current_mode, true)
@@ -1738,6 +1749,7 @@ local function show_model_picker(provider_info, models)
             -- Update model mapping
             model_mappings[provider_name] = model_id
             current_model = model_id
+            current_provider_id = provider_info.id  -- Track actual provider for display
             
             -- Switch provider (skip duplicate message since we show our own)
             switch_provider(provider_name, true)
@@ -2401,10 +2413,18 @@ function M.open(initial_message)
             string.format('%%#FloatTitle# %s %%#Comment# [0%%%%] 0/128K %%#String# $0.0000 %%#Normal#', model_name))
         
         -- Input window statusline shows mode
+        -- Get proper provider display name
+        local provider_display_sl = current_provider_id or current_provider
+        for _, p in ipairs(providers_info) do
+            if p.id == current_provider_id then
+                provider_display_sl = p.name:match('^(%w+)') or p.id
+                break
+            end
+        end
         vim.api.nvim_win_set_option(input_win, 'statusline',
             string.format('%%#TarkMode%s# %s %s %%#Comment# %s %%#FloatBorder# %s %%#Comment# tab:mode  /:commands %%#Normal#',
                 current_mode:sub(1,1):upper() .. current_mode:sub(2), mode_icon, mode_label, model_name, 
-                current_provider:sub(1,1):upper() .. current_provider:sub(2)))
+                provider_display_sl:sub(1,1):upper() .. provider_display_sl:sub(2)))
         
         -- Focus input window
         vim.api.nvim_set_current_win(input_win)
@@ -2500,6 +2520,16 @@ function M.open(initial_message)
         local input_mode_hl = get_mode_highlight(current_mode, true)
         local input_mode_part = string.format(' %s %s ', mode_icon, mode_label)
         
+        -- Get proper provider display name
+        local provider_display_t = current_provider_id or current_provider
+        for _, p in ipairs(providers_info) do
+            if p.id == current_provider_id then
+                provider_display_t = p.name:match('^(%w+)') or p.id
+                break
+            end
+        end
+        local provider_label_t = provider_display_t:sub(1,1):upper() .. provider_display_t:sub(2)
+        
         -- Position input window below chat (sidepane: at bottom; popup: below chat)
         local input_row = M.config.window.style == 'sidepane' and (editor_height - input_height - 2) or (row + height + 2)
         
@@ -2514,7 +2544,7 @@ function M.open(initial_message)
             title = {
                 { input_mode_part, input_mode_hl },
                 { ' ' .. model_name_t .. ' ', 'Comment' },
-                { current_provider:sub(1,1):upper() .. current_provider:sub(2) .. ' ', 'FloatBorder' },
+                { provider_label_t .. ' ', 'FloatBorder' },
             },
             title_pos = 'left',
             footer = {
@@ -2762,5 +2792,17 @@ end
 
 -- Export save function
 M.save_session = save_session
+
+-- Test helpers (only used in test mode)
+if vim.g.tark_test_mode then
+    M._test_get_current_provider = function() return current_provider end
+    M._test_get_current_provider_id = function() return current_provider_id end
+    M._test_get_current_model = function() return current_model end
+    M._test_set_provider_state = function(provider, provider_id, model)
+        current_provider = provider
+        current_provider_id = provider_id
+        current_model = model
+    end
+end
 
 return M

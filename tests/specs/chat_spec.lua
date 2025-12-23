@@ -133,5 +133,59 @@ describe('chat - agent mode', function()
             end)
         end)
     end)
+
+    describe('provider state tracking', function()
+        it('has test helper functions', function()
+            assert.is_function(chat._test_get_current_provider)
+            assert.is_function(chat._test_get_current_provider_id)
+            assert.is_function(chat._test_get_current_model)
+            assert.is_function(chat._test_set_provider_state)
+        end)
+
+        it('tracks backend provider separately from display provider', function()
+            -- Simulate selecting Gemini (uses OpenAI-compatible API)
+            chat._test_set_provider_state('openai', 'google', 'google/gemini-1.5-flash')
+            
+            -- Backend provider should be 'openai' (for API routing)
+            assert.equals('openai', chat._test_get_current_provider())
+            
+            -- Display provider should be 'google' (for UI)
+            assert.equals('google', chat._test_get_current_provider_id())
+            
+            -- Model should be full ID
+            assert.equals('google/gemini-1.5-flash', chat._test_get_current_model())
+        end)
+
+        it('tracks OpenAI provider correctly', function()
+            chat._test_set_provider_state('openai', 'openai', 'openai/gpt-4o')
+            
+            assert.equals('openai', chat._test_get_current_provider())
+            assert.equals('openai', chat._test_get_current_provider_id())
+            assert.equals('openai/gpt-4o', chat._test_get_current_model())
+        end)
+
+        it('tracks Claude provider correctly', function()
+            chat._test_set_provider_state('claude', 'anthropic', 'anthropic/claude-sonnet-4')
+            
+            assert.equals('claude', chat._test_get_current_provider())
+            assert.equals('anthropic', chat._test_get_current_provider_id())
+            assert.equals('anthropic/claude-sonnet-4', chat._test_get_current_model())
+        end)
+
+        it('tracks Ollama provider correctly', function()
+            chat._test_set_provider_state('ollama', 'ollama', 'ollama/codellama')
+            
+            assert.equals('ollama', chat._test_get_current_provider())
+            assert.equals('ollama', chat._test_get_current_provider_id())
+            assert.equals('ollama/codellama', chat._test_get_current_model())
+        end)
+
+        it('provider_id defaults to provider when not set', function()
+            chat._test_set_provider_state('openai', nil, 'openai/gpt-4o')
+            
+            assert.equals('openai', chat._test_get_current_provider())
+            assert.is_nil(chat._test_get_current_provider_id())
+        end)
+    end)
 end)
 
