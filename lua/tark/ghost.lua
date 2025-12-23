@@ -319,18 +319,27 @@ local function request_completion()
     if not enabled then
         return
     end
+    
+    -- Snapshot buffer state as late as possible to honor current cursor/content
+    local function snapshot()
+        local bufnr = vim.api.nvim_get_current_buf()
+        local cursor = vim.api.nvim_win_get_cursor(0)
+        local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+        return {
+            bufnr = bufnr,
+            cursor = cursor,
+            file_path = vim.api.nvim_buf_get_name(bufnr),
+            file_content = table.concat(lines, '\n'),
+        }
+    end
 
-    local bufnr = vim.api.nvim_get_current_buf()
-    local cursor = vim.api.nvim_win_get_cursor(0)
-    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    local file_path = vim.api.nvim_buf_get_name(bufnr)
-    local file_content = table.concat(lines, '\n')
-    local line = cursor[1] - 1  -- 0-indexed
-    local col = cursor[2]
+    local snap = snapshot()
+    local line = snap.cursor[1] - 1  -- 0-indexed
+    local col = snap.cursor[2]
 
     -- If LSP context is disabled, send request immediately
     if not M.config.lsp_context then
-        send_completion_request(bufnr, cursor, file_path, file_content, nil)
+        send_completion_request(snap.bufnr, snap.cursor, snap.file_path, snap.file_content, nil)
         return
     end
 
@@ -343,13 +352,11 @@ local function request_completion()
     end
 
     -- Get context asynchronously (doesn't block UI)
-    lsp.get_completion_context_async(bufnr, line, col, function(context)
-        -- Check if cursor is still in the same position before sending
+    lsp.get_completion_context_async(snap.bufnr, line, col, function(context)
         vim.schedule(function()
-            local new_cursor = vim.api.nvim_win_get_cursor(0)
-            if new_cursor[1] == cursor[1] and new_cursor[2] == cursor[2] then
-                send_completion_request(bufnr, cursor, file_path, file_content, context)
-            end
+            -- Re-snapshot to honor the latest cursor/content before sending
+            local latest = snapshot()
+            send_completion_request(latest.bufnr, latest.cursor, latest.file_path, latest.file_content, context)
         end)
     end)
 end
