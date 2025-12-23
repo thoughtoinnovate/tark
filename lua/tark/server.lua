@@ -44,7 +44,15 @@ end
 local function get_data_dir()
     local data_dir = vim.fn.stdpath('data') .. '/tark'
     if vim.fn.isdirectory(data_dir) == 0 then
-        vim.fn.mkdir(data_dir, 'p')
+        -- Use pcall to handle case where a file exists at this path
+        local ok, err = pcall(vim.fn.mkdir, data_dir, 'p')
+        if not ok then
+            -- If mkdir fails (e.g., file exists), log warning but continue
+            -- The binary checks will fail gracefully later
+            vim.schedule(function()
+                vim.notify('tark: Could not create data directory: ' .. tostring(err), vim.log.levels.WARN)
+            end)
+        end
     end
     return data_dir
 end
