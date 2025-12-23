@@ -3,8 +3,8 @@
 #![allow(dead_code)]
 
 use super::{
-    CodeIssue, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role, ToolCall,
-    ToolDefinition,
+    CodeIssue, CompletionResult, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role,
+    TokenUsage, ToolCall, ToolDefinition,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -186,7 +186,12 @@ impl LlmProvider for OllamaProvider {
         Ok(LlmResponse::Text(response.message.content))
     }
 
-    async fn complete_fim(&self, prefix: &str, suffix: &str, language: &str) -> Result<String> {
+    async fn complete_fim(
+        &self,
+        prefix: &str,
+        suffix: &str,
+        language: &str,
+    ) -> Result<CompletionResult> {
         // Use generate API for FIM-style completion
         let prompt = format!(
             "Complete the following {} code. Only output the code that goes between the prefix and suffix, nothing else.\n\nPrefix:\n```\n{}\n```\n\nSuffix:\n```\n{}\n```\n\nCompletion:",
@@ -204,7 +209,18 @@ impl LlmProvider for OllamaProvider {
             .trim()
             .to_string();
 
-        Ok(cleaned)
+        // Estimate tokens (Ollama doesn't always return usage in generate API)
+        let input_tokens = (prefix.len() + suffix.len() + prompt.len()) / 4;
+        let output_tokens = cleaned.len() / 4;
+
+        Ok(CompletionResult {
+            text: cleaned,
+            usage: Some(TokenUsage {
+                input_tokens: input_tokens as u32,
+                output_tokens: output_tokens as u32,
+                total_tokens: (input_tokens + output_tokens) as u32,
+            }),
+        })
     }
 
     async fn explain_code(&self, code: &str, context: &str) -> Result<String> {

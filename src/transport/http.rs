@@ -93,6 +93,9 @@ struct InlineCompleteRequest {
 struct InlineCompleteResponse {
     completion: String,
     line_count: usize,
+    /// Token usage statistics (if available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<crate::llm::TokenUsage>,
 }
 
 /// Request for chat
@@ -485,6 +488,7 @@ async fn handle_inline_completion(
             Json(InlineCompleteResponse {
                 completion: response.completion,
                 line_count: response.line_count,
+                usage: response.usage,
             }),
         )
             .into_response(),

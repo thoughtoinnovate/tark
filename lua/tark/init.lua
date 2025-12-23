@@ -197,6 +197,17 @@ local function setup_commands()
         end
     end, { desc = 'Trigger ghost text completion' })
     
+    vim.api.nvim_create_user_command('TarkCompletionStats', function()
+        local ghost = get_ghost()
+        local lines = ghost.stats_lines()
+        vim.notify(table.concat(lines, '\n'), vim.log.levels.INFO)
+    end, { desc = 'Show completion session stats' })
+    
+    vim.api.nvim_create_user_command('TarkCompletionStatsReset', function()
+        get_ghost().reset_stats()
+        vim.notify('Completion stats reset', vim.log.levels.INFO)
+    end, { desc = 'Reset completion session stats' })
+    
     -- Chat commands
     vim.api.nvim_create_user_command('TarkChatToggle', function()
         if M.config.chat.enabled then
@@ -320,6 +331,19 @@ function M.toggle_ghost()
     if M.config.ghost_text.enabled then
         get_ghost().toggle()
     end
+end
+
+---Get completion stats for statusline
+---@return table stats Session stats for completion mode
+function M.completion_stats()
+    return get_ghost().get_stats()
+end
+
+---Get completion statusline component
+---Returns a formatted string suitable for statusline display
+---@return string statusline Formatted stats (empty if no completions)
+function M.completion_statusline()
+    return get_ghost().statusline()
 end
 
 return M

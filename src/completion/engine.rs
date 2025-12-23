@@ -83,6 +83,9 @@ pub struct CompletionResponse {
     pub completion: String,
     /// Number of lines in the completion
     pub line_count: usize,
+    /// Token usage statistics (if available from provider)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::llm::TokenUsage>,
 }
 
 /// The completion engine
@@ -128,6 +131,7 @@ impl CompletionEngine {
                 return Ok(CompletionResponse {
                     line_count: cached.lines().count(),
                     completion: cached,
+                    usage: None, // Cache hits don't have fresh usage data
                 });
             }
         }
@@ -143,21 +147,22 @@ impl CompletionEngine {
         let enhanced_prefix = self.build_enhanced_prefix(&prefix, request);
 
         // Get completion from LLM
-        let completion = self
+        let result = self
             .llm
             .complete_fim(&enhanced_prefix, &suffix, language)
             .await?;
 
         // Only cache context-free completions (they're deterministic and stable)
         if request.lsp_context.is_none() {
-            self.cache.put(&prefix, &suffix, completion.clone());
+            self.cache.put(&prefix, &suffix, result.text.clone());
         }
 
-        let line_count = completion.lines().count().max(1);
+        let line_count = result.text.lines().count().max(1);
 
         Ok(CompletionResponse {
-            completion,
+            completion: result.text,
             line_count,
+            usage: result.usage,
         })
     }
 

@@ -15,6 +15,188 @@ M.config = {
     lsp_context = true,  -- Include LSP context in requests
 }
 
+-- Session stats for completion mode (similar to chat mode)
+local session_stats = {
+    requests = 0,           -- Number of completion requests
+    accepted = 0,           -- Number of accepted completions
+    dismissed = 0,          -- Number of dismissed completions
+    input_tokens = 0,       -- Estimated input tokens (file context sent)
+    output_tokens = 0,      -- Estimated output tokens (completions received)
+    total_cost = 0,         -- Estimated cost
+    chars_generated = 0,    -- Total characters generated
+    chars_accepted = 0,     -- Characters actually accepted
+}
+
+-- Models database (shared with chat, lazy-loaded)
+local models_db = nil
+
+---Estimate tokens (rough: ~4 chars per token for code)
+---@param text string
+---@return number
+local function estimate_tokens(text)
+    if not text then return 0 end
+    return math.ceil(#text / 4)
+end
+
+---Format number with K/M suffix
+---@param n number
+---@return string
+local function format_number(n)
+    if n >= 1000000 then
+        return string.format('%.1fM', n / 1000000)
+    elseif n >= 1000 then
+        return string.format('%.1fK', n / 1000)
+    else
+        return tostring(n)
+    end
+end
+
+---Format cost
+---@param cost number
+---@return string
+local function format_cost(cost)
+    if cost < 0.01 then
+        return string.format('$%.4f', cost)
+    elseif cost < 1 then
+        return string.format('$%.3f', cost)
+    else
+        return string.format('$%.2f', cost)
+    end
+end
+
+---Fetch models database for pricing info
+---@return table|nil
+local function get_models_db()
+    if models_db then return models_db end
+    
+    -- Try to get from chat module if loaded
+    local ok, chat = pcall(require, 'tark.chat')
+    if ok and chat.get_models_db then
+        models_db = chat.get_models_db()
+    end
+    
+    return models_db
+end
+
+---Calculate cost for tokens based on provider
+---@param input_tokens number
+---@param output_tokens number
+---@param provider string
+---@return number
+local function calculate_cost(input_tokens, output_tokens, provider)
+    -- Default pricing (per 1M tokens) - conservative estimates
+    local pricing = {
+        openai = { input = 2.50, output = 10.00 },   -- GPT-4o
+        claude = { input = 3.00, output = 15.00 },   -- Claude 3.5
+        ollama = { input = 0, output = 0 },          -- Free (local)
+    }
+    
+    local rates = pricing[provider] or pricing.ollama
+    local input_cost = (rates.input * input_tokens) / 1000000
+    local output_cost = (rates.output * output_tokens) / 1000000
+    return input_cost + output_cost
+end
+
+---Update session stats after a completion
+---@param input_text string The file content sent
+---@param output_text string The completion received
+---@param provider string|nil The provider used
+local function update_stats(input_text, output_text, provider)
+    provider = provider or 'ollama'
+    
+    local input_tokens = estimate_tokens(input_text)
+    local output_tokens = estimate_tokens(output_text)
+    
+    session_stats.requests = session_stats.requests + 1
+    session_stats.input_tokens = session_stats.input_tokens + input_tokens
+    session_stats.output_tokens = session_stats.output_tokens + output_tokens
+    session_stats.chars_generated = session_stats.chars_generated + #output_text
+    session_stats.total_cost = session_stats.total_cost + calculate_cost(input_tokens, output_tokens, provider)
+end
+
+---Get current session stats
+---@return table
+function M.get_stats()
+    return vim.tbl_extend('force', {}, session_stats)
+end
+
+---Reset session stats
+function M.reset_stats()
+    session_stats.requests = 0
+    session_stats.accepted = 0
+    session_stats.dismissed = 0
+    session_stats.input_tokens = 0
+    session_stats.output_tokens = 0
+    session_stats.total_cost = 0
+    session_stats.chars_generated = 0
+    session_stats.chars_accepted = 0
+end
+
+---Get statusline component string
+---@return string
+function M.statusline()
+    if session_stats.requests == 0 then
+        return ''
+    end
+    
+    local total_tokens = session_stats.input_tokens + session_stats.output_tokens
+    local accept_rate = session_stats.requests > 0 
+        and math.floor((session_stats.accepted / session_stats.requests) * 100) 
+        or 0
+    
+    -- Format: "⚡ 5K tokens | 3/10 accepted | $0.02"
+    local parts = {}
+    table.insert(parts, string.format('⚡%s', format_number(total_tokens)))
+    
+    if session_stats.accepted > 0 or session_stats.dismissed > 0 then
+        table.insert(parts, string.format('%d/%d (%d%%)', 
+            session_stats.accepted, 
+            session_stats.requests,
+            accept_rate))
+    end
+    
+    if session_stats.total_cost > 0 then
+        table.insert(parts, format_cost(session_stats.total_cost))
+    end
+    
+    return table.concat(parts, ' · ')
+end
+
+---Get detailed stats as formatted lines
+---@return string[]
+function M.stats_lines()
+    local lines = {
+        '=== tark Completion Stats ===',
+        '',
+    }
+    
+    if session_stats.requests == 0 then
+        table.insert(lines, 'No completions this session.')
+        return lines
+    end
+    
+    local total_tokens = session_stats.input_tokens + session_stats.output_tokens
+    local accept_rate = math.floor((session_stats.accepted / session_stats.requests) * 100)
+    
+    table.insert(lines, string.format('**Requests:** %d', session_stats.requests))
+    table.insert(lines, string.format('**Accepted:** %d (%d%%)', session_stats.accepted, accept_rate))
+    table.insert(lines, string.format('**Dismissed:** %d', session_stats.dismissed))
+    table.insert(lines, '')
+    table.insert(lines, string.format('**Input Tokens:** %s', format_number(session_stats.input_tokens)))
+    table.insert(lines, string.format('**Output Tokens:** %s', format_number(session_stats.output_tokens)))
+    table.insert(lines, string.format('**Total Tokens:** %s', format_number(total_tokens)))
+    table.insert(lines, '')
+    table.insert(lines, string.format('**Characters Generated:** %s', format_number(session_stats.chars_generated)))
+    table.insert(lines, string.format('**Characters Accepted:** %s', format_number(session_stats.chars_accepted)))
+    
+    if session_stats.total_cost > 0 then
+        table.insert(lines, '')
+        table.insert(lines, string.format('**Estimated Cost:** %s', format_cost(session_stats.total_cost)))
+    end
+    
+    return lines
+end
+
 -- Display ghost text at current cursor position
 local function show_ghost_text(completion, line, col)
     -- Clear existing ghost text
@@ -68,6 +250,9 @@ local function send_completion_request(bufnr, cursor, file_path, file_content, c
     end
     
     local req_body = vim.fn.json_encode(req_data)
+    
+    -- Track the input size for stats
+    local input_size = #file_content
 
     -- Use curl to make the request asynchronously
     vim.fn.jobstart({
@@ -84,6 +269,25 @@ local function send_completion_request(bufnr, cursor, file_path, file_content, c
                 local response_text = table.concat(data, '')
                 local ok, resp = pcall(vim.fn.json_decode, response_text)
                 if ok and resp and resp.completion and resp.completion ~= '' then
+                    -- Update stats with the completion
+                    -- Use real usage from server if available, otherwise estimate
+                    if resp.usage then
+                        session_stats.requests = session_stats.requests + 1
+                        session_stats.input_tokens = session_stats.input_tokens + (resp.usage.input_tokens or 0)
+                        session_stats.output_tokens = session_stats.output_tokens + (resp.usage.output_tokens or 0)
+                        session_stats.chars_generated = session_stats.chars_generated + #resp.completion
+                        -- Calculate cost with real tokens
+                        local cost = calculate_cost(
+                            resp.usage.input_tokens or 0,
+                            resp.usage.output_tokens or 0,
+                            M.config.provider or 'ollama'
+                        )
+                        session_stats.total_cost = session_stats.total_cost + cost
+                    else
+                        -- Fallback to estimation
+                        update_stats(file_content, resp.completion, M.config.provider)
+                    end
+                    
                     -- Schedule to run on main thread
                     vim.schedule(function()
                         -- Check if cursor is still in the same position
@@ -166,14 +370,24 @@ function M.accept()
     local new_col = #lines > 1 and #lines[#lines] or (current_completion.col + #lines[1])
     vim.api.nvim_win_set_cursor(0, { new_line, new_col })
 
-    -- Clear ghost text
-    M.dismiss()
+    -- Track accepted completion
+    session_stats.accepted = session_stats.accepted + 1
+    session_stats.chars_accepted = session_stats.chars_accepted + #current_completion.text
+
+    -- Clear ghost text (don't track as dismissed since we're accepting)
+    M.dismiss(false)
 
     return true
 end
 
 -- Dismiss the current completion
-function M.dismiss()
+---@param track_dismissed boolean|nil Whether to track as dismissed (default: true if completion exists)
+function M.dismiss(track_dismissed)
+    -- Track dismissed completion (only if there was one showing)
+    if current_completion and track_dismissed ~= false then
+        session_stats.dismissed = session_stats.dismissed + 1
+    end
+    
     vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
     current_completion = nil
 end

@@ -29,7 +29,12 @@ pub trait LlmProvider: Send + Sync {
     ) -> Result<LlmResponse>;
 
     /// Fill-in-middle completion for code
-    async fn complete_fim(&self, prefix: &str, suffix: &str, language: &str) -> Result<String>;
+    async fn complete_fim(
+        &self,
+        prefix: &str,
+        suffix: &str,
+        language: &str,
+    ) -> Result<CompletionResult>;
 
     /// Explain code at a specific location
     async fn explain_code(&self, code: &str, context: &str) -> Result<String>;

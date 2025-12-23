@@ -175,3 +175,18 @@ pub enum IssueSeverity {
     Info,
     Hint,
 }
+
+/// Token usage statistics
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub total_tokens: u32,
+}
+
+/// Result of a completion request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionResult {
+    pub text: String,
+    pub usage: Option<TokenUsage>,
+}

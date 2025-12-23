@@ -6,8 +6,8 @@
 #![allow(dead_code)]
 
 use super::{
-    CodeIssue, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role, ToolCall,
-    ToolDefinition,
+    CodeIssue, CompletionResult, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role,
+    TokenUsage, ToolCall, ToolDefinition,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -190,7 +190,12 @@ impl LlmProvider for ClaudeProvider {
         }
     }
 
-    async fn complete_fim(&self, prefix: &str, suffix: &str, language: &str) -> Result<String> {
+    async fn complete_fim(
+        &self,
+        prefix: &str,
+        suffix: &str,
+        language: &str,
+    ) -> Result<CompletionResult> {
         let system = format!(
             "You are a code completion engine. Complete the code where <CURSOR> is placed. \
              Output ONLY the completion text that should be inserted at the cursor position. \
@@ -214,13 +219,22 @@ impl LlmProvider for ClaudeProvider {
         let response = self.send_request(request).await?;
 
         // Extract text from response
+        let mut text = String::new();
         for block in response.content {
-            if let ClaudeContentBlock::Text { text } = block {
-                return Ok(text.trim().to_string());
+            if let ClaudeContentBlock::Text { text: t } = block {
+                text = t.trim().to_string();
+                break;
             }
         }
 
-        Ok(String::new())
+        // Extract usage from Claude response
+        let usage = response.usage.map(|u| TokenUsage {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            total_tokens: u.input_tokens + u.output_tokens,
+        });
+
+        Ok(CompletionResult { text, usage })
     }
 
     async fn explain_code(&self, code: &str, context: &str) -> Result<String> {
@@ -402,4 +416,11 @@ struct ClaudeResponse {
     content: Vec<ClaudeContentBlock>,
     #[allow(dead_code)]
     stop_reason: Option<String>,
+    usage: Option<ClaudeUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeUsage {
+    input_tokens: u32,
+    output_tokens: u32,
 }

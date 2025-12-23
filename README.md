@@ -238,6 +238,8 @@ The server starts automatically by default. You can also manage it manually:
 | `:TarkServerStatus` | Check server status |
 | `:TarkServerRestart` | Restart the server |
 | `:TarkBinaryDownload [channel]` | Download binary (optional: `stable`/`nightly`) |
+| `:TarkCompletionStats` | Show completion token usage and cost |
+| `:TarkCompletionStatsReset` | Reset completion stats |
 
 Or start manually in a terminal:
 ```bash
@@ -284,6 +286,30 @@ tark serve
 - Type `/` for command autocompletion  
 - Context usage shown in title bar
 - Real-time thinking display with tool calls
+
+### Statusline Integration
+
+Add completion stats to your statusline:
+
+```lua
+-- lualine.nvim example
+require('lualine').setup({
+    sections = {
+        lualine_x = {
+            { function() return require('tark').completion_statusline() end },
+        },
+    },
+})
+
+-- Or get raw stats for custom formatting
+local stats = require('tark').completion_stats()
+-- stats.requests, stats.accepted, stats.input_tokens, stats.output_tokens, stats.total_cost
+```
+
+The statusline shows: `⚡5K · 3/10 (30%) · $0.02`
+- Total tokens used
+- Accepted/total completions (acceptance rate)
+- Estimated cost
 
 ## Health Check
 

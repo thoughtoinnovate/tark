@@ -6,8 +6,8 @@
 #![allow(dead_code)]
 
 use super::{
-    CodeIssue, ContentPart, LlmProvider, LlmResponse, Message, MessageContent,
-    RefactoringSuggestion, Role, ToolCall, ToolDefinition,
+    CodeIssue, CompletionResult, ContentPart, LlmProvider, LlmResponse, Message, MessageContent,
+    RefactoringSuggestion, Role, TokenUsage, ToolCall, ToolDefinition,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -216,7 +216,12 @@ impl LlmProvider for OpenAiProvider {
         }
     }
 
-    async fn complete_fim(&self, prefix: &str, suffix: &str, language: &str) -> Result<String> {
+    async fn complete_fim(
+        &self,
+        prefix: &str,
+        suffix: &str,
+        language: &str,
+    ) -> Result<CompletionResult> {
         let system = format!(
             "You are a code completion engine. Complete the code where <CURSOR> is placed. \
              Output ONLY the completion text that should be inserted at the cursor position. \
@@ -249,17 +254,26 @@ impl LlmProvider for OpenAiProvider {
 
         let response = self.send_request(request).await?;
 
-        if let Some(choice) = response.choices.first() {
-            Ok(choice
+        let text = if let Some(choice) = response.choices.first() {
+            choice
                 .message
                 .content
                 .clone()
                 .unwrap_or_default()
                 .trim()
-                .to_string())
+                .to_string()
         } else {
-            Ok(String::new())
-        }
+            String::new()
+        };
+
+        // Extract usage from OpenAI response
+        let usage = response.usage.map(|u| TokenUsage {
+            input_tokens: u.prompt_tokens,
+            output_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+        });
+
+        Ok(CompletionResult { text, usage })
     }
 
     async fn explain_code(&self, code: &str, context: &str) -> Result<String> {
@@ -470,9 +484,17 @@ struct OpenAiFunction {
 #[derive(Debug, Deserialize)]
 struct OpenAiResponse {
     choices: Vec<OpenAiChoice>,
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenAiChoice {
     message: OpenAiMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
 }
