@@ -84,3 +84,21 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  neovim-tests:
+    name: Neovim Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
+      
+      - name: Run Neovim tests
+        run: |
+          nvim --version
+          nvim --headless -u tests/minimal_init.lua \
+            -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
+
