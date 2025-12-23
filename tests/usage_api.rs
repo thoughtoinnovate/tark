@@ -88,7 +88,11 @@ async fn test_usage_dashboard_endpoint() {
         assert!(res.status().is_success());
         let text = res.text().await.expect("Failed to get response text");
         assert!(text.contains("Tark Usage Dashboard"));
-        assert!(text.contains("Chart.js"));
+        // Chart.js is loaded from CDN - check for the script tag (case-insensitive)
+        assert!(
+            text.to_lowercase().contains("chart.js"),
+            "Dashboard should include Chart.js library"
+        );
     }
 }
 
