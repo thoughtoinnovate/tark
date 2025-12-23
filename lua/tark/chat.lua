@@ -3066,11 +3066,15 @@ slash_commands = {
         description = 'Plan mode: read-only, no file modifications',
         usage = '/plan',
         handler = function()
+            if agent_running or queue_processing then
+                append_message('system', '⚠️ *Cannot switch modes while agent is working. Please wait for current task to complete, or use `/interrupt` to stop.*')
+                return
+            end
             current_mode = 'plan'
             update_chat_header()
             if M.save_session then M.save_session() end
             append_message('system', '📝 **PLAN mode** - Read-only exploration. Use `/build` to make changes.')
-            append_message('system', '_Tools: file_search, grep, read_file_')
+            append_message('system', '_Tools: file_search, grep, read_file, propose_change_')
             scroll_to_bottom()
         end,
     },
@@ -3078,11 +3082,15 @@ slash_commands = {
         description = 'Build mode: full access to all tools',
         usage = '/build',
         handler = function()
+            if agent_running or queue_processing then
+                append_message('system', '⚠️ *Cannot switch modes while agent is working. Please wait for current task to complete, or use `/interrupt` to stop.*')
+                return
+            end
             current_mode = 'build'
             update_chat_header()
             if M.save_session then M.save_session() end
             append_message('system', '🔨 **BUILD mode** - Full access to modify files.')
-            append_message('system', '_Tools: all (read, write, shell)_')
+            append_message('system', '_Tools: all (read, write, patch, shell)_')
             scroll_to_bottom()
         end,
     },
@@ -3090,6 +3098,10 @@ slash_commands = {
         description = 'Review mode: approval required before each action',
         usage = '/review',
         handler = function()
+            if agent_running or queue_processing then
+                append_message('system', '⚠️ *Cannot switch modes while agent is working. Please wait for current task to complete, or use `/interrupt` to stop.*')
+                return
+            end
             current_mode = 'review'
             update_chat_header()
             if M.save_session then M.save_session() end
@@ -3872,6 +3884,10 @@ function M.open(initial_message)
 
     -- Tab to toggle between plan and build modes (normal mode)
     vim.keymap.set('n', '<Tab>', function()
+        if agent_running or queue_processing then
+            append_message('system', '⚠️ *Cannot switch modes while agent is working. Wait or use `/interrupt`.*')
+            return
+        end
         if current_mode == 'plan' then
             current_mode = 'build'
             append_message('system', '🔨 **BUILD mode** - Full access to modify files.')
@@ -3886,6 +3902,10 @@ function M.open(initial_message)
 
     -- Also add Tab in chat buffer for toggling
     vim.keymap.set('n', '<Tab>', function()
+        if agent_running or queue_processing then
+            append_message('system', '⚠️ *Cannot switch modes while agent is working. Wait or use `/interrupt`.*')
+            return
+        end
         if current_mode == 'plan' then
             current_mode = 'build'
             append_message('system', '🔨 **BUILD mode** - Full access to modify files.')
