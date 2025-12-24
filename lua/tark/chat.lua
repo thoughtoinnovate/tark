@@ -86,6 +86,19 @@ local last_modified_files = {}
 local maximized = false
 local saved_dimensions = nil  -- {width, col, sidepane_width, chat_width, panel_width}
 
+-- Helper to temporarily make buffer modifiable for writes
+local function safe_buf_set_lines(buf, start, finish, strict_indexing, lines)
+    if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+    local was_modifiable = vim.api.nvim_buf_get_option(buf, 'modifiable')
+    if not was_modifiable then
+        vim.api.nvim_buf_set_option(buf, 'modifiable', true)
+    end
+    vim.api.nvim_buf_set_lines(buf, start, finish, strict_indexing, lines)
+    if not was_modifiable then
+        vim.api.nvim_buf_set_option(buf, 'modifiable', false)
+    end
+end
+
 -- Open side-by-side diff view using git or vimdiff
 local function show_diff_view(filepath)
     -- Close chat windows temporarily
@@ -494,7 +507,7 @@ local function vim_select(items, opts, on_choice)
     
     -- Create buffer
     local buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, items)
+    safe_buf_set_lines(buf, 0, -1, false, items)
     vim.api.nvim_buf_set_option(buf, 'modifiable', false)
     vim.api.nvim_buf_set_option(buf, 'bufhidden', 'wipe')
     
@@ -877,7 +890,7 @@ local function update_chat_header()
     if line_count <= 1 and (not current_lines[1] or current_lines[1] == '') then
         -- Just add a blank line to start
         vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '' })
+        safe_buf_set_lines(buf, 0, -1, false, { '' })
         vim.api.nvim_buf_set_option(buf, 'modifiable', false)
     end
     
@@ -1236,7 +1249,7 @@ local function update_panel()
     
     pcall(function()
         vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        safe_buf_set_lines(buf, 0, -1, false, lines)
         vim.api.nvim_buf_set_option(buf, 'modifiable', false)
     end)
 end
@@ -1466,7 +1479,7 @@ local function append_message(role, content)
     if #new_lines > 0 then
         -- Toggle modifiable for writing
         vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-        vim.api.nvim_buf_set_lines(buf, start_line, start_line, false, new_lines)
+        safe_buf_set_lines(buf, start_line, start_line, false, new_lines)
         vim.api.nvim_buf_set_option(buf, 'modifiable', false)
         
         -- Apply highlights using extmarks
@@ -1518,7 +1531,7 @@ local function stop_loading_animation()
         )
         
         pcall(function()
-            vim.api.nvim_buf_set_lines(buf, thinking_state.line_start - 1, thinking_state.line_start, false, { summary })
+            safe_buf_set_lines(buf, thinking_state.line_start - 1, thinking_state.line_start, false, { summary })
         end)
     end
 end
@@ -1542,7 +1555,7 @@ local function update_thinking_display()
     
     -- Update just this one line
     pcall(function()
-        vim.api.nvim_buf_set_lines(buf, line_start - 1, line_start, false, { line })
+        safe_buf_set_lines(buf, line_start - 1, line_start, false, { line })
     end)
 end
 
@@ -1577,7 +1590,7 @@ local function start_loading_animation()
     
     -- Add single thinking line
     local initial_line = '*Thinking for 0s* ' .. spinner_frames[1] .. ' ' .. thinking_state.current_action
-    vim.api.nvim_buf_set_lines(buf, loading_line_idx, loading_line_idx, false, { '', initial_line, '' })
+    safe_buf_set_lines(buf, loading_line_idx, loading_line_idx, false, { '', initial_line, '' })
     thinking_state.line_start = loading_line_idx + 2  -- Point to the single thinking line
     
     -- Start animation timer (updates spinner and time)
@@ -1802,7 +1815,7 @@ send_message_internal = function(message, completion_callback)
                     table.insert(summary_lines, '')
                     
                     pcall(function()
-                        vim.api.nvim_buf_set_lines(buf, thinking_start - 1, thinking_end, false, summary_lines)
+                        safe_buf_set_lines(buf, thinking_start - 1, thinking_end, false, summary_lines)
                     end)
                 end
 
@@ -2386,7 +2399,7 @@ local function create_new_session()
                         
                         -- Clear chat display
                         local buf = get_chat_buffer()
-                        vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
+                        safe_buf_set_lines(buf, 0, -1, false, {})
                         reset_stats()
                         update_chat_header()
                         update_chat_window_title()
@@ -2437,7 +2450,7 @@ local function switch_to_session(session_id)
                         
                         -- Clear and restore chat display
                         local buf = get_chat_buffer()
-                        vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
+                        safe_buf_set_lines(buf, 0, -1, false, {})
                         
                         -- Restore messages from session
                         if data.messages then
@@ -2944,7 +2957,7 @@ end
 local function clear_chat()
     local buf = get_chat_buffer()
     vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
+    safe_buf_set_lines(buf, 0, -1, false, {})
     vim.api.nvim_buf_set_option(buf, 'modifiable', false)
     -- Reset session stats
     reset_stats()
