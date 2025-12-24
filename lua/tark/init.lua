@@ -301,6 +301,12 @@ local function setup_commands()
         end
     end, { desc = 'Close chat window' })
     
+    vim.api.nvim_create_user_command('TarkMaximize', function()
+        if M.config.chat.enabled then
+            get_chat().maximize()
+        end
+    end, { desc = 'Toggle maximize tark windows' })
+    
     -- Usage commands
     vim.api.nvim_create_user_command('TarkUsage', function()
         local usage = require('tark.usage')

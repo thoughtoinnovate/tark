@@ -82,6 +82,10 @@ local panel_sections = {
 -- Store last modified files for diff view
 local last_modified_files = {}
 
+-- Maximize mode state
+local maximized = false
+local saved_dimensions = nil  -- {width, col, sidepane_width, chat_width, panel_width}
+
 -- Open side-by-side diff view using git or vimdiff
 local function show_diff_view(filepath)
     -- Close chat windows temporarily
@@ -848,6 +852,14 @@ local function get_chat_buffer()
                 vim.api.nvim_set_current_win(input_win)
                 vim.cmd('startinsert')
             end
+        end
+    })
+    
+    -- Maximize toggle (Ctrl-z for zen mode)
+    vim.api.nvim_buf_set_keymap(chat_buf, 'n', '<C-z>', '', {
+        noremap = true, silent = true,
+        callback = function()
+            M.maximize()
         end
     })
 
@@ -3912,6 +3924,15 @@ function M.open(initial_message)
             end,
         })
         
+        -- Ctrl-z: maximize toggle
+        vim.api.nvim_buf_set_keymap(panel, 'n', '<C-z>', '', {
+            noremap = true,
+            silent = true,
+            callback = function()
+                M.maximize()
+            end,
+        })
+        
         -- Initialize panel display
         update_panel()
 
@@ -4058,6 +4079,11 @@ function M.open(initial_message)
                 vim.cmd('stopinsert')
             end
         end
+    end, { buffer = input, silent = true, nowait = true })
+    
+    -- Ctrl+z to maximize toggle (normal mode only)
+    vim.keymap.set('n', '<C-z>', function()
+        M.maximize()
     end, { buffer = input, silent = true, nowait = true })
 
     -- '/' triggers slash command completion
@@ -4258,6 +4284,143 @@ function M.toggle()
     else
         M.open()
     end
+end
+
+-- Maximize/restore tark windows
+function M.maximize()
+    if not M.is_open() then
+        vim.notify('Tark chat is not open', vim.log.levels.WARN)
+        return
+    end
+    
+    -- Only works in floating modes (sidepane/popup)
+    if M.config.window.style == 'split' then
+        vim.notify('Maximize only works in sidepane/popup mode', vim.log.levels.WARN)
+        return
+    end
+    
+    local editor_width = vim.o.columns
+    local editor_height = vim.o.lines
+    local input_height = 3
+    
+    if maximized then
+        -- RESTORE: Return to saved dimensions
+        if saved_dimensions then
+            local sd = saved_dimensions
+            local panel_width = 22
+            local chat_width = sd.width - panel_width
+            local height = editor_height - input_height - 4
+            
+            -- Restore chat window
+            if chat_win and vim.api.nvim_win_is_valid(chat_win) then
+                vim.api.nvim_win_set_config(chat_win, {
+                    relative = 'editor',
+                    width = chat_width,
+                    height = height,
+                    col = sd.col,
+                    row = 0,
+                })
+            end
+            
+            -- Restore panel window
+            if panel_win and vim.api.nvim_win_is_valid(panel_win) then
+                vim.api.nvim_win_set_config(panel_win, {
+                    relative = 'editor',
+                    width = panel_width,
+                    height = height,
+                    col = sd.col + chat_width,
+                    row = 0,
+                })
+            end
+            
+            -- Restore input window
+            if input_win and vim.api.nvim_win_is_valid(input_win) then
+                vim.api.nvim_win_set_config(input_win, {
+                    relative = 'editor',
+                    width = sd.width,
+                    height = input_height,
+                    col = sd.col,
+                    row = editor_height - input_height - 2,
+                })
+            end
+            
+            -- Restore config
+            M.config.window.sidepane_width = sd.sidepane_width
+        end
+        maximized = false
+        saved_dimensions = nil
+        vim.notify('Tark restored', vim.log.levels.INFO)
+    else
+        -- MAXIMIZE: Save current and expand to full screen
+        local current_width = M.config.window.sidepane_width
+        if current_width <= 1 then
+            current_width = math.floor(editor_width * current_width)
+        end
+        
+        local current_col
+        if M.config.window.position == 'left' then
+            current_col = 0
+        else
+            current_col = editor_width - current_width - 2
+        end
+        
+        saved_dimensions = {
+            width = current_width,
+            col = current_col,
+            sidepane_width = M.config.window.sidepane_width,
+        }
+        
+        -- Calculate maximized dimensions (full editor width)
+        local max_width = editor_width - 4  -- Leave small margin
+        local panel_width = 26  -- Slightly wider panel when maximized
+        local chat_width = max_width - panel_width
+        local height = editor_height - input_height - 4
+        
+        -- Maximize chat window
+        if chat_win and vim.api.nvim_win_is_valid(chat_win) then
+            vim.api.nvim_win_set_config(chat_win, {
+                relative = 'editor',
+                width = chat_width,
+                height = height,
+                col = 1,
+                row = 0,
+            })
+        end
+        
+        -- Maximize panel window
+        if panel_win and vim.api.nvim_win_is_valid(panel_win) then
+            vim.api.nvim_win_set_config(panel_win, {
+                relative = 'editor',
+                width = panel_width,
+                height = height,
+                col = 1 + chat_width,
+                row = 0,
+            })
+        end
+        
+        -- Maximize input window
+        if input_win and vim.api.nvim_win_is_valid(input_win) then
+            vim.api.nvim_win_set_config(input_win, {
+                relative = 'editor',
+                width = max_width,
+                height = input_height,
+                col = 1,
+                row = editor_height - input_height - 2,
+            })
+        end
+        
+        maximized = true
+        vim.notify('Tark maximized (use :TarkMaximize to restore)', vim.log.levels.INFO)
+    end
+    
+    -- Update headers after resize
+    pcall(update_chat_header)
+    pcall(update_input_window_title)
+end
+
+-- Check if maximized
+function M.is_maximized()
+    return maximized
 end
 
 -- Get current provider
