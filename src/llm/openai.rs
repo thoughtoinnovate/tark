@@ -286,61 +286,102 @@ impl OpenAiProvider {
 
     /// Final validation: ensure tool messages follow assistant messages with tool_calls
     /// This is a safety net in case sanitize_messages misses something
+    /// Uses a two-pass approach to ensure complete pairs only
     fn validate_tool_sequence(messages: &[OpenAiMessage]) -> Vec<OpenAiMessage> {
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet};
 
-        let mut result: Vec<OpenAiMessage> = Vec::new();
-        let mut pending_tool_call_ids: HashSet<String> = HashSet::new();
+        // First pass: find all assistant messages with tool_calls and their responses
+        let mut assistant_tool_calls: HashMap<usize, Vec<String>> = HashMap::new(); // idx -> tool_call_ids
+        let mut tool_responses: HashMap<String, usize> = HashMap::new(); // tool_call_id -> idx
 
-        for msg in messages {
-            if msg.role == "tool" {
-                // Tool message - only include if we have a pending tool_call for it
+        for (idx, msg) in messages.iter().enumerate() {
+            if msg.role == "assistant" {
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    let ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
+                    if !ids.is_empty() {
+                        assistant_tool_calls.insert(idx, ids);
+                    }
+                }
+            } else if msg.role == "tool" {
                 if let Some(ref id) = msg.tool_call_id {
-                    if pending_tool_call_ids.contains(id) {
-                        pending_tool_call_ids.remove(id);
+                    tool_responses.insert(id.clone(), idx);
+                }
+            }
+        }
+
+        // Find complete assistant messages (ALL their tool_calls have responses)
+        let complete_assistants: HashSet<usize> = assistant_tool_calls
+            .iter()
+            .filter(|(_, ids)| ids.iter().all(|id| tool_responses.contains_key(id)))
+            .map(|(idx, _)| *idx)
+            .collect();
+
+        // Find valid tool responses (their assistant message is complete)
+        let valid_tool_call_ids: HashSet<String> = assistant_tool_calls
+            .iter()
+            .filter(|(idx, _)| complete_assistants.contains(idx))
+            .flat_map(|(_, ids)| ids.clone())
+            .collect();
+
+        // Log what we're filtering
+        let incomplete_assistants: Vec<usize> = assistant_tool_calls
+            .keys()
+            .filter(|idx| !complete_assistants.contains(idx))
+            .copied()
+            .collect();
+        if !incomplete_assistants.is_empty() {
+            tracing::warn!(
+                "validate_tool_sequence: Filtering {} assistant messages with incomplete tool_calls at indices {:?}",
+                incomplete_assistants.len(),
+                incomplete_assistants
+            );
+        }
+
+        let orphaned_tools: Vec<String> = tool_responses
+            .keys()
+            .filter(|id| !valid_tool_call_ids.contains(*id))
+            .cloned()
+            .collect();
+        if !orphaned_tools.is_empty() {
+            tracing::warn!(
+                "validate_tool_sequence: Filtering {} orphaned tool responses: {:?}",
+                orphaned_tools.len(),
+                orphaned_tools
+            );
+        }
+
+        // Second pass: build result with only valid messages
+        let mut result: Vec<OpenAiMessage> = Vec::new();
+        for (idx, msg) in messages.iter().enumerate() {
+            if msg.role == "assistant" {
+                if msg.tool_calls.is_some() {
+                    // Only include if this assistant message is complete
+                    if complete_assistants.contains(&idx) {
                         result.push(msg.clone());
-                    } else {
-                        tracing::warn!(
-                            "validate_tool_sequence: Filtering orphaned tool message (id: {})",
-                            id
-                        );
                     }
                 } else {
-                    tracing::warn!("validate_tool_sequence: Filtering tool message without id");
+                    // Regular assistant message without tool_calls
+                    result.push(msg.clone());
                 }
-            } else if msg.role == "assistant" {
-                // Assistant message - track any tool_calls
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    for tc in tool_calls {
-                        pending_tool_call_ids.insert(tc.id.clone());
+            } else if msg.role == "tool" {
+                // Only include if this tool response is for a valid tool_call
+                if let Some(ref id) = msg.tool_call_id {
+                    if valid_tool_call_ids.contains(id) {
+                        result.push(msg.clone());
                     }
                 }
-                result.push(msg.clone());
             } else {
-                // System or user message - just include
+                // System or user message - always include
                 result.push(msg.clone());
             }
         }
 
-        // If there are pending tool_calls without responses, remove those assistant messages
-        if !pending_tool_call_ids.is_empty() {
-            tracing::warn!(
-                "validate_tool_sequence: Removing assistant messages with unresolved tool_calls: {:?}",
-                pending_tool_call_ids
-            );
-            result.retain(|msg| {
-                if msg.role == "assistant" {
-                    if let Some(ref tool_calls) = msg.tool_calls {
-                        // Remove if ANY of its tool_calls are unresolved
-                        !tool_calls.iter().any(|tc| pending_tool_call_ids.contains(&tc.id))
-                    } else {
-                        true
-                    }
-                } else {
-                    true
-                }
-            });
-        }
+        tracing::info!(
+            "validate_tool_sequence: {} messages in, {} messages out (filtered {})",
+            messages.len(),
+            result.len(),
+            messages.len() - result.len()
+        );
 
         result
     }
