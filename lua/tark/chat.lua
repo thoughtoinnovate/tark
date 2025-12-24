@@ -736,7 +736,7 @@ local function update_chat_window_title()
         local width = config.width or 80
         
         -- Calculate display widths
-        local left_width = display_width(model_part)
+        local left_width = 0 -- Removed model part
         local center_width = display_width(context_part)
         local right_width = display_width(cost_part)
         
@@ -749,7 +749,7 @@ local function update_chat_window_title()
         local right_start = usable_width - right_width
         
         -- Calculate padding needed
-        local left_pad = center_start - left_width
+        local left_pad = center_start
         local right_pad = right_start - (center_start + center_width)
         
         -- Ensure minimum padding
@@ -760,7 +760,6 @@ local function update_chat_window_title()
         local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
         
         config.title = {
-            { model_part, 'FloatTitle' },  -- Left: Model name
             { string.rep(' ', left_pad), 'FloatBorder' },
             { context_part, context_hl },  -- Center: Context usage (truly centered)
             { string.rep(' ', right_pad), 'FloatBorder' },
@@ -774,8 +773,8 @@ local function update_chat_window_title()
         -- Color the context based on usage
         local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
         vim.api.nvim_win_set_option(chat_win, 'statusline',
-            string.format('%%#FloatTitle#%s%%#Normal# %%#%s#%s%%#Normal# %%#String#%s%%#Normal#',
-                model_part, context_hl, context_part, cost_part))
+            string.format('%%#%s#%s%%#Normal# %%#String#%s%%#Normal#',
+                context_hl, context_part, cost_part))
     end
     
     -- Also update input title
@@ -3548,13 +3547,11 @@ function M.open(initial_message)
         -- Build initial chat title (model | context | cost)
         local model_name_t = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
         
-        -- Layout: [Model] ... [0%] 0/128K ... [$0.0000]
-        local model_part_t = string.format(' %s ', model_name_t)
+        -- Layout: ... [0%] 0/128K ... [$0.0000]
         local context_part_t = string.format('[0%%] 0/%s', format_number(128000))
         local cost_part_t = '$0.0000 '
         
-        -- INTELLIGENT PADDING: Left-align left, Center center, Right-align right
-        local left_width_t = display_width(model_part_t)
+        -- INTELLIGENT PADDING: Center center, Right-align right
         local center_width_t = display_width(context_part_t)
         local right_width_t = display_width(cost_part_t)
         local usable_width_t = width - 2  -- Account for border chars
@@ -3565,13 +3562,12 @@ function M.open(initial_message)
         local right_start_t = usable_width_t - right_width_t
         
         -- Calculate padding needed
-        local left_pad_t = center_start_t - left_width_t
+        local left_pad_t = center_start_t
         local right_pad_t = right_start_t - (center_start_t + center_width_t)
         if left_pad_t < 1 then left_pad_t = 1 end
         if right_pad_t < 1 then right_pad_t = 1 end
         
         local title_config = {
-            { model_part_t, 'FloatTitle' },
             { string.rep(' ', left_pad_t), 'FloatBorder' },
             { context_part_t, 'Comment' },
             { string.rep(' ', right_pad_t), 'FloatBorder' },
