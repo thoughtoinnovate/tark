@@ -325,12 +325,14 @@ pub const DASHBOARD_HTML: &str = r#"
         let modelCostChart, modelTokensChart, modeChart;
         
         function formatCost(cost) {
+            if (cost === undefined || cost === null || isNaN(cost)) return '$0.00';
             if (cost < 0.01) return `$${cost.toFixed(4)}`;
             if (cost < 1) return `$${cost.toFixed(3)}`;
             return `$${cost.toFixed(2)}`;
         }
         
         function formatNumber(n) {
+            if (n === undefined || n === null || isNaN(n)) return '0';
             if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
             if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
             return n.toString();
@@ -348,12 +350,12 @@ pub const DASHBOARD_HTML: &str = r#"
                 const summaryRes = await fetch('/api/usage/summary');
                 const summary = await summaryRes.json();
                 
-                // Update summary stats
+                // Update summary stats with safe defaults
                 document.getElementById('total-cost').textContent = formatCost(summary.total_cost);
                 document.getElementById('total-tokens').textContent = formatNumber(summary.total_tokens);
-                document.getElementById('session-count').textContent = summary.session_count;
-                document.getElementById('request-count').textContent = summary.log_count;
-                document.getElementById('db-size').textContent = summary.db_size_human;
+                document.getElementById('session-count').textContent = summary.session_count || 0;
+                document.getElementById('request-count').textContent = summary.log_count || 0;
+                document.getElementById('db-size').textContent = summary.db_size_human || '0 B';
                 
                 // Fetch model usage
                 const modelsRes = await fetch('/api/usage/models');
