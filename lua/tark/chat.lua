@@ -53,8 +53,10 @@ local chat_buf = nil
 local chat_win = nil
 local input_buf = nil
 local input_win = nil
-local tasks_buf = nil
-local tasks_win = nil
+local panel_buf = nil  -- Renamed from tasks_buf
+local panel_win = nil  -- Renamed from tasks_win
+local tasks_buf = nil  -- Alias for backwards compatibility
+local tasks_win = nil  -- Alias for backwards compatibility
 local current_provider = 'ollama'      -- Backend protocol for API calls
 local current_provider_id = 'ollama'   -- Actual provider identity for display
 
@@ -68,7 +70,14 @@ local prompt_current_input = ''  -- Temporary storage for current input when nav
 local task_queue = {}  -- Array of {id, prompt, status, timestamp, expanded}
 local task_id_counter = 0
 local queue_processing = false  -- Is a task currently being processed?
-local focused_window = 'input'  -- 'input', 'chat', or 'tasks'
+local focused_window = 'input'  -- 'input', 'chat', or 'panel'
+
+-- Panel accordion sections state
+local panel_sections = {
+    tasks = { expanded = true, items = {} },           -- Task queue
+    notifications = { expanded = false, items = {} },   -- Future notifications
+    files = { expanded = false, items = {} },           -- Files modified in session
+}
 
 -- Store last modified files for diff view
 local last_modified_files = {}
@@ -231,6 +240,22 @@ local function track_modified_file(filepath)
     -- Add to end (most recent)
     table.insert(last_modified_files, filepath)
     -- Keep only last 10
+    
+    -- Also add to panel's files section
+    if panel_sections and panel_sections.files then
+        -- Avoid duplicates in panel
+        local found = false
+        for _, f in ipairs(panel_sections.files.items) do
+            if f == filepath then found = true; break end
+        end
+        if not found then
+            table.insert(panel_sections.files.items, filepath)
+            -- Update panel if it exists
+            if panel_buf and vim.api.nvim_buf_is_valid(panel_buf) then
+                pcall(update_panel)
+            end
+        end
+    end
     while #last_modified_files > 10 do
         table.remove(last_modified_files, 1)
     end
@@ -699,16 +724,14 @@ local function update_input_window_title()
     end
 end
 
--- Update chat window title with current stats
+-- Update chat window title with current stats (model removed - shown in prompt)
 local function update_chat_window_title()
     if not chat_win or not vim.api.nvim_win_is_valid(chat_win) then
         return
     end
     
-    -- Build title components
+    -- Build title components (no model name - it's in the prompt window)
     local model_info = get_current_model_info()
-    local model_name = current_model or model_mappings[current_provider] or current_provider
-    local model_short = model_name:match('[^/]+$') or model_name
     
     -- Context info
     local used = session_stats.input_tokens + session_stats.output_tokens
@@ -718,13 +741,9 @@ local function update_chat_window_title()
     end
     
     local percent = context_max > 0 and math.floor((used / context_max) * 100) or 0
-    local remaining = context_max - used
     
-    -- Left: Model name
-    local model_part = string.format(' %s ', model_short)
-    
-    -- Center: Context usage (simple format: [1%] 1K/128K)
-    local context_part = string.format('[%d%%] %s/%s', percent, format_number(used), format_number(context_max))
+    -- Left: Context usage (simple format: [1%] 1K/128K)
+    local context_part = string.format(' [%d%%] %s/%s ', percent, format_number(used), format_number(context_max))
     
     -- Right: Cost
     local cost_part = string.format('$%.4f ', session_stats.total_cost)
@@ -736,46 +755,31 @@ local function update_chat_window_title()
         local width = config.width or 80
         
         -- Calculate display widths
-        local left_width = display_width(model_part)
-        local center_width = display_width(context_part)
+        local left_width = display_width(context_part)
         local right_width = display_width(cost_part)
         
-        -- INTELLIGENT PADDING: Left-align left, Center center, Right-align right
+        -- Calculate padding for right alignment
         local usable_width = width - 2  -- Account for border chars
-        
-        -- Where should center START to be truly centered?
-        local center_start = math.floor((usable_width - center_width) / 2)
-        -- Where should right START to be truly right-aligned?
-        local right_start = usable_width - right_width
-        
-        -- Calculate padding needed
-        local left_pad = center_start - left_width
-        local right_pad = right_start - (center_start + center_width)
-        
-        -- Ensure minimum padding
-        if left_pad < 1 then left_pad = 1 end
-        if right_pad < 1 then right_pad = 1 end
+        local center_pad = usable_width - left_width - right_width
+        if center_pad < 1 then center_pad = 1 end
         
         -- Color the context bar based on usage
         local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
         
         config.title = {
-            { model_part, 'FloatTitle' },  -- Left: Model name
-            { string.rep(' ', left_pad), 'FloatBorder' },
-            { context_part, context_hl },  -- Center: Context usage (truly centered)
-            { string.rep(' ', right_pad), 'FloatBorder' },
-            { cost_part, 'String' },  -- Right: Cost (right-aligned)
+            { context_part, context_hl },  -- Left: Context usage
+            { string.rep(' ', center_pad), 'FloatBorder' },
+            { cost_part, 'String' },  -- Right: Cost
         }
         config.title_pos = 'left'
         
         vim.api.nvim_win_set_config(chat_win, config)
     else
         -- Split window: use statusline
-        -- Color the context based on usage
         local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
         vim.api.nvim_win_set_option(chat_win, 'statusline',
-            string.format('%%#FloatTitle#%s%%#Normal# %%#%s#%s%%#Normal# %%#String#%s%%#Normal#',
-                model_part, context_hl, context_part, cost_part))
+            string.format('%%#%s#%s%%#Normal# %%#String#%s%%#Normal#',
+                context_hl, context_part, cost_part))
     end
     
     -- Also update input title
@@ -815,7 +819,37 @@ local function get_chat_buffer()
     vim.api.nvim_buf_set_option(chat_buf, 'buftype', 'nofile')
     vim.api.nvim_buf_set_option(chat_buf, 'bufhidden', 'hide')
     vim.api.nvim_buf_set_option(chat_buf, 'filetype', 'markdown')
+    vim.api.nvim_buf_set_option(chat_buf, 'modifiable', false)  -- Non-modifiable by user
     vim.api.nvim_buf_set_name(chat_buf, 'tark-chat')
+    
+    -- Prevent user from entering insert mode in chat buffer
+    vim.api.nvim_buf_set_keymap(chat_buf, 'n', 'i', '', {
+        noremap = true, silent = true,
+        callback = function()
+            if input_win and vim.api.nvim_win_is_valid(input_win) then
+                vim.api.nvim_set_current_win(input_win)
+                vim.cmd('startinsert')
+            end
+        end
+    })
+    vim.api.nvim_buf_set_keymap(chat_buf, 'n', 'a', '', {
+        noremap = true, silent = true,
+        callback = function()
+            if input_win and vim.api.nvim_win_is_valid(input_win) then
+                vim.api.nvim_set_current_win(input_win)
+                vim.cmd('startinsert!')
+            end
+        end
+    })
+    vim.api.nvim_buf_set_keymap(chat_buf, 'n', 'o', '', {
+        noremap = true, silent = true,
+        callback = function()
+            if input_win and vim.api.nvim_win_is_valid(input_win) then
+                vim.api.nvim_set_current_win(input_win)
+                vim.cmd('startinsert')
+            end
+        end
+    })
 
     return chat_buf
 end
@@ -830,7 +864,9 @@ local function update_chat_header()
     
     if line_count <= 1 and (not current_lines[1] or current_lines[1] == '') then
         -- Just add a blank line to start
+        vim.api.nvim_buf_set_option(buf, 'modifiable', true)
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '' })
+        vim.api.nvim_buf_set_option(buf, 'modifiable', false)
     end
     
     -- Update window title bar (this has the model + context info)
@@ -1074,78 +1110,154 @@ local response_start_time = nil
 -- Create namespace for extmarks
 local ns_id = vim.api.nvim_create_namespace('tark_chat_highlights')
 
--- Task queue management functions
-local function update_tasks_window()
-    if not tasks_buf or not vim.api.nvim_buf_is_valid(tasks_buf) then
+-- Panel (accordion) management functions
+-- Line mapping for interactions: line_num -> {type, section, index}
+M._panel_line_map = {}
+
+local function update_panel()
+    local buf = panel_buf or tasks_buf
+    local win = panel_win or tasks_win
+    
+    if not buf or not vim.api.nvim_buf_is_valid(buf) then
         return
     end
     
-    -- Update title with count
-    if tasks_win and vim.api.nvim_win_is_valid(tasks_win) then
-        local title_text = #task_queue > 0 and string.format(' Tasks (%d) ', #task_queue) or ' Tasks '
-        pcall(function()
-            local config = vim.api.nvim_win_get_config(tasks_win)
-            if config.relative ~= '' then  -- Only for floating windows
-                config.title = { { title_text, 'FloatTitle' } }
-                vim.api.nvim_win_set_config(tasks_win, config)
-            end
-        end)
+    local lines = {}
+    M._panel_line_map = {}
+    
+    -- Helper to wrap long text
+    local function wrap_text(text, max_width, indent)
+        indent = indent or ''
+        local wrapped = {}
+        local remaining = text
+        while #remaining > max_width do
+            table.insert(wrapped, indent .. remaining:sub(1, max_width))
+            remaining = remaining:sub(max_width + 1)
+        end
+        if #remaining > 0 then
+            table.insert(wrapped, indent .. remaining)
+        end
+        return wrapped
     end
     
-    local lines = {}
-    if #task_queue == 0 then
-        table.insert(lines, ' No tasks')
-    else
-        -- Line mapping for interactions: line_num -> {type='task'|'content', index=idx}
-        M._task_line_map = {}
-        
-        for i, task in ipairs(task_queue) do
-            local icon = task.status == 'processing' and '⏳' or '⏸'
-            local expand_icon = task.expanded and '▼' or '▶'
-            
-            -- Header line
-            local header = string.format(' %s %s %d. %s', expand_icon, icon, i, task.prompt:match('^[^\n]+') or 'Task')
-            if #header > 20 then
-                 header = header:sub(1, 17) .. '...'
-            end
-            table.insert(lines, header)
-            M._task_line_map[#lines] = { type = 'task', index = i }
-            
-            -- Expanded content
-            if task.expanded then
-                local content_lines = vim.split(task.prompt, '\n')
-                for _, line in ipairs(content_lines) do
-                    -- Wrap long lines manually since window is narrow
-                    local wrapped = {}
-                    local max_width = 18 -- 22 width - 4 padding
-                    if #line > max_width then
-                        local remaining = line
-                        while #remaining > max_width do
-                            table.insert(wrapped, remaining:sub(1, max_width))
-                            remaining = remaining:sub(max_width + 1)
+    -- Section: Tasks
+    local tasks_count = #task_queue
+    local tasks_icon = panel_sections.tasks.expanded and '▼' or '▶'
+    local tasks_header = string.format('%s Tasks (%d)', tasks_icon, tasks_count)
+    table.insert(lines, tasks_header)
+    M._panel_line_map[#lines] = { type = 'section', section = 'tasks' }
+    
+    if panel_sections.tasks.expanded then
+        if tasks_count == 0 then
+            table.insert(lines, '   No tasks')
+            M._panel_line_map[#lines] = { type = 'empty', section = 'tasks' }
+        else
+            for i, task in ipairs(task_queue) do
+                local status_icon = task.status == 'processing' and '⏳' or '⏸'
+                local expand_icon = task.expanded and '▼' or '▶'
+                local prompt_preview = (task.prompt:match('^[^\n]+') or 'Task'):sub(1, 12)
+                if #prompt_preview >= 12 then prompt_preview = prompt_preview .. '...' end
+                
+                local task_line = string.format('  %s %s %d. %s', expand_icon, status_icon, i, prompt_preview)
+                table.insert(lines, task_line)
+                M._panel_line_map[#lines] = { type = 'task', section = 'tasks', index = i }
+                
+                -- Expanded task content
+                if task.expanded then
+                    local content_lines = vim.split(task.prompt, '\n')
+                    for _, line in ipairs(content_lines) do
+                        local wrapped = wrap_text(line, 16, '     ')
+                        for _, w_line in ipairs(wrapped) do
+                            table.insert(lines, w_line)
+                            M._panel_line_map[#lines] = { type = 'task_content', section = 'tasks', index = i }
                         end
-                        table.insert(wrapped, remaining)
-                    else
-                        table.insert(wrapped, line)
                     end
-                    
-                    for _, w_line in ipairs(wrapped) do
-                        table.insert(lines, '    ' .. w_line)
-                        M._task_line_map[#lines] = { type = 'content', index = i }
-                    end
+                    table.insert(lines, '')
+                    M._panel_line_map[#lines] = { type = 'separator', section = 'tasks' }
                 end
-                -- Add empty line separator
-                table.insert(lines, '') 
-                M._task_line_map[#lines] = { type = 'separator', index = i }
+            end
+        end
+        table.insert(lines, '')
+    end
+    
+    -- Section: Notifications
+    local notif_count = #panel_sections.notifications.items
+    local notif_icon = panel_sections.notifications.expanded and '▼' or '▶'
+    local notif_header = string.format('%s Notifications (%d)', notif_icon, notif_count)
+    table.insert(lines, notif_header)
+    M._panel_line_map[#lines] = { type = 'section', section = 'notifications' }
+    
+    if panel_sections.notifications.expanded then
+        if notif_count == 0 then
+            table.insert(lines, '   No notifications')
+            M._panel_line_map[#lines] = { type = 'empty', section = 'notifications' }
+        else
+            for i, notif in ipairs(panel_sections.notifications.items) do
+                local notif_line = '   ' .. (notif.message or notif):sub(1, 16)
+                table.insert(lines, notif_line)
+                M._panel_line_map[#lines] = { type = 'notification', section = 'notifications', index = i }
+            end
+        end
+        table.insert(lines, '')
+    end
+    
+    -- Section: Files Modified
+    local files_count = #panel_sections.files.items
+    local files_icon = panel_sections.files.expanded and '▼' or '▶'
+    local files_header = string.format('%s Files (%d)', files_icon, files_count)
+    table.insert(lines, files_header)
+    M._panel_line_map[#lines] = { type = 'section', section = 'files' }
+    
+    if panel_sections.files.expanded then
+        if files_count == 0 then
+            table.insert(lines, '   No files')
+            M._panel_line_map[#lines] = { type = 'empty', section = 'files' }
+        else
+            for i, file in ipairs(panel_sections.files.items) do
+                local short_name = file:match('[^/]+$') or file
+                local file_line = '   ' .. short_name:sub(1, 16)
+                table.insert(lines, file_line)
+                M._panel_line_map[#lines] = { type = 'file', section = 'files', index = i }
             end
         end
     end
     
     pcall(function()
-        vim.api.nvim_buf_set_option(tasks_buf, 'modifiable', true)
-        vim.api.nvim_buf_set_lines(tasks_buf, 0, -1, false, lines)
-        vim.api.nvim_buf_set_option(tasks_buf, 'modifiable', false)
+        vim.api.nvim_buf_set_option(buf, 'modifiable', true)
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        vim.api.nvim_buf_set_option(buf, 'modifiable', false)
     end)
+end
+
+-- Alias for backwards compatibility
+local function update_tasks_window()
+    update_panel()
+end
+
+-- Add file to panel's files section
+local function add_file_to_panel(filepath)
+    if not filepath then return end
+    -- Avoid duplicates
+    for _, f in ipairs(panel_sections.files.items) do
+        if f == filepath then return end
+    end
+    table.insert(panel_sections.files.items, filepath)
+    update_panel()
+end
+
+-- Add notification to panel
+local function add_notification(message)
+    table.insert(panel_sections.notifications.items, {
+        message = message,
+        timestamp = os.time(),
+    })
+    update_panel()
+end
+
+-- Clear notifications
+local function clear_notifications()
+    panel_sections.notifications.items = {}
+    update_panel()
 end
 
 local function add_to_queue(prompt)
@@ -1340,7 +1452,10 @@ local function append_message(role, content)
     end
 
     if #new_lines > 0 then
+        -- Toggle modifiable for writing
+        vim.api.nvim_buf_set_option(buf, 'modifiable', true)
         vim.api.nvim_buf_set_lines(buf, start_line, start_line, false, new_lines)
+        vim.api.nvim_buf_set_option(buf, 'modifiable', false)
         
         -- Apply highlights using extmarks
         for _, range in ipairs(highlight_ranges) do
@@ -2816,11 +2931,18 @@ end
 -- Clear chat history
 local function clear_chat()
     local buf = get_chat_buffer()
+    vim.api.nvim_buf_set_option(buf, 'modifiable', true)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
+    vim.api.nvim_buf_set_option(buf, 'modifiable', false)
     -- Reset session stats
     reset_stats()
     update_chat_header()
     update_chat_window_title()
+    -- Clear panel files section too
+    if panel_sections then
+        panel_sections.files.items = {}
+        update_panel()
+    end
     
     -- Also clear server-side history
     local clear_body = '{"message": "", "clear_history": true, "provider": "' .. current_provider .. '"}'
@@ -3635,14 +3757,15 @@ function M.open(initial_message)
             title_pos = 'left',
         })
 
-        -- Create tasks window (slim, on the right)
-        local tasks = vim.api.nvim_create_buf(false, true)
-        tasks_buf = tasks
-        vim.api.nvim_buf_set_option(tasks, 'buftype', 'nofile')
-        vim.api.nvim_buf_set_option(tasks, 'filetype', 'tark-tasks')
-        vim.api.nvim_buf_set_option(tasks, 'modifiable', false)
+        -- Create panel window (slim, on the right) - renamed from tasks
+        local panel = vim.api.nvim_create_buf(false, true)
+        panel_buf = panel
+        tasks_buf = panel  -- Alias for backwards compatibility
+        vim.api.nvim_buf_set_option(panel, 'buftype', 'nofile')
+        vim.api.nvim_buf_set_option(panel, 'filetype', 'tark-panel')
+        vim.api.nvim_buf_set_option(panel, 'modifiable', false)
         
-        tasks_win = vim.api.nvim_open_win(tasks, false, {
+        panel_win = vim.api.nvim_open_win(panel, false, {
             relative = 'editor',
             width = tasks_width,
             height = height,
@@ -3651,59 +3774,116 @@ function M.open(initial_message)
             style = 'minimal',
             border = M.config.window.border,
             title = {
-                { ' Tasks ', 'FloatTitle' },
+                { ' Panel ', 'FloatTitle' },
             },
             title_pos = 'center',
             footer = {
-                { ' i:add d:del <CR>:toggle ', 'Comment' },
+                { ' j/k ', 'Comment' },
+                { 'zo/zc ', 'FloatBorder' },
+                { 'dd:del ', 'Comment' },
             },
             footer_pos = 'center',
         })
+        tasks_win = panel_win  -- Alias for backwards compatibility
         
-        -- Configure tasks window options
-        vim.api.nvim_win_set_option(tasks_win, 'number', false)
-        vim.api.nvim_win_set_option(tasks_win, 'relativenumber', false)
-        vim.api.nvim_win_set_option(tasks_win, 'signcolumn', 'no')
-        vim.api.nvim_win_set_option(tasks_win, 'wrap', true)
-        vim.api.nvim_win_set_option(tasks_win, 'linebreak', true)
-        vim.api.nvim_win_set_option(tasks_win, 'winfixwidth', true)
-        vim.api.nvim_win_set_option(tasks_win, 'winfixheight', true)
+        -- Configure panel window options (non-modifiable)
+        vim.api.nvim_win_set_option(panel_win, 'number', false)
+        vim.api.nvim_win_set_option(panel_win, 'relativenumber', false)
+        vim.api.nvim_win_set_option(panel_win, 'signcolumn', 'no')
+        vim.api.nvim_win_set_option(panel_win, 'wrap', true)
+        vim.api.nvim_win_set_option(panel_win, 'linebreak', true)
+        vim.api.nvim_win_set_option(panel_win, 'winfixwidth', true)
+        vim.api.nvim_win_set_option(panel_win, 'winfixheight', true)
+        vim.api.nvim_win_set_option(panel_win, 'cursorline', true)
         
-        -- Set up keymappings for tasks window
-        -- Toggle expansion with Enter or Tab
-        local function toggle_task()
-            if not M._task_line_map then return end
-            local line = vim.api.nvim_win_get_cursor(tasks_win)[1]
-            local map = M._task_line_map[line]
+        -- Panel keymappings (vim-style)
+        local function panel_toggle()
+            if not M._panel_line_map then return end
+            local line = vim.api.nvim_win_get_cursor(panel_win)[1]
+            local map = M._panel_line_map[line]
             
-            if map and map.index then
+            if not map then return end
+            
+            if map.type == 'section' then
+                -- Toggle section expand/collapse
+                panel_sections[map.section].expanded = not panel_sections[map.section].expanded
+                update_panel()
+            elseif map.type == 'task' and map.index then
+                -- Toggle task expand
                 local task = task_queue[map.index]
                 if task then
                     task.expanded = not task.expanded
-                    update_tasks_window()
+                    update_panel()
+                end
+            end
+        end
+        
+        local function panel_expand()
+            if not M._panel_line_map then return end
+            local line = vim.api.nvim_win_get_cursor(panel_win)[1]
+            local map = M._panel_line_map[line]
+            
+            if not map then return end
+            
+            if map.type == 'section' then
+                panel_sections[map.section].expanded = true
+                update_panel()
+            elseif map.type == 'task' and map.index then
+                local task = task_queue[map.index]
+                if task then
+                    task.expanded = true
+                    update_panel()
+                end
+            end
+        end
+        
+        local function panel_collapse()
+            if not M._panel_line_map then return end
+            local line = vim.api.nvim_win_get_cursor(panel_win)[1]
+            local map = M._panel_line_map[line]
+            
+            if not map then return end
+            
+            if map.type == 'section' then
+                panel_sections[map.section].expanded = false
+                update_panel()
+            elseif map.type == 'task' and map.index then
+                local task = task_queue[map.index]
+                if task then
+                    task.expanded = false
+                    update_panel()
                 end
             end
         end
 
-        vim.api.nvim_buf_set_keymap(tasks, 'n', '<CR>', '', {
-            noremap = true,
-            silent = true,
-            callback = toggle_task
+        -- Enter/Tab: toggle
+        vim.api.nvim_buf_set_keymap(panel, 'n', '<CR>', '', {
+            noremap = true, silent = true, callback = panel_toggle
         })
-        vim.api.nvim_buf_set_keymap(tasks, 'n', '<Tab>', '', {
-            noremap = true,
-            silent = true,
-            callback = toggle_task
+        vim.api.nvim_buf_set_keymap(panel, 'n', '<Tab>', '', {
+            noremap = true, silent = true, callback = panel_toggle
         })
-
-        vim.api.nvim_buf_set_keymap(tasks, 'n', 'dd', '', {
+        
+        -- Vim fold keybinds: zo (open), zc (close), za (toggle)
+        vim.api.nvim_buf_set_keymap(panel, 'n', 'zo', '', {
+            noremap = true, silent = true, callback = panel_expand
+        })
+        vim.api.nvim_buf_set_keymap(panel, 'n', 'zc', '', {
+            noremap = true, silent = true, callback = panel_collapse
+        })
+        vim.api.nvim_buf_set_keymap(panel, 'n', 'za', '', {
+            noremap = true, silent = true, callback = panel_toggle
+        })
+        
+        -- Delete task with dd
+        vim.api.nvim_buf_set_keymap(panel, 'n', 'dd', '', {
             noremap = true,
             silent = true,
             callback = function()
-                local line = vim.api.nvim_win_get_cursor(tasks_win)[1]
-                if M._task_line_map then
-                    local map = M._task_line_map[line]
-                    if map and map.index then
+                local line = vim.api.nvim_win_get_cursor(panel_win)[1]
+                if M._panel_line_map then
+                    local map = M._panel_line_map[line]
+                    if map and map.type == 'task' and map.index then
                         remove_from_queue(map.index)
                         vim.notify(string.format('Removed task #%d', map.index), vim.log.levels.INFO)
                     end
@@ -3711,19 +3891,29 @@ function M.open(initial_message)
             end,
         })
         
-        vim.api.nvim_buf_set_keymap(tasks, 'n', 'i', '', {
+        -- i: switch to input
+        vim.api.nvim_buf_set_keymap(panel, 'n', 'i', '', {
             noremap = true,
             silent = true,
             callback = function()
-                -- Switch focus to input window
                 focused_window = 'input'
                 vim.api.nvim_set_current_win(input_win)
                 vim.cmd('startinsert')
             end,
         })
         
-        -- Initialize tasks display
-        update_tasks_window()
+        -- q: close panel focus, go back to input
+        vim.api.nvim_buf_set_keymap(panel, 'n', 'q', '', {
+            noremap = true,
+            silent = true,
+            callback = function()
+                focused_window = 'input'
+                vim.api.nvim_set_current_win(input_win)
+            end,
+        })
+        
+        -- Initialize panel display
+        update_panel()
 
         -- Create input window with mode-specific title (mode badge is HERE, not in chat window)
         local mode_icons = { plan = '◇', build = '◆', review = '◈' }
