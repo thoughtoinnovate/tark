@@ -29,9 +29,26 @@ M.config = {
     },
 }
 
--- Get the global port file path
+-- Get the global port file path (must match Rust server's path)
+-- Uses XDG_DATA_HOME or platform-specific data directory
 local function get_port_file_path()
-    local data_dir = vim.fn.stdpath('data')
+    local data_dir
+    
+    -- Check XDG_DATA_HOME first (Linux)
+    local xdg_data = os.getenv('XDG_DATA_HOME')
+    if xdg_data and xdg_data ~= '' then
+        data_dir = xdg_data
+    elseif vim.fn.has('mac') == 1 then
+        -- macOS: ~/Library/Application Support
+        data_dir = vim.fn.expand('~/Library/Application Support')
+    elseif vim.fn.has('win32') == 1 then
+        -- Windows: %APPDATA%
+        data_dir = os.getenv('APPDATA') or vim.fn.expand('~')
+    else
+        -- Linux fallback: ~/.local/share
+        data_dir = vim.fn.expand('~/.local/share')
+    end
+    
     return data_dir .. '/tark/server.port'
 end
 
