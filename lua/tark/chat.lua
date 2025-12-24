@@ -1876,8 +1876,49 @@ send_message_internal = function(message, completion_callback)
                         -- Final scroll to ensure we see the end
                         scroll_to_bottom()
                     elseif ok and resp and resp.error then
-                        append_message('system', '❌ *Error: ' .. resp.error .. '*')
-                        scroll_to_bottom()
+                        -- Check for corrupted tool message history error
+                        if resp.error:match("messages with role 'tool'") or 
+                           resp.error:match("tool_calls") then
+                            append_message('system', '🔄 *Session history corrupted. Auto-clearing and retrying...*')
+                            scroll_to_bottom()
+                            
+                            -- Clear history and retry the message
+                            vim.defer_fn(function()
+                                local retry_body = vim.fn.json_encode({
+                                    message = message,
+                                    provider = current_provider,
+                                    cwd = get_server_cwd(),
+                                    clear_history = true,
+                                    lsp_proxy_port = lsp_proxy_port,
+                                })
+                                vim.fn.jobstart({
+                                    'curl', '-s', '-X', 'POST',
+                                    '-H', 'Content-Type: application/json',
+                                    '-d', retry_body,
+                                    get_server_url() .. '/chat',
+                                }, {
+                                    stdout_buffered = true,
+                                    on_stdout = function(_, retry_data)
+                                        vim.schedule(function()
+                                            if retry_data and retry_data[1] then
+                                                local retry_ok, retry_resp = pcall(vim.fn.json_decode, table.concat(retry_data, ''))
+                                                if retry_ok and retry_resp and retry_resp.response then
+                                                    append_message('system', '✅ *Session cleared. Continuing...*')
+                                                    append_message('assistant', retry_resp.response)
+                                                    update_chat_header()
+                                                elseif retry_ok and retry_resp and retry_resp.error then
+                                                    append_message('system', '❌ *Error after retry: ' .. retry_resp.error .. '*')
+                                                end
+                                            end
+                                            scroll_to_bottom()
+                                        end)
+                                    end,
+                                })
+                            end, 100)
+                        else
+                            append_message('system', '❌ *Error: ' .. resp.error .. '*')
+                            scroll_to_bottom()
+                        end
                     else
                         append_message('system', '❌ *Failed to parse response*')
                         scroll_to_bottom()
