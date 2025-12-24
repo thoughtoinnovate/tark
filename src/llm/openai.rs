@@ -1059,4 +1059,236 @@ mod tests {
         assert_eq!(result[0].role, "system");
         assert_eq!(result[1].role, "user");
     }
+
+    #[test]
+    fn test_validate_tool_sequence_long_conversation_with_incomplete_tool_calls() {
+        // Simulates a long conversation (like the user's case with 68+ messages)
+        // where one assistant message has tool_calls without responses
+        let mut messages = vec![
+            OpenAiMessage {
+                role: "system".to_string(),
+                content: Some("You are a helpful assistant.".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        // Add many complete tool call rounds
+        for i in 0..30 {
+            // User message
+            messages.push(OpenAiMessage {
+                role: "user".to_string(),
+                content: Some(format!("Question {}", i)),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+
+            // Assistant with tool_calls
+            messages.push(OpenAiMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![OpenAiToolCall {
+                    id: format!("call_complete_{}", i),
+                    call_type: "function".to_string(),
+                    function: OpenAiFunctionCall {
+                        name: "grep".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+            });
+
+            // Matching tool result
+            messages.push(OpenAiMessage {
+                role: "tool".to_string(),
+                content: Some(format!("Result {}", i)),
+                tool_calls: None,
+                tool_call_id: Some(format!("call_complete_{}", i)),
+            });
+
+            // Assistant response
+            messages.push(OpenAiMessage {
+                role: "assistant".to_string(),
+                content: Some(format!("Here's the result for question {}", i)),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+
+        // Add one INCOMPLETE tool call at the end (simulating interrupted execution)
+        messages.push(OpenAiMessage {
+            role: "user".to_string(),
+            content: Some("Final question".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        messages.push(OpenAiMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![OpenAiToolCall {
+                id: "call_incomplete_final".to_string(),
+                call_type: "function".to_string(),
+                function: OpenAiFunctionCall {
+                    name: "grep".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        });
+        // Note: NO tool result for call_incomplete_final
+
+        let original_len = messages.len();
+        let result = OpenAiProvider::validate_tool_sequence(&messages);
+
+        // Should have filtered out the incomplete assistant message
+        assert_eq!(
+            result.len(),
+            original_len - 1,
+            "Should remove exactly 1 message (the incomplete assistant)"
+        );
+
+        // Verify no assistant messages with unmatched tool_calls remain
+        for msg in &result {
+            if msg.role == "assistant" {
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    // All assistant messages with tool_calls should have matching responses
+                    for tc in tool_calls {
+                        assert!(
+                            tc.id.starts_with("call_complete_"),
+                            "Found incomplete tool_call {} in result",
+                            tc.id
+                        );
+                    }
+                }
+            }
+        }
+
+        // Verify no orphaned tool messages
+        for msg in &result {
+            if msg.role == "tool" {
+                if let Some(ref id) = msg.tool_call_id {
+                    assert!(
+                        id.starts_with("call_complete_"),
+                        "Found orphaned tool message {} in result",
+                        id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_tool_sequence_multiple_incomplete_throughout() {
+        // Test with incomplete tool calls scattered throughout the conversation
+        let messages = vec![
+            OpenAiMessage {
+                role: "system".to_string(),
+                content: Some("System prompt".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            // First incomplete tool call
+            OpenAiMessage {
+                role: "user".to_string(),
+                content: Some("Q1".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            OpenAiMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![OpenAiToolCall {
+                    id: "call_incomplete_1".to_string(),
+                    call_type: "function".to_string(),
+                    function: OpenAiFunctionCall {
+                        name: "grep".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+            },
+            // No tool result for call_incomplete_1
+            // Complete tool call in the middle
+            OpenAiMessage {
+                role: "user".to_string(),
+                content: Some("Q2".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            OpenAiMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![OpenAiToolCall {
+                    id: "call_complete".to_string(),
+                    call_type: "function".to_string(),
+                    function: OpenAiFunctionCall {
+                        name: "grep".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+            },
+            OpenAiMessage {
+                role: "tool".to_string(),
+                content: Some("Result".to_string()),
+                tool_calls: None,
+                tool_call_id: Some("call_complete".to_string()),
+            },
+            OpenAiMessage {
+                role: "assistant".to_string(),
+                content: Some("Done".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            // Second incomplete tool call
+            OpenAiMessage {
+                role: "user".to_string(),
+                content: Some("Q3".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            OpenAiMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![OpenAiToolCall {
+                    id: "call_incomplete_2".to_string(),
+                    call_type: "function".to_string(),
+                    function: OpenAiFunctionCall {
+                        name: "grep".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+            },
+            // No tool result for call_incomplete_2
+        ];
+
+        let result = OpenAiProvider::validate_tool_sequence(&messages);
+
+        // Count remaining assistant messages with tool_calls
+        let assistant_with_tools: Vec<_> = result
+            .iter()
+            .filter(|m| m.role == "assistant" && m.tool_calls.is_some())
+            .collect();
+
+        // Only the complete one should remain
+        assert_eq!(
+            assistant_with_tools.len(),
+            1,
+            "Only 1 complete assistant with tool_calls should remain"
+        );
+        assert_eq!(
+            assistant_with_tools[0].tool_calls.as_ref().unwrap()[0].id,
+            "call_complete"
+        );
+
+        // Only the matching tool result should remain
+        let tool_results: Vec<_> = result.iter().filter(|m| m.role == "tool").collect();
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(
+            tool_results[0].tool_call_id.as_ref().unwrap(),
+            "call_complete"
+        );
+    }
 }
