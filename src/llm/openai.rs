@@ -52,51 +52,90 @@ impl OpenAiProvider {
     /// 1. Every assistant message with tool_calls must be followed by tool messages
     /// 2. Every tool message must be preceded by an assistant message with matching tool_call_id
     fn sanitize_messages(&self, messages: &[Message]) -> Vec<Message> {
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet};
 
-        // First pass: collect all valid tool_call_ids from assistant messages
-        let mut valid_tool_call_ids: HashSet<String> = HashSet::new();
-        for msg in messages {
+        // First pass: find all assistant messages with tool_calls and map their positions
+        // Also find which tool_call_ids have corresponding tool responses
+        let mut tool_call_positions: HashMap<String, usize> = HashMap::new();
+        let mut tool_response_ids: HashSet<String> = HashSet::new();
+
+        for (idx, msg) in messages.iter().enumerate() {
             if msg.role == Role::Assistant {
                 if let MessageContent::Parts(parts) = &msg.content {
                     for part in parts {
                         if let ContentPart::ToolUse { id, .. } = part {
-                            valid_tool_call_ids.insert(id.clone());
+                            tool_call_positions.insert(id.clone(), idx);
                         }
                     }
+                }
+            } else if msg.role == Role::Tool {
+                if let Some(ref id) = msg.tool_call_id {
+                    tool_response_ids.insert(id.clone());
                 }
             }
         }
 
+        // Determine which tool_call_ids are "complete" (have both call and response)
+        let complete_tool_calls: HashSet<String> = tool_call_positions
+            .keys()
+            .filter(|id| tool_response_ids.contains(*id))
+            .cloned()
+            .collect();
+
+        // Second pass: build result, keeping only valid message sequences
         let mut result: Vec<Message> = Vec::new();
         let mut i = 0;
 
         while i < messages.len() {
             let msg = &messages[i];
 
-            // Skip orphaned tool messages (tool responses without matching tool_calls)
+            // Handle tool messages - only keep if they have a matching COMPLETE tool call
             if msg.role == Role::Tool {
                 if let Some(ref tool_call_id) = msg.tool_call_id {
-                    if !valid_tool_call_ids.contains(tool_call_id) {
+                    if complete_tool_calls.contains(tool_call_id) {
+                        // Check that we've already added the assistant message with this tool call
+                        let assistant_idx = tool_call_positions.get(tool_call_id);
+                        let already_added = assistant_idx.is_some_and(|_| {
+                            result.iter().any(|m| {
+                                if m.role == Role::Assistant {
+                                    if let MessageContent::Parts(parts) = &m.content {
+                                        parts.iter().any(|p| {
+                                            matches!(p, ContentPart::ToolUse { id, .. } if id == tool_call_id)
+                                        })
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            })
+                        });
+
+                        if already_added {
+                            result.push(msg.clone());
+                        } else {
+                            tracing::warn!(
+                                "Skipping tool response (assistant message not yet added for id: {})",
+                                tool_call_id
+                            );
+                        }
+                    } else {
                         tracing::warn!(
-                            "Removing orphaned tool response (no matching tool_call for id: {})",
+                            "Removing orphaned tool response (incomplete tool call for id: {})",
                             tool_call_id
                         );
-                        i += 1;
-                        continue;
                     }
                 } else {
-                    // Tool message without tool_call_id - skip it
                     tracing::warn!("Removing tool message without tool_call_id");
-                    i += 1;
-                    continue;
                 }
+                i += 1;
+                continue;
             }
 
-            // Check if this is an assistant message with tool calls
+            // Handle assistant messages with tool calls
             if msg.role == Role::Assistant {
-                let tool_call_ids: Vec<String> = match &msg.content {
-                    MessageContent::Parts(parts) => parts
+                if let MessageContent::Parts(parts) = &msg.content {
+                    let tool_ids: Vec<String> = parts
                         .iter()
                         .filter_map(|p| {
                             if let ContentPart::ToolUse { id, .. } = p {
@@ -105,44 +144,25 @@ impl OpenAiProvider {
                                 None
                             }
                         })
-                        .collect(),
-                    _ => vec![],
-                };
-
-                if !tool_call_ids.is_empty() {
-                    // Look ahead to see if all tool responses exist
-                    let mut found_ids: HashSet<String> = HashSet::new();
-                    let mut j = i + 1;
-                    while j < messages.len() && messages[j].role == Role::Tool {
-                        if let Some(ref id) = messages[j].tool_call_id {
-                            found_ids.insert(id.clone());
-                        }
-                        j += 1;
-                    }
-
-                    // Check if all tool calls have responses
-                    let missing: Vec<&String> = tool_call_ids
-                        .iter()
-                        .filter(|id| !found_ids.contains(*id))
                         .collect();
 
-                    if !missing.is_empty() {
-                        // Skip this assistant message and its tool responses - they're orphaned
-                        tracing::warn!(
-                            "Removing orphaned tool call message (missing responses for: {:?})",
-                            missing
-                        );
-                        // Also remove these tool_call_ids from valid set so tool responses get filtered
-                        for id in &tool_call_ids {
-                            valid_tool_call_ids.remove(id);
+                    if !tool_ids.is_empty() {
+                        // Check if ALL tool calls in this message have responses
+                        let all_complete = tool_ids.iter().all(|id| complete_tool_calls.contains(id));
+
+                        if !all_complete {
+                            tracing::warn!(
+                                "Removing assistant message with incomplete tool calls: {:?}",
+                                tool_ids
+                            );
+                            i += 1;
+                            continue;
                         }
-                        // Skip to after the tool responses
-                        i = j;
-                        continue;
                     }
                 }
             }
 
+            // Keep this message
             result.push(msg.clone());
             i += 1;
         }
