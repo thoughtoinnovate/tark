@@ -171,8 +171,36 @@ impl OpenAiProvider {
     }
 
     fn convert_messages(&self, messages: &[Message]) -> Vec<OpenAiMessage> {
+        // Log input messages for debugging
+        tracing::debug!("convert_messages input: {} messages", messages.len());
+        for (i, msg) in messages.iter().enumerate() {
+            let role = format!("{:?}", msg.role);
+            let has_tool_call_id = msg.tool_call_id.is_some();
+            let content_type = match &msg.content {
+                MessageContent::Text(_) => "Text",
+                MessageContent::Parts(parts) => {
+                    if parts.iter().any(|p| matches!(p, ContentPart::ToolUse { .. })) {
+                        "Parts(ToolUse)"
+                    } else {
+                        "Parts(other)"
+                    }
+                }
+            };
+            tracing::debug!(
+                "  [{}] role={}, content={}, tool_call_id={}",
+                i, role, content_type, has_tool_call_id
+            );
+        }
+
         // First sanitize to remove orphaned tool calls
         let sanitized = self.sanitize_messages(messages);
+        
+        tracing::debug!("After sanitize: {} messages", sanitized.len());
+        for (i, msg) in sanitized.iter().enumerate() {
+            let role = format!("{:?}", msg.role);
+            tracing::debug!("  [{}] role={}", i, role);
+        }
+        
         sanitized
             .iter()
             .map(|msg| {
@@ -256,7 +284,86 @@ impl OpenAiProvider {
             .collect()
     }
 
+    /// Final validation: ensure tool messages follow assistant messages with tool_calls
+    /// This is a safety net in case sanitize_messages misses something
+    fn validate_tool_sequence(messages: &[OpenAiMessage]) -> Vec<OpenAiMessage> {
+        use std::collections::HashSet;
+
+        let mut result: Vec<OpenAiMessage> = Vec::new();
+        let mut pending_tool_call_ids: HashSet<String> = HashSet::new();
+
+        for msg in messages {
+            if msg.role == "tool" {
+                // Tool message - only include if we have a pending tool_call for it
+                if let Some(ref id) = msg.tool_call_id {
+                    if pending_tool_call_ids.contains(id) {
+                        pending_tool_call_ids.remove(id);
+                        result.push(msg.clone());
+                    } else {
+                        tracing::warn!(
+                            "validate_tool_sequence: Filtering orphaned tool message (id: {})",
+                            id
+                        );
+                    }
+                } else {
+                    tracing::warn!("validate_tool_sequence: Filtering tool message without id");
+                }
+            } else if msg.role == "assistant" {
+                // Assistant message - track any tool_calls
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    for tc in tool_calls {
+                        pending_tool_call_ids.insert(tc.id.clone());
+                    }
+                }
+                result.push(msg.clone());
+            } else {
+                // System or user message - just include
+                result.push(msg.clone());
+            }
+        }
+
+        // If there are pending tool_calls without responses, remove those assistant messages
+        if !pending_tool_call_ids.is_empty() {
+            tracing::warn!(
+                "validate_tool_sequence: Removing assistant messages with unresolved tool_calls: {:?}",
+                pending_tool_call_ids
+            );
+            result.retain(|msg| {
+                if msg.role == "assistant" {
+                    if let Some(ref tool_calls) = msg.tool_calls {
+                        // Remove if ANY of its tool_calls are unresolved
+                        !tool_calls.iter().any(|tc| pending_tool_call_ids.contains(&tc.id))
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            });
+        }
+
+        result
+    }
+
     async fn send_request(&self, request: OpenAiRequest) -> Result<OpenAiResponse> {
+        // Final validation: ensure no orphaned tool messages
+        let validated_messages = Self::validate_tool_sequence(&request.messages);
+        let request = OpenAiRequest {
+            messages: validated_messages,
+            ..request
+        };
+
+        // Log request messages for debugging
+        tracing::debug!("Sending {} messages to OpenAI", request.messages.len());
+        for (i, msg) in request.messages.iter().enumerate() {
+            let has_tool_calls = msg.tool_calls.is_some();
+            let has_tool_call_id = msg.tool_call_id.is_some();
+            tracing::debug!(
+                "  [{}] role={}, tool_calls={}, tool_call_id={}",
+                i, msg.role, has_tool_calls, has_tool_call_id
+            );
+        }
+
         let response = self
             .client
             .post(OPENAI_API_URL)
@@ -270,6 +377,14 @@ impl OpenAiProvider {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
+            // Log the messages that caused the error
+            tracing::error!("OpenAI request failed. Messages sent:");
+            for (i, msg) in request.messages.iter().enumerate() {
+                tracing::error!(
+                    "  [{}] role={}, tool_calls={:?}, tool_call_id={:?}",
+                    i, msg.role, msg.tool_calls.is_some(), msg.tool_call_id
+                );
+            }
             anyhow::bail!("OpenAI API error ({}): {}", status, error_text);
         }
 
@@ -587,7 +702,7 @@ struct OpenAiRequest {
     tool_choice: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -598,7 +713,7 @@ struct OpenAiMessage {
     tool_call_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiToolCall {
     id: String,
     #[serde(rename = "type")]
@@ -606,7 +721,7 @@ struct OpenAiToolCall {
     function: OpenAiFunctionCall,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiFunctionCall {
     name: String,
     arguments: String,
@@ -732,5 +847,175 @@ mod tests {
         let response: OpenAiResponse = serde_json::from_str(json).unwrap();
         assert!(response.usage.is_some());
         assert_eq!(response.usage.unwrap().total_tokens, 30);
+    }
+
+    #[test]
+    fn test_validate_tool_sequence_filters_orphaned_tool_messages() {
+        // Simulates a restored session where assistant messages lost their tool_calls
+        let messages = vec![
+            OpenAiMessage {
+                role: "system".to_string(),
+                content: Some("You are a helpful assistant.".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            // Tool message without preceding assistant with tool_calls
+            OpenAiMessage {
+                role: "tool".to_string(),
+                content: Some("tool result".to_string()),
+                tool_calls: None,
+                tool_call_id: Some("call_orphaned".to_string()),
+            },
+            OpenAiMessage {
+                role: "user".to_string(),
+                content: Some("Hello".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        let result = OpenAiProvider::validate_tool_sequence(&messages);
+
+        // Tool message should be filtered out
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, "system");
+        assert_eq!(result[1].role, "user");
+    }
+
+    #[test]
+    fn test_validate_tool_sequence_keeps_valid_tool_calls() {
+        let messages = vec![
+            OpenAiMessage {
+                role: "system".to_string(),
+                content: Some("You are a helpful assistant.".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            OpenAiMessage {
+                role: "user".to_string(),
+                content: Some("Search for files".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            // Assistant with tool_calls
+            OpenAiMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![OpenAiToolCall {
+                    id: "call_123".to_string(),
+                    call_type: "function".to_string(),
+                    function: OpenAiFunctionCall {
+                        name: "grep".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+            },
+            // Matching tool result
+            OpenAiMessage {
+                role: "tool".to_string(),
+                content: Some("Found 5 files".to_string()),
+                tool_calls: None,
+                tool_call_id: Some("call_123".to_string()),
+            },
+        ];
+
+        let result = OpenAiProvider::validate_tool_sequence(&messages);
+
+        // All messages should be kept
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].role, "system");
+        assert_eq!(result[1].role, "user");
+        assert_eq!(result[2].role, "assistant");
+        assert!(result[2].tool_calls.is_some());
+        assert_eq!(result[3].role, "tool");
+    }
+
+    #[test]
+    fn test_sanitize_messages_filters_orphaned_tool_messages_from_restored_session() {
+        // Simulates a restored session where assistant messages have been converted to plain text
+        // but tool messages still have their tool_call_id
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: MessageContent::Text("You are a helpful assistant.".to_string()),
+                tool_call_id: None,
+            },
+            // Plain text assistant message (restored from session, originally had tool_calls)
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Text(
+                    "[Tool: grep with {\"pattern\": \"test\"}] Found 5 files".to_string(),
+                ),
+                tool_call_id: None,
+            },
+            // Tool message with tool_call_id (orphaned because assistant lost ToolUse parts)
+            Message {
+                role: Role::Tool,
+                content: MessageContent::Text("grep result: 5 matches".to_string()),
+                tool_call_id: Some("call_123".to_string()),
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Text("Thanks!".to_string()),
+                tool_call_id: None,
+            },
+        ];
+
+        let provider = OpenAiProvider {
+            client: reqwest::Client::new(),
+            api_key: "test".to_string(),
+            model: "gpt-4".to_string(),
+            max_tokens: 1000,
+        };
+
+        let result = provider.sanitize_messages(&messages);
+
+        // Tool message should be filtered out since there's no matching ToolUse in assistant
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].role, Role::System);
+        assert_eq!(result[1].role, Role::Assistant);
+        assert_eq!(result[2].role, Role::User);
+        // Verify no tool messages
+        assert!(!result.iter().any(|m| m.role == Role::Tool));
+    }
+
+    #[test]
+    fn test_validate_tool_sequence_removes_incomplete_assistant_tool_calls() {
+        let messages = vec![
+            OpenAiMessage {
+                role: "system".to_string(),
+                content: Some("You are a helpful assistant.".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            // Assistant with tool_calls but NO matching tool result
+            OpenAiMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![OpenAiToolCall {
+                    id: "call_unmatched".to_string(),
+                    call_type: "function".to_string(),
+                    function: OpenAiFunctionCall {
+                        name: "grep".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+            },
+            OpenAiMessage {
+                role: "user".to_string(),
+                content: Some("Thanks".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        let result = OpenAiProvider::validate_tool_sequence(&messages);
+
+        // Assistant with unmatched tool_calls should be filtered out
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, "system");
+        assert_eq!(result[1].role, "user");
     }
 }
