@@ -65,7 +65,7 @@ local prompt_history_max = 100  -- Max prompts to remember
 local prompt_current_input = ''  -- Temporary storage for current input when navigating
 
 -- Task queue for non-blocking multi-prompt handling
-local task_queue = {}  -- Array of {id, prompt, status, timestamp}
+local task_queue = {}  -- Array of {id, prompt, status, timestamp, expanded}
 local task_id_counter = 0
 local queue_processing = false  -- Is a task currently being processed?
 local focused_window = 'input'  -- 'input', 'chat', or 'tasks'
@@ -1080,22 +1080,64 @@ local function update_tasks_window()
         return
     end
     
+    -- Update title with count
+    if tasks_win and vim.api.nvim_win_is_valid(tasks_win) then
+        local title_text = #task_queue > 0 and string.format(' Tasks (%d) ', #task_queue) or ' Tasks '
+        pcall(function()
+            local config = vim.api.nvim_win_get_config(tasks_win)
+            if config.relative ~= '' then  -- Only for floating windows
+                config.title = { { title_text, 'FloatTitle' } }
+                vim.api.nvim_win_set_config(tasks_win, config)
+            end
+        end)
+    end
+    
     local lines = {}
     if #task_queue == 0 then
         table.insert(lines, ' No tasks')
-        table.insert(lines, '')
-        table.insert(lines, ' Press i to')
-        table.insert(lines, ' add tasks')
     else
-        table.insert(lines, ' Tasks (' .. #task_queue .. ')')
-        table.insert(lines, '')
+        -- Line mapping for interactions: line_num -> {type='task'|'content', index=idx}
+        M._task_line_map = {}
+        
         for i, task in ipairs(task_queue) do
             local icon = task.status == 'processing' and '⏳' or '⏸'
-            local preview = task.prompt:gsub('\n', ' ')
-            if #preview > 18 then
-                preview = preview:sub(1, 15) .. '...'
+            local expand_icon = task.expanded and '▼' or '▶'
+            
+            -- Header line
+            local header = string.format(' %s %s %d. %s', expand_icon, icon, i, task.prompt:match('^[^\n]+') or 'Task')
+            if #header > 20 then
+                 header = header:sub(1, 17) .. '...'
             end
-            table.insert(lines, string.format(' %s %d. %s', icon, i, preview))
+            table.insert(lines, header)
+            M._task_line_map[#lines] = { type = 'task', index = i }
+            
+            -- Expanded content
+            if task.expanded then
+                local content_lines = vim.split(task.prompt, '\n')
+                for _, line in ipairs(content_lines) do
+                    -- Wrap long lines manually since window is narrow
+                    local wrapped = {}
+                    local max_width = 18 -- 22 width - 4 padding
+                    if #line > max_width then
+                        local remaining = line
+                        while #remaining > max_width do
+                            table.insert(wrapped, remaining:sub(1, max_width))
+                            remaining = remaining:sub(max_width + 1)
+                        end
+                        table.insert(wrapped, remaining)
+                    else
+                        table.insert(wrapped, line)
+                    end
+                    
+                    for _, w_line in ipairs(wrapped) do
+                        table.insert(lines, '    ' .. w_line)
+                        M._task_line_map[#lines] = { type = 'content', index = i }
+                    end
+                end
+                -- Add empty line separator
+                table.insert(lines, '') 
+                M._task_line_map[#lines] = { type = 'separator', index = i }
+            end
         end
     end
     
@@ -1113,6 +1155,7 @@ local function add_to_queue(prompt)
         prompt = prompt,
         status = 'queued',
         timestamp = os.time(),
+        expanded = false,  -- Collapsed by default
     })
     update_tasks_window()
     return task_id_counter
@@ -3570,6 +3613,10 @@ function M.open(initial_message)
                 { ' Tasks ', 'FloatTitle' },
             },
             title_pos = 'center',
+            footer = {
+                { ' i:add d:del <CR>:toggle ', 'Comment' },
+            },
+            footer_pos = 'center',
         })
         
         -- Configure tasks window options
@@ -3582,32 +3629,48 @@ function M.open(initial_message)
         vim.api.nvim_win_set_option(tasks_win, 'winfixheight', true)
         
         -- Set up keymappings for tasks window
+        -- Toggle expansion with Enter or Tab
+        local function toggle_task()
+            if not M._task_line_map then return end
+            local line = vim.api.nvim_win_get_cursor(tasks_win)[1]
+            local map = M._task_line_map[line]
+            
+            if map and map.index then
+                local task = task_queue[map.index]
+                if task then
+                    task.expanded = not task.expanded
+                    update_tasks_window()
+                end
+            end
+        end
+
+        vim.api.nvim_buf_set_keymap(tasks, 'n', '<CR>', '', {
+            noremap = true,
+            silent = true,
+            callback = toggle_task
+        })
+        vim.api.nvim_buf_set_keymap(tasks, 'n', '<Tab>', '', {
+            noremap = true,
+            silent = true,
+            callback = toggle_task
+        })
+
         vim.api.nvim_buf_set_keymap(tasks, 'n', 'dd', '', {
             noremap = true,
             silent = true,
             callback = function()
                 local line = vim.api.nvim_win_get_cursor(tasks_win)[1]
-                -- Line 1 is header, line 2 is empty, tasks start at line 3
-                local task_idx = line - 2
-                if task_idx > 0 and task_idx <= #task_queue then
-                    remove_from_queue(task_idx)
-                    vim.notify(string.format('Removed task #%d', task_idx), vim.log.levels.INFO)
+                if M._task_line_map then
+                    local map = M._task_line_map[line]
+                    if map and map.index then
+                        remove_from_queue(map.index)
+                        vim.notify(string.format('Removed task #%d', map.index), vim.log.levels.INFO)
+                    end
                 end
             end,
         })
         
         vim.api.nvim_buf_set_keymap(tasks, 'n', 'i', '', {
-            noremap = true,
-            silent = true,
-            callback = function()
-                -- Switch focus to input window
-                focused_window = 'input'
-                vim.api.nvim_set_current_win(input_win)
-                vim.cmd('startinsert')
-            end,
-        })
-        
-        vim.api.nvim_buf_set_keymap(tasks, 'n', '<CR>', '', {
             noremap = true,
             silent = true,
             callback = function()
@@ -3651,8 +3714,6 @@ function M.open(initial_message)
             border = M.config.window.border,
             title = {
                 { input_mode_part, input_mode_hl },
-                { ' ' .. model_name_t .. ' ', 'Comment' },
-                { provider_label_t .. ' ', 'FloatBorder' },
             },
             title_pos = 'left',
             footer = {
