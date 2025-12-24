@@ -47,17 +47,51 @@ impl OpenAiProvider {
         self
     }
 
-    /// Sanitize message history to fix orphaned tool calls.
-    /// OpenAI requires that every assistant message with tool_calls must be
-    /// followed by tool messages responding to each tool_call_id.
+    /// Sanitize message history to fix orphaned tool calls and tool responses.
+    /// OpenAI requires that:
+    /// 1. Every assistant message with tool_calls must be followed by tool messages
+    /// 2. Every tool message must be preceded by an assistant message with matching tool_call_id
     fn sanitize_messages(&self, messages: &[Message]) -> Vec<Message> {
         use std::collections::HashSet;
+
+        // First pass: collect all valid tool_call_ids from assistant messages
+        let mut valid_tool_call_ids: HashSet<String> = HashSet::new();
+        for msg in messages {
+            if msg.role == Role::Assistant {
+                if let MessageContent::Parts(parts) = &msg.content {
+                    for part in parts {
+                        if let ContentPart::ToolUse { id, .. } = part {
+                            valid_tool_call_ids.insert(id.clone());
+                        }
+                    }
+                }
+            }
+        }
 
         let mut result: Vec<Message> = Vec::new();
         let mut i = 0;
 
         while i < messages.len() {
             let msg = &messages[i];
+
+            // Skip orphaned tool messages (tool responses without matching tool_calls)
+            if msg.role == Role::Tool {
+                if let Some(ref tool_call_id) = msg.tool_call_id {
+                    if !valid_tool_call_ids.contains(tool_call_id) {
+                        tracing::warn!(
+                            "Removing orphaned tool response (no matching tool_call for id: {})",
+                            tool_call_id
+                        );
+                        i += 1;
+                        continue;
+                    }
+                } else {
+                    // Tool message without tool_call_id - skip it
+                    tracing::warn!("Removing tool message without tool_call_id");
+                    i += 1;
+                    continue;
+                }
+            }
 
             // Check if this is an assistant message with tool calls
             if msg.role == Role::Assistant {
@@ -98,6 +132,10 @@ impl OpenAiProvider {
                             "Removing orphaned tool call message (missing responses for: {:?})",
                             missing
                         );
+                        // Also remove these tool_call_ids from valid set so tool responses get filtered
+                        for id in &tool_call_ids {
+                            valid_tool_call_ids.remove(id);
+                        }
                         // Skip to after the tool responses
                         i = j;
                         continue;
