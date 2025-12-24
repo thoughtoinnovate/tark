@@ -148,7 +148,8 @@ impl OpenAiProvider {
 
                     if !tool_ids.is_empty() {
                         // Check if ALL tool calls in this message have responses
-                        let all_complete = tool_ids.iter().all(|id| complete_tool_calls.contains(id));
+                        let all_complete =
+                            tool_ids.iter().all(|id| complete_tool_calls.contains(id));
 
                         if !all_complete {
                             tracing::warn!(
@@ -179,7 +180,10 @@ impl OpenAiProvider {
             let content_type = match &msg.content {
                 MessageContent::Text(_) => "Text",
                 MessageContent::Parts(parts) => {
-                    if parts.iter().any(|p| matches!(p, ContentPart::ToolUse { .. })) {
+                    if parts
+                        .iter()
+                        .any(|p| matches!(p, ContentPart::ToolUse { .. }))
+                    {
                         "Parts(ToolUse)"
                     } else {
                         "Parts(other)"
@@ -188,19 +192,22 @@ impl OpenAiProvider {
             };
             tracing::debug!(
                 "  [{}] role={}, content={}, tool_call_id={}",
-                i, role, content_type, has_tool_call_id
+                i,
+                role,
+                content_type,
+                has_tool_call_id
             );
         }
 
         // First sanitize to remove orphaned tool calls
         let sanitized = self.sanitize_messages(messages);
-        
+
         tracing::debug!("After sanitize: {} messages", sanitized.len());
         for (i, msg) in sanitized.iter().enumerate() {
             let role = format!("{:?}", msg.role);
             tracing::debug!("  [{}] role={}", i, role);
         }
-        
+
         sanitized
             .iter()
             .map(|msg| {
@@ -401,7 +408,10 @@ impl OpenAiProvider {
             let has_tool_call_id = msg.tool_call_id.is_some();
             tracing::debug!(
                 "  [{}] role={}, tool_calls={}, tool_call_id={}",
-                i, msg.role, has_tool_calls, has_tool_call_id
+                i,
+                msg.role,
+                has_tool_calls,
+                has_tool_call_id
             );
         }
 
@@ -423,7 +433,10 @@ impl OpenAiProvider {
             for (i, msg) in request.messages.iter().enumerate() {
                 tracing::error!(
                     "  [{}] role={}, tool_calls={:?}, tool_call_id={:?}",
-                    i, msg.role, msg.tool_calls.is_some(), msg.tool_call_id
+                    i,
+                    msg.role,
+                    msg.tool_calls.is_some(),
+                    msg.tool_call_id
                 );
             }
             anyhow::bail!("OpenAI API error ({}): {}", status, error_text);
@@ -1064,14 +1077,12 @@ mod tests {
     fn test_validate_tool_sequence_long_conversation_with_incomplete_tool_calls() {
         // Simulates a long conversation (like the user's case with 68+ messages)
         // where one assistant message has tool_calls without responses
-        let mut messages = vec![
-            OpenAiMessage {
-                role: "system".to_string(),
-                content: Some("You are a helpful assistant.".to_string()),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        ];
+        let mut messages = vec![OpenAiMessage {
+            role: "system".to_string(),
+            content: Some("You are a helpful assistant.".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
 
         // Add many complete tool call rounds
         for i in 0..30 {
