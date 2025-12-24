@@ -47,14 +47,17 @@ impl OpenAiProvider {
         self
     }
 
-    /// Sanitize message history to fix orphaned tool calls.
+    /// Sanitize message history to fix orphaned tool calls and tool responses.
     /// OpenAI requires that every assistant message with tool_calls must be
     /// followed by tool messages responding to each tool_call_id.
+    /// It also requires that every tool message must be preceded by an assistant
+    /// message with a matching tool_call_id.
     fn sanitize_messages(&self, messages: &[Message]) -> Vec<Message> {
         use std::collections::HashSet;
 
         let mut result: Vec<Message> = Vec::new();
         let mut i = 0;
+        let mut pending_tool_call_ids: HashSet<String> = HashSet::new();
 
         while i < messages.len() {
             let msg = &messages[i];
@@ -102,11 +105,40 @@ impl OpenAiProvider {
                         i = j;
                         continue;
                     }
-                }
-            }
 
-            result.push(msg.clone());
-            i += 1;
+                    // All tool calls have responses - track them
+                    for id in tool_call_ids {
+                        pending_tool_call_ids.insert(id);
+                    }
+                }
+
+                result.push(msg.clone());
+                i += 1;
+            } else if msg.role == Role::Tool {
+                // Check if this tool response has a matching pending tool call
+                if let Some(ref tool_call_id) = msg.tool_call_id {
+                    if pending_tool_call_ids.contains(tool_call_id) {
+                        // Valid tool response - include it and remove from pending
+                        pending_tool_call_ids.remove(tool_call_id);
+                        result.push(msg.clone());
+                    } else {
+                        // Orphaned tool response - skip it
+                        tracing::warn!(
+                            "Removing orphaned tool response (no matching tool_call for id: {})",
+                            tool_call_id
+                        );
+                    }
+                } else {
+                    // Tool message without tool_call_id - skip it
+                    tracing::warn!("Removing tool message without tool_call_id");
+                }
+                i += 1;
+            } else {
+                // Non-tool message clears pending tool calls
+                pending_tool_call_ids.clear();
+                result.push(msg.clone());
+                i += 1;
+            }
         }
 
         result

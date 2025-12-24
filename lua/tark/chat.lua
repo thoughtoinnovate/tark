@@ -3559,14 +3559,18 @@ function M.open(initial_message)
         -- Build initial chat title (model | context | cost)
         local model_name_t = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
         
+        -- Adjust width to make room for tasks window
+        local tasks_width = 22
+        local chat_width = width - tasks_width
+        
         -- Layout: ... [0%] 0/128K ... [$0.0000]
         local context_part_t = string.format('[0%%] 0/%s', format_number(128000))
         local cost_part_t = '$0.0000 '
         
-        -- INTELLIGENT PADDING: Center center, Right-align right
+        -- INTELLIGENT PADDING: Center center, Right-align right (using chat_width, not full width)
         local center_width_t = display_width(context_part_t)
         local right_width_t = display_width(cost_part_t)
-        local usable_width_t = width - 2  -- Account for border chars
+        local usable_width_t = chat_width - 2  -- Account for border chars
         
         -- Where should center START to be truly centered?
         local center_start_t = math.floor((usable_width_t - center_width_t) / 2)
@@ -3585,10 +3589,6 @@ function M.open(initial_message)
             { string.rep(' ', right_pad_t), 'FloatBorder' },
             { cost_part_t, 'String' },
         }
-        
-        -- Adjust width to make room for tasks window
-        local tasks_width = 22
-        local chat_width = width - tasks_width
         
         chat_win = vim.api.nvim_open_win(buf, false, {
             relative = 'editor',
@@ -3622,7 +3622,7 @@ function M.open(initial_message)
             },
             title_pos = 'center',
             footer = {
-                { ' i:add d:del <CR>:toggle ', 'Comment' },
+                { ' i + d - ↵ ▼ ', 'Comment' },
             },
             footer_pos = 'center',
         })
