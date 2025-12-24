@@ -667,15 +667,27 @@ local function update_input_window_title()
     
     -- Mode-specific highlight (colored background for instant recognition)
     local mode_hl = get_mode_highlight(current_mode, true)
+    local input_mode_part = string.format(' %s %s ', mode_icon, mode_label)
+    
+    -- Model name for right side
+    local model_part_t = string.format(' %s ', model_short)
     
     -- Check if this is a floating window or a split window
     if is_floating_window(input_win) then
         -- Floating window: use title/footer
         local config = vim.api.nvim_win_get_config(input_win)
+        local width = config.width or 80
+        
+        -- Calculate padding to push model name to the right
+        local mode_width = display_width(input_mode_part)
+        local model_width = display_width(model_part_t)
+        local input_padding = width - mode_width - model_width - 2 -- 2 for borders
+        if input_padding < 1 then input_padding = 1 end
+        
         config.title = {
-            { ' ' .. mode_label .. ' ', mode_hl },
-            { ' ' .. model_short .. ' ', 'Comment' },
-            { provider_label .. ' ', 'FloatBorder' },
+            { input_mode_part, mode_hl },
+            { string.rep(' ', input_padding), 'FloatBorder' },
+            { model_part_t, 'Comment' },
         }
         config.title_pos = 'left'
         
@@ -3680,22 +3692,22 @@ function M.open(initial_message)
         -- Initialize tasks display
         update_tasks_window()
 
-        -- Create input window with mode-specific title (mode badge is HERE, not in chat window)
+        -- Create input window with mode-specific title
         local mode_icons = { plan = '◇', build = '◆', review = '◈' }
         local mode_icon = mode_icons[current_mode] or '◆'
         local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
         local input_mode_hl = get_mode_highlight(current_mode, true)
         local input_mode_part = string.format(' %s %s ', mode_icon, mode_label)
         
-        -- Get proper provider display name
-        local provider_display_t = current_provider_id or current_provider
-        for _, p in ipairs(providers_info) do
-            if p.id == current_provider_id then
-                provider_display_t = p.name:match('^(%w+)') or p.id
-                break
-            end
-        end
-        local provider_label_t = provider_display_t:sub(1,1):upper() .. provider_display_t:sub(2)
+        -- Model name for right side of input title
+        local model_name_t = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
+        local model_part_t = string.format(' %s ', model_name_t)
+        
+        -- Calculate padding to push model name to the right
+        local mode_width = display_width(input_mode_part)
+        local model_width = display_width(model_part_t)
+        local input_padding = width - mode_width - model_width - 2 -- 2 for borders
+        if input_padding < 1 then input_padding = 1 end
         
         -- Position input window below chat (sidepane: at bottom; popup: below chat)
         local input_row = M.config.window.style == 'sidepane' and (editor_height - input_height - 2) or (row + height + 2)
@@ -3710,6 +3722,8 @@ function M.open(initial_message)
             border = M.config.window.border,
             title = {
                 { input_mode_part, input_mode_hl },
+                { string.rep(' ', input_padding), 'FloatBorder' },
+                { model_part_t, 'Comment' },
             },
             title_pos = 'left',
             footer = {
