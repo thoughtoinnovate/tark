@@ -344,6 +344,20 @@ end
 
 -- Main setup function
 function M.setup(opts)
+    -- Check for required dependencies
+    local plenary_ok, _ = pcall(require, 'plenary')
+    if not plenary_ok then
+        vim.notify(
+            'tark.nvim requires plenary.nvim\n\n' ..
+            'Install with lazy.nvim:\n' ..
+            '  { "nvim-lua/plenary.nvim" }\n\n' ..
+            'Or add as tark dependency:\n' ..
+            '  dependencies = { "nvim-lua/plenary.nvim" }',
+            vim.log.levels.ERROR
+        )
+        return
+    end
+    
     -- Merge user config with defaults
     M.config = vim.tbl_deep_extend('force', M.config, opts or {})
     
