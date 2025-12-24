@@ -22,13 +22,24 @@ function M.check()
         warn('Neovim 0.9+ recommended, you have: ' .. nvim_version.major .. '.' .. nvim_version.minor)
     end
     
-    -- Check curl (required for HTTP communication)
+    -- Check dependencies
     start('Dependencies')
+    
+    -- Check plenary.nvim (required for HTTP requests)
+    local plenary_ok, _ = pcall(require, 'plenary')
+    if plenary_ok then
+        ok('plenary.nvim is installed')
+    else
+        error_fn('plenary.nvim not found - required for HTTP requests')
+        info('Install: { "nvim-lua/plenary.nvim" }')
+    end
+    
+    -- Check curl (used by plenary.curl)
     local curl_ok = vim.fn.executable('curl') == 1
     if curl_ok then
         ok('curl is available')
     else
-        error_fn('curl not found - required for server communication')
+        warn('curl not found - some features may not work')
     end
     
     -- Check tark module loaded

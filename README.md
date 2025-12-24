@@ -196,6 +196,7 @@ return {
     "thoughtoinnovate/tark",
     lazy = false,
     dependencies = {
+        "nvim-lua/plenary.nvim",                  -- Required: HTTP requests
         { "saghen/blink.cmp", optional = true },  -- Optional: Tab integration
     },
     keys = {
