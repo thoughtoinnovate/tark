@@ -934,11 +934,8 @@ impl ChatAgent {
                                 "Agent interrupted before tool execution: {}",
                                 call.name
                             );
-                            // Add "interrupted" responses for ALL remaining tool calls
-                            for remaining_call in calls.iter().skip(i) {
-                                self.context
-                                    .add_tool_result(&remaining_call.id, "⚠️ Interrupted by user");
-                            }
+                            self.context
+                                .add_tool_result(&call.id, "⚠️ Interrupted by user");
                             return Ok(AgentResponse {
                                 text: format!(
                                     "⚠️ *Operation interrupted before executing {}*",
@@ -1040,11 +1037,8 @@ impl ChatAgent {
                                 "Agent interrupted before tool execution: {}",
                                 call.name
                             );
-                            // Add "interrupted" responses for ALL remaining tool calls
-                            for remaining_call in tool_calls.iter().skip(i) {
-                                self.context
-                                    .add_tool_result(&remaining_call.id, "⚠️ Interrupted by user");
-                            }
+                            self.context
+                                .add_tool_result(&call.id, "⚠️ Interrupted by user");
                             return Ok(AgentResponse {
                                 text: format!(
                                     "⚠️ *Operation interrupted before executing {}*",

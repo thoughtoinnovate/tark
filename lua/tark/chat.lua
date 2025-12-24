@@ -667,27 +667,15 @@ local function update_input_window_title()
     
     -- Mode-specific highlight (colored background for instant recognition)
     local mode_hl = get_mode_highlight(current_mode, true)
-    local input_mode_part = string.format(' %s %s ', mode_icon, mode_label)
-    
-    -- Model name for right side
-    local model_part_t = string.format(' %s ', model_short)
     
     -- Check if this is a floating window or a split window
     if is_floating_window(input_win) then
         -- Floating window: use title/footer
         local config = vim.api.nvim_win_get_config(input_win)
-        local width = config.width or 80
-        
-        -- Calculate padding to push model name to the right
-        local mode_width = display_width(input_mode_part)
-        local model_width = display_width(model_part_t)
-        local input_padding = width - mode_width - model_width - 2 -- 2 for borders
-        if input_padding < 1 then input_padding = 1 end
-        
         config.title = {
-            { input_mode_part, mode_hl },
-            { string.rep(' ', input_padding), 'FloatBorder' },
-            { model_part_t, 'Comment' },
+            { ' ' .. mode_label .. ' ', mode_hl },
+            { ' ' .. model_short .. ' ', 'Comment' },
+            { provider_label .. ' ', 'FloatBorder' },
         }
         config.title_pos = 'left'
         
@@ -748,7 +736,7 @@ local function update_chat_window_title()
         local width = config.width or 80
         
         -- Calculate display widths
-        local left_width = 0 -- Removed model part
+        local left_width = display_width(model_part)
         local center_width = display_width(context_part)
         local right_width = display_width(cost_part)
         
@@ -761,7 +749,7 @@ local function update_chat_window_title()
         local right_start = usable_width - right_width
         
         -- Calculate padding needed
-        local left_pad = center_start
+        local left_pad = center_start - left_width
         local right_pad = right_start - (center_start + center_width)
         
         -- Ensure minimum padding
@@ -772,6 +760,7 @@ local function update_chat_window_title()
         local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
         
         config.title = {
+            { model_part, 'FloatTitle' },  -- Left: Model name
             { string.rep(' ', left_pad), 'FloatBorder' },
             { context_part, context_hl },  -- Center: Context usage (truly centered)
             { string.rep(' ', right_pad), 'FloatBorder' },
@@ -785,8 +774,8 @@ local function update_chat_window_title()
         -- Color the context based on usage
         local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
         vim.api.nvim_win_set_option(chat_win, 'statusline',
-            string.format('%%#%s#%s%%#Normal# %%#String#%s%%#Normal#',
-                context_hl, context_part, cost_part))
+            string.format('%%#FloatTitle#%s%%#Normal# %%#%s#%s%%#Normal# %%#String#%s%%#Normal#',
+                model_part, context_hl, context_part, cost_part))
     end
     
     -- Also update input title
@@ -3559,18 +3548,16 @@ function M.open(initial_message)
         -- Build initial chat title (model | context | cost)
         local model_name_t = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
         
-        -- Adjust width to make room for tasks window
-        local tasks_width = 22
-        local chat_width = width - tasks_width
-        
-        -- Layout: ... [0%] 0/128K ... [$0.0000]
+        -- Layout: [Model] ... [0%] 0/128K ... [$0.0000]
+        local model_part_t = string.format(' %s ', model_name_t)
         local context_part_t = string.format('[0%%] 0/%s', format_number(128000))
         local cost_part_t = '$0.0000 '
         
-        -- INTELLIGENT PADDING: Center center, Right-align right (using chat_width, not full width)
+        -- INTELLIGENT PADDING: Left-align left, Center center, Right-align right
+        local left_width_t = display_width(model_part_t)
         local center_width_t = display_width(context_part_t)
         local right_width_t = display_width(cost_part_t)
-        local usable_width_t = chat_width - 2  -- Account for border chars
+        local usable_width_t = width - 2  -- Account for border chars
         
         -- Where should center START to be truly centered?
         local center_start_t = math.floor((usable_width_t - center_width_t) / 2)
@@ -3578,17 +3565,22 @@ function M.open(initial_message)
         local right_start_t = usable_width_t - right_width_t
         
         -- Calculate padding needed
-        local left_pad_t = center_start_t
+        local left_pad_t = center_start_t - left_width_t
         local right_pad_t = right_start_t - (center_start_t + center_width_t)
         if left_pad_t < 1 then left_pad_t = 1 end
         if right_pad_t < 1 then right_pad_t = 1 end
         
         local title_config = {
+            { model_part_t, 'FloatTitle' },
             { string.rep(' ', left_pad_t), 'FloatBorder' },
             { context_part_t, 'Comment' },
             { string.rep(' ', right_pad_t), 'FloatBorder' },
             { cost_part_t, 'String' },
         }
+        
+        -- Adjust width to make room for tasks window
+        local tasks_width = 22
+        local chat_width = width - tasks_width
         
         chat_win = vim.api.nvim_open_win(buf, false, {
             relative = 'editor',
@@ -3622,7 +3614,7 @@ function M.open(initial_message)
             },
             title_pos = 'center',
             footer = {
-                { ' i + d - ↵ ▼ ', 'Comment' },
+                { ' i:add d:del <CR>:toggle ', 'Comment' },
             },
             footer_pos = 'center',
         })
@@ -3692,22 +3684,22 @@ function M.open(initial_message)
         -- Initialize tasks display
         update_tasks_window()
 
-        -- Create input window with mode-specific title
+        -- Create input window with mode-specific title (mode badge is HERE, not in chat window)
         local mode_icons = { plan = '◇', build = '◆', review = '◈' }
         local mode_icon = mode_icons[current_mode] or '◆'
         local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
         local input_mode_hl = get_mode_highlight(current_mode, true)
         local input_mode_part = string.format(' %s %s ', mode_icon, mode_label)
         
-        -- Model name for right side of input title
-        local model_name_t = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
-        local model_part_t = string.format(' %s ', model_name_t)
-        
-        -- Calculate padding to push model name to the right
-        local mode_width = display_width(input_mode_part)
-        local model_width = display_width(model_part_t)
-        local input_padding = width - mode_width - model_width - 2 -- 2 for borders
-        if input_padding < 1 then input_padding = 1 end
+        -- Get proper provider display name
+        local provider_display_t = current_provider_id or current_provider
+        for _, p in ipairs(providers_info) do
+            if p.id == current_provider_id then
+                provider_display_t = p.name:match('^(%w+)') or p.id
+                break
+            end
+        end
+        local provider_label_t = provider_display_t:sub(1,1):upper() .. provider_display_t:sub(2)
         
         -- Position input window below chat (sidepane: at bottom; popup: below chat)
         local input_row = M.config.window.style == 'sidepane' and (editor_height - input_height - 2) or (row + height + 2)
@@ -3722,8 +3714,6 @@ function M.open(initial_message)
             border = M.config.window.border,
             title = {
                 { input_mode_part, input_mode_hl },
-                { string.rep(' ', input_padding), 'FloatBorder' },
-                { model_part_t, 'Comment' },
             },
             title_pos = 'left',
             footer = {
