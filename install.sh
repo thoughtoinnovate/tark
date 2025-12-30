@@ -41,33 +41,9 @@ security() {
     echo -e "${CYAN}[SECURITY]${NC} $1"
 }
 
-# Detect libc type (glibc vs musl)
-detect_libc() {
-    # Check if we're on musl
-    if ldd --version 2>&1 | grep -qi musl; then
-        echo "musl"
-        return
-    fi
-    
-    # Check for Alpine Linux
-    if [ -f /etc/alpine-release ]; then
-        echo "musl"
-        return
-    fi
-    
-    # Check if libc.so is musl
-    if [ -f /lib/ld-musl-x86_64.so.1 ] || [ -f /lib/ld-musl-aarch64.so.1 ]; then
-        echo "musl"
-        return
-    fi
-    
-    # Default to glibc
-    echo "gnu"
-}
-
 # Detect OS and architecture
 detect_platform() {
-    local os arch libc_type=""
+    local os arch
 
     case "$(uname -s)" in
         Linux*)   os="linux" ;;
@@ -85,12 +61,8 @@ detect_platform() {
         *)             error "Unsupported architecture: $(uname -m)" ;;
     esac
 
-    # For Linux, detect libc type
-    if [ "$os" = "linux" ]; then
-        libc_type="-$(detect_libc)"
-    fi
-
-    echo "${os}-${arch}${libc_type}"
+    # Note: Release binaries are statically linked (musl) so no libc suffix needed
+    echo "${os}-${arch}"
 }
 
 # Get the download URL for the latest release
@@ -109,29 +81,16 @@ get_download_url() {
         download_url=$(curl -sL "$release_url" | grep "browser_download_url.*${asset_name}\"" | head -1 | cut -d '"' -f 4)
         
         if [ -z "$download_url" ]; then
-            # Try falling back to musl for Linux if gnu not found
-            if [[ "$platform" == *"-gnu" ]]; then
-                local musl_platform="${platform/-gnu/-musl}"
-                asset_name="tark-${musl_platform}"
-                download_url=$(curl -sL "$release_url" | grep "browser_download_url.*${asset_name}\"" | head -1 | cut -d '"' -f 4)
-                if [ -n "$download_url" ]; then
-                    warn "Using musl binary (statically linked) - works on any Linux"
-                fi
-            fi
-        fi
-        
-        if [ -z "$download_url" ]; then
             error "Could not find binary for platform: ${platform}
 
 Available platforms:
-  - linux-x86_64-gnu    (Ubuntu, Debian, Fedora, etc.)
-  - linux-x86_64-musl   (Alpine, Arch, any Linux)
-  - linux-arm64-gnu     (ARM64 with glibc)
-  - linux-arm64-musl    (ARM64, any Linux)
-  - darwin-x86_64       (macOS Intel)
-  - darwin-arm64        (macOS Apple Silicon)
-  - freebsd-x86_64      (FreeBSD)
-  - windows-x86_64      (Windows)
+  - linux-x86_64       (Any Linux x64)
+  - linux-arm64        (Any Linux ARM64)
+  - darwin-x86_64      (macOS Intel)
+  - darwin-arm64       (macOS Apple Silicon)
+  - freebsd-x86_64     (FreeBSD)
+  - windows-x86_64     (Windows x64)
+  - windows-arm64      (Windows ARM64)
 
 Check releases: https://github.com/${REPO}/releases"
         fi
