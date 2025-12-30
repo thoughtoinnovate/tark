@@ -19,6 +19,12 @@ M.config = {
         max_width = 100,
         border = 'rounded',
     },
+    -- Session management options
+    session = {
+        auto_restore = true,    -- Auto-load previous session on chat open
+        max_sessions = 50,      -- Max sessions per workspace
+        save_on_close = true,   -- Save session when chat closes
+    },
     -- Keybinds for chat buffer (set to false to disable)
     keymaps = {
         open_file = 'gf',           -- Open file under cursor (Vim standard)
@@ -64,6 +70,9 @@ local tasks_buf = nil  -- Alias for backwards compatibility
 local tasks_win = nil  -- Alias for backwards compatibility
 local current_provider = 'ollama'      -- Backend protocol for API calls
 local current_provider_id = 'ollama'   -- Actual provider identity for display
+
+-- Current session name for display in title
+local current_session_name = nil
 
 -- Prompt history for navigation (like shell history)
 local prompt_history = {}
@@ -746,6 +755,22 @@ local function update_input_window_title()
     end
 end
 
+-- Truncate session name with ellipsis (max 20 chars)
+-- Exported for testing
+local function truncate_session_name(name, max_len)
+    max_len = max_len or 20
+    if not name or name == '' then
+        return nil
+    end
+    if #name <= max_len then
+        return name
+    end
+    return name:sub(1, max_len - 3) .. '...'
+end
+
+-- Export for testing
+M._truncate_session_name = truncate_session_name
+
 -- Update chat window title with current stats (model removed - shown in prompt)
 local function update_chat_window_title()
     if not chat_win or not vim.api.nvim_win_is_valid(chat_win) then
@@ -764,8 +789,12 @@ local function update_chat_window_title()
     
     local percent = context_max > 0 and math.floor((used / context_max) * 100) or 0
     
+    -- Session name (truncated to max 20 chars)
+    local session_display = truncate_session_name(current_session_name, 20)
+    local session_part = session_display and string.format(' 📝 %s ', session_display) or ''
+    
     -- Left: Context usage (simple format: [1%] 1K/128K)
-    local context_part = string.format(' [%d%%] %s/%s ', percent, format_number(used), format_number(context_max))
+    local context_part = string.format('[%d%%] %s/%s ', percent, format_number(used), format_number(context_max))
     
     -- Right: Cost
     local cost_part = string.format('$%.4f ', session_stats.total_cost)
@@ -777,31 +806,38 @@ local function update_chat_window_title()
         local width = config.width or 80
         
         -- Calculate display widths
-        local left_width = display_width(context_part)
+        local session_width = display_width(session_part)
+        local context_width = display_width(context_part)
         local right_width = display_width(cost_part)
         
         -- Calculate padding for right alignment
         local usable_width = width - 2  -- Account for border chars
-        local center_pad = usable_width - left_width - right_width
+        local center_pad = usable_width - session_width - context_width - right_width
         if center_pad < 1 then center_pad = 1 end
         
         -- Color the context bar based on usage
         local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
         
-        config.title = {
-            { context_part, context_hl },  -- Left: Context usage
-            { string.rep(' ', center_pad), 'FloatBorder' },
-            { cost_part, 'String' },  -- Right: Cost
-        }
+        -- Build title with session name if available
+        local title_parts = {}
+        if session_part ~= '' then
+            table.insert(title_parts, { session_part, 'FloatTitle' })
+        end
+        table.insert(title_parts, { context_part, context_hl })
+        table.insert(title_parts, { string.rep(' ', center_pad), 'FloatBorder' })
+        table.insert(title_parts, { cost_part, 'String' })
+        
+        config.title = title_parts
         config.title_pos = 'left'
         
         vim.api.nvim_win_set_config(chat_win, config)
     else
         -- Split window: use statusline
         local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
+        local session_status = session_display and string.format('%%#FloatTitle# 📝 %s %%#Normal#', session_display) or ''
         vim.api.nvim_win_set_option(chat_win, 'statusline',
-            string.format('%%#%s#%s%%#Normal# %%#String#%s%%#Normal#',
-                context_hl, context_part, cost_part))
+            string.format('%s%%#%s# %s%%#Normal# %%#String#%s%%#Normal#',
+                session_status, context_hl, context_part, cost_part))
     end
     
     -- Also update input title
@@ -968,6 +1004,10 @@ local function get_command_completions()
         { word = '/layout', menu = 'Toggle split/sidepane/popup', kind = '📐' },
         { word = '/diff', menu = 'Side-by-side diff view', kind = '📊' },
         { word = '/autodiff', menu = 'Toggle auto diff on changes', kind = '📊' },
+        { word = '/new', menu = 'Start a new chat session', kind = '🆕' },
+        { word = '/sessions', menu = 'List and switch sessions', kind = '📂' },
+        { word = '/session', menu = 'List and switch sessions', kind = '📂' },
+        { word = '/delete', menu = 'Delete a chat session', kind = '🗑️' },
     }
 end
 
@@ -2534,185 +2574,229 @@ local current_session_id = nil
 local current_session_name = nil
 
 -- Create a new session
+-- Uses session module to create session via backend API
+-- Clears chat buffer, resets stats, retains provider/mode settings
+-- Requirements: 4.1, 4.2, 4.3, 4.4
 local function create_new_session()
-    local url = get_server_url() .. '/sessions/new'
-    local curl = require('plenary.curl')
+    local session_mod = require('tark.session')
     
     append_message('system', '🆕 *Creating new session...*')
     
-    curl.post(url, {
-        callback = function(response)
-            vim.schedule(function()
-                if response.status == 200 then
-                    local ok, data = pcall(vim.json.decode, response.body)
-                    if ok and data.id then
-                        current_session_id = data.id
-                        current_session_name = data.name or 'New Session'
-                        
-                        -- Clear chat display
-                        local buf = get_chat_buffer()
-                        safe_buf_set_lines(buf, 0, -1, false, {})
-                        reset_stats()
-                        update_chat_header()
-                        update_chat_window_title()
-                        
-                        append_message('system', '✅ *New session created!* Start typing to begin.')
-                    else
-                        append_message('system', '❌ *Failed to create session: Invalid response*')
-                    end
-                else
-                    append_message('system', '❌ *Failed to create session: ' .. (response.body or 'Unknown error') .. '*')
-                end
-            end)
-        end,
-    })
+    session_mod.create_session(function(new_session, err)
+        if err then
+            append_message('system', '❌ *Failed to create session: ' .. err .. '*')
+            -- Use centralized error notification (Requirements: 8.4)
+            session_mod.notify_error(err, 'create', nil)
+            return
+        end
+        
+        if new_session then
+            current_session_id = new_session.id
+            current_session_name = new_session.name or 'New Session'
+            
+            -- Clear chat display
+            local buf = get_chat_buffer()
+            safe_buf_set_lines(buf, 0, -1, false, {})
+            
+            -- Reset session stats (Requirements 4.3)
+            reset_stats()
+            
+            -- Provider and mode settings are retained (Requirements 4.4)
+            -- current_provider, current_provider_id, current_mode remain unchanged
+            
+            update_chat_header()
+            update_chat_window_title()
+            
+            append_message('system', '✅ *New session created!* Start typing to begin.')
+            -- Use centralized success notification (Requirements: 4.1)
+            session_mod.notify_success('created', nil)
+        else
+            append_message('system', '❌ *Failed to create session: Invalid response*')
+            session_mod.notify_error('Invalid response from server', 'create', nil)
+        end
+    end)
 end
 
 -- Switch to a specific session
+-- Uses session module to switch session via backend API
+-- Restores messages, stats, and settings from the session
+-- Requirements: 3.3, 3.4
 local function switch_to_session(session_id)
-    local url = get_server_url() .. '/sessions/switch'
-    local curl = require('plenary.curl')
+    local session_mod = require('tark.session')
     
     append_message('system', '🔄 *Switching to session...*')
     
-    local body = vim.json.encode({ session_id = session_id })
-    
-    curl.post(url, {
-        body = body,
-        headers = { ['Content-Type'] = 'application/json' },
-        callback = function(response)
-            vim.schedule(function()
-                if response.status == 200 then
-                    local ok, data = pcall(vim.json.decode, response.body)
-                    if ok and data.id then
-                        current_session_id = data.id
-                        current_session_name = data.name or 'Session'
-                        
-                        -- Update provider/model from session
-                        if data.provider then
-                            current_provider = data.provider
-                            current_provider_id = data.provider
-                        end
-                        if data.model then
-                            current_model = data.model
-                        end
-                        if data.mode then
-                            current_mode = data.mode
-                        end
-                        
-                        -- Clear and restore chat display
-                        local buf = get_chat_buffer()
-                        safe_buf_set_lines(buf, 0, -1, false, {})
-                        
-                        -- Restore messages from session
-                        if data.messages then
-                            for _, msg in ipairs(data.messages) do
-                                if msg.role == 'user' then
-                                    append_message('user', msg.content)
-                                elseif msg.role == 'assistant' then
-                                    append_message('assistant', msg.content)
-                                end
-                            end
-                        end
-                        
-                        -- Update stats
-                        if data.input_tokens then session_input_tokens = data.input_tokens end
-                        if data.output_tokens then session_output_tokens = data.output_tokens end
-                        if data.total_cost then session_cost = data.total_cost end
-                        
-                        update_chat_header()
-                        update_chat_window_title()
-                        
-                        local msg_count = data.messages and #data.messages or 0
-                        append_message('system', string.format('✅ *Switched to session: %s* (%d messages)', data.name or session_id, msg_count))
-                    else
-                        append_message('system', '❌ *Failed to switch session: Invalid response*')
+    session_mod.switch_session(session_id, function(data, err)
+        if err then
+            local session_name = session_id
+            if err:match('404') or err:match('not found') then
+                append_message('system', '❌ *Session not found: ' .. session_id .. '*')
+                -- Use centralized error notification for session not found (Requirements: 8.4)
+                session_mod.notify_error(err, 'switch', session_name)
+            else
+                append_message('system', '❌ *Failed to switch session: ' .. err .. '*')
+                -- Use centralized error notification (Requirements: 8.4)
+                session_mod.notify_error(err, 'switch', session_name)
+            end
+            return
+        end
+        
+        if data and data.id then
+            current_session_id = data.id
+            current_session_name = data.name or 'Session'
+            
+            -- Update provider/model from session
+            if data.provider then
+                current_provider = data.provider
+                current_provider_id = data.provider
+            end
+            if data.model then
+                current_model = data.model
+            end
+            if data.mode then
+                current_mode = data.mode
+            end
+            
+            -- Clear and restore chat display
+            local buf = get_chat_buffer()
+            safe_buf_set_lines(buf, 0, -1, false, {})
+            
+            -- Restore messages from session
+            if data.messages then
+                for _, msg in ipairs(data.messages) do
+                    if msg.role == 'user' then
+                        append_message('user', msg.content)
+                    elseif msg.role == 'assistant' then
+                        append_message('assistant', msg.content)
                     end
-                elseif response.status == 404 then
-                    append_message('system', '❌ *Session not found: ' .. session_id .. '*')
-                else
-                    append_message('system', '❌ *Failed to switch session: ' .. (response.body or 'Unknown error') .. '*')
                 end
-            end)
-        end,
-    })
+            end
+            
+            -- Update stats from session
+            if data.input_tokens then
+                session_stats.input_tokens = data.input_tokens
+            end
+            if data.output_tokens then
+                session_stats.output_tokens = data.output_tokens
+            end
+            if data.total_cost then
+                session_stats.total_cost = data.total_cost
+            end
+            
+            update_chat_header()
+            update_chat_window_title()
+            
+            local msg_count = data.messages and #data.messages or 0
+            append_message('system', string.format('✅ *Switched to session: %s* (%d messages)', data.name or session_id, msg_count))
+            -- Use centralized success notification (Requirements: 3.3)
+            session_mod.notify_success('switched', data.name or session_id)
+        else
+            append_message('system', '❌ *Failed to switch session: Invalid response*')
+            session_mod.notify_error('Invalid response from server', 'switch', session_id)
+        end
+    end)
 end
 
 -- Show session picker
+-- Uses session module's show_picker() in switch mode
+-- Requirements: 3.1, 3.3
 local function show_session_picker()
-    local url = get_server_url() .. '/sessions'
-    local curl = require('plenary.curl')
+    local session_mod = require('tark.session')
     
-    curl.get(url, {
-        callback = function(response)
-            vim.schedule(function()
-                if response.status ~= 200 then
-                    append_message('system', '❌ *Failed to load sessions*')
+    -- Use session module's picker in switch mode
+    session_mod.show_picker(function(session_id)
+        if session_id then
+            switch_to_session(session_id)
+        end
+    end, 'switch')
+end
+
+-- Delete session command handler
+-- Shows session picker in delete mode with confirmation
+-- Handles current session deletion (switch to recent) and last session deletion (create new)
+-- Requirements: 5.1, 5.2, 5.3, 5.4
+local function delete_session_command()
+    local session_mod = require('tark.session')
+    
+    -- Use session module's picker in delete mode
+    session_mod.show_picker(function(session_id)
+        if not session_id then
+            return
+        end
+        
+        -- Fetch sessions to check if this is the current session or last session
+        session_mod.fetch_sessions(function(sessions, err)
+            if err then
+                append_message('system', '❌ *Failed to fetch sessions: ' .. err .. '*')
+                -- Use centralized error notification (Requirements: 8.4)
+                session_mod.notify_error(err, 'fetch', nil)
+                return
+            end
+            
+            local is_current = session_mod.current_session and session_mod.current_session.id == session_id
+            local is_last = sessions and #sessions == 1
+            
+            -- Find the session to get its name for confirmation
+            local session_to_delete = nil
+            for _, s in ipairs(sessions or {}) do
+                if s.id == session_id then
+                    session_to_delete = s
+                    break
+                end
+            end
+            
+            local session_name = session_to_delete and session_to_delete.name or session_id
+            
+            -- Show confirmation dialog
+            session_mod.show_delete_confirm(session_to_delete or { id = session_id, name = session_id }, function(confirmed)
+                if not confirmed then
                     return
                 end
                 
-                local ok, sessions = pcall(vim.json.decode, response.body)
-                if not ok or not sessions or #sessions == 0 then
-                    append_message('system', '📂 *No sessions found. Type a message to start a new session, or use `/new` to create one.*')
-                    return
-                end
-                
-                -- Format sessions for display
-                local items = {}
-                for _, session in ipairs(sessions) do
-                    local name = session.name or 'Unnamed'
-                    if name == '' then name = 'Unnamed' end
-                    local msg_count = session.message_count or 0
-                    local mode = session.mode or 'build'
-                    local provider = session.provider or 'ollama'
-                    
-                    -- Determine status indicator
-                    local status_icon = ''
-                    local status_text = ''
-                    if session.is_current and session.agent_running then
-                        status_icon = '🔄 '
-                        status_text = ' - Working'
-                    elseif session.is_current then
-                        status_icon = '⏸️ '
-                        status_text = ' - Current'
-                    else
-                        status_icon = '   '  -- 3 spaces for alignment
-                        status_text = ''
+                -- Perform deletion
+                session_mod.delete_session(session_id, function(success, del_err)
+                    if not success then
+                        append_message('system', '❌ *Failed to delete session: ' .. (del_err or 'Unknown error') .. '*')
+                        -- Use centralized error notification (Requirements: 8.4)
+                        session_mod.notify_error(del_err, 'delete', session_name)
+                        return
                     end
                     
-                    -- Format date
-                    local date_str = ''
-                    if session.updated_at then
-                        -- Parse ISO date and format
-                        local year, month, day, hour, min = session.updated_at:match('(%d+)-(%d+)-(%d+)T(%d+):(%d+)')
-                        if year then
-                            date_str = string.format('%s/%s %s:%s', month, day, hour, min)
+                    append_message('system', '🗑️ *Session deleted*')
+                    -- Use centralized success notification (Requirements: 5.2)
+                    session_mod.notify_success('deleted', session_name)
+                    
+                    -- Handle current session deletion (Requirements 5.3)
+                    if is_current then
+                        if is_last then
+                            -- Last session deleted, create new one (Requirements 5.4)
+                            create_new_session()
+                        else
+                            -- Switch to most recent remaining session
+                            session_mod.fetch_sessions(function(remaining_sessions, fetch_err)
+                                if fetch_err or not remaining_sessions or #remaining_sessions == 0 then
+                                    create_new_session()
+                                    return
+                                end
+                                
+                                -- Sort by updated_at to get most recent
+                                table.sort(remaining_sessions, function(a, b)
+                                    return (a.updated_at or '') > (b.updated_at or '')
+                                end)
+                                
+                                local most_recent = remaining_sessions[1]
+                                if most_recent then
+                                    switch_to_session(most_recent.id)
+                                else
+                                    create_new_session()
+                                end
+                            end)
                         end
-                    end
-                    
-                    local label = string.format('%s%s [%s] (%d msgs, %s) %s%s', 
-                        status_icon, name, provider, msg_count, mode, date_str, status_text)
-                    
-                    table.insert(items, {
-                        label = label,
-                        id = session.id,
-                        name = session.name,
-                    })
-                end
-                
-                -- Use our Vim-friendly picker
-                show_picker(items, {
-                    title = 'Chat Sessions',
-                    prompt = 'Select session to switch to:',
-                    format_item = function(item) return item.label end,
-                }, function(item)
-                    if item then
-                        switch_to_session(item.id)
                     end
                 end)
             end)
-        end,
-    })
+        end)
+    end, 'delete')
 end
 
 -- Save current session (called after each message)
@@ -3219,6 +3303,7 @@ slash_commands = {
                 '`/new` - Start a new chat session',
                 '`/session` - List and switch sessions',
                 '`/session [id]` - Switch to specific session',
+                '`/delete` - Delete a chat session',
                 '',
                 '**Execution Plans:**',
                 '`/plan-status` or `/ps` - Show current plan status',
@@ -3640,6 +3725,13 @@ slash_commands = {
         end,
     },
     ['sessions'] = { alias = 'session' },
+    ['delete'] = {
+        description = 'Delete a chat session',
+        usage = '/delete',
+        handler = function()
+            delete_session_command()
+        end,
+    },
     
     -- Execution Plan commands
     ['plan-status'] = {
@@ -4404,6 +4496,21 @@ function M.open(initial_message)
         scroll_to_bottom()
     end, { buffer = chat_buf, silent = true, desc = 'Toggle plan/build mode' })
 
+    -- Auto-restore previous session if enabled
+    if M.config.session.auto_restore then
+        local ok_session, session_mod = pcall(require, 'tark.session')
+        if ok_session then
+            session_mod.restore_current(M, function(success, err)
+                if not success and err then
+                    -- Log error but allow fresh start
+                    vim.schedule(function()
+                        vim.notify('tark: Session restore failed: ' .. tostring(err), vim.log.levels.DEBUG)
+                    end)
+                end
+            end)
+        end
+    end
+
     -- Handle initial message if provided
     if initial_message and initial_message ~= '' then
         process_input(initial_message)
@@ -4415,6 +4522,15 @@ end
 
 -- Close the chat window
 function M.close()
+    -- Save session on close if enabled
+    if M.config.session.save_on_close then
+        -- Trigger session save on backend (sync call for reliability)
+        local ok, session_mod = pcall(require, 'tark.session')
+        if ok and session_mod.trigger_save then
+            session_mod.trigger_save()
+        end
+    end
+    
     if chat_win and vim.api.nvim_win_is_valid(chat_win) then
         vim.api.nvim_win_close(chat_win, true)
         chat_win = nil
@@ -4605,6 +4721,12 @@ end
 function M.setup(opts)
     M.config = vim.tbl_deep_extend('force', M.config, opts or {})
     
+    -- Setup session module with config
+    local ok_session, session_mod = pcall(require, 'tark.session')
+    if ok_session then
+        session_mod.setup(M.config.session)
+    end
+    
     -- Setup mode-specific highlight groups (distinctive colors)
     -- Plan mode: Blue/Cyan - analytical, read-only
     vim.api.nvim_set_hl(0, 'TarkModePlan', { fg = '#61afef', bold = true })
@@ -4649,6 +4771,18 @@ function M.setup(opts)
                         M.config.window.position = resp.position
                     end
                 end
+            end
+        end,
+    })
+    
+    -- Setup VimLeavePre autocmd to save session on Neovim exit
+    vim.api.nvim_create_autocmd('VimLeavePre', {
+        group = vim.api.nvim_create_augroup('TarkSessionSave', { clear = true }),
+        callback = function()
+            -- Save session on Neovim exit (sync call for reliability)
+            local ok_sess, session_mod = pcall(require, 'tark.session')
+            if ok_sess and session_mod.trigger_save_sync then
+                session_mod.trigger_save_sync()
             end
         end,
     })
@@ -4724,5 +4858,74 @@ end
 M._test_find_file_paths_in_line = find_file_paths_in_line
 M._test_get_file_path_map = function() return file_path_map end
 M._test_clear_file_path_map = function() file_path_map = {} end
+
+-- Session restore helpers (used by session.lua module)
+-- These functions allow the session module to restore messages and stats
+
+--- Append a message to the chat buffer (for session restore)
+---@param role string Message role ('user', 'assistant', 'system')
+---@param content string Message content
+M._session_append_message = function(role, content)
+    append_message(role, content)
+end
+
+--- Restore session statistics
+---@param stats table Stats with input_tokens, output_tokens, total_cost
+M._session_restore_stats = function(stats)
+    if stats then
+        session_stats.input_tokens = stats.input_tokens or 0
+        session_stats.output_tokens = stats.output_tokens or 0
+        session_stats.total_cost = stats.total_cost or 0
+        -- Update the window title with restored stats
+        vim.schedule(function()
+            update_chat_window_title()
+        end)
+    end
+end
+
+--- Update window title with session name
+---@param session_name string|nil Session name to display
+M._session_update_title = function(session_name)
+    -- Store session name for title display (use local variable)
+    current_session_name = session_name
+    vim.schedule(function()
+        update_chat_window_title()
+    end)
+end
+
+--- Get current session stats (for session module)
+---@return table Stats with input_tokens, output_tokens, total_cost
+M._session_get_stats = function()
+    return {
+        input_tokens = session_stats.input_tokens,
+        output_tokens = session_stats.output_tokens,
+        total_cost = session_stats.total_cost,
+    }
+end
+
+--- Get the chat buffer handle (for session module)
+---@return number|nil Buffer handle or nil if not created
+M._session_get_buffer = function()
+    return chat_buf
+end
+
+--- Clear the chat buffer (for new session)
+M._session_clear_buffer = function()
+    if chat_buf and vim.api.nvim_buf_is_valid(chat_buf) then
+        vim.api.nvim_buf_set_option(chat_buf, 'modifiable', true)
+        vim.api.nvim_buf_set_lines(chat_buf, 0, -1, false, { '' })
+        vim.api.nvim_buf_set_option(chat_buf, 'modifiable', false)
+    end
+    -- Reset stats
+    session_stats.input_tokens = 0
+    session_stats.output_tokens = 0
+    session_stats.total_cost = 0
+    -- Clear file path map
+    file_path_map = {}
+    -- Update title
+    vim.schedule(function()
+        update_chat_window_title()
+    end)
+end
 
 return M
