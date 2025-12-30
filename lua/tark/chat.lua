@@ -867,6 +867,10 @@ end
 -- Slash commands registry
 local slash_commands = {}
 
+-- Forward declarations for file path functions (defined later)
+local get_filepath_under_cursor
+local open_file_from_chat
+
 -- Create or get the chat buffer
 local function get_chat_buffer()
     if chat_buf and vim.api.nvim_buf_is_valid(chat_buf) then
@@ -1279,7 +1283,7 @@ end
 
 --- Get the file path under cursor in the chat buffer
 ---@return string|nil filepath The file path if cursor is on one
-local function get_filepath_under_cursor()
+get_filepath_under_cursor = function()
     local cursor = vim.api.nvim_win_get_cursor(0)
     local line_num = cursor[1] - 1  -- Convert to 0-indexed
     local col = cursor[2]
@@ -1298,7 +1302,7 @@ end
 
 --- Open a file path in a new buffer (closes chat first for better UX)
 ---@param filepath string The file path to open
-local function open_file_from_chat(filepath)
+open_file_from_chat = function(filepath)
     if not filepath then return end
     
     local cwd = vim.fn.getcwd()
