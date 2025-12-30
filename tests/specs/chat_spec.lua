@@ -11,6 +11,80 @@ describe('chat - agent mode', function()
         end
     end)
 
+    describe('file path detection', function()
+        it('has file path test helpers', function()
+            assert.is_function(chat._test_find_file_paths_in_line)
+            assert.is_function(chat._test_get_file_path_map)
+            assert.is_function(chat._test_clear_file_path_map)
+        end)
+
+        it('detects file paths in backticks', function()
+            local paths = chat._test_find_file_paths_in_line('Check the file `src/main.rs` for details')
+            assert.equals(1, #paths)
+            assert.equals('src/main.rs', paths[1].filepath)
+        end)
+
+        it('detects multiple file paths', function()
+            local paths = chat._test_find_file_paths_in_line('See `config.toml` and `lua/tark/chat.lua`')
+            assert.equals(2, #paths)
+            assert.equals('config.toml', paths[1].filepath)
+            assert.equals('lua/tark/chat.lua', paths[2].filepath)
+        end)
+
+        it('detects paths with extensions', function()
+            local paths = chat._test_find_file_paths_in_line('Edit `file.yaml` and `test.json`')
+            assert.equals(2, #paths)
+            assert.equals('file.yaml', paths[1].filepath)
+            assert.equals('test.json', paths[2].filepath)
+        end)
+
+        it('detects paths with directories', function()
+            local paths = chat._test_find_file_paths_in_line('Found in `deployment/kubernetes/istio/base/istio-edge-gw.yaml`')
+            assert.equals(1, #paths)
+            assert.equals('deployment/kubernetes/istio/base/istio-edge-gw.yaml', paths[1].filepath)
+        end)
+
+        it('ignores URLs', function()
+            local paths = chat._test_find_file_paths_in_line('Visit `https://example.com/path`')
+            assert.equals(0, #paths)
+        end)
+
+        it('ignores CLI flags', function()
+            local paths = chat._test_find_file_paths_in_line('Use `--verbose` flag')
+            assert.equals(0, #paths)
+        end)
+
+        it('ignores shell variables', function()
+            local paths = chat._test_find_file_paths_in_line('Set `$HOME` variable')
+            assert.equals(0, #paths)
+        end)
+
+        it('returns correct column positions', function()
+            local line = 'Check `src/main.rs` here'
+            local paths = chat._test_find_file_paths_in_line(line)
+            assert.equals(1, #paths)
+            -- col_start should be 0-indexed position of first backtick
+            assert.equals(6, paths[1].col_start)
+            -- col_end should be position after closing backtick
+            assert.equals(19, paths[1].col_end)
+        end)
+
+        it('handles empty lines', function()
+            local paths = chat._test_find_file_paths_in_line('')
+            assert.equals(0, #paths)
+        end)
+
+        it('handles lines without backticks', function()
+            local paths = chat._test_find_file_paths_in_line('No backticks here')
+            assert.equals(0, #paths)
+        end)
+
+        it('handles unclosed backticks', function()
+            local paths = chat._test_find_file_paths_in_line('Unclosed `file.txt')
+            assert.equals(0, #paths)
+        end)
+    end)
+
     describe('window management', function()
         it('opens chat window', function()
             chat.open()

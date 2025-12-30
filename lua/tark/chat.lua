@@ -19,6 +19,11 @@ M.config = {
         max_width = 100,
         border = 'rounded',
     },
+    -- Keybinds for chat buffer (set to false to disable)
+    keymaps = {
+        open_file = 'gf',           -- Open file under cursor (Vim standard)
+        open_file_enter = '<CR>',   -- Also open file with Enter
+    },
 }
 
 -- Get the server URL dynamically (resolves port from global port file)
@@ -875,6 +880,37 @@ local function get_chat_buffer()
             M.maximize()
         end
     })
+    
+    -- Open file under cursor with gf (like Vim's built-in gf)
+    if M.config.keymaps and M.config.keymaps.open_file then
+        vim.api.nvim_buf_set_keymap(chat_buf, 'n', M.config.keymaps.open_file, '', {
+            noremap = true, silent = true,
+            desc = 'Open file under cursor',
+            callback = function()
+                local filepath = get_filepath_under_cursor()
+                if filepath then
+                    open_file_from_chat(filepath)
+                else
+                    vim.notify('No file path under cursor', vim.log.levels.INFO)
+                end
+            end
+        })
+    end
+    
+    -- Also allow Enter to open file (when on a file path)
+    if M.config.keymaps and M.config.keymaps.open_file_enter then
+        vim.api.nvim_buf_set_keymap(chat_buf, 'n', M.config.keymaps.open_file_enter, '', {
+            noremap = true, silent = true,
+            desc = 'Open file under cursor',
+            callback = function()
+                local filepath = get_filepath_under_cursor()
+                if filepath then
+                    open_file_from_chat(filepath)
+                end
+                -- If not on a file path, do nothing (don't switch to input)
+            end
+        })
+    end
 
     return chat_buf
 end
@@ -1134,6 +1170,117 @@ local response_start_time = nil
 
 -- Create namespace for extmarks
 local ns_id = vim.api.nvim_create_namespace('tark_chat_highlights')
+local ns_file_links = vim.api.nvim_create_namespace('tark_file_links')
+
+-- Store file path locations for click handling: { [line_num] = { {col_start, col_end, filepath}, ... } }
+local file_path_map = {}
+
+--- Detect file paths in backticks and return their positions
+--- Matches patterns like `path/to/file.ext` or `filename.ext`
+---@param line string The line to search
+---@return table[] List of {col_start, col_end, filepath}
+local function find_file_paths_in_line(line)
+    local results = {}
+    local pos = 1
+    
+    while true do
+        -- Find backtick-wrapped content
+        local start_tick = line:find('`', pos, true)
+        if not start_tick then break end
+        
+        local end_tick = line:find('`', start_tick + 1, true)
+        if not end_tick then break end
+        
+        local content = line:sub(start_tick + 1, end_tick - 1)
+        
+        -- Check if it looks like a file path (has extension or path separator)
+        -- Match: path/file.ext, file.ext, ./file, ../file, dir/subdir/file
+        if content:match('[%w_%-%.]+%.[%w]+$') or  -- has file extension
+           content:match('[/\\]') then              -- has path separator
+            -- Exclude URLs and obvious non-files
+            if not content:match('^https?://') and
+               not content:match('^%$') and        -- shell variables
+               not content:match('^%-%-') and      -- CLI flags
+               #content > 1 and #content < 256 then
+                table.insert(results, {
+                    col_start = start_tick - 1,  -- 0-indexed for extmarks
+                    col_end = end_tick,          -- 0-indexed, exclusive
+                    filepath = content,
+                })
+            end
+        end
+        
+        pos = end_tick + 1
+    end
+    
+    return results
+end
+
+--- Highlight file paths in the chat buffer and store their locations
+---@param buf number Buffer handle
+---@param start_line number Starting line (0-indexed)
+---@param lines string[] Lines to process
+local function highlight_file_paths(buf, start_line, lines)
+    for i, line in ipairs(lines) do
+        local line_num = start_line + i - 1  -- 0-indexed
+        local paths = find_file_paths_in_line(line)
+        
+        if #paths > 0 then
+            file_path_map[line_num] = paths
+            
+            for _, path_info in ipairs(paths) do
+                -- Add underline highlight to make it look clickable
+                pcall(vim.api.nvim_buf_add_highlight, buf, ns_file_links, 
+                    'Underlined', line_num, path_info.col_start, path_info.col_end)
+            end
+        end
+    end
+end
+
+--- Get the file path under cursor in the chat buffer
+---@return string|nil filepath The file path if cursor is on one
+local function get_filepath_under_cursor()
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local line_num = cursor[1] - 1  -- Convert to 0-indexed
+    local col = cursor[2]
+    
+    local paths = file_path_map[line_num]
+    if not paths then return nil end
+    
+    for _, path_info in ipairs(paths) do
+        if col >= path_info.col_start and col < path_info.col_end then
+            return path_info.filepath
+        end
+    end
+    
+    return nil
+end
+
+--- Open a file path in a new buffer (closes chat first for better UX)
+---@param filepath string The file path to open
+local function open_file_from_chat(filepath)
+    if not filepath then return end
+    
+    local cwd = vim.fn.getcwd()
+    local full_path = filepath
+    
+    -- Make path absolute if relative
+    if not filepath:match('^/') and not filepath:match('^%a:') then
+        full_path = cwd .. '/' .. filepath
+    end
+    
+    -- Check if file exists
+    if vim.fn.filereadable(full_path) == 1 then
+        -- Close chat to show the file
+        M.close()
+        
+        -- Open the file
+        vim.cmd('edit ' .. vim.fn.fnameescape(full_path))
+        vim.notify('Opened: ' .. filepath, vim.log.levels.INFO)
+    else
+        vim.notify('File not found: ' .. filepath, vim.log.levels.WARN)
+    end
+end
 
 -- Panel (accordion) management functions
 -- Line mapping for interactions: line_num -> {type, section, index}
@@ -1485,6 +1632,11 @@ local function append_message(role, content)
         -- Apply highlights using extmarks
         for _, range in ipairs(highlight_ranges) do
             pcall(vim.api.nvim_buf_add_highlight, buf, ns_id, range.hl, range.line, range.col_start, range.col_end)
+        end
+        
+        -- Highlight clickable file paths in assistant/system messages
+        if role == 'assistant' or role == 'system' or role == 'thinking' then
+            highlight_file_paths(buf, start_line, new_lines)
         end
     end
 
@@ -2963,6 +3115,8 @@ local function clear_chat()
     reset_stats()
     update_chat_header()
     update_chat_window_title()
+    -- Clear file path map for clickable links
+    file_path_map = {}
     -- Clear panel files section too
     if panel_sections then
         panel_sections.files.items = {}
@@ -3097,6 +3251,7 @@ slash_commands = {
                 '**Keyboard Shortcuts:**',
                 '• `Enter` - Send message',
                 '• `Tab` - Toggle plan/build mode',
+                '• `gf` - Open file under cursor (in chat window)',
             }
             append_message('system', table.concat(help_lines, '\n'))
         end,
@@ -4564,5 +4719,10 @@ end
 M._test_can_switch_mode = function()
     return not (agent_running or queue_processing)
 end
+
+-- File path detection test helpers
+M._test_find_file_paths_in_line = find_file_paths_in_line
+M._test_get_file_path_map = function() return file_path_map end
+M._test_clear_file_path_map = function() file_path_map = {} end
 
 return M
