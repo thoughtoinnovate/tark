@@ -49,3 +49,29 @@ shell_enabled = true
 # Allowed paths for file operations (relative to working directory)
 allowed_paths = ["."]
 
+# TUI (Terminal User Interface) Configuration
+[tui.attachments]
+# Maximum file size for attachments in bytes (default: 10MB)
+max_attachment_size = 10485760
+# Maximum number of attachments per message (default: 10)
+max_attachments = 10
+
+[tui.theme]
+# Theme name: "dark" or "light"
+name = "dark"
+
+# Optional custom colors (uncomment to override)
+# [tui.theme.colors]
+# primary = "cyan"
+# secondary = "magenta"
+# background = "#1e1e1e"
+# foreground = "#d4d4d4"
+# error = "red"
+# warning = "yellow"
+# success = "green"
+
+# Custom keybindings (uncomment to override defaults)
+# [tui.keybindings.custom]
+# quit = "Ctrl-q"
+# submit = "Ctrl-Enter"
+

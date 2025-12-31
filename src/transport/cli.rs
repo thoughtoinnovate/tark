@@ -1,5 +1,8 @@
 //! CLI transport for direct terminal interaction
 
+// Allow dead code for intentionally unused API methods that are part of the public interface
+#![allow(dead_code)]
+
 use crate::agent::ChatAgent;
 use crate::completion::{CompletionEngine, CompletionRequest};
 use crate::config::Config;
@@ -7,12 +10,82 @@ use crate::llm;
 use crate::storage::usage::{CleanupRequest, UsageTracker};
 use crate::storage::TarkStorage;
 use crate::tools::ToolRegistry;
+use crate::tui::{EditorBridge, EditorBridgeConfig, TuiApp, TuiConfig};
 use anyhow::{Context, Result};
 use colored::Colorize;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tabled::{settings::Style, Table, Tabled};
+
+/// Run TUI chat mode
+///
+/// This starts the full Terminal UI for chat, optionally connecting to Neovim
+/// via Unix socket for editor integration.
+///
+/// # Arguments
+/// * `initial_message` - Optional initial message to send
+/// * `working_dir` - Working directory for file operations
+/// * `socket_path` - Optional Unix socket path for Neovim integration
+pub async fn run_tui_chat(
+    _initial_message: Option<String>,
+    working_dir: &str,
+    socket_path: Option<String>,
+) -> Result<()> {
+    let working_dir = PathBuf::from(working_dir).canonicalize()?;
+
+    // Load TUI configuration
+    let config = TuiConfig::load().unwrap_or_default();
+
+    // Create the TUI application
+    let mut app = TuiApp::with_config(config)?;
+
+    // Determine standalone mode
+    let is_standalone = socket_path.is_none();
+    app.state.editor_connected = !is_standalone;
+
+    // If socket path provided, attempt to connect to Neovim
+    if let Some(ref socket) = socket_path {
+        let bridge_config = EditorBridgeConfig {
+            socket_path: PathBuf::from(socket),
+            ..Default::default()
+        };
+        let bridge = EditorBridge::new(bridge_config);
+
+        // Try to connect (non-blocking, will fall back to standalone if fails)
+        match bridge.connect().await {
+            Ok(()) => {
+                tracing::info!("Connected to Neovim at {}", socket);
+                app.state.editor_connected = true;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to connect to Neovim: {}. Running in standalone mode.",
+                    e
+                );
+                app.state.editor_connected = false;
+            }
+        }
+    }
+
+    // Update status message based on mode
+    if app.state.editor_connected {
+        app.state.status_message = Some(format!(
+            "Connected to Neovim | Working dir: {}",
+            working_dir.display()
+        ));
+    } else {
+        app.state.status_message = Some(format!(
+            "Standalone mode | Working dir: {}",
+            working_dir.display()
+        ));
+    }
+
+    // Run the TUI event loop
+    app.run()?;
+
+    Ok(())
+}
 
 /// Run interactive chat mode
 pub async fn run_chat(initial_message: Option<String>, working_dir: &str) -> Result<()> {

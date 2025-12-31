@@ -13,6 +13,43 @@ AI-powered CLI agent with LSP server for code completion, hover, diagnostics, an
 - **Agent Modes**: Plan (read-only), Build (full access), Review (approval required)
 - **blink.cmp Integration**: Works seamlessly with blink.cmp - no config needed!
 - **Auto-Start Server**: Server starts automatically when Neovim opens
+- **New Rust TUI**: High-performance terminal chat with image/file attachments
+
+## Migration: Lua Chat → Rust TUI
+
+The original Lua-based chat (`:TarkChatOpen`) is being replaced by a new Rust-based TUI (`:TarkTuiOpen`). The new TUI offers:
+
+- **Better Performance**: Native Rust implementation with ratatui
+- **Image Attachments**: Paste images from clipboard with `Ctrl-v`
+- **File Attachments**: Attach files with `/attach` or `@filepath` syntax
+- **Standalone Mode**: Run `tark chat` directly in any terminal
+- **Neovim Integration**: Full editor integration via socket RPC
+
+### Migration Steps
+
+1. **Update your keymaps** to use the new TUI commands:
+   ```lua
+   -- Old (deprecated)
+   { "<leader>tc", "<cmd>TarkChatToggle<cr>" }
+   
+   -- New (recommended)
+   { "<leader>tc", "<cmd>TarkTuiToggle<cr>" }
+   ```
+
+2. **Command mapping**:
+   | Old Command | New Command |
+   |-------------|-------------|
+   | `:TarkChatOpen` | `:TarkTuiOpen` |
+   | `:TarkChatClose` | `:TarkTuiClose` |
+   | `:TarkChatToggle` | `:TarkTuiToggle` |
+
+3. **Standalone usage** (new feature):
+   ```bash
+   # Run chat directly in terminal without Neovim
+   tark chat
+   ```
+
+The old Lua chat will continue to work during the transition period but will show a deprecation warning. It will be removed in a future major version.
 
 ## Quick Install
 
@@ -155,7 +192,7 @@ return {
     "thoughtoinnovate/tark",
     lazy = false,
     keys = {
-        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
+        { "<leader>tc", "<cmd>TarkTuiToggle<cr>", desc = "Toggle tark TUI chat" },
         { "<leader>tg", "<cmd>TarkGhostToggle<cr>", desc = "Toggle ghost text" },
         { "<leader>ts", "<cmd>TarkServerStatus<cr>", desc = "Server status" },
     },
@@ -169,7 +206,7 @@ return {
     "thoughtoinnovate/tark",
     lazy = false,
     keys = {
-        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
+        { "<leader>tc", "<cmd>TarkTuiToggle<cr>", desc = "Toggle tark TUI chat" },
     },
     opts = {
         server = { mode = 'docker' },
@@ -200,7 +237,7 @@ return {
         { "saghen/blink.cmp", optional = true },  -- Optional: Tab integration
     },
     keys = {
-        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
+        { "<leader>tc", "<cmd>TarkTuiToggle<cr>", desc = "Toggle tark TUI chat" },
         { "<leader>tg", "<cmd>TarkGhostToggle<cr>", desc = "Toggle ghost text" },
         { "<leader>ts", "<cmd>TarkServerStatus<cr>", desc = "Server status" },
         { "<leader>tr", "<cmd>TarkServerRestart<cr>", desc = "Restart server" },
@@ -240,6 +277,11 @@ The server starts automatically by default. You can also manage it manually:
 | `:TarkServerStatus` | Check server status |
 | `:TarkServerRestart` | Restart the server |
 | `:TarkBinaryDownload [channel]` | Download binary (optional: `stable`/`nightly`) |
+| `:TarkTuiOpen` | Open TUI chat (new Rust-based interface) |
+| `:TarkTuiClose` | Close TUI chat |
+| `:TarkTuiToggle` | Toggle TUI chat |
+| `:TarkChatOpen` | Open legacy Lua chat (deprecated) |
+| `:TarkChatToggle` | Toggle legacy Lua chat (deprecated) |
 | `:TarkCompletionStats` | Show completion token usage and cost |
 | `:TarkCompletionStatsReset` | Reset completion stats |
 | `:TarkUsage` | Show usage summary (tokens, costs, sessions) |
@@ -257,15 +299,17 @@ tark serve
 
 | Key | Mode | Description |
 |-----|------|-------------|
-| `<leader>ec` | Normal | Toggle chat window |
-| `<leader>es` | Normal | Show server status |
-| `<leader>eg` | Normal | Toggle ghost text |
+| `<leader>tc` | Normal | Toggle TUI chat window |
+| `<leader>ts` | Normal | Show server status |
+| `<leader>tg` | Normal | Toggle ghost text |
 | `Tab` | Insert | Accept ghost text (or blink.cmp) |
 | `Ctrl+]` | Insert | Accept ghost text (always) |
 | `Ctrl+Space` | Insert | Trigger completion manually |
 | `Tab` | Chat | Toggle Plan ↔ Build mode |
 
-### Chat Commands
+### Chat Commands (TUI)
+
+The new Rust TUI supports all slash commands from the original Lua chat:
 
 | Command | Description |
 |---------|-------------|
@@ -275,13 +319,18 @@ tark serve
 | `/build` | Switch to Build mode (full access) |
 | `/thinking` | Toggle verbose output |
 | `/clear` | Clear chat history |
-| `/split` | Switch to split layout (docked, resizes other windows) |
-| `/sidepane` | Switch to sidepane layout (floating overlay) |
-| `/popup` | Switch to popup layout (centered) |
-| `/layout` | Cycle through split/sidepane/popup layouts |
-| `/usage` | Show usage stats in floating window |
+| `/attach <file>` | Attach a file to the message |
+| `/sessions` | List and switch sessions |
+| `/new` | Start a new session |
+| `/usage` | Show usage stats |
 | `/usage-open` | Open usage dashboard in browser |
 | `/exit` | Close chat window |
+
+**TUI-specific features:**
+- `Ctrl-v` - Paste image from clipboard
+- `@filepath` - Inline file attachment syntax
+- `j/k` - Vim-style navigation in message list
+- `Tab` - Toggle Plan ↔ Build mode
 
 ### Agent Modes
 

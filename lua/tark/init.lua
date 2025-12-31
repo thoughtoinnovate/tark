@@ -4,7 +4,7 @@
 local M = {}
 
 -- Version
-M.version = '0.2.0'
+M.version = '0.3.0'
 
 -- Default configuration
 M.config = {
@@ -55,7 +55,7 @@ M.config = {
 -- Lazy-loaded modules
 local server = nil
 local ghost = nil
-local chat = nil
+local chat = nil  -- New Rust-based TUI chat (was tui.lua, renamed to chat.lua)
 local lsp = nil
 
 -- Get the global port file path
@@ -280,7 +280,7 @@ local function setup_commands()
         vim.notify('Completion stats reset', vim.log.levels.INFO)
     end, { desc = 'Reset completion session stats' })
     
-    -- Chat commands
+    -- Chat commands (Rust-based TUI)
     vim.api.nvim_create_user_command('TarkChatToggle', function()
         if M.config.chat.enabled then
             get_chat().toggle()
@@ -300,12 +300,6 @@ local function setup_commands()
             get_chat().close()
         end
     end, { desc = 'Close chat window' })
-    
-    vim.api.nvim_create_user_command('TarkMaximize', function()
-        if M.config.chat.enabled then
-            get_chat().maximize()
-        end
-    end, { desc = 'Toggle maximize tark windows' })
     
     -- Usage commands
     vim.api.nvim_create_user_command('TarkUsage', function()
@@ -401,18 +395,11 @@ function M.setup(opts)
         get_ghost().setup(ghost_config)
     end
     
-    -- Setup chat if enabled
+    -- Setup chat if enabled (Rust-based TUI)
     if M.config.chat.enabled then
-        -- Determine if we're using Docker mode
-        local is_docker_mode = M.config.server.mode == 'docker' or 
-            (M.config.server.mode == 'auto' and M.config.docker.build_local)
-        
         local chat_config = vim.tbl_deep_extend('force', M.config.chat, {
-            server_url = M.get_server_url(),  -- Uses dynamic port discovery
-            docker_mode = is_docker_mode,
-            lsp_proxy = M.config.lsp.enabled and M.config.chat.lsp_proxy,
+            binary = M.config.server.binary,
         })
-        -- Chat setup is called when first opened, but we can pass config
         get_chat().setup(chat_config)
     end
 end

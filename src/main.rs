@@ -11,6 +11,7 @@ mod lsp;
 mod storage;
 mod tools;
 mod transport;
+mod tui;
 
 #[derive(Parser)]
 #[command(name = "tark")]
@@ -51,7 +52,7 @@ enum Commands {
         port: u16,
     },
 
-    /// Interactive chat mode with the AI agent
+    /// Interactive chat mode with the AI agent (TUI)
     Chat {
         /// Initial message to send
         message: Option<String>,
@@ -59,6 +60,11 @@ enum Commands {
         /// Working directory for file operations
         #[arg(short, long)]
         cwd: Option<String>,
+
+        /// Unix socket path for Neovim integration
+        /// When provided, connects to Neovim for editor features
+        #[arg(long)]
+        socket: Option<String>,
     },
 
     /// Get a one-shot completion for a file position
@@ -142,10 +148,28 @@ async fn main() -> Result<()> {
             lsp::run_lsp_server().await?;
             http_handle.abort();
         }
-        Commands::Chat { message, cwd } => {
+        Commands::Chat {
+            message,
+            cwd,
+            socket,
+        } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());
-            tracing::info!("Starting chat mode in {}", working_dir);
-            transport::cli::run_chat(message, &working_dir).await?;
+
+            // Determine if we're running in standalone mode or connected to Neovim
+            let is_standalone = socket.is_none();
+
+            if is_standalone {
+                tracing::info!("Starting TUI chat in standalone mode, cwd: {}", working_dir);
+            } else {
+                tracing::info!(
+                    "Starting TUI chat with Neovim integration, socket: {:?}, cwd: {}",
+                    socket,
+                    working_dir
+                );
+            }
+
+            // Run the TUI application
+            transport::cli::run_tui_chat(message, &working_dir, socket).await?;
         }
         Commands::Complete { file, line, col } => {
             transport::cli::run_complete(&file, line, col).await?;

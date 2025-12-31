@@ -1,4936 +1,903 @@
--- Chat interface for tark with provider selection and slash commands
--- With LSP proxy integration for enhanced agent capabilities
+-- tark chat integration for Neovim
+-- Thin Lua layer that bridges the Rust TUI with Neovim
+-- Handles socket server, terminal management, and RPC commands
+-- (Renamed from tui.lua as part of migration cleanup)
 
 local M = {}
 
+-- Module state
+M.state = {
+    socket_path = nil,      -- Path to Unix socket
+    socket_server = nil,    -- Socket server handle
+    client_conn = nil,      -- Connected TUI client
+    terminal_buf = nil,     -- Terminal buffer
+    terminal_win = nil,     -- Terminal window
+    terminal_job = nil,     -- Terminal job ID
+}
+
+-- Configuration
 M.config = {
-    server_url = nil,       -- Will be dynamically resolved from tark.get_server_url()
-    auto_show_diff = true,  -- Show inline diff in chat when files are modified
-    docker_mode = false,    -- If true, server is in Docker (use /workspace as cwd)
-    lsp_proxy = true,       -- Enable LSP proxy for agent tools
+    binary = 'tark',        -- Path to tark binary
     window = {
-        style = 'split',     -- 'split' (docked), 'sidepane' (floating overlay), or 'popup'
-        position = 'right',  -- 'right' or 'left' (for split/sidepane)
-        width = 80,          -- for popup mode
-        height = 20,         -- for popup mode
-        sidepane_width = 0.35,  -- 35% of editor width (or fixed number like 60)
-        split_width = 80,    -- fixed width for split mode (columns)
-        panel_width = 18,    -- width of the panel (tasks/notifications) in columns
-        min_width = 50,
-        max_width = 100,
-        border = 'rounded',
+        position = 'right', -- 'right', 'left', 'bottom', 'top'
+        width = 80,         -- Width for vertical splits
+        height = 20,        -- Height for horizontal splits
     },
-    -- Session management options
-    session = {
-        auto_restore = true,    -- Auto-load previous session on chat open
-        max_sessions = 50,      -- Max sessions per workspace
-        save_on_close = true,   -- Save session when chat closes
-    },
-    -- Keybinds for chat buffer (set to false to disable)
-    keymaps = {
-        open_file = 'gf',           -- Open file under cursor (Vim standard)
-        open_file_enter = '<CR>',   -- Also open file with Enter
+    context_sync = {
+        enabled = true,     -- Send buffer/diagnostic updates to TUI
+        debounce_ms = 100,  -- Debounce context updates
     },
 }
 
--- Get the server URL dynamically (resolves port from global port file)
-local function get_server_url()
-    -- If explicitly set, use that (e.g., for testing)
-    if M.config.server_url then
-        return M.config.server_url
-    end
-    -- Otherwise, use dynamic port discovery from main tark module
-    local ok, tark = pcall(require, 'tark')
-    if ok and tark.get_server_url then
-        return tark.get_server_url()
-    end
-    -- Fallback
-    return 'http://127.0.0.1:8765'
+-- Generate unique socket path for this Neovim instance
+local function get_socket_path()
+    local pid = vim.fn.getpid()
+    local tmpdir = os.getenv('TMPDIR') or os.getenv('TMP') or '/tmp'
+    return string.format('%s/tark-nvim-%d.sock', tmpdir, pid)
 end
 
--- LSP proxy port (dynamically assigned when chat opens)
-local lsp_proxy_port = nil
-
--- Get the cwd to send to server (handles Docker mode)
-local function get_server_cwd()
-    if M.config.docker_mode then
-        -- Docker container has workspace mounted at /workspace
-        return '/workspace'
-    else
-        return vim.fn.getcwd()
-    end
+-- JSON encode helper
+local function json_encode(data)
+    return vim.fn.json_encode(data)
 end
 
-local chat_buf = nil
-local chat_win = nil
-local input_buf = nil
-local input_win = nil
-local panel_buf = nil  -- Renamed from tasks_buf
-local panel_win = nil  -- Renamed from tasks_win
-local tasks_buf = nil  -- Alias for backwards compatibility
-local tasks_win = nil  -- Alias for backwards compatibility
-local current_provider = 'ollama'      -- Backend protocol for API calls
-local current_provider_id = 'ollama'   -- Actual provider identity for display
-
--- Current session name for display in title
-local current_session_name = nil
-
--- Prompt history for navigation (like shell history)
-local prompt_history = {}
-local prompt_history_index = 0  -- 0 = current input, 1 = most recent, etc.
-local prompt_history_max = 100  -- Max prompts to remember
-local prompt_current_input = ''  -- Temporary storage for current input when navigating
-
--- Task queue for non-blocking multi-prompt handling
-local task_queue = {}  -- Array of {id, prompt, status, timestamp, expanded}
-local task_id_counter = 0
-local queue_processing = false  -- Is a task currently being processed?
-local focused_window = 'input'  -- 'input', 'chat', or 'panel'
-
--- Panel accordion sections state
-local panel_sections = {
-    tasks = { expanded = true, items = {} },           -- Task queue
-    notifications = { expanded = false, items = {} },   -- Future notifications
-    files = { expanded = false, items = {} },           -- Files modified in session
-}
-
--- Store last modified files for diff view
-local last_modified_files = {}
-
--- Maximize mode state
-local maximized = false
-local saved_dimensions = nil  -- {width, col, sidepane_width, chat_width, panel_width}
-
--- Helper to temporarily make buffer modifiable for writes
-local function safe_buf_set_lines(buf, start, finish, strict_indexing, lines)
-    if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
-    local was_modifiable = vim.api.nvim_buf_get_option(buf, 'modifiable')
-    if not was_modifiable then
-        vim.api.nvim_buf_set_option(buf, 'modifiable', true)
+-- JSON decode helper
+local function json_decode(str)
+    local ok, result = pcall(vim.fn.json_decode, str)
+    if ok then
+        return result
     end
-    vim.api.nvim_buf_set_lines(buf, start, finish, strict_indexing, lines)
-    if not was_modifiable then
-        vim.api.nvim_buf_set_option(buf, 'modifiable', false)
-    end
-end
-
--- Open side-by-side diff view using git or vimdiff
-local function show_diff_view(filepath)
-    -- Close chat windows temporarily
-    local chat_was_open = M.is_open and M.is_open()
-    if chat_was_open then
-        M.close()
-    end
-    
-    local cwd = vim.fn.getcwd()
-    local target_file = filepath
-    
-    -- If no file specified, try to use last modified or show git status
-    if not target_file or target_file == '' then
-        if #last_modified_files > 0 then
-            target_file = last_modified_files[#last_modified_files]
-        else
-            -- Show all git changes
-            vim.cmd('tabnew')
-            vim.cmd('terminal git diff --color')
-            vim.notify('Showing all git changes (press q to close)', vim.log.levels.INFO)
-            return
-        end
-    end
-    
-    -- Check if file exists and has git changes
-    local has_git = vim.fn.isdirectory(cwd .. '/.git') == 1
-    
-    if has_git then
-        -- Use git diff in split view
-        local git_show = vim.fn.system('cd ' .. vim.fn.shellescape(cwd) .. ' && git show HEAD:' .. vim.fn.shellescape(target_file) .. ' 2>/dev/null')
-        local git_exit = vim.v.shell_error
-        
-        if git_exit == 0 then
-            -- File exists in git, show proper diff
-            local old_buf = vim.api.nvim_create_buf(false, true)
-            local new_buf = vim.api.nvim_create_buf(false, true)
-            
-            -- Read current file content
-            local current_content = vim.fn.readfile(cwd .. '/' .. target_file)
-            
-            -- Parse git content
-            local old_lines = {}
-            for line in git_show:gmatch('[^\r\n]*') do
-                table.insert(old_lines, line)
-            end
-            
-            -- Set buffer contents
-            vim.api.nvim_buf_set_lines(old_buf, 0, -1, false, old_lines)
-            vim.api.nvim_buf_set_lines(new_buf, 0, -1, false, current_content)
-            
-            -- Set buffer names with clear OLD/NEW labels
-            local short_name = target_file:match('[^/]+$') or target_file
-            vim.api.nvim_buf_set_name(old_buf, '[OLD] ' .. short_name .. ' (git HEAD)')
-            vim.api.nvim_buf_set_name(new_buf, '[NEW] ' .. short_name .. ' (modified)')
-            
-            -- Detect filetype
-            local ext = target_file:match('%.([^%.]+)$') or ''
-            local ft_map = {
-                rs = 'rust', lua = 'lua', py = 'python', js = 'javascript',
-                ts = 'typescript', md = 'markdown', json = 'json', toml = 'toml',
-                yaml = 'yaml', yml = 'yaml', html = 'html', css = 'css',
-                go = 'go', java = 'java', c = 'c', cpp = 'cpp', h = 'c',
-            }
-            local filetype = ft_map[ext] or ''
-            
-            vim.api.nvim_buf_set_option(old_buf, 'filetype', filetype)
-            vim.api.nvim_buf_set_option(new_buf, 'filetype', filetype)
-            vim.api.nvim_buf_set_option(old_buf, 'buftype', 'nofile')
-            vim.api.nvim_buf_set_option(new_buf, 'buftype', 'nofile')
-            vim.api.nvim_buf_set_option(old_buf, 'modifiable', false)
-            vim.api.nvim_buf_set_option(new_buf, 'modifiable', false)
-            
-            -- Open in vertical split with diff mode
-            vim.cmd('tabnew')
-            
-            -- Configure diff display for clear +/- visibility
-            vim.opt_local.diffopt = 'internal,filler,closeoff,algorithm:histogram,indent-heuristic'
-            
-            -- LEFT side: OLD file (from git HEAD)
-            vim.api.nvim_win_set_buf(0, old_buf)
-            vim.cmd('diffthis')
-            vim.opt_local.number = true
-            vim.opt_local.signcolumn = 'yes'
-            vim.opt_local.foldcolumn = '0'
-            vim.opt_local.cursorline = true
-            
-            -- RIGHT side: NEW file (modified)
-            vim.cmd('vsplit')
-            vim.api.nvim_win_set_buf(0, new_buf)
-            vim.cmd('diffthis')
-            vim.opt_local.number = true
-            vim.opt_local.signcolumn = 'yes'
-            vim.opt_local.foldcolumn = '0'
-            vim.opt_local.cursorline = true
-            
-            -- Define clear highlight groups for diff
-            vim.cmd([[
-                highlight DiffAdd guibg=#1e3a1e guifg=NONE gui=NONE
-                highlight DiffDelete guibg=#3a1e1e guifg=#666666 gui=NONE
-                highlight DiffChange guibg=#1e2a3a guifg=NONE gui=NONE
-                highlight DiffText guibg=#2e4a5a guifg=NONE gui=bold
-            ]])
-            
-            -- Add signs for +/- indicators
-            vim.fn.sign_define('DiffAdd', { text = '+', texthl = 'DiffAdd' })
-            vim.fn.sign_define('DiffDelete', { text = '-', texthl = 'DiffDelete' })
-            vim.fn.sign_define('DiffChange', { text = '~', texthl = 'DiffChange' })
-            
-            -- Set up keymaps to close
-            local close_diff = function()
-                vim.cmd('diffoff!')
-                vim.cmd('tabclose')
-                if chat_was_open then
-                    vim.defer_fn(function() M.open() end, 50)
-                end
-            end
-            
-            vim.keymap.set('n', 'q', close_diff, { buffer = old_buf, silent = true })
-            vim.keymap.set('n', 'q', close_diff, { buffer = new_buf, silent = true })
-            vim.keymap.set('n', '<Esc>', close_diff, { buffer = old_buf, silent = true })
-            vim.keymap.set('n', '<Esc>', close_diff, { buffer = new_buf, silent = true })
-            
-            -- Navigation keymaps
-            vim.keymap.set('n', ']c', ']c', { buffer = old_buf, silent = true, desc = 'Next change' })
-            vim.keymap.set('n', '[c', '[c', { buffer = new_buf, silent = true, desc = 'Previous change' })
-            
-            -- Show help message
-            local short_file = target_file:match('[^/]+$') or target_file
-            vim.notify(string.format(
-                '📊 Diff: %s\n   LEFT = OLD (HEAD)  |  RIGHT = NEW (modified)\n   ]c = next change  |  [c = prev change  |  q = close',
-                short_file
-            ), vim.log.levels.INFO)
-        else
-            -- New file, not in git yet
-            vim.cmd('tabnew')
-            vim.cmd('edit ' .. vim.fn.fnameescape(cwd .. '/' .. target_file))
-            vim.notify('New file (not yet in git): ' .. target_file, vim.log.levels.INFO)
-        end
-    else
-        -- No git, just open the file
-        vim.cmd('tabnew')
-        vim.cmd('edit ' .. vim.fn.fnameescape(cwd .. '/' .. target_file))
-        vim.notify('No git repo. Opened: ' .. target_file, vim.log.levels.INFO)
-    end
-end
-
--- Track modified files from tool calls
-local function track_modified_file(filepath)
-    -- Remove if already in list
-    for i, f in ipairs(last_modified_files) do
-        if f == filepath then
-            table.remove(last_modified_files, i)
-            break
-        end
-    end
-    -- Add to end (most recent)
-    table.insert(last_modified_files, filepath)
-    -- Keep only last 10
-    
-    -- Also add to panel's files section
-    if panel_sections and panel_sections.files then
-        -- Avoid duplicates in panel
-        local found = false
-        for _, f in ipairs(panel_sections.files.items) do
-            if f == filepath then found = true; break end
-        end
-        if not found then
-            table.insert(panel_sections.files.items, filepath)
-            -- Update panel if it exists
-            if panel_buf and vim.api.nvim_buf_is_valid(panel_buf) then
-                pcall(update_panel)
-            end
-        end
-    end
-    while #last_modified_files > 10 do
-        table.remove(last_modified_files, 1)
-    end
-end
-
--- Export for external use
-M.show_diff = show_diff_view
-
--- Token and cost tracking
-local session_stats = {
-    input_tokens = 0,
-    output_tokens = 0,
-    total_cost = 0,
-}
-
--- Models database from models.dev
-local models_db = {
-    data = nil,
-    timestamp = 0,
-    cache_duration = 3600, -- 1 hour cache
-}
-
--- Model mappings (our provider names to models.dev model IDs)
--- Current model (provider/model format)
-local current_model = nil
-
--- Thinking mode - show verbose tool call info
-local thinking_mode = false
-
--- Agent mode: plan (read-only), build (all tools), review (approval required)
-local current_mode = 'build'
-
--- Loading animation state
-local loading_timer = nil
-local loading_frame = 1
-local spinner_frames = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
-
--- Calculate display width (handles Unicode properly)
-local function display_width(str)
-    return vim.fn.strdisplaywidth(str)
-end
-
--- Get loading message based on current mode
-local function get_loading_message()
-    local messages = {
-        plan = {
-            '🔍 Exploring codebase...',
-            '📖 Reading files...',
-            '🧠 Analyzing structure...',
-            '🔎 Searching...',
-        },
-        build = {
-            '🔨 Working...',
-            '📝 Preparing changes...',
-            '⚙️ Processing...',
-            '🛠️ Building...',
-        },
-        review = {
-            '👁️ Reviewing...',
-            '🔍 Checking changes...',
-            '✅ Validating...',
-            '📋 Preparing actions...',
-        },
-    }
-    local mode_messages = messages[current_mode] or messages.build
-    return mode_messages[math.random(#mode_messages)]
-end
-
--- Model mappings (our provider names to models.dev model IDs)
-local model_mappings = {
-    openai = 'openai/gpt-4o',
-    claude = 'anthropic/claude-sonnet-4-20250514',
-    ollama = nil, -- Local, no cost
-}
-
--- Provider info for model picker
-local providers_info = {
-    {
-        id = 'openai',
-        name = 'OpenAI',
-        icon = '🧠',
-        api_key = 'openai',  -- Key in models.dev API
-        our_provider = 'openai',
-        env = 'OPENAI_API_KEY',
-    },
-    {
-        id = 'anthropic',
-        name = 'Anthropic (Claude)',
-        icon = '🤖',
-        api_key = 'anthropic',
-        our_provider = 'claude',
-        env = 'ANTHROPIC_API_KEY',
-    },
-    {
-        id = 'google',
-        name = 'Google (Gemini)',
-        icon = '🔷',
-        api_key = 'google',
-        our_provider = 'openai',  -- Uses OpenAI-compatible
-        env = 'GOOGLE_API_KEY',
-    },
-    {
-        id = 'ollama',
-        name = 'Ollama (Local)',
-        icon = '🦙',
-        api_key = 'ollama',
-        our_provider = 'ollama',
-        env = nil,
-        local_fetch = true,
-    },
-}
-
--- Fetch models database from models.dev
--- SECURITY NOTE: This is a PUBLIC API - NO API keys are sent here!
--- API keys are ONLY sent to official provider endpoints in the Rust backend:
---   - OpenAI: https://api.openai.com/v1/chat/completions
---   - Anthropic: https://api.anthropic.com/v1/messages
---   - Ollama: http://localhost:11434 (local)
-local function fetch_models_db()
-    local now = os.time()
-    if models_db.data and (now - models_db.timestamp) < models_db.cache_duration then
-        return models_db.data
-    end
-    
-    -- Async fetch - PUBLIC endpoint, no authentication
-    vim.fn.jobstart({
-        'curl', '-s', 'https://models.dev/api.json'
-    }, {
-        stdout_buffered = true,
-        on_stdout = function(_, data)
-            if data and data[1] and data[1] ~= '' then
-                local ok, parsed = pcall(vim.fn.json_decode, table.concat(data, ''))
-                if ok and parsed then
-                    models_db.data = parsed
-                    models_db.timestamp = now
-                end
-            end
-        end,
-    })
-    
-    return models_db.data
-end
-
--- Get model info from database
-local function get_model_info(provider)
-    local model_id = model_mappings[provider]
-    if not model_id then return nil end
-    
-    local db = fetch_models_db()
-    if not db then return nil end
-    
-    -- Parse model_id (format: provider/model)
-    local provider_key, model_key = model_id:match('^([^/]+)/(.+)$')
-    if not provider_key then return nil end
-    
-    -- Map our provider names to models.dev provider keys
-    local provider_map = {
-        openai = 'openai',
-        anthropic = 'anthropic',
-        google = 'google',
-    }
-    provider_key = provider_map[provider_key] or provider_key
-    
-    -- Look up in nested structure
-    local provider_data = db[provider_key]
-    if provider_data and provider_data.models then
-        return provider_data.models[model_key]
-    end
-    
     return nil
 end
 
--- Estimate tokens (rough: ~4 chars per token for English)
-local function estimate_tokens(text)
-    if not text then return 0 end
-    return math.ceil(#text / 4)
-end
-
--- Format cost
-local function format_cost(cost)
-    if cost < 0.01 then
-        return string.format('$%.4f', cost)
-    elseif cost < 1 then
-        return string.format('$%.3f', cost)
-    else
-        return string.format('$%.2f', cost)
-    end
-end
-
--- Format number with K/M suffix
-local function format_number(n)
-    if n >= 1000000 then
-        local val = n / 1000000
-        return val == math.floor(val) and string.format('%dM', val) or string.format('%.1fM', val)
-    elseif n >= 1000 then
-        local val = n / 1000
-        return val == math.floor(val) and string.format('%dK', val) or string.format('%.1fK', val)
-    else
-        return tostring(n)
-    end
-end
-
--- Calculate cost for tokens
-local function calculate_cost(input_tokens, output_tokens, model_info)
-    if not model_info or not model_info.cost then return 0 end
-    
-    local input_cost = (model_info.cost.input or 0) * input_tokens / 1000000
-    local output_cost = (model_info.cost.output or 0) * output_tokens / 1000000
-    return input_cost + output_cost
-end
-
--- Reset session stats
-local function reset_stats()
-    session_stats.input_tokens = 0
-    session_stats.output_tokens = 0
-    session_stats.total_cost = 0
-end
-
--- Custom floating picker with Vim navigation (j/k, Up/Down, Enter, Esc)
-local function vim_select(items, opts, on_choice)
-    opts = opts or {}
-    local prompt = opts.prompt or 'Select:'
-    
-    -- Calculate dimensions
-    local max_width = 0
-    for _, item in ipairs(items) do
-        max_width = math.max(max_width, #item)
-    end
-    max_width = math.max(max_width, #prompt)
-    local width = math.min(max_width + 4, math.floor(vim.o.columns * 0.8))
-    local height = math.min(#items, math.floor(vim.o.lines * 0.5))
-    
-    -- Create buffer
-    local buf = vim.api.nvim_create_buf(false, true)
-    safe_buf_set_lines(buf, 0, -1, false, items)
-    vim.api.nvim_buf_set_option(buf, 'modifiable', false)
-    vim.api.nvim_buf_set_option(buf, 'bufhidden', 'wipe')
-    
-    -- Calculate position (center)
-    local col = math.floor((vim.o.columns - width) / 2)
-    local row = math.floor((vim.o.lines - height) / 2) - 2
-    
-    -- Create window
-    local win = vim.api.nvim_open_win(buf, true, {
-        relative = 'editor',
-        width = width,
-        height = height,
-        col = col,
-        row = row,
-        style = 'minimal',
-        border = 'rounded',
-        title = ' ' .. prompt .. ' ',
-        title_pos = 'center',
-        footer = { { ' j/k:move  Enter:select  Esc:cancel ', 'Comment' } },
-        footer_pos = 'center',
-    })
-    
-    -- Highlight current line
-    vim.api.nvim_win_set_option(win, 'cursorline', true)
-    vim.api.nvim_win_set_option(win, 'winhighlight', 'CursorLine:PmenuSel')
-    
-    -- Start in normal mode at first line
-    vim.api.nvim_win_set_cursor(win, {1, 0})
-    vim.cmd('stopinsert')
-    
-    -- Helper to close and callback
-    local function close_and_select(idx)
-        if vim.api.nvim_win_is_valid(win) then
-            vim.api.nvim_win_close(win, true)
-        end
-        if idx and idx > 0 and idx <= #items then
-            on_choice(items[idx], idx)
-        else
-            on_choice(nil, nil)
-        end
-    end
-    
-    -- Keymaps
-    local kopts = { buffer = buf, silent = true, nowait = true }
-    
-    -- Navigation
-    vim.keymap.set('n', 'j', 'j', kopts)
-    vim.keymap.set('n', 'k', 'k', kopts)
-    vim.keymap.set('n', '<Down>', 'j', kopts)
-    vim.keymap.set('n', '<Up>', 'k', kopts)
-    vim.keymap.set('n', 'G', 'G', kopts)
-    vim.keymap.set('n', 'gg', 'gg', kopts)
-    vim.keymap.set('n', '<C-d>', '<C-d>', kopts)
-    vim.keymap.set('n', '<C-u>', '<C-u>', kopts)
-    
-    -- Selection
-    vim.keymap.set('n', '<CR>', function()
-        local cursor = vim.api.nvim_win_get_cursor(win)
-        close_and_select(cursor[1])
-    end, kopts)
-    vim.keymap.set('n', 'l', function()
-        local cursor = vim.api.nvim_win_get_cursor(win)
-        close_and_select(cursor[1])
-    end, kopts)
-    
-    -- Cancel
-    vim.keymap.set('n', '<Esc>', function() close_and_select(nil) end, kopts)
-    vim.keymap.set('n', 'q', function() close_and_select(nil) end, kopts)
-    vim.keymap.set('n', 'h', function() close_and_select(nil) end, kopts)
-    
-    -- Also handle insert mode keys for quick typing
-    vim.keymap.set('i', '<Esc>', function() 
-        vim.cmd('stopinsert')
-        close_and_select(nil) 
-    end, kopts)
-    vim.keymap.set('i', '<CR>', function()
-        vim.cmd('stopinsert')
-        local cursor = vim.api.nvim_win_get_cursor(win)
-        close_and_select(cursor[1])
-    end, kopts)
-    
-    -- Close on buffer leave
-    vim.api.nvim_create_autocmd('BufLeave', {
-        buffer = buf,
-        once = true,
-        callback = function()
-            if vim.api.nvim_win_is_valid(win) then
-                vim.api.nvim_win_close(win, true)
-            end
-        end,
-    })
-end
-
--- Default context windows (fallback if models.dev not loaded)
-local default_context_windows = {
-    openai = 128000,   -- GPT-4o: 128K
-    claude = 200000,   -- Claude: 200K
-    ollama = 32000,    -- Most local models: ~32K
-}
-
--- Build window title with stats
--- Get model info by looking up current_model directly
-local function get_current_model_info()
-    if not current_model then return nil end
-    
-    local db = fetch_models_db()
-    if not db then return nil end
-    
-    -- Parse model_id (format: provider/model)
-    local provider_key, model_key = current_model:match('^([^/]+)/(.+)$')
-    if not provider_key then return nil end
-    
-    -- Look up in nested structure
-    local provider_data = db[provider_key]
-    if provider_data and provider_data.models then
-        return provider_data.models[model_key]
-    end
-    
-    return nil
-end
-
-local function build_chat_title()
-    -- Use current_model directly for pricing lookup
-    local model_info = get_current_model_info()
-    
-    -- Model name (short, clean)
-    local model_name = current_model or model_mappings[current_provider] or current_provider
-    local model_short = model_name:match('[^/]+$') or model_name
-    
-    -- Mode icons (distinctive shapes)
-    local mode_icons = { plan = '◇', build = '◆', review = '◈' }
-    local mode_icon = mode_icons[current_mode] or '◆'
-    local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
-    
-    local left_title = string.format(' %s %s · %s ', mode_icon, mode_label, model_short)
-    
-    -- Context info
-    local used = session_stats.input_tokens + session_stats.output_tokens
-    local context_max = default_context_windows[current_provider] or 128000
-    if model_info and model_info.limit and model_info.limit.context then
-        context_max = model_info.limit.context
-    end
-    
-    local percent = context_max > 0 and math.floor((used / context_max) * 100) or 0
-    
-    -- Simple clean progress bar (like OpenCode)
-    local bar_width = 15
-    local filled = math.floor((percent / 100) * bar_width)
-    local bar = '⚪' .. string.rep('▓', filled) .. string.rep('░', bar_width - filled)
-    
-    local right_title = string.format(' %s %s/%s ', bar, format_number(used), format_number(context_max))
-    
-    return left_title, right_title
-end
-
--- Get mode-specific highlight group
-local function get_mode_highlight(mode, with_bg)
-    local suffix = with_bg and 'Bg' or ''
-    local mode_highlights = {
-        plan = 'TarkModePlan' .. suffix,
-        build = 'TarkModeBuild' .. suffix,
-        review = 'TarkModeReview' .. suffix,
-    }
-    return mode_highlights[mode] or ('TarkModeBuild' .. suffix)
-end
-
--- Check if a window is a floating window
-local function is_floating_window(win)
-    if not win or not vim.api.nvim_win_is_valid(win) then
-        return false
-    end
-    local config = vim.api.nvim_win_get_config(win)
-    return config.relative ~= nil and config.relative ~= ''
-end
-
--- Update input window title with current mode (OpenCode style)
-local function update_input_window_title()
-    if not input_win or not vim.api.nvim_win_is_valid(input_win) then
-        return
-    end
-    
-    -- Mode with model name (like OpenCode)
-    local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
-    local mode_icons = { plan = '◇', build = '◆', review = '◈' }
-    local mode_icon = mode_icons[current_mode] or '◆'
-    local model_name = current_model or model_mappings[current_provider] or 'GPT-4o'
-    local model_short = model_name:match('[^/]+$') or model_name
-    
-    -- Use actual provider identity for display (not backend protocol)
-    local provider_display = current_provider_id or current_provider
-    for _, p in ipairs(providers_info) do
-        if p.id == current_provider_id then
-            -- Extract first word from provider name, e.g., "Google" from "Google (Gemini)"
-            provider_display = p.name:match('^(%w+)') or p.id
-            break
-        end
-    end
-    local provider_label = provider_display:sub(1,1):upper() .. provider_display:sub(2)
-    
-    -- Mode-specific highlight (colored background for instant recognition)
-    local mode_hl = get_mode_highlight(current_mode, true)
-    
-    -- Check if this is a floating window or a split window
-    if is_floating_window(input_win) then
-        -- Floating window: use title/footer
-        local config = vim.api.nvim_win_get_config(input_win)
-        config.title = {
-            { ' ' .. mode_label .. ' ', mode_hl },
-            { ' ' .. model_short .. ' ', 'Comment' },
-            { provider_label .. ' ', 'FloatBorder' },
-        }
-        config.title_pos = 'left'
-        
-        -- Add footer text (keybindings) with mode-aware hint
-        local mode_hint = current_mode == 'plan' and 'build' or 'plan'
-        config.footer = {
-            { ' tab ', 'Comment' },
-            { mode_hint, get_mode_highlight(mode_hint, false) },
-            { '  /', 'Comment' },
-            { 'commands ', 'FloatBorder' },
-        }
-        config.footer_pos = 'left'
-        
-        vim.api.nvim_win_set_config(input_win, config)
-    else
-        -- Split window: use statusline
-        local mode_hint = current_mode == 'plan' and 'build' or 'plan'
-        vim.api.nvim_win_set_option(input_win, 'statusline',
-            string.format('%%#TarkMode%s# %s %s %%#Comment# %s %%#FloatBorder# %s %%#Comment# tab:%s  /:commands %%#Normal#',
-                mode_label, mode_icon, mode_label, model_short, provider_label, mode_hint))
-    end
-end
-
--- Truncate session name with ellipsis (max 20 chars)
--- Exported for testing
-local function truncate_session_name(name, max_len)
-    max_len = max_len or 20
-    if not name or name == '' then
-        return nil
-    end
-    if #name <= max_len then
-        return name
-    end
-    return name:sub(1, max_len - 3) .. '...'
-end
-
--- Export for testing
-M._truncate_session_name = truncate_session_name
-
--- Update chat window title with current stats (model removed - shown in prompt)
-local function update_chat_window_title()
-    if not chat_win or not vim.api.nvim_win_is_valid(chat_win) then
-        return
-    end
-    
-    -- Build title components (no model name - it's in the prompt window)
-    local model_info = get_current_model_info()
-    
-    -- Context info
-    local used = session_stats.input_tokens + session_stats.output_tokens
-    local context_max = default_context_windows[current_provider] or 128000
-    if model_info and model_info.limit and model_info.limit.context then
-        context_max = model_info.limit.context
-    end
-    
-    local percent = context_max > 0 and math.floor((used / context_max) * 100) or 0
-    
-    -- Session name (truncated to max 20 chars)
-    local session_display = truncate_session_name(current_session_name, 20)
-    local session_part = session_display and string.format(' 📝 %s ', session_display) or ''
-    
-    -- Left: Context usage (simple format: [1%] 1K/128K)
-    local context_part = string.format('[%d%%] %s/%s ', percent, format_number(used), format_number(context_max))
-    
-    -- Right: Cost
-    local cost_part = string.format('$%.4f ', session_stats.total_cost)
-    
-    -- Check if this is a floating window or a split window
-    if is_floating_window(chat_win) then
-        -- Floating window: use title config
-        local config = vim.api.nvim_win_get_config(chat_win)
-        local width = config.width or 80
-        
-        -- Calculate display widths
-        local session_width = display_width(session_part)
-        local context_width = display_width(context_part)
-        local right_width = display_width(cost_part)
-        
-        -- Calculate padding for right alignment
-        local usable_width = width - 2  -- Account for border chars
-        local center_pad = usable_width - session_width - context_width - right_width
-        if center_pad < 1 then center_pad = 1 end
-        
-        -- Color the context bar based on usage
-        local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
-        
-        -- Build title with session name if available
-        local title_parts = {}
-        if session_part ~= '' then
-            table.insert(title_parts, { session_part, 'FloatTitle' })
-        end
-        table.insert(title_parts, { context_part, context_hl })
-        table.insert(title_parts, { string.rep(' ', center_pad), 'FloatBorder' })
-        table.insert(title_parts, { cost_part, 'String' })
-        
-        config.title = title_parts
-        config.title_pos = 'left'
-        
-        vim.api.nvim_win_set_config(chat_win, config)
-    else
-        -- Split window: use statusline
-        local context_hl = percent >= 90 and 'ErrorMsg' or (percent >= 75 and 'WarningMsg' or 'Comment')
-        local session_status = session_display and string.format('%%#FloatTitle# 📝 %s %%#Normal#', session_display) or ''
-        vim.api.nvim_win_set_option(chat_win, 'statusline',
-            string.format('%s%%#%s# %s%%#Normal# %%#String#%s%%#Normal#',
-                session_status, context_hl, context_part, cost_part))
-    end
-    
-    -- Also update input title
-    update_input_window_title()
-end
-
--- Update session stats and refresh UI
-local function update_stats(input_text, output_text)
-    local input_tokens = estimate_tokens(input_text)
-    local output_tokens = estimate_tokens(output_text)
-    
-    session_stats.input_tokens = session_stats.input_tokens + input_tokens
-    session_stats.output_tokens = session_stats.output_tokens + output_tokens
-    
-    local model_info = get_model_info(current_provider)
-    if model_info then
-        local cost = calculate_cost(input_tokens, output_tokens, model_info)
-        session_stats.total_cost = session_stats.total_cost + cost
-    end
-    
-    -- Update the window title with new stats
-    vim.schedule(function()
-        update_chat_window_title()
-    end)
-end
-
--- Slash commands registry
-local slash_commands = {}
-
--- Forward declarations for file path functions (defined later)
-local get_filepath_under_cursor
-local open_file_from_chat
-
--- Create or get the chat buffer
-local function get_chat_buffer()
-    if chat_buf and vim.api.nvim_buf_is_valid(chat_buf) then
-        return chat_buf
-    end
-
-    chat_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_option(chat_buf, 'buftype', 'nofile')
-    vim.api.nvim_buf_set_option(chat_buf, 'bufhidden', 'hide')
-    vim.api.nvim_buf_set_option(chat_buf, 'filetype', 'markdown')
-    vim.api.nvim_buf_set_option(chat_buf, 'modifiable', false)  -- Non-modifiable by user
-    vim.api.nvim_buf_set_name(chat_buf, 'tark-chat')
-    
-    -- Prevent user from entering insert mode in chat buffer
-    vim.api.nvim_buf_set_keymap(chat_buf, 'n', 'i', '', {
-        noremap = true, silent = true,
-        callback = function()
-            if input_win and vim.api.nvim_win_is_valid(input_win) then
-                vim.api.nvim_set_current_win(input_win)
-                vim.cmd('startinsert')
-            end
-        end
-    })
-    vim.api.nvim_buf_set_keymap(chat_buf, 'n', 'a', '', {
-        noremap = true, silent = true,
-        callback = function()
-            if input_win and vim.api.nvim_win_is_valid(input_win) then
-                vim.api.nvim_set_current_win(input_win)
-                vim.cmd('startinsert!')
-            end
-        end
-    })
-    vim.api.nvim_buf_set_keymap(chat_buf, 'n', 'o', '', {
-        noremap = true, silent = true,
-        callback = function()
-            if input_win and vim.api.nvim_win_is_valid(input_win) then
-                vim.api.nvim_set_current_win(input_win)
-                vim.cmd('startinsert')
-            end
-        end
-    })
-    
-    -- Maximize toggle (Ctrl-z for zen mode)
-    vim.api.nvim_buf_set_keymap(chat_buf, 'n', '<C-z>', '', {
-        noremap = true, silent = true,
-        callback = function()
-            M.maximize()
-        end
-    })
-    
-    -- Open file under cursor with gf (like Vim's built-in gf)
-    if M.config.keymaps and M.config.keymaps.open_file then
-        vim.api.nvim_buf_set_keymap(chat_buf, 'n', M.config.keymaps.open_file, '', {
-            noremap = true, silent = true,
-            desc = 'Open file under cursor',
-            callback = function()
-                local filepath = get_filepath_under_cursor()
-                if filepath then
-                    open_file_from_chat(filepath)
-                else
-                    vim.notify('No file path under cursor', vim.log.levels.INFO)
-                end
-            end
-        })
-    end
-    
-    -- Also allow Enter to open file (when on a file path)
-    if M.config.keymaps and M.config.keymaps.open_file_enter then
-        vim.api.nvim_buf_set_keymap(chat_buf, 'n', M.config.keymaps.open_file_enter, '', {
-            noremap = true, silent = true,
-            desc = 'Open file under cursor',
-            callback = function()
-                local filepath = get_filepath_under_cursor()
-                if filepath then
-                    open_file_from_chat(filepath)
-                end
-                -- If not on a file path, do nothing (don't switch to input)
-            end
-        })
-    end
-
-    return chat_buf
-end
-
--- Update chat header (no in-chat header, all info in window chrome)
-local function update_chat_header()
-    local buf = get_chat_buffer()
-    
-    -- Check if buffer needs initialization
-    local line_count = vim.api.nvim_buf_line_count(buf)
-    local current_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-    
-    if line_count <= 1 and (not current_lines[1] or current_lines[1] == '') then
-        -- Just add a blank line to start
-        vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-        safe_buf_set_lines(buf, 0, -1, false, { '' })
-        vim.api.nvim_buf_set_option(buf, 'modifiable', false)
-    end
-    
-    -- Update window title bar (this has the model + context info)
-    update_chat_window_title()
-end
-
--- Slash command completion items
-local function get_command_completions()
-    return {
-        { word = '/model', menu = 'Switch AI provider (picker)', kind = '🔄' },
-        { word = '/model openai', menu = 'Switch to OpenAI GPT-4', kind = '🧠' },
-        { word = '/model claude', menu = 'Switch to Claude', kind = '🤖' },
-        { word = '/model ollama', menu = 'Switch to Ollama (local)', kind = '🦙' },
-        { word = '/m', menu = 'Switch AI provider (short)', kind = '🔄' },
-        { word = '/openai', menu = 'Quick switch to OpenAI', kind = '🧠' },
-        { word = '/claude', menu = 'Quick switch to Claude', kind = '🤖' },
-        { word = '/ollama', menu = 'Quick switch to Ollama', kind = '🦙' },
-        { word = '/gpt', menu = 'Quick switch to OpenAI', kind = '🧠' },
-        { word = '/clear', menu = 'Clear chat history & stats', kind = '🗑️' },
-        { word = '/c', menu = 'Clear (short)', kind = '🗑️' },
-        { word = '/tasks', menu = 'Focus task queue window', kind = '📋' },
-        { word = '/stats', menu = 'Show session statistics', kind = '📊' },
-        { word = '/s', menu = 'Stats (short)', kind = '📊' },
-        { word = '/cost', menu = 'Show model pricing info', kind = '💰' },
-        { word = '/compact', menu = 'Summarize to save context', kind = '🗜️' },
-        { word = '/thinking', menu = 'Toggle verbose tool call output', kind = '🧠' },
-        { word = '/verbose', menu = 'Toggle verbose mode', kind = '🧠' },
-        { word = '/plan', menu = 'Plan mode: read-only', kind = '📝' },
-        { word = '/build', menu = 'Build mode: full access', kind = '🔨' },
-        { word = '/review', menu = 'Review mode: approval required', kind = '👁️' },
-        { word = '/help', menu = 'Show all commands', kind = '📚' },
-        { word = '/?', menu = 'Help (short)', kind = '📚' },
-        { word = '/exit', menu = 'Close chat window', kind = '🚪' },
-        { word = '/quit', menu = 'Close chat window', kind = '🚪' },
-        { word = '/split', menu = 'Split layout (docked)', kind = '📐' },
-        { word = '/sidepane', menu = 'Sidepane layout (floating)', kind = '📐' },
-        { word = '/popup', menu = 'Popup layout (centered)', kind = '📐' },
-        { word = '/layout', menu = 'Toggle split/sidepane/popup', kind = '📐' },
-        { word = '/diff', menu = 'Side-by-side diff view', kind = '📊' },
-        { word = '/autodiff', menu = 'Toggle auto diff on changes', kind = '📊' },
-        { word = '/new', menu = 'Start a new chat session', kind = '🆕' },
-        { word = '/sessions', menu = 'List and switch sessions', kind = '📂' },
-        { word = '/session', menu = 'List and switch sessions', kind = '📂' },
-        { word = '/delete', menu = 'Delete a chat session', kind = '🗑️' },
-    }
-end
-
--- File cache for @ completion
-local file_cache = {
-    files = {},
-    cwd = nil,
-    timestamp = 0,
-}
-
--- Scan files in directory (with gitignore support)
-local function scan_files(dir, max_files)
-    max_files = max_files or 500
-    local files = {}
-    local count = 0
-    
-    -- Use fd if available (faster, respects gitignore), fallback to find
-    local cmd
-    if vim.fn.executable('fd') == 1 then
-        cmd = string.format('cd %s && fd --type f --hidden --exclude .git --max-results %d 2>/dev/null', 
-            vim.fn.shellescape(dir), max_files)
-    elseif vim.fn.executable('find') == 1 then
-        cmd = string.format('cd %s && find . -type f -not -path "*/.git/*" 2>/dev/null | head -n %d', 
-            vim.fn.shellescape(dir), max_files)
-    else
-        return files
-    end
-    
-    local handle = io.popen(cmd)
-    if handle then
-        for line in handle:lines() do
-            -- Clean up path (remove ./ prefix)
-            local path = line:gsub('^%./', '')
-            if path ~= '' then
-                table.insert(files, path)
-                count = count + 1
-                if count >= max_files then break end
-            end
-        end
-        handle:close()
-    end
-    
-    -- Sort files for consistent ordering
-    table.sort(files)
-    return files
-end
-
--- Get file completions with caching
-local function get_file_completions(base)
-    local cwd = vim.fn.getcwd()
-    local now = os.time()
-    
-    -- Refresh cache if cwd changed or cache is older than 30 seconds
-    if file_cache.cwd ~= cwd or (now - file_cache.timestamp) > 30 then
-        file_cache.files = scan_files(cwd, 500)
-        file_cache.cwd = cwd
-        file_cache.timestamp = now
-    end
-    
-    -- Filter files based on input
-    local matches = {}
-    local search = base:lower():gsub('^@', '')
-    
-    for _, file in ipairs(file_cache.files) do
-        -- Match anywhere in the path
-        if file:lower():find(search, 1, true) then
-            -- Determine icon based on extension
-            local ext = file:match('%.([^%.]+)$') or ''
-            local icon = ({
-                lua = '🌙',
-                rs = '🦀',
-                py = '🐍',
-                js = '📜',
-                ts = '📘',
-                tsx = '⚛️',
-                jsx = '⚛️',
-                json = '📋',
-                toml = '⚙️',
-                yaml = '⚙️',
-                yml = '⚙️',
-                md = '📝',
-                txt = '📄',
-                sh = '🐚',
-                bash = '🐚',
-                zsh = '🐚',
-                vim = '💚',
-                go = '🐹',
-                rb = '💎',
-                css = '🎨',
-                html = '🌐',
-                sql = '🗃️',
-            })[ext] or '📁'
-            
-            table.insert(matches, {
-                word = '@' .. file,
-                menu = file,
-                kind = icon,
-            })
-            
-            if #matches >= 50 then break end
-        end
-    end
-    
-    return matches
-end
-
--- Custom omnifunc for slash commands
-local function slash_command_complete(findstart, base)
-    if findstart == 1 then
-        -- Find the start of the word
-        local line = vim.api.nvim_get_current_line()
-        local col = vim.fn.col('.') - 1
-        -- If line starts with /, return 0 to complete from start
-        if line:sub(1, 1) == '/' then
-            return 0
-        end
-        return -3 -- No completion
-    else
-        -- Return matching completions
-        local completions = get_command_completions()
-        local matches = {}
-        for _, item in ipairs(completions) do
-            if item.word:lower():find(base:lower(), 1, true) == 1 then
-                table.insert(matches, item)
-            end
-        end
-        return matches
-    end
-end
-
--- Custom completefunc for @ file references
-local function file_reference_complete(findstart, base)
-    if findstart == 1 then
-        local line = vim.api.nvim_get_current_line()
-        local col = vim.fn.col('.') - 1
-        -- Find the @ that starts this reference
-        local at_pos = nil
-        for i = col, 1, -1 do
-            local char = line:sub(i, i)
-            if char == '@' then
-                at_pos = i - 1
-                break
-            elseif char == ' ' or char == '\t' then
-                break
-            end
-        end
-        if at_pos then
-            return at_pos
-        end
-        return -3
-    else
-        return get_file_completions(base)
-    end
-end
-
--- Make completion functions globally accessible
-_G.tark_slash_complete = slash_command_complete
-_G.tark_file_complete = file_reference_complete
-
--- Create the input buffer
-local function get_input_buffer()
-    if input_buf and vim.api.nvim_buf_is_valid(input_buf) then
-        return input_buf
-    end
-
-    input_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_option(input_buf, 'buftype', 'nofile')
-    vim.api.nvim_buf_set_option(input_buf, 'bufhidden', 'hide')
-    vim.api.nvim_buf_set_name(input_buf, 'tark-input')
-    
-    -- Set custom omnifunc for slash commands (triggered with C-x C-o)
-    vim.api.nvim_buf_set_option(input_buf, 'omnifunc', 'v:lua.tark_slash_complete')
-    -- Set custom completefunc for @ file references (triggered with C-x C-u)
-    vim.api.nvim_buf_set_option(input_buf, 'completefunc', 'v:lua.tark_file_complete')
-
-    return input_buf
-end
-
--- Append a message to the chat
--- Scroll chat window to bottom
-local function scroll_to_bottom()
-    if not chat_win or not vim.api.nvim_win_is_valid(chat_win) then
-        return
-    end
-    
-    local buf = get_chat_buffer()
-    local line_count = vim.api.nvim_buf_line_count(buf)
-    
-    -- Set cursor to last line
-    vim.api.nvim_win_set_cursor(chat_win, { line_count, 0 })
-    
-    -- Also scroll the view to ensure it's visible
-    vim.api.nvim_win_call(chat_win, function()
-        vim.cmd('normal! zb')  -- Put current line at bottom of window
-    end)
-end
-
--- Track response start time for timing display
-local response_start_time = nil
-
--- Create namespace for extmarks
-local ns_id = vim.api.nvim_create_namespace('tark_chat_highlights')
-local ns_file_links = vim.api.nvim_create_namespace('tark_file_links')
-
--- Store file path locations for click handling: { [line_num] = { {col_start, col_end, filepath}, ... } }
-local file_path_map = {}
-
---- Detect file paths in backticks and return their positions
---- Matches patterns like `path/to/file.ext` or `filename.ext`
----@param line string The line to search
----@return table[] List of {col_start, col_end, filepath}
-local function find_file_paths_in_line(line)
-    local results = {}
-    local pos = 1
-    
-    while true do
-        -- Find backtick-wrapped content
-        local start_tick = line:find('`', pos, true)
-        if not start_tick then break end
-        
-        local end_tick = line:find('`', start_tick + 1, true)
-        if not end_tick then break end
-        
-        local content = line:sub(start_tick + 1, end_tick - 1)
-        
-        -- Check if it looks like a file path (has extension or path separator)
-        -- Match: path/file.ext, file.ext, ./file, ../file, dir/subdir/file
-        if content:match('[%w_%-%.]+%.[%w]+$') or  -- has file extension
-           content:match('[/\\]') then              -- has path separator
-            -- Exclude URLs and obvious non-files
-            if not content:match('^https?://') and
-               not content:match('^%$') and        -- shell variables
-               not content:match('^%-%-') and      -- CLI flags
-               #content > 1 and #content < 256 then
-                table.insert(results, {
-                    col_start = start_tick - 1,  -- 0-indexed for extmarks
-                    col_end = end_tick,          -- 0-indexed, exclusive
-                    filepath = content,
-                })
-            end
-        end
-        
-        pos = end_tick + 1
-    end
-    
-    return results
-end
-
---- Highlight file paths in the chat buffer and store their locations
----@param buf number Buffer handle
----@param start_line number Starting line (0-indexed)
----@param lines string[] Lines to process
-local function highlight_file_paths(buf, start_line, lines)
-    for i, line in ipairs(lines) do
-        local line_num = start_line + i - 1  -- 0-indexed
-        local paths = find_file_paths_in_line(line)
-        
-        if #paths > 0 then
-            file_path_map[line_num] = paths
-            
-            for _, path_info in ipairs(paths) do
-                -- Add underline highlight to make it look clickable
-                pcall(vim.api.nvim_buf_add_highlight, buf, ns_file_links, 
-                    'Underlined', line_num, path_info.col_start, path_info.col_end)
-            end
-        end
-    end
-end
-
---- Get the file path under cursor in the chat buffer
----@return string|nil filepath The file path if cursor is on one
-get_filepath_under_cursor = function()
-    local cursor = vim.api.nvim_win_get_cursor(0)
-    local line_num = cursor[1] - 1  -- Convert to 0-indexed
-    local col = cursor[2]
-    
-    local paths = file_path_map[line_num]
-    if not paths then return nil end
-    
-    for _, path_info in ipairs(paths) do
-        if col >= path_info.col_start and col < path_info.col_end then
-            return path_info.filepath
-        end
-    end
-    
-    return nil
-end
-
---- Open a file path in a new buffer (closes chat first for better UX)
----@param filepath string The file path to open
-open_file_from_chat = function(filepath)
-    if not filepath then return end
-    
-    local cwd = vim.fn.getcwd()
-    local full_path = filepath
-    
-    -- Make path absolute if relative
-    if not filepath:match('^/') and not filepath:match('^%a:') then
-        full_path = cwd .. '/' .. filepath
-    end
-    
-    -- Check if file exists
-    if vim.fn.filereadable(full_path) == 1 then
-        -- Close chat to show the file
-        M.close()
-        
-        -- Open the file
-        vim.cmd('edit ' .. vim.fn.fnameescape(full_path))
-        vim.notify('Opened: ' .. filepath, vim.log.levels.INFO)
-    else
-        vim.notify('File not found: ' .. filepath, vim.log.levels.WARN)
-    end
-end
-
--- Panel (accordion) management functions
--- Line mapping for interactions: line_num -> {type, section, index}
-M._panel_line_map = {}
-
-local function update_panel()
-    local buf = panel_buf or tasks_buf
-    local win = panel_win or tasks_win
-    
-    if not buf or not vim.api.nvim_buf_is_valid(buf) then
-        return
-    end
-    
-    local lines = {}
-    M._panel_line_map = {}
-    
-    -- Helper to wrap long text
-    local function wrap_text(text, max_width, indent)
-        indent = indent or ''
-        local wrapped = {}
-        local remaining = text
-        while #remaining > max_width do
-            table.insert(wrapped, indent .. remaining:sub(1, max_width))
-            remaining = remaining:sub(max_width + 1)
-        end
-        if #remaining > 0 then
-            table.insert(wrapped, indent .. remaining)
-        end
-        return wrapped
-    end
-    
-    -- Section: Tasks
-    local tasks_count = #task_queue
-    local tasks_icon = panel_sections.tasks.expanded and '▼' or '▶'
-    local tasks_header = string.format('%s Tasks (%d)', tasks_icon, tasks_count)
-    table.insert(lines, tasks_header)
-    M._panel_line_map[#lines] = { type = 'section', section = 'tasks' }
-    
-    if panel_sections.tasks.expanded then
-        if tasks_count == 0 then
-            table.insert(lines, '   No tasks')
-            M._panel_line_map[#lines] = { type = 'empty', section = 'tasks' }
-        else
-            for i, task in ipairs(task_queue) do
-                local status_icon = task.status == 'processing' and '⏳' or '⏸'
-                local expand_icon = task.expanded and '▼' or '▶'
-                local prompt_preview = (task.prompt:match('^[^\n]+') or 'Task'):sub(1, 12)
-                if #prompt_preview >= 12 then prompt_preview = prompt_preview .. '...' end
-                
-                local task_line = string.format('  %s %s %d. %s', expand_icon, status_icon, i, prompt_preview)
-                table.insert(lines, task_line)
-                M._panel_line_map[#lines] = { type = 'task', section = 'tasks', index = i }
-                
-                -- Expanded task content
-                if task.expanded then
-                    local content_lines = vim.split(task.prompt, '\n')
-                    for _, line in ipairs(content_lines) do
-                        local wrapped = wrap_text(line, 16, '     ')
-                        for _, w_line in ipairs(wrapped) do
-                            table.insert(lines, w_line)
-                            M._panel_line_map[#lines] = { type = 'task_content', section = 'tasks', index = i }
-                        end
-                    end
-                    table.insert(lines, '')
-                    M._panel_line_map[#lines] = { type = 'separator', section = 'tasks' }
-                end
-            end
-        end
-        table.insert(lines, '')
-    end
-    
-    -- Section: Notifications
-    local notif_count = #panel_sections.notifications.items
-    local notif_icon = panel_sections.notifications.expanded and '▼' or '▶'
-    local notif_header = string.format('%s Notifications (%d)', notif_icon, notif_count)
-    table.insert(lines, notif_header)
-    M._panel_line_map[#lines] = { type = 'section', section = 'notifications' }
-    
-    if panel_sections.notifications.expanded then
-        if notif_count == 0 then
-            table.insert(lines, '   No notifications')
-            M._panel_line_map[#lines] = { type = 'empty', section = 'notifications' }
-        else
-            for i, notif in ipairs(panel_sections.notifications.items) do
-                local notif_line = '   ' .. (notif.message or notif):sub(1, 16)
-                table.insert(lines, notif_line)
-                M._panel_line_map[#lines] = { type = 'notification', section = 'notifications', index = i }
-            end
-        end
-        table.insert(lines, '')
-    end
-    
-    -- Section: Files Modified
-    local files_count = #panel_sections.files.items
-    local files_icon = panel_sections.files.expanded and '▼' or '▶'
-    local files_header = string.format('%s Files (%d)', files_icon, files_count)
-    table.insert(lines, files_header)
-    M._panel_line_map[#lines] = { type = 'section', section = 'files' }
-    
-    if panel_sections.files.expanded then
-        if files_count == 0 then
-            table.insert(lines, '   No files')
-            M._panel_line_map[#lines] = { type = 'empty', section = 'files' }
-        else
-            for i, file in ipairs(panel_sections.files.items) do
-                local short_name = file:match('[^/]+$') or file
-                local file_line = '   ' .. short_name:sub(1, 16)
-                table.insert(lines, file_line)
-                M._panel_line_map[#lines] = { type = 'file', section = 'files', index = i }
-            end
-        end
-    end
-    
-    pcall(function()
-        vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-        safe_buf_set_lines(buf, 0, -1, false, lines)
-        vim.api.nvim_buf_set_option(buf, 'modifiable', false)
-    end)
-end
-
--- Alias for backwards compatibility
-local function update_tasks_window()
-    update_panel()
-end
-
--- Add file to panel's files section
-local function add_file_to_panel(filepath)
-    if not filepath then return end
-    -- Avoid duplicates
-    for _, f in ipairs(panel_sections.files.items) do
-        if f == filepath then return end
-    end
-    table.insert(panel_sections.files.items, filepath)
-    update_panel()
-end
-
--- Add notification to panel
-local function add_notification(message)
-    table.insert(panel_sections.notifications.items, {
-        message = message,
-        timestamp = os.time(),
-    })
-    update_panel()
-end
-
--- Clear notifications
-local function clear_notifications()
-    panel_sections.notifications.items = {}
-    update_panel()
-end
-
-local function add_to_queue(prompt)
-    task_id_counter = task_id_counter + 1
-    table.insert(task_queue, {
-        id = task_id_counter,
-        prompt = prompt,
-        status = 'queued',
-        timestamp = os.time(),
-        expanded = false,  -- Collapsed by default
-    })
-    update_tasks_window()
-    return task_id_counter
-end
-
-local function remove_from_queue(index)
-    if index > 0 and index <= #task_queue then
-        table.remove(task_queue, index)
-        update_tasks_window()
-        return true
-    end
-    return false
-end
-
--- Forward declaration for send_message_internal
-local send_message_internal
-
--- Process next task in queue (called after task completion)
-local function process_next_task()
-    if queue_processing or #task_queue == 0 then
-        return
-    end
-    
-    -- Get the first task
-    local task = task_queue[1]
-    if not task then
-        return
-    end
-    
-    -- Mark as processing
-    task.status = 'processing'
-    queue_processing = true
-    update_tasks_window()
-    
-    -- Send the message
-    send_message_internal(task.prompt, function()
-        -- On completion, remove from queue and process next
-        vim.schedule(function()
-            queue_processing = false
-            remove_from_queue(1)  -- Remove first task
-            process_next_task()   -- Process next if available
-        end)
-    end)
-end
-
--- Get user accent highlight based on current mode
-local function get_user_accent_hl()
-    local accent_map = {
-        plan = 'TarkUserAccentPlan',
-        build = 'TarkUserAccentBuild',
-        review = 'TarkUserAccentReview',
-    }
-    return accent_map[current_mode] or 'TarkUserAccentBuild'
-end
-
--- Format message with OpenCode-style design
-local function append_message(role, content)
-    local buf = get_chat_buffer()
-    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-    local start_line = #lines
-
-    local new_lines = {}
-    local highlight_ranges = {}  -- Track where to add highlights
-    
-    if role == 'user' then
-        -- User message with left accent bar (clean, no username)
-        table.insert(new_lines, '')
-        table.insert(new_lines, '  ┃ ' .. content)
-        table.insert(new_lines, '')
-        -- Track accent bar position for highlighting
-        table.insert(highlight_ranges, { line = start_line + 1, col_start = 2, col_end = 5, hl = get_user_accent_hl() })
-        -- Start timing for response
-        response_start_time = vim.fn.reltime()
-        
-    elseif role == 'assistant' then
-        -- Assistant response - clean, no border
-        table.insert(new_lines, '')
-        for line in content:gmatch('[^\r\n]+') do
-            table.insert(new_lines, line)
-        end
-        -- Simple footer: just timing (mode already shown in input bar)
-        local elapsed = response_start_time and vim.fn.reltimestr(vim.fn.reltime(response_start_time)) or '0.0'
-        elapsed = string.format('%.1fs', tonumber(elapsed) or 0)
-        table.insert(new_lines, '')
-        table.insert(new_lines, string.format('  ⏱ %s', elapsed))
-        table.insert(new_lines, '')
-        
-    elseif role == 'thinking' then
-        -- Thinking section - subtle gray style
-        table.insert(new_lines, '')
-        for line in content:gmatch('[^\r\n]+') do
-            table.insert(new_lines, '    ' .. line)
-        end
-        
-    elseif role == 'tools' then
-        -- Tool actions - subtle
-        for line in content:gmatch('[^\r\n]+') do
-            table.insert(new_lines, '    ' .. line)
-        end
-        
-    elseif role == 'diff' then
-        -- Clean diff display with clear +/- markers
-        table.insert(new_lines, '')
-        
-        -- Parse the diff content
-        local removed_lines = {}
-        local added_lines = {}
-        local filename = ''
-        local is_new_file = false
-        
-        local in_code_block = false
-        for line in content:gmatch('[^\r\n]*') do
-            if line:match('^```') then
-                in_code_block = not in_code_block
-            elseif in_code_block then
-                if line:match('^# New file:') then
-                    filename = line:match('^# New file: (.+)') or ''
-                    is_new_file = true
-                elseif line:match('^# Changes to') then
-                    filename = line:match('^# Changes to (.+)') or ''
-                elseif line:match('^%+ ') then
-                    table.insert(added_lines, line:sub(3))
-                elseif line:match('^%- ') then
-                    table.insert(removed_lines, line:sub(3))
-                elseif line:match('^%+[^%+]') then
-                    table.insert(added_lines, line:sub(2))
-                elseif line:match('^%-[^%-]') then
-                    table.insert(removed_lines, line:sub(2))
-                end
-            end
-        end
-        
-        -- Header with filename
-        table.insert(new_lines, '  ╭─ 📊 ' .. (is_new_file and 'New file: ' or 'Modified: ') .. filename .. ' ─╮')
-        
-        -- Show removed lines (if any)
-        if #removed_lines > 0 then
-            table.insert(new_lines, '  │')
-            table.insert(new_lines, '  │ ── Removed ──')
-            for i, line in ipairs(removed_lines) do
-                if i > 15 then
-                    table.insert(new_lines, '  │   ... (' .. (#removed_lines - 15) .. ' more)')
-                    break
-                end
-                local display = line
-                if #display > 50 then display = display:sub(1, 47) .. '...' end
-                table.insert(new_lines, '  │ - ' .. display)
-                local line_num = #new_lines - 1 + start_line
-                table.insert(highlight_ranges, { line = line_num, col_start = 4, col_end = 6, hl = 'ErrorMsg' })
-            end
-        end
-        
-        -- Show added lines
-        if #added_lines > 0 then
-            table.insert(new_lines, '  │')
-            table.insert(new_lines, '  │ ── Added ──')
-            for i, line in ipairs(added_lines) do
-                if i > 15 then
-                    table.insert(new_lines, '  │   ... (' .. (#added_lines - 15) .. ' more)')
-                    break
-                end
-                local display = line
-                if #display > 50 then display = display:sub(1, 47) .. '...' end
-                table.insert(new_lines, '  │ + ' .. display)
-                local line_num = #new_lines - 1 + start_line
-                table.insert(highlight_ranges, { line = line_num, col_start = 4, col_end = 6, hl = 'String' })
-            end
-        end
-        
-        table.insert(new_lines, '  │')
-        table.insert(new_lines, '  ╰─ `/diff` for full side-by-side view ─╯')
-        table.insert(new_lines, '')
-        
-    elseif role == 'system' then
-        -- System messages - very subtle
-        for line in content:gmatch('[^\r\n]+') do
-            table.insert(new_lines, '  ' .. line)
-        end
-        
-    elseif role == 'separator' then
-        table.insert(new_lines, '')
-    end
-
-    if #new_lines > 0 then
-        -- Toggle modifiable for writing
-        vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-        safe_buf_set_lines(buf, start_line, start_line, false, new_lines)
-        vim.api.nvim_buf_set_option(buf, 'modifiable', false)
-        
-        -- Apply highlights using extmarks
-        for _, range in ipairs(highlight_ranges) do
-            pcall(vim.api.nvim_buf_add_highlight, buf, ns_id, range.hl, range.line, range.col_start, range.col_end)
-        end
-        
-        -- Highlight clickable file paths in assistant/system messages
-        if role == 'assistant' or role == 'system' or role == 'thinking' then
-            highlight_file_paths(buf, start_line, new_lines)
-        end
-    end
-
-    -- Auto-scroll to bottom
-    vim.schedule(function()
-        scroll_to_bottom()
-    end)
-end
-
--- Thinking state for Cursor-like display
-local thinking_state = {
-    start_time = nil,
-    actions = {},      -- List of actions taken
-    current_action = nil,
-    expanded = true,   -- Whether thinking section is expanded
-    line_start = nil,  -- Where thinking section starts in buffer
-}
-
--- Format thinking time
-local function format_thinking_time()
-    if not thinking_state.start_time then return '0s' end
-    local elapsed = vim.fn.reltimefloat(vim.fn.reltime(thinking_state.start_time))
-    return string.format('%.0fs', elapsed)
-end
-
--- Stop loading animation and finalize display
-local function stop_loading_animation()
-    if loading_timer then
-        vim.fn.timer_stop(loading_timer)
-        loading_timer = nil
-    end
-    
-    -- Finalize the thinking line with summary
-    local buf = get_chat_buffer()
-    if buf and vim.api.nvim_buf_is_valid(buf) and thinking_state.line_start then
-        local time_str = format_thinking_time()
-        local action_count = #thinking_state.actions
-        
-        -- Final summary: "*Thought for 5s* ▸ 8 actions"
-        local summary = string.format('*Thought for %s* ▸ %d action%s', 
-            time_str, 
-            action_count,
-            action_count == 1 and '' or 's'
-        )
-        
-        pcall(function()
-            safe_buf_set_lines(buf, thinking_state.line_start - 1, thinking_state.line_start, false, { summary })
-        end)
-    end
-end
-
--- Update the thinking display (single line, updates in-place)
-local function update_thinking_display()
-    local buf = get_chat_buffer()
-    if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
-    
-    local line_start = thinking_state.line_start
-    if not line_start then return end
-    
-    -- Build single line display
-    local time_str = format_thinking_time()
-    loading_frame = (loading_frame % #spinner_frames) + 1
-    local spinner = spinner_frames[loading_frame]
-    
-    -- Single line: "*Thinking for 3s* ⠋ Grepped AdminService"
-    local action_text = thinking_state.current_action or 'Processing...'
-    local line = string.format('*Thinking for %s* %s %s', time_str, spinner, action_text)
-    
-    -- Update just this one line
-    pcall(function()
-        safe_buf_set_lines(buf, line_start - 1, line_start, false, { line })
-    end)
-end
-
--- Add completed action to history (for final summary)
-local function add_thinking_action(icon, text)
-    table.insert(thinking_state.actions, { icon = icon, text = text })
-    -- Don't clear current_action - just track for summary
-end
-
--- Set current action (updates single line in-place)
-local function set_thinking_action(text)
-    thinking_state.current_action = text
-    update_thinking_display()
-end
-
--- Start loading animation (Cursor-style thinking)
-local function start_loading_animation()
-    stop_loading_animation()
-    loading_frame = 1
-    
-    -- Reset thinking state
-    thinking_state = {
-        start_time = vim.fn.reltime(),
-        actions = {},
-        current_action = get_loading_message(),
-        expanded = true,
-        line_start = nil,
-    }
-    
-    local buf = get_chat_buffer()
-    local loading_line_idx = vim.api.nvim_buf_line_count(buf)
-    
-    -- Add single thinking line
-    local initial_line = '*Thinking for 0s* ' .. spinner_frames[1] .. ' ' .. thinking_state.current_action
-    safe_buf_set_lines(buf, loading_line_idx, loading_line_idx, false, { '', initial_line, '' })
-    thinking_state.line_start = loading_line_idx + 2  -- Point to the single thinking line
-    
-    -- Start animation timer (updates spinner and time)
-    loading_timer = vim.fn.timer_start(100, function()
-        vim.schedule(function()
-            if not buf or not vim.api.nvim_buf_is_valid(buf) then
-                stop_loading_animation()
-                return
-            end
-            update_thinking_display()
-        end)
-    end, { ['repeat'] = -1 })
-    
-    return loading_line_idx
-end
-
--- Status polling timer
-local status_timer = nil
-local last_status = ''
-
--- Map tool actions to display-friendly format with icons
-local function format_action(action, tool_arg)
-    local action_map = {
-        ['Searching'] = { icon = '🔍', verb = 'Searched' },
-        ['Reading'] = { icon = '📖', verb = 'Read' },
-        ['Writing'] = { icon = '✏️', verb = 'Wrote' },
-        ['Executing'] = { icon = '⚡', verb = 'Executed' },
-        ['Analyzing'] = { icon = '🧠', verb = 'Analyzed' },
-        ['Grepping'] = { icon = '🔎', verb = 'Grepped' },
-        ['Listing'] = { icon = '📂', verb = 'Listed' },
-        ['Deleting'] = { icon = '🗑️', verb = 'Deleted' },
-        ['Planning'] = { icon = '📋', verb = 'Planned' },
-    }
-    
-    local info = action_map[action] or { icon = '•', verb = action }
-    local display_text = action or ''
-    
-    -- Ensure tool_arg is a string (could be vim.NIL from JSON)
-    if tool_arg and type(tool_arg) == 'string' and tool_arg ~= '' then
-        -- Shorten long paths
-        local short_arg = tostring(tool_arg)
-        if #short_arg > 40 then
-            short_arg = '...' .. short_arg:sub(-37)
-        end
-        display_text = display_text .. ' `' .. short_arg .. '`'
-    end
-    
-    return info.icon, display_text, info.verb
-end
-
--- Poll agent status and update display
-local function poll_status()
-    local url = get_server_url() .. '/chat/status'
-    vim.fn.jobstart({
-        'curl', '-s', '--connect-timeout', '1', url
-    }, {
-        stdout_buffered = true,
-        on_stdout = function(_, data)
-            vim.schedule(function()
-                if data and data[1] and data[1] ~= '' then
-                    local response = table.concat(data, '')
-                    local ok, status = pcall(vim.fn.json_decode, response)
-                    if ok and status then
-                        if status.active and status.current_action and status.current_action ~= '' then
-                            local icon, display_text, verb = format_action(status.current_action, status.tool_arg)
-                            
-                            -- Check if this is a new action
-                            if display_text ~= last_status then
-                                -- If action changed, add previous to history
-                                if last_status ~= '' then
-                                    local prev_action = last_status:match('^(%w+)') or ''
-                                    local prev_arg = last_status:match('`([^`]+)`') or ''
-                                    if prev_action ~= '' then
-                                        local prev_icon, _, prev_verb = format_action(prev_action, nil)
-                                        local history_text = prev_verb
-                                        if prev_arg ~= '' then
-                                            history_text = history_text .. ' `' .. prev_arg .. '`'
-                                        end
-                                        add_thinking_action(prev_icon, history_text)
-                                    end
-                                end
-                                
-                                last_status = display_text
-                                set_thinking_action(display_text)
-                            end
-                        end
-                    end
-                end
-            end)
-        end,
-    })
-end
-
--- Start status polling
-local function start_status_polling()
-    if status_timer then
-        vim.fn.timer_stop(status_timer)
-    end
-    last_status = ''
-    status_timer = vim.fn.timer_start(200, function()
-        vim.schedule(poll_status)
-    end, { ['repeat'] = -1 })
-end
-
--- Stop status polling
-local function stop_status_polling()
-    if status_timer then
-        vim.fn.timer_stop(status_timer)
-        status_timer = nil
-    end
-    last_status = ''
-end
-
--- Internal message sending (called by queue processor)
-send_message_internal = function(message, completion_callback)
-    if not message or message == '' then
-        if completion_callback then
-            completion_callback()
-        end
-        return
-    end
-
-    -- Mark agent as running
-    agent_running = true
-    
-    append_message('user', message)
-
-    -- Show animated loading indicator
-    local buf = get_chat_buffer()
-    start_loading_animation()
-    
-    -- Start polling for status updates
-    start_status_polling()
-    
-    -- Scroll to show loading indicator
-    vim.schedule(function()
-        scroll_to_bottom()
-    end)
-
-    -- Get editor's current working directory
-    local server_cwd = get_server_cwd()
-    local clean_cwd = server_cwd:gsub('\\', '\\\\'):gsub('"', '\\"')
-
-    -- Ensure message is a proper string (escape special characters)
-    local clean_message = message:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'):gsub('\t', '\\t')
-    
-    -- Build request body with optional LSP proxy port
-    local req_parts = {
-        '"message": "' .. clean_message .. '"',
-        '"clear_history": false',
-        '"provider": "' .. current_provider .. '"',
-        '"cwd": "' .. clean_cwd .. '"',
-        '"mode": "' .. current_mode .. '"',
-    }
-    
-    -- Include LSP proxy port if available
-    if lsp_proxy_port then
-        table.insert(req_parts, '"lsp_proxy_port": ' .. lsp_proxy_port)
-    end
-    
-    local req_body = '{' .. table.concat(req_parts, ', ') .. '}'
-
-    -- Track if we've received any response data
-    local response_received = false
-    
-    vim.fn.jobstart({
-        'curl',
-        '-s',
-        '--max-time', '300',  -- 5 minute timeout for long-running operations
-        '-X', 'POST',
-        '-H', 'Content-Type: application/json',
-        '-d', req_body,
-        get_server_url() .. '/chat',
-    }, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_stdout = function(_, data)
-            vim.schedule(function()
-                response_received = true
-                
-                -- Stop loading animation and status polling
-                stop_loading_animation()
-                stop_status_polling()
-                
-                -- Mark agent as not running
-                agent_running = false
-                
-                -- Call completion callback if provided
-                if completion_callback then
-                    vim.schedule(function()
-                        completion_callback()
-                    end)
-                end
-                
-                -- Finalize thinking section - replace with collapsed summary
-                local current_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-                local thinking_start = nil
-                local thinking_end = nil
-                
-                -- Find thinking section boundaries
-                for i = 1, #current_lines do
-                    if current_lines[i]:match('^%*Thinking') then
-                        thinking_start = i
-                    elseif thinking_start and (current_lines[i] == '' and not current_lines[i]:match('^%s+[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏•🔍📖✏️⚡🧠🔎📂🗑️📋▼▶]')) then
-                        thinking_end = i
-                        break
-                    end
-                end
-                
-                if thinking_start then
-                    thinking_end = thinking_end or #current_lines
-                    local final_time = format_thinking_time()
-                    local action_count = #thinking_state.actions
-                    
-                    -- Create collapsed summary
-                    local summary_lines = {}
-                    if action_count > 0 then
-                        table.insert(summary_lines, string.format('*Thought for %s* ▶ _%d actions_', final_time, action_count))
-                    else
-                        table.insert(summary_lines, string.format('*Thought for %s*', final_time))
-                    end
-                    table.insert(summary_lines, '')
-                    
-                    pcall(function()
-                        safe_buf_set_lines(buf, thinking_start - 1, thinking_end, false, summary_lines)
-                    end)
-                end
-
-                if data and data[1] and data[1] ~= '' then
-                    local response_text = table.concat(data, '')
-                    local ok, resp = pcall(vim.fn.json_decode, response_text)
-                    if ok and resp and resp.response then
-                        -- Track token usage and update stats
-                        update_stats(message, resp.response)
-                        
-                        -- Check if context is getting full and warn user
-                        local context_max = model_info and model_info.limit and model_info.limit.context
-                            or default_context_windows[current_provider] or 128000
-                        local used = session_stats.input_tokens + session_stats.output_tokens
-                        local percent = math.floor((used / context_max) * 100)
-                        
-                        -- Show auto-compaction status from server
-                        if resp.auto_compacted then
-                            append_message('system', '🔄 **Context auto-compacted!** Previous conversation summarized to save space.')
-                        elseif percent >= 70 then
-                            append_message('system', '📦 **Context at ' .. percent .. '%** - Auto-compact will trigger at 80%')
-                        end
-                        
-                        -- Update with actual usage from server if available
-                        if resp.context_usage_percent then
-                            -- Server reports actual usage, use that for UI
-                            percent = resp.context_usage_percent
-                        end
-                        
-                        -- Track modified files (always, regardless of thinking mode)
-                        local modified_files = {}
-                        if resp.tool_call_log and #resp.tool_call_log > 0 then
-                            for _, tc in ipairs(resp.tool_call_log) do
-                                local args = tc.args or {}
-                                if tc.tool == 'write_file' or tc.tool == 'patch_file' or tc.tool == 'propose_change' then
-                                    local path = args.path or nil
-                                    if path and path ~= '?' then
-                                        track_modified_file(path)
-                                        table.insert(modified_files, path)
-                                    end
-                                end
-                            end
-                        end
-                        
-                        -- Show verbose tool call info if thinking mode is on
-                        if thinking_mode and resp.tool_call_log and #resp.tool_call_log > 0 then
-                            -- Build thinking content
-                            local thinking_lines = {}
-                            table.insert(thinking_lines, 'User asked: ' .. message:sub(1, 50) .. (message:len() > 50 and '...' or ''))
-                            
-                            -- Categorize and display tool calls
-                            local reads = {}
-                            local writes = {}
-                            local searches = {}
-                            
-                            for _, tc in ipairs(resp.tool_call_log) do
-                                local args = tc.args or {}
-                                if tc.tool == 'read_file' or tc.tool == 'read_files' then
-                                    local path = args.path or (args.paths and table.concat(args.paths, ', ')) or '?'
-                                    table.insert(reads, path)
-                                elseif tc.tool == 'write_file' or tc.tool == 'patch_file' or tc.tool == 'delete_file' or tc.tool == 'propose_change' then
-                                    local path = args.path or '?'
-                                    table.insert(writes, path)
-                                elseif tc.tool == 'file_search' or tc.tool == 'grep' or tc.tool == 'find_references' then
-                                    table.insert(searches, args.pattern or args.symbol or '?')
-                                elseif tc.tool == 'codebase_overview' then
-                                    table.insert(thinking_lines, 'Analyzing codebase structure...')
-                                elseif tc.tool == 'list_directory' then
-                                    table.insert(thinking_lines, 'Listing ' .. (args.path or '.') .. '/')
-                                end
-                            end
-                            
-                            if #searches > 0 then
-                                table.insert(thinking_lines, '🔍 Searching: ' .. table.concat(searches, ', '))
-                            end
-                            
-                            if #reads > 0 then
-                                table.insert(thinking_lines, '📖 Reading:')
-                                for _, f in ipairs(reads) do
-                                    local short = f:match('[^/]+$') or f
-                                    table.insert(thinking_lines, '   • ' .. short)
-                                end
-                            end
-                            
-                            if #writes > 0 then
-                                table.insert(thinking_lines, '✏️ Modified:')
-                                for _, f in ipairs(writes) do
-                                    local short = f:match('[^/]+$') or f
-                                    table.insert(thinking_lines, '   • ' .. short)
-                                end
-                                -- Add diff prompt
-                                table.insert(thinking_lines, '')
-                                table.insert(thinking_lines, '💡 Type `/diff` to view side-by-side changes')
-                            end
-                            
-                            -- Display as thinking section
-                            append_message('thinking', table.concat(thinking_lines, '\n'))
-                        end
-                        
-                        -- Show inline diff in chat for modified files (if enabled)
-                        if #modified_files > 0 and M.config.auto_show_diff then
-                            for _, filepath in ipairs(modified_files) do
-                                local cwd = vim.fn.getcwd()
-                                local full_path = cwd .. '/' .. filepath
-                                local has_git = vim.fn.isdirectory(cwd .. '/.git') == 1
-                                local diff_shown = false
-                                
-                                if has_git then
-                                    -- Try git diff first (for tracked files)
-                                    local diff_output = vim.fn.system('cd ' .. vim.fn.shellescape(cwd) .. ' && git diff --no-color -- ' .. vim.fn.shellescape(filepath) .. ' 2>/dev/null')
-                                    
-                                    if diff_output and diff_output ~= '' and vim.v.shell_error == 0 then
-                                        -- Format diff for display
-                                        local diff_lines = {}
-                                        local short_name = filepath:match('[^/]+$') or filepath
-                                        table.insert(diff_lines, '```diff')
-                                        table.insert(diff_lines, '# Changes to ' .. short_name)
-                                        
-                                        -- Parse and include relevant diff lines
-                                        local line_count = 0
-                                        for line in diff_output:gmatch('[^\r\n]+') do
-                                            -- Skip diff header lines, keep the actual changes
-                                            if line:match('^[+-]') and not line:match('^[+-][+-][+-]') then
-                                                table.insert(diff_lines, line)
-                                                line_count = line_count + 1
-                                            elseif line:match('^@@') then
-                                                table.insert(diff_lines, line)
-                                            end
-                                            -- Limit to prevent huge diffs
-                                            if line_count > 50 then
-                                                table.insert(diff_lines, '... (truncated, use /diff for full view)')
-                                                break
-                                            end
-                                        end
-                                        
-                                        table.insert(diff_lines, '```')
-                                        
-                                        if line_count > 0 then
-                                            append_message('diff', table.concat(diff_lines, '\n'))
-                                            diff_shown = true
-                                        end
-                                    end
-                                    
-                                    -- If no diff (new file or already staged), show file content as "new"
-                                    if not diff_shown then
-                                        -- Check if it's a new untracked file
-                                        local is_untracked = vim.fn.system('cd ' .. vim.fn.shellescape(cwd) .. ' && git ls-files -- ' .. vim.fn.shellescape(filepath)):gsub('%s+', '') == ''
-                                        
-                                        if is_untracked and vim.fn.filereadable(full_path) == 1 then
-                                            local content = vim.fn.readfile(full_path)
-                                            if #content > 0 then
-                                                local diff_lines = {}
-                                                local short_name = filepath:match('[^/]+$') or filepath
-                                                table.insert(diff_lines, '```diff')
-                                                table.insert(diff_lines, '# New file: ' .. short_name)
-                                                
-                                                local line_count = 0
-                                                for _, line in ipairs(content) do
-                                                    table.insert(diff_lines, '+ ' .. line)
-                                                    line_count = line_count + 1
-                                                    if line_count > 30 then
-                                                        table.insert(diff_lines, '+ ... (' .. (#content - 30) .. ' more lines)')
-                                                        break
-                                                    end
-                                                end
-                                                
-                                                table.insert(diff_lines, '```')
-                                                append_message('diff', table.concat(diff_lines, '\n'))
-                                                diff_shown = true
-                                            end
-                                        end
-                                    end
-                                end
-                                
-                                -- If still no diff shown (no git or other issue), just note the file was modified
-                                if not diff_shown then
-                                    local short_name = filepath:match('[^/]+$') or filepath
-                                    append_message('system', '📝 Modified: `' .. short_name .. '` (use `/diff` to view changes)')
-                                end
-                            end
-                        end
-                        
-                        append_message('assistant', resp.response)
-                        
-                        -- Update provider if changed
-                        if resp.provider then
-                            current_provider = resp.provider
-                            current_provider_id = resp.provider  -- Keep display in sync
-                        end
-                        
-                        -- Always update header to show new stats
-                        update_chat_header()
-                        
-                        -- Show tool call summary only if not in thinking mode
-                        if resp.tool_calls_made and resp.tool_calls_made > 0 and not thinking_mode then
-                            append_message('system', '(' .. resp.tool_calls_made .. ' actions performed)')
-                        end
-                        -- Final scroll to ensure we see the end
-                        scroll_to_bottom()
-                    elseif ok and resp and resp.error then
-                        -- Check for corrupted tool message history error
-                        if resp.error:match("messages with role 'tool'") or 
-                           resp.error:match("tool_calls") then
-                            append_message('system', '🔄 *Session history corrupted. Auto-clearing and retrying...*')
-                            scroll_to_bottom()
-                            
-                            -- Clear history and retry the message
-                            vim.defer_fn(function()
-                                local retry_body = vim.fn.json_encode({
-                                    message = message,
-                                    provider = current_provider,
-                                    cwd = get_server_cwd(),
-                                    clear_history = true,
-                                    lsp_proxy_port = lsp_proxy_port,
-                                })
-                                vim.fn.jobstart({
-                                    'curl', '-s', '-X', 'POST',
-                                    '-H', 'Content-Type: application/json',
-                                    '-d', retry_body,
-                                    get_server_url() .. '/chat',
-                                }, {
-                                    stdout_buffered = true,
-                                    on_stdout = function(_, retry_data)
-                                        vim.schedule(function()
-                                            if retry_data and retry_data[1] then
-                                                local retry_ok, retry_resp = pcall(vim.fn.json_decode, table.concat(retry_data, ''))
-                                                if retry_ok and retry_resp and retry_resp.response then
-                                                    append_message('system', '✅ *Session cleared. Continuing...*')
-                                                    append_message('assistant', retry_resp.response)
-                                                    update_chat_header()
-                                                elseif retry_ok and retry_resp and retry_resp.error then
-                                                    append_message('system', '❌ *Error after retry: ' .. retry_resp.error .. '*')
-                                                end
-                                            end
-                                            scroll_to_bottom()
-                                        end)
-                                    end,
-                                })
-                            end, 100)
-                        else
-                            append_message('system', '❌ *Error: ' .. resp.error .. '*')
-                            scroll_to_bottom()
-                        end
-                    else
-                        append_message('system', '❌ *Failed to parse response*')
-                        scroll_to_bottom()
-                    end
-                end
-            end)
-        end,
-        on_stderr = function(_, data)
-            vim.schedule(function()
-                response_received = true
-                stop_status_polling()
-                stop_loading_animation()
-                agent_running = false
-                
-                -- Call completion callback if provided
-                if completion_callback then
-                    completion_callback()
-                end
-                
-                if data and data[1] and data[1] ~= '' then
-                    local err_msg = table.concat(data, '')
-                    append_message('system', '❌ *Error: Could not connect to server. Run: tark serve*')
-                    -- Log stderr for debugging (visible with :messages)
-                    vim.notify('tark curl stderr: ' .. err_msg, vim.log.levels.DEBUG)
-                    scroll_to_bottom()
-                end
-            end)
-        end,
-        on_exit = function(_, exit_code)
-            vim.schedule(function()
-                -- Only handle if no response was received (hung/timeout case)
-                if not response_received then
-                    stop_loading_animation()
-                    stop_status_polling()
-                    agent_running = false
-                    
-                    -- Call completion callback if provided
-                    if completion_callback then
-                        completion_callback()
-                    end
-                    
-                    if exit_code == 28 then
-                        -- curl exit code 28 = timeout
-                        append_message('system', '⏱️ *Request timed out after 5 minutes. The server may still be processing.*')
-                    elseif exit_code ~= 0 then
-                        append_message('system', string.format('❌ *Request failed (exit code: %d). Check server status.*', exit_code))
-                    else
-                        -- Exit code 0 but no data received - server sent empty response
-                        append_message('system', '❌ *Server returned empty response. This may indicate an internal error.*')
-                    end
-                    scroll_to_bottom()
-                end
-            end)
-        end,
-    })
-end
-
--- Public send_message: adds to queue or processes immediately
-local function send_message(message)
-    if not message or message == '' then
-        return
-    end
-    
-    -- If agent is busy, add to queue
-    if agent_running or queue_processing then
-        add_to_queue(message)
-        append_message('system', string.format('➕ *Task added to queue (#%d)*', #task_queue))
-        return
-    end
-    
-    -- Otherwise, process immediately (start the queue)
-    add_to_queue(message)
-    process_next_task()
-end
-
--- Switch to a specific provider
-local function switch_provider(new_provider, skip_message)
-    if new_provider == current_provider then
-        -- Still update header in case model changed
-        update_chat_header()
-        if not skip_message then
-            append_message('system', '✓ *Already using ' .. new_provider .. '*')
-        end
-        return
-    end
-
-    local req_body = '{"provider": "' .. new_provider .. '"}'
-    vim.fn.jobstart({
-        'curl', '-s', '-X', 'POST',
-        '-H', 'Content-Type: application/json',
-        '-d', req_body,
-        get_server_url() .. '/provider',
-    }, {
-        stdout_buffered = true,
-        on_stdout = function(_, data)
-            vim.schedule(function()
-                if data and data[1] then
-                    local ok, resp = pcall(vim.fn.json_decode, table.concat(data, ''))
-                    if ok and resp and resp.success then
-                        current_provider = new_provider
-                        current_provider_id = new_provider  -- Update display provider too
-                        update_chat_header()
-                        append_message('system', '✅ *Switched to ' .. new_provider .. '*')
-                        -- Clear history with new provider
-                        local clear_body = '{"message": "", "clear_history": true, "provider": "' .. new_provider .. '"}'
-                        vim.fn.system('curl -s -X POST -H "Content-Type: application/json" -d \'' .. clear_body .. '\' ' .. get_server_url() .. '/chat')
-                    elseif ok and resp and resp.error then
-                        append_message('system', '❌ *Error: ' .. resp.error .. '*')
-                    end
-                end
-            end)
-        end,
-    })
-end
-
--- Get models for a specific provider from models.dev
-local function get_models_for_provider(provider_key)
-    local db = models_db.data
-    if not db then return {} end
-    
-    -- Remove trailing slash from prefix if present
-    provider_key = provider_key:gsub('/$', '')
-    
-    local provider_data = db[provider_key]
-    if not provider_data or not provider_data.models then
-        return {}
-    end
-    
-    local models = {}
-    for model_key, model in pairs(provider_data.models) do
-        -- Skip deprecated models
-        if not model.status or model.status ~= 'deprecated' then
-            -- Add full id if not present
-            local model_copy = vim.tbl_deep_extend('force', {}, model)
-            model_copy.id = model_copy.id or (provider_key .. '/' .. model_key)
-            table.insert(models, model_copy)
-        end
-    end
-    
-    -- Sort by name
-    table.sort(models, function(a, b)
-        return (a.name or a.id) < (b.name or b.id)
-    end)
-    
-    return models
-end
-
--- Fetch Ollama models from local server
-local function fetch_ollama_models(callback)
-    vim.fn.jobstart({
-        'curl', '-s', 'http://localhost:11434/api/tags'
-    }, {
-        stdout_buffered = true,
-        on_stdout = function(_, data)
-            vim.schedule(function()
-                local models = {}
-                if data and data[1] and data[1] ~= '' then
-                    local ok, resp = pcall(vim.fn.json_decode, table.concat(data, ''))
-                    if ok and resp and resp.models then
-                        for _, m in ipairs(resp.models) do
-                            table.insert(models, {
-                                id = 'ollama/' .. m.name,
-                                name = m.name,
-                                size = m.size,
-                            })
-                        end
-                    end
-                end
-                callback(models)
-            end)
-        end,
-        on_exit = function(_, code)
-            if code ~= 0 then
-                vim.schedule(function()
-                    callback({})
-                end)
-            end
-        end,
-    })
-end
-
--- Show model picker for a specific provider
-local function show_model_picker(provider_info, models)
-    if #models == 0 then
-        append_message('system', '❌ *No models found for ' .. provider_info.name .. '*')
-        return
-    end
-    
-    local items = {}
-    for _, m in ipairs(models) do
-        local display = m.name or m.id
-        -- Add context window info if available
-        if m.limit and m.limit.context then
-            display = display .. string.format(' (%s ctx)', format_number(m.limit.context))
-        end
-        -- Add cost info if available
-        if m.cost and m.cost.input then
-            display = display .. string.format(' - $%.2f/1M in', m.cost.input)
-        end
-        -- Add size for Ollama
-        if m.size then
-            local size_gb = m.size / (1024 * 1024 * 1024)
-            display = display .. string.format(' (%.1fGB)', size_gb)
-        end
-        table.insert(items, provider_info.icon .. ' ' .. display)
-    end
-    
-    vim_select(items, {
-        prompt = 'Select ' .. provider_info.name .. ' Model',
-    }, function(choice, idx)
-        if choice and idx then
-            local selected_model = models[idx]
-            local model_id = selected_model.id
-            local provider_name = provider_info.our_provider or provider_info.id
-            
-            -- Update model mapping
-            model_mappings[provider_name] = model_id
-            current_model = model_id
-            current_provider_id = provider_info.id  -- Track actual provider for display
-            
-            -- Switch provider (skip duplicate message since we show our own)
-            switch_provider(provider_name, true)
-            
-            -- Update header to show new model
-            update_chat_header()
-            
-            -- Save session to persist selection
-            vim.defer_fn(function()
-                if M.save_session then M.save_session() end
-            end, 100)
-            
-            append_message('system', '📦 *Selected: ' .. (selected_model.name or model_id) .. '*')
-        end
-        -- Return focus to input window
-        if input_win and vim.api.nvim_win_is_valid(input_win) then
-            vim.api.nvim_set_current_win(input_win)
-            vim.cmd('startinsert')
-        end
-    end)
-end
-
--- Show provider selection menu (first step)
-local function show_provider_menu()
-    local items = {}
-    for _, p in ipairs(providers_info) do
-        local marker = ''
-        if current_provider == p.id or 
-           (current_provider == 'claude' and p.id == 'anthropic') or
-           (current_provider == 'openai' and p.id == 'openai') then
-            marker = '✓ '
-        end
-        table.insert(items, marker .. p.icon .. ' ' .. p.name)
-    end
-
-    vim_select(items, {
-        prompt = 'Select AI Provider',
-    }, function(choice, idx)
-        if choice and idx then
-            local provider = providers_info[idx]
-            
-            -- Show loading message
-            append_message('system', '🔍 *Fetching models for ' .. provider.name .. '...*')
-            
-            if provider.local_fetch then
-                -- Fetch from local Ollama
-                fetch_ollama_models(function(models)
-                    if #models > 0 then
-                        show_model_picker(provider, models)
-                    else
-                        append_message('system', '❌ *No Ollama models found. Is Ollama running?*')
-                        -- Return focus
-                        if input_win and vim.api.nvim_win_is_valid(input_win) then
-                            vim.api.nvim_set_current_win(input_win)
-                            vim.cmd('startinsert')
-                        end
-                    end
-                end)
-            else
-                -- Get from models.dev cache
-                local models = get_models_for_provider(provider.api_key)
-                if #models > 0 then
-                    show_model_picker(provider, models)
-                else
-                    -- Try fetching fresh data
-                    append_message('system', '⏳ *Loading models database...*')
-                    fetch_models_db()
-                    vim.defer_fn(function()
-                        local fresh_models = get_models_for_provider(provider.api_key)
-                        if #fresh_models > 0 then
-                            show_model_picker(provider, fresh_models)
-                        else
-                            append_message('system', '❌ *No models found. Try again in a few seconds.*')
-                            -- Return focus
-                            if input_win and vim.api.nvim_win_is_valid(input_win) then
-                                vim.api.nvim_set_current_win(input_win)
-                                vim.cmd('startinsert')
-                            end
-                        end
-                    end, 3000)
-                end
-            end
-        else
-            -- Return focus to input window
-            if input_win and vim.api.nvim_win_is_valid(input_win) then
-                vim.api.nvim_set_current_win(input_win)
-                vim.cmd('startinsert')
-            end
-        end
-    end)
-end
-
--- Quick provider switch (for backwards compatibility)
-local function quick_switch_provider(provider_name)
-    switch_provider(provider_name)
-end
-
--- ========== Multi-Session Management ==========
-
--- Current session info
-local current_session_id = nil
-local current_session_name = nil
-
--- Create a new session
--- Uses session module to create session via backend API
--- Clears chat buffer, resets stats, retains provider/mode settings
--- Requirements: 4.1, 4.2, 4.3, 4.4
-local function create_new_session()
-    local session_mod = require('tark.session')
-    
-    append_message('system', '🆕 *Creating new session...*')
-    
-    session_mod.create_session(function(new_session, err)
-        if err then
-            append_message('system', '❌ *Failed to create session: ' .. err .. '*')
-            -- Use centralized error notification (Requirements: 8.4)
-            session_mod.notify_error(err, 'create', nil)
-            return
-        end
-        
-        if new_session then
-            current_session_id = new_session.id
-            current_session_name = new_session.name or 'New Session'
-            
-            -- Clear chat display
-            local buf = get_chat_buffer()
-            safe_buf_set_lines(buf, 0, -1, false, {})
-            
-            -- Reset session stats (Requirements 4.3)
-            reset_stats()
-            
-            -- Provider and mode settings are retained (Requirements 4.4)
-            -- current_provider, current_provider_id, current_mode remain unchanged
-            
-            update_chat_header()
-            update_chat_window_title()
-            
-            append_message('system', '✅ *New session created!* Start typing to begin.')
-            -- Use centralized success notification (Requirements: 4.1)
-            session_mod.notify_success('created', nil)
-        else
-            append_message('system', '❌ *Failed to create session: Invalid response*')
-            session_mod.notify_error('Invalid response from server', 'create', nil)
-        end
-    end)
-end
-
--- Switch to a specific session
--- Uses session module to switch session via backend API
--- Restores messages, stats, and settings from the session
--- Requirements: 3.3, 3.4
-local function switch_to_session(session_id)
-    local session_mod = require('tark.session')
-    
-    append_message('system', '🔄 *Switching to session...*')
-    
-    session_mod.switch_session(session_id, function(data, err)
-        if err then
-            local session_name = session_id
-            if err:match('404') or err:match('not found') then
-                append_message('system', '❌ *Session not found: ' .. session_id .. '*')
-                -- Use centralized error notification for session not found (Requirements: 8.4)
-                session_mod.notify_error(err, 'switch', session_name)
-            else
-                append_message('system', '❌ *Failed to switch session: ' .. err .. '*')
-                -- Use centralized error notification (Requirements: 8.4)
-                session_mod.notify_error(err, 'switch', session_name)
-            end
-            return
-        end
-        
-        if data and data.id then
-            current_session_id = data.id
-            current_session_name = data.name or 'Session'
-            
-            -- Update provider/model from session
-            if data.provider then
-                current_provider = data.provider
-                current_provider_id = data.provider
-            end
-            if data.model then
-                current_model = data.model
-            end
-            if data.mode then
-                current_mode = data.mode
-            end
-            
-            -- Clear and restore chat display
-            local buf = get_chat_buffer()
-            safe_buf_set_lines(buf, 0, -1, false, {})
-            
-            -- Restore messages from session
-            if data.messages then
-                for _, msg in ipairs(data.messages) do
-                    if msg.role == 'user' then
-                        append_message('user', msg.content)
-                    elseif msg.role == 'assistant' then
-                        append_message('assistant', msg.content)
-                    end
-                end
-            end
-            
-            -- Update stats from session
-            if data.input_tokens then
-                session_stats.input_tokens = data.input_tokens
-            end
-            if data.output_tokens then
-                session_stats.output_tokens = data.output_tokens
-            end
-            if data.total_cost then
-                session_stats.total_cost = data.total_cost
-            end
-            
-            update_chat_header()
-            update_chat_window_title()
-            
-            local msg_count = data.messages and #data.messages or 0
-            append_message('system', string.format('✅ *Switched to session: %s* (%d messages)', data.name or session_id, msg_count))
-            -- Use centralized success notification (Requirements: 3.3)
-            session_mod.notify_success('switched', data.name or session_id)
-        else
-            append_message('system', '❌ *Failed to switch session: Invalid response*')
-            session_mod.notify_error('Invalid response from server', 'switch', session_id)
-        end
-    end)
-end
-
--- Show session picker
--- Uses session module's show_picker() in switch mode
--- Requirements: 3.1, 3.3
-local function show_session_picker()
-    local session_mod = require('tark.session')
-    
-    -- Use session module's picker in switch mode
-    session_mod.show_picker(function(session_id)
-        if session_id then
-            switch_to_session(session_id)
-        end
-    end, 'switch')
-end
-
--- Delete session command handler
--- Shows session picker in delete mode with confirmation
--- Handles current session deletion (switch to recent) and last session deletion (create new)
--- Requirements: 5.1, 5.2, 5.3, 5.4
-local function delete_session_command()
-    local session_mod = require('tark.session')
-    
-    -- Use session module's picker in delete mode
-    session_mod.show_picker(function(session_id)
-        if not session_id then
-            return
-        end
-        
-        -- Fetch sessions to check if this is the current session or last session
-        session_mod.fetch_sessions(function(sessions, err)
-            if err then
-                append_message('system', '❌ *Failed to fetch sessions: ' .. err .. '*')
-                -- Use centralized error notification (Requirements: 8.4)
-                session_mod.notify_error(err, 'fetch', nil)
-                return
-            end
-            
-            local is_current = session_mod.current_session and session_mod.current_session.id == session_id
-            local is_last = sessions and #sessions == 1
-            
-            -- Find the session to get its name for confirmation
-            local session_to_delete = nil
-            for _, s in ipairs(sessions or {}) do
-                if s.id == session_id then
-                    session_to_delete = s
-                    break
-                end
-            end
-            
-            local session_name = session_to_delete and session_to_delete.name or session_id
-            
-            -- Show confirmation dialog
-            session_mod.show_delete_confirm(session_to_delete or { id = session_id, name = session_id }, function(confirmed)
-                if not confirmed then
-                    return
-                end
-                
-                -- Perform deletion
-                session_mod.delete_session(session_id, function(success, del_err)
-                    if not success then
-                        append_message('system', '❌ *Failed to delete session: ' .. (del_err or 'Unknown error') .. '*')
-                        -- Use centralized error notification (Requirements: 8.4)
-                        session_mod.notify_error(del_err, 'delete', session_name)
-                        return
-                    end
-                    
-                    append_message('system', '🗑️ *Session deleted*')
-                    -- Use centralized success notification (Requirements: 5.2)
-                    session_mod.notify_success('deleted', session_name)
-                    
-                    -- Handle current session deletion (Requirements 5.3)
-                    if is_current then
-                        if is_last then
-                            -- Last session deleted, create new one (Requirements 5.4)
-                            create_new_session()
-                        else
-                            -- Switch to most recent remaining session
-                            session_mod.fetch_sessions(function(remaining_sessions, fetch_err)
-                                if fetch_err or not remaining_sessions or #remaining_sessions == 0 then
-                                    create_new_session()
-                                    return
-                                end
-                                
-                                -- Sort by updated_at to get most recent
-                                table.sort(remaining_sessions, function(a, b)
-                                    return (a.updated_at or '') > (b.updated_at or '')
-                                end)
-                                
-                                local most_recent = remaining_sessions[1]
-                                if most_recent then
-                                    switch_to_session(most_recent.id)
-                                else
-                                    create_new_session()
-                                end
-                            end)
-                        end
-                    end
-                end)
-            end)
-        end)
-    end, 'delete')
-end
-
--- Save current session (called after each message)
-local function save_current_session()
-    if not current_session_id then return end
-    
-    -- The server handles saving automatically, but we can trigger a save
-    -- This is called after each message exchange
-end
-
--- ========== Execution Plans ==========
-
--- Current plan state
-local current_plan_id = nil
-
--- Show current plan status
-local function show_plan_status()
-    local url = get_server_url() .. '/plans/current'
-    local curl = require('plenary.curl')
-    
-    curl.get(url, {
-        callback = function(response)
-            vim.schedule(function()
-                if response.status == 200 then
-                    local ok, plan = pcall(vim.json.decode, response.body)
-                    if ok and plan.id then
-                        current_plan_id = plan.id
-                        
-                        -- Format plan status
-                        local lines = {
-                            '📋 **Current Plan:** ' .. plan.title,
-                            '**Status:** ' .. (plan.status or 'draft'),
-                            '',
-                        }
-                        
-                        -- Calculate progress
-                        local total = 0
-                        local done = 0
-                        for _, task in ipairs(plan.tasks or {}) do
-                            if #task.subtasks > 0 then
-                                for _, sub in ipairs(task.subtasks) do
-                                    total = total + 1
-                                    if sub.status == 'completed' or sub.status == 'skipped' then
-                                        done = done + 1
-                                    end
-                                end
-                            else
-                                total = total + 1
-                                if task.status == 'completed' or task.status == 'skipped' then
-                                    done = done + 1
-                                end
-                            end
-                        end
-                        
-                        local pct = total > 0 and math.floor((done / total) * 100) or 0
-                        table.insert(lines, string.format('**Progress:** %d/%d (%d%%)', done, total, pct))
-                        table.insert(lines, '')
-                        table.insert(lines, '**Tasks:**')
-                        
-                        -- Show tasks
-                        for i, task in ipairs(plan.tasks or {}) do
-                            local status_icon = task.status == 'completed' and '✅' or 
-                                               task.status == 'in_progress' and '🔄' or 
-                                               task.status == 'skipped' and '⏭️' or 
-                                               task.status == 'failed' and '❌' or '⬜'
-                            table.insert(lines, string.format('%d. %s %s', i, status_icon, task.description))
-                            
-                            -- Show subtasks
-                            for j, sub in ipairs(task.subtasks or {}) do
-                                local sub_icon = sub.status == 'completed' and '✅' or 
-                                                sub.status == 'in_progress' and '🔄' or 
-                                                sub.status == 'skipped' and '⏭️' or 
-                                                sub.status == 'failed' and '❌' or '⬜'
-                                table.insert(lines, string.format('   %d.%d. %s %s', i, j, sub_icon, sub.description))
-                            end
-                        end
-                        
-                        -- Show next action
-                        table.insert(lines, '')
-                        local next_task = nil
-                        for i, task in ipairs(plan.tasks or {}) do
-                            if task.status ~= 'completed' and task.status ~= 'skipped' then
-                                for j, sub in ipairs(task.subtasks or {}) do
-                                    if sub.status ~= 'completed' and sub.status ~= 'skipped' then
-                                        next_task = string.format('Task %d.%d: %s', i, j, sub.description)
-                                        break
-                                    end
-                                end
-                                if not next_task and #task.subtasks == 0 then
-                                    next_task = string.format('Task %d: %s', i, task.description)
-                                end
-                                if next_task then break end
-                            end
-                        end
-                        
-                        if next_task then
-                            table.insert(lines, '**Next:** ' .. next_task)
-                            table.insert(lines, '')
-                            table.insert(lines, '_Use `/plan-next` to execute next task, `/plan-done [task]` to mark complete_')
-                        else
-                            table.insert(lines, '🎉 **All tasks completed!**')
-                        end
-                        
-                        append_message('system', table.concat(lines, '\n'))
-                    else
-                        append_message('system', '❌ *Invalid plan data*')
-                    end
-                else
-                    append_message('system', '📋 *No active plan. Use `/plan-create` to start one.*')
-                end
-            end)
-        end,
-    })
-end
-
--- List all plans
-local function show_plan_list()
-    local url = get_server_url() .. '/plans'
-    local curl = require('plenary.curl')
-    
-    curl.get(url, {
-        callback = function(response)
-            vim.schedule(function()
-                if response.status ~= 200 then
-                    append_message('system', '❌ *Failed to load plans*')
-                    return
-                end
-                
-                local ok, plans = pcall(vim.json.decode, response.body)
-                if not ok or not plans or #plans == 0 then
-                    append_message('system', '📋 *No plans found. Use `/plan-create` to start one.*')
-                    return
-                end
-                
-                -- Format plans for display
-                local items = {}
-                for _, plan in ipairs(plans) do
-                    local progress = plan.progress or {0, 0}
-                    local pct = progress[2] > 0 and math.floor((progress[1] / progress[2]) * 100) or 0
-                    local status_icon = plan.status == 'completed' and '✅' or 
-                                       plan.status == 'active' and '🔄' or 
-                                       plan.status == 'paused' and '⏸️' or 
-                                       plan.status == 'abandoned' and '🚫' or '📝'
-                    
-                    local label = string.format('%s %s (%d%%, %d tasks)', 
-                        status_icon, plan.title, pct, plan.task_count)
-                    
-                    table.insert(items, {
-                        label = label,
-                        id = plan.id,
-                        title = plan.title,
-                    })
-                end
-                
-                -- Use our Vim-friendly picker
-                show_picker(items, {
-                    title = 'Execution Plans',
-                    prompt = 'Select a plan:',
-                    format_item = function(item) return item.label end,
-                }, function(item)
-                    if item then
-                        -- Load the selected plan
-                        load_plan(item.id)
-                    end
-                end)
-            end)
-        end,
-    })
-end
-
--- Load a specific plan
-local function load_plan(plan_id)
-    local url = get_server_url() .. '/plans/update'
-    local curl = require('plenary.curl')
-    
-    -- First set this as current plan
-    local body = vim.json.encode({ 
-        plan_id = plan_id,
-        status = 'active' 
-    })
-    
-    curl.post(url, {
-        body = body,
-        headers = { ['Content-Type'] = 'application/json' },
-        callback = function(response)
-            vim.schedule(function()
-                if response.status == 200 then
-                    local ok, plan = pcall(vim.json.decode, response.body)
-                    if ok and plan.id then
-                        current_plan_id = plan.id
-                        append_message('system', '📋 *Loaded plan: ' .. plan.title .. '*')
-                        show_plan_status()
-                    end
-                else
-                    append_message('system', '❌ *Failed to load plan*')
-                end
-            end)
-        end,
-    })
-end
-
--- Mark task/subtask as done
-local function mark_task_done(task_spec, status)
-    if not current_plan_id then
-        append_message('system', '❌ *No active plan. Use `/plan-status` to check current plan.*')
-        return
-    end
-    
-    status = status or 'completed'
-    
-    -- Parse task spec: "1" for task 1, "1.2" for task 1 subtask 2
-    local task_idx, subtask_idx = task_spec:match('^(%d+)%.?(%d*)$')
-    if not task_idx then
-        append_message('system', '❌ *Invalid task format. Use: 1 or 1.2*')
-        return
-    end
-    
-    task_idx = tonumber(task_idx) - 1  -- Convert to 0-indexed
-    subtask_idx = subtask_idx ~= '' and (tonumber(subtask_idx) - 1) or nil
-    
-    local url = get_server_url() .. '/plans/task/status'
-    local curl = require('plenary.curl')
-    
-    local body = vim.json.encode({
-        plan_id = current_plan_id,
-        task_index = task_idx,
-        subtask_index = subtask_idx,
-        status = status,
-    })
-    
-    curl.post(url, {
-        body = body,
-        headers = { ['Content-Type'] = 'application/json' },
-        callback = function(response)
-            vim.schedule(function()
-                if response.status == 200 then
-                    local status_text = status == 'completed' and 'completed ✅' or 
-                                       status == 'skipped' and 'skipped ⏭️' or status
-                    append_message('system', string.format('📋 *Task %s marked as %s*', task_spec, status_text))
-                    show_plan_status()
-                else
-                    append_message('system', '❌ *Failed to update task status*')
-                end
-            end)
-        end,
-    })
-end
-
--- Execute next pending task
-local function execute_next_task()
-    if not current_plan_id then
-        append_message('system', '❌ *No active plan. Use `/plan-status` to check current plan.*')
-        return
-    end
-    
-    local url = get_server_url() .. '/plans/current'
-    local curl = require('plenary.curl')
-    
-    curl.get(url, {
-        callback = function(response)
-            vim.schedule(function()
-                if response.status ~= 200 then
-                    append_message('system', '❌ *Failed to load plan*')
-                    return
-                end
-                
-                local ok, plan = pcall(vim.json.decode, response.body)
-                if not ok then
-                    append_message('system', '❌ *Invalid plan data*')
-                    return
-                end
-                
-                -- Find next pending task
-                local next_desc = nil
-                local task_spec = nil
-                for i, task in ipairs(plan.tasks or {}) do
-                    if task.status ~= 'completed' and task.status ~= 'skipped' then
-                        for j, sub in ipairs(task.subtasks or {}) do
-                            if sub.status ~= 'completed' and sub.status ~= 'skipped' then
-                                next_desc = sub.description
-                                task_spec = string.format('%d.%d', i, j)
-                                break
-                            end
-                        end
-                        if not next_desc and #task.subtasks == 0 then
-                            next_desc = task.description
-                            task_spec = tostring(i)
-                        end
-                        if next_desc then break end
-                    end
-                end
-                
-                if not next_desc then
-                    append_message('system', '🎉 *All tasks completed!*')
-                    return
-                end
-                
-                -- Mark as in progress
-                mark_task_done(task_spec, 'in_progress')
-                
-                -- Send task to agent
-                local msg = string.format(
-                    '**Executing Plan Task %s:**\n\n%s\n\n_From plan: %s_',
-                    task_spec, next_desc, plan.title
-                )
-                
-                -- Ensure we're in build mode for execution
-                if current_mode == 'plan' then
-                    append_message('system', '⚠️ *Switching to build mode for execution...*')
-                    current_mode = 'build'
-                    update_chat_window_title()
-                end
-                
-                -- Send to agent
-                send_message(next_desc)
-            end)
-        end,
-    })
-end
-
--- Add refinement to current plan
-local function refine_plan(refinement)
-    if not current_plan_id then
-        append_message('system', '❌ *No active plan to refine.*')
-        return
-    end
-    
-    local url = get_server_url() .. '/plans/update'
-    local curl = require('plenary.curl')
-    
-    local body = vim.json.encode({
-        plan_id = current_plan_id,
-        refinement = refinement,
-    })
-    
-    curl.post(url, {
-        body = body,
-        headers = { ['Content-Type'] = 'application/json' },
-        callback = function(response)
-            vim.schedule(function()
-                if response.status == 200 then
-                    append_message('system', '📋 *Plan refined: ' .. refinement .. '*')
-                else
-                    append_message('system', '❌ *Failed to refine plan*')
-                end
-            end)
-        end,
-    })
-end
-
--- ========== Agent Interrupt ==========
-
--- Flag to track if we're currently waiting for agent response
-local agent_running = false
-
--- Interrupt the agent
-local function interrupt_agent()
-    if not agent_running then
-        append_message('system', '💡 *No operation in progress*')
-        return
-    end
-    
-    local url = get_server_url() .. '/interrupt'
-    local curl = require('plenary.curl')
-    
-    append_message('system', '⛔ *Sending interrupt signal...*')
-    
-    curl.post(url, {
-        callback = function(response)
-            vim.schedule(function()
-                if response.status == 200 then
-                    agent_running = false
-                    append_message('system', '🛑 *Agent interrupted successfully*')
-                    update_chat_window_title()
-                else
-                    append_message('system', '⚠️ *Interrupt may not have been received*')
-                end
-            end)
-        end,
-    })
-end
-
--- Set agent running state (called from send_message)
-local function set_agent_running(running)
-    agent_running = running
-end
-
--- Check if agent is running
-local function is_agent_running()
-    return agent_running
-end
-
--- Clear chat history
-local function clear_chat()
-    local buf = get_chat_buffer()
-    vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-    safe_buf_set_lines(buf, 0, -1, false, {})
-    vim.api.nvim_buf_set_option(buf, 'modifiable', false)
-    -- Reset session stats
-    reset_stats()
-    update_chat_header()
-    update_chat_window_title()
-    -- Clear file path map for clickable links
-    file_path_map = {}
-    -- Clear panel files section too
-    if panel_sections then
-        panel_sections.files.items = {}
-        update_panel()
-    end
-    
-    -- Also clear server-side history
-    local clear_body = '{"message": "", "clear_history": true, "provider": "' .. current_provider .. '"}'
-    vim.fn.system('curl -s -X POST -H "Content-Type: application/json" -d \'' .. clear_body .. '\' ' .. get_server_url() .. '/chat')
-    
-    append_message('system', '🗑️ *Chat history cleared*')
-end
-
--- Define slash commands
-slash_commands = {
-    -- Model/Provider commands
-    ['model'] = {
-        description = 'Switch AI model/provider',
-        usage = '/model [ollama|claude|openai]',
-        handler = function(args)
-            if args and args ~= '' then
-                local provider = args:lower():gsub('^%s+', ''):gsub('%s+$', '')
-                if provider == 'ollama' or provider == 'claude' or provider == 'openai' or
-                   provider == 'gpt' or provider == 'anthropic' or provider == 'local' then
-                    -- Normalize aliases
-                    if provider == 'gpt' then provider = 'openai' end
-                    if provider == 'anthropic' then provider = 'claude' end
-                    if provider == 'local' then provider = 'ollama' end
-                    switch_provider(provider)
-                else
-                    append_message('system', '❌ *Unknown provider: ' .. provider .. '. Use: ollama, claude, or openai*')
-                end
-            else
-                show_provider_menu()
-            end
-        end,
-    },
-    ['m'] = { alias = 'model' },
-    
-    -- Clear command
-    ['clear'] = {
-        description = 'Clear chat history',
-        usage = '/clear',
-        handler = function()
-            clear_chat()
-        end,
-    },
-    ['c'] = { alias = 'clear' },
-    
-    -- Tasks command (focus tasks window)
-    ['tasks'] = {
-        description = 'Focus task queue window',
-        usage = '/tasks',
-        handler = function()
-            if tasks_win and vim.api.nvim_win_is_valid(tasks_win) then
-                focused_window = 'tasks'
-                vim.api.nvim_set_current_win(tasks_win)
-                append_message('system', '📋 *Switched to tasks window. Press `dd` to delete, `i` to add new task, `j`/`k` to navigate.*')
-            else
-                append_message('system', '❌ *Task window not available*')
-            end
-        end,
-    },
-    
-    -- Help command
-    ['help'] = {
-        description = 'Show available commands',
-        usage = '/help',
-        handler = function()
-            local help_lines = {
-                '📚 **Available Commands:**',
-                '',
-                '`/model [provider]` or `/m` - Switch AI provider',
-                '  • `/model` - Open provider picker',
-                '  • `/model openai` - Switch to OpenAI',
-                '  • `/model claude` - Switch to Claude',
-                '  • `/model ollama` - Switch to Ollama (local)',
-                '',
-                '`/clear` or `/c` - Clear chat history and reset stats',
-                '',
-                '`/tasks` - Focus task queue window (press `i` to return to input)',
-                '',
-                '`/compact` - Summarize conversation to save context (for large codebases)',
-                '',
-                '`/thinking` or `/verbose` - Toggle verbose mode (show agent tool calls)',
-                '',
-                '**Agent Modes** (or press `Tab` to toggle plan/build):',
-                '`/plan` - Plan mode: read-only exploration, no file modifications',
-                '`/build` - Build mode: full access to all tools',
-                '`/review` - Review mode: approval required before each action',
-                '',
-                '`/stats` or `/s` - Show detailed session statistics',
-                '',
-                '`/cost` - Show model pricing info',
-                '',
-                '`/usage` - Show usage summary (tokens, costs, sessions)',
-                '`/usage-open` - Open usage dashboard in browser',
-                '',
-                '**Sessions:**',
-                '`/new` - Start a new chat session',
-                '`/session` - List and switch sessions',
-                '`/session [id]` - Switch to specific session',
-                '`/delete` - Delete a chat session',
-                '',
-                '**Execution Plans:**',
-                '`/plan-status` or `/ps` - Show current plan status',
-                '`/plan-list` or `/pl` - List all plans',
-                '`/plan-next` or `/pn` - Execute next pending task',
-                '`/plan-done [task]` or `/pd` - Mark task done (e.g., 1 or 1.2)',
-                '`/plan-skip [task]` - Skip a task',
-                '`/plan-refine [note]` or `/pr` - Add refinement note',
-                '',
-                '**Control:**',
-                '`/interrupt` or `/stop` - Stop current agent operation (also Ctrl+C)',
-                '`/exit` or `/q` - Close chat window',
-                '',
-                '**Layout:**',
-                '`/sidepane` - Right-side panel (full height)',
-                '`/popup` - Centered floating window',
-                '`/layout` - Toggle between layouts',
-                '',
-                '**Diff View:**',
-                '`/diff [file]` - Side-by-side diff (git HEAD vs current)',
-                '  • No args: diff last modified file',
-                '  • With file: diff specific file',
-                '`/autodiff` - Toggle automatic diff on file changes (ON by default)',
-                '',
-                '`/help` or `/?` - Show this help',
-                '',
-                '**References:**',
-                '• `@filename` - Reference a file for context',
-                '',
-                '**Keyboard Shortcuts:**',
-                '• `Enter` - Send message',
-                '• `Tab` - Toggle plan/build mode',
-                '• `gf` - Open file under cursor (in chat window)',
-            }
-            append_message('system', table.concat(help_lines, '\n'))
-        end,
-    },
-    ['?'] = { alias = 'help' },
-    
-    -- Stats command
-    ['stats'] = {
-        description = 'Show session statistics',
-        usage = '/stats',
-        handler = function()
-            local model_info = get_model_info(current_provider)
-            local total_tokens = session_stats.input_tokens + session_stats.output_tokens
-            
-            -- Get context window
-            local context_max = nil
-            if model_info and model_info.limit and model_info.limit.context then
-                context_max = model_info.limit.context
-            else
-                context_max = default_context_windows[current_provider]
-            end
-            
-            local stats_lines = {
-                '📊 **Session Statistics:**',
-                '',
-                string.format('**Provider:** %s', current_provider),
-            }
-            
-            -- Context window info
-            if context_max then
-                local percent = context_max > 0 and math.floor((total_tokens / context_max) * 100) or 0
-                local remaining = context_max - total_tokens
-                table.insert(stats_lines, string.format('**Context Window:** %s tokens', format_number(context_max)))
-                table.insert(stats_lines, string.format('**Context Used:** %s (%d%%)', format_number(total_tokens), percent))
-                table.insert(stats_lines, string.format('**Context Remaining:** %s tokens', format_number(remaining)))
-                
-                if percent >= 90 then
-                    table.insert(stats_lines, '')
-                    table.insert(stats_lines, '⚠️ **Warning:** Context nearly full! Use `/clear` to reset.')
-                elseif percent >= 75 then
-                    table.insert(stats_lines, '')
-                    table.insert(stats_lines, '⚡ **Note:** Context filling up. Consider `/clear` soon.')
-                end
-            end
-            
-            table.insert(stats_lines, '')
-            table.insert(stats_lines, '**Token Breakdown:**')
-            table.insert(stats_lines, string.format('• Input tokens: %s', format_number(session_stats.input_tokens)))
-            table.insert(stats_lines, string.format('• Output tokens: %s', format_number(session_stats.output_tokens)))
-            table.insert(stats_lines, string.format('• Total tokens: %s', format_number(total_tokens)))
-            
-            if session_stats.total_cost > 0 then
-                table.insert(stats_lines, '')
-                table.insert(stats_lines, string.format('**Estimated Cost:** %s', format_cost(session_stats.total_cost)))
-            elseif current_provider == 'ollama' then
-                table.insert(stats_lines, '')
-                table.insert(stats_lines, '**Cost:** Free (local model)')
-            end
-            
-            table.insert(stats_lines, '')
-            table.insert(stats_lines, '*Context is stored server-side. Use `/clear` to reset.*')
-            
-            append_message('system', table.concat(stats_lines, '\n'))
-        end,
-    },
-    ['s'] = { alias = 'stats' },
-    
-    -- Compact/summarize context command
-    ['compact'] = {
-        description = 'Summarize conversation to save context',
-        usage = '/compact',
-        handler = function()
-            append_message('system', '🗜️ *Compacting conversation...*')
-            
-            -- Send request to compact the context
-            local server_cwd = get_server_cwd()
-            local clean_cwd = server_cwd:gsub('\\', '\\\\'):gsub('"', '\\"')
-            local req_body = '{"message": "Please provide a brief summary of our conversation so far in 2-3 sentences. Focus on: what files were discussed, what changes were made, and what the user wanted to accomplish. Start with: CONTEXT SUMMARY:", "clear_history": false, "provider": "' .. current_provider .. '", "cwd": "' .. clean_cwd .. '"}'
-            
-            vim.fn.jobstart({
-                'curl', '-s', '-X', 'POST',
-                '-H', 'Content-Type: application/json',
-                '-d', req_body,
-                get_server_url() .. '/chat',
-            }, {
-                stdout_buffered = true,
-                on_stdout = function(_, data)
-                    vim.schedule(function()
-                        if data and data[1] and data[1] ~= '' then
-                            local ok, resp = pcall(vim.fn.json_decode, table.concat(data, ''))
-                            if ok and resp and resp.response then
-                                local summary = resp.response
-                                
-                                -- Now clear and start fresh with summary
-                                local clear_body = '{"message": "Previous context summary: ' .. summary:gsub('"', '\\"'):gsub('\n', ' ') .. '", "clear_history": true, "provider": "' .. current_provider .. '", "cwd": "' .. clean_cwd .. '"}'
-                                vim.fn.system('curl -s -X POST -H "Content-Type: application/json" -d \'' .. clear_body .. '\' ' .. get_server_url() .. '/chat')
-                                
-                                -- Reset local stats
-                                local old_tokens = session_stats.input_tokens + session_stats.output_tokens
-                                reset_stats()
-                                update_chat_window_title()
-                                
-                                append_message('system', '✅ *Context compacted! Reduced from ~' .. format_number(old_tokens) .. ' tokens to summary.*')
-                                append_message('system', '📝 *Summary preserved: ' .. summary:sub(1, 200) .. (string.len(summary) > 200 and '...' or '') .. '*')
-                            end
-                        end
-                    end)
-                end,
-            })
-        end,
-    },
-    
-    -- Cost/pricing command
-    ['cost'] = {
-        description = 'Show model pricing info',
-        usage = '/cost',
-        handler = function()
-            local model_info = get_model_info(current_provider)
-            
-            local cost_lines = {
-                '💰 **Model Pricing Info:**',
-                '',
-                string.format('**Provider:** %s', current_provider),
-            }
-            
-            if current_provider == 'ollama' then
-                table.insert(cost_lines, '')
-                table.insert(cost_lines, 'Ollama runs locally - **no API costs!**')
-                table.insert(cost_lines, '')
-                table.insert(cost_lines, 'You only pay for electricity and hardware.')
-            elseif model_info and model_info.cost then
-                local model_id = model_mappings[current_provider] or 'unknown'
-                table.insert(cost_lines, string.format('**Model:** %s', model_id))
-                table.insert(cost_lines, '')
-                table.insert(cost_lines, '**Pricing (per 1M tokens):**')
-                table.insert(cost_lines, string.format('• Input: $%.2f', model_info.cost.input or 0))
-                table.insert(cost_lines, string.format('• Output: $%.2f', model_info.cost.output or 0))
-                if model_info.cost.cache_read then
-                    table.insert(cost_lines, string.format('• Cache read: $%.2f', model_info.cost.cache_read))
-                end
-                if model_info.cost.cache_write then
-                    table.insert(cost_lines, string.format('• Cache write: $%.2f', model_info.cost.cache_write))
-                end
-                table.insert(cost_lines, '')
-                table.insert(cost_lines, '*Data from [models.dev](https://models.dev)*')
-            else
-                table.insert(cost_lines, '')
-                table.insert(cost_lines, 'Pricing info not available for this model.')
-            end
-            
-            append_message('system', table.concat(cost_lines, '\n'))
-        end,
-    },
-    
-    -- Provider shortcuts
-    ['ollama'] = {
-        description = 'Switch to Ollama',
-        usage = '/ollama',
-        handler = function()
-            switch_provider('ollama')
-        end,
-    },
-    ['claude'] = {
-        description = 'Switch to Claude',
-        usage = '/claude',
-        handler = function()
-            switch_provider('claude')
-        end,
-    },
-    ['openai'] = {
-        description = 'Switch to OpenAI',
-        usage = '/openai',
-        handler = function()
-            switch_provider('openai')
-        end,
-    },
-    ['gpt'] = { alias = 'openai' },
-    
-    -- Thinking/verbose mode
-    ['thinking'] = {
-        description = 'Toggle verbose mode (show tool calls)',
-        usage = '/thinking',
-        handler = function()
-            thinking_mode = not thinking_mode
-            local status = thinking_mode and '**ON** 🔍' or '**OFF**'
-            append_message('system', '🧠 Thinking mode: ' .. status)
-            if thinking_mode then
-                append_message('system', '_Tool calls will be shown in detail_')
-            end
-            scroll_to_bottom()
-        end,
-    },
-    ['verbose'] = { alias = 'thinking' },
-    ['debug'] = { alias = 'thinking' },
-    
-    -- Agent mode commands
-    ['plan'] = {
-        description = 'Plan mode: read-only, no file modifications',
-        usage = '/plan',
-        handler = function()
-            if agent_running or queue_processing then
-                append_message('system', '⚠️ *Cannot switch modes while agent is working. Please wait for current task to complete, or use `/interrupt` to stop.*')
-                return
-            end
-            current_mode = 'plan'
-            update_chat_header()
-            if M.save_session then M.save_session() end
-            append_message('system', '📝 **PLAN mode** - Read-only exploration. Use `/build` to make changes.')
-            append_message('system', '_Tools: file_search, grep, read_file, propose_change_')
-            scroll_to_bottom()
-        end,
-    },
-    ['build'] = {
-        description = 'Build mode: full access to all tools',
-        usage = '/build',
-        handler = function()
-            if agent_running or queue_processing then
-                append_message('system', '⚠️ *Cannot switch modes while agent is working. Please wait for current task to complete, or use `/interrupt` to stop.*')
-                return
-            end
-            current_mode = 'build'
-            update_chat_header()
-            if M.save_session then M.save_session() end
-            append_message('system', '🔨 **BUILD mode** - Full access to modify files.')
-            append_message('system', '_Tools: all (read, write, patch, shell)_')
-            scroll_to_bottom()
-        end,
-    },
-    ['review'] = {
-        description = 'Review mode: approval required before each action',
-        usage = '/review',
-        handler = function()
-            if agent_running or queue_processing then
-                append_message('system', '⚠️ *Cannot switch modes while agent is working. Please wait for current task to complete, or use `/interrupt` to stop.*')
-                return
-            end
-            current_mode = 'review'
-            update_chat_header()
-            if M.save_session then M.save_session() end
-            append_message('system', '👁️ **REVIEW mode** - Approval required for each action.')
-            append_message('system', '_Tools will show pending actions before execution_')
-            scroll_to_bottom()
-        end,
-    },
-    
-    -- Exit/Quit commands
-    ['exit'] = {
-        description = 'Close the chat window',
-        usage = '/exit',
-        handler = function()
-            M.close()
-        end,
-    },
-    ['quit'] = { alias = 'exit' },
-    ['q'] = { alias = 'exit' },
-    ['close'] = { alias = 'exit' },
-    
-    -- Layout commands
-    ['split'] = {
-        description = 'Switch to split layout (docked, resizes other windows)',
-        usage = '/split [left|right]',
-        handler = function(args)
-            M.config.window.style = 'split'
-            if args and args:match('left') then
-                M.config.window.position = 'left'
-            else
-                M.config.window.position = 'right'
-            end
-            -- Save layout preference
-            if M.save_session then M.save_session() end
-            -- Reopen to apply
-            M.close()
-            vim.defer_fn(function() M.open() end, 50)
-            append_message('system', '📐 Switched to split layout (docked)')
-        end,
-    },
-    ['sidepane'] = {
-        description = 'Switch to sidepane layout (floating overlay)',
-        usage = '/sidepane [left|right]',
-        handler = function(args)
-            M.config.window.style = 'sidepane'
-            if args and args:match('left') then
-                M.config.window.position = 'left'
-            else
-                M.config.window.position = 'right'
-            end
-            -- Save layout preference
-            if M.save_session then M.save_session() end
-            -- Reopen to apply
-            M.close()
-            vim.defer_fn(function() M.open() end, 50)
-            append_message('system', '📐 Switched to sidepane layout (floating)')
-        end,
-    },
-    ['popup'] = {
-        description = 'Switch to popup layout (centered)',
-        usage = '/popup',
-        handler = function()
-            M.config.window.style = 'popup'
-            -- Save layout preference
-            if M.save_session then M.save_session() end
-            -- Reopen to apply
-            M.close()
-            vim.defer_fn(function() M.open() end, 50)
-            append_message('system', '📐 Switched to popup layout')
-        end,
-    },
-    ['layout'] = {
-        description = 'Cycle through split/sidepane/popup layouts',
-        usage = '/layout',
-        handler = function()
-            -- Cycle: split -> sidepane -> popup -> split
-            if M.config.window.style == 'split' then
-                M.config.window.style = 'sidepane'
-                append_message('system', '📐 Layout: sidepane (floating)')
-            elseif M.config.window.style == 'sidepane' then
-                M.config.window.style = 'popup'
-                append_message('system', '📐 Layout: popup (centered)')
-            else
-                M.config.window.style = 'split'
-                append_message('system', '📐 Layout: split (docked)')
-            end
-            -- Save layout preference
-            if M.save_session then M.save_session() end
-            -- Reopen to apply
-            M.close()
-            vim.defer_fn(function() M.open() end, 50)
-        end,
-    },
-    
-    -- Diff view command
-    ['diff'] = {
-        description = 'Show side-by-side diff view (like vimdiff)',
-        usage = '/diff [filepath]',
-        handler = function(args)
-            show_diff_view(args)
-        end,
-    },
-    
-    -- Toggle auto-diff
-    ['autodiff'] = {
-        description = 'Toggle inline diff display in chat',
-        usage = '/autodiff',
-        handler = function()
-            M.config.auto_show_diff = not M.config.auto_show_diff
-            local status = M.config.auto_show_diff and 'ON' or 'OFF'
-            append_message('system', '📊 Inline diff in chat: **' .. status .. '**')
-        end,
-    },
-    
-    -- Usage commands
-    ['usage'] = {
-        description = 'Show usage stats',
-        usage = '/usage',
-        handler = function()
-            require('tark.usage').show_summary()
-        end,
-    },
-    ['usage-open'] = {
-        description = 'Open usage dashboard in browser',
-        usage = '/usage-open',
-        handler = function()
-            vim.cmd('TarkUsageOpen')
-        end,
-    },
-    
-    -- Session management commands
-    ['new'] = {
-        description = 'Start a new chat session',
-        usage = '/new',
-        handler = function()
-            create_new_session()
-        end,
-    },
-    ['session'] = {
-        description = 'List and switch sessions',
-        usage = '/session [id]',
-        handler = function(args)
-            if args and args ~= '' then
-                -- Switch to specific session
-                switch_to_session(args:gsub('^%s+', ''):gsub('%s+$', ''))
-            else
-                -- Show session picker
-                show_session_picker()
-            end
-        end,
-    },
-    ['sessions'] = { alias = 'session' },
-    ['delete'] = {
-        description = 'Delete a chat session',
-        usage = '/delete',
-        handler = function()
-            delete_session_command()
-        end,
-    },
-    
-    -- Execution Plan commands
-    ['plan-status'] = {
-        description = 'Show current plan status',
-        usage = '/plan-status',
-        handler = function()
-            show_plan_status()
-        end,
-    },
-    ['ps'] = { alias = 'plan-status' },
-    
-    ['plan-list'] = {
-        description = 'List all plans',
-        usage = '/plan-list',
-        handler = function()
-            show_plan_list()
-        end,
-    },
-    ['pl'] = { alias = 'plan-list' },
-    
-    ['plan-done'] = {
-        description = 'Mark task as done',
-        usage = '/plan-done [task] (e.g., 1 or 1.2)',
-        handler = function(args)
-            if not args or args == '' then
-                append_message('system', '❌ *Usage: /plan-done 1 (task) or /plan-done 1.2 (subtask)*')
-                return
-            end
-            mark_task_done(args:gsub('^%s+', ''):gsub('%s+$', ''), 'completed')
-        end,
-    },
-    ['pd'] = { alias = 'plan-done' },
-    
-    ['plan-skip'] = {
-        description = 'Skip a task',
-        usage = '/plan-skip [task]',
-        handler = function(args)
-            if not args or args == '' then
-                append_message('system', '❌ *Usage: /plan-skip 1 (task) or /plan-skip 1.2 (subtask)*')
-                return
-            end
-            mark_task_done(args:gsub('^%s+', ''):gsub('%s+$', ''), 'skipped')
-        end,
-    },
-    
-    ['plan-next'] = {
-        description = 'Execute next pending task',
-        usage = '/plan-next',
-        handler = function()
-            execute_next_task()
-        end,
-    },
-    ['pn'] = { alias = 'plan-next' },
-    
-    ['plan-refine'] = {
-        description = 'Add refinement to current plan',
-        usage = '/plan-refine [note]',
-        handler = function(args)
-            if not args or args == '' then
-                append_message('system', '❌ *Usage: /plan-refine Add tests for edge cases*')
-                return
-            end
-            refine_plan(args)
-        end,
-    },
-    ['pr'] = { alias = 'plan-refine' },
-    
-    -- Interrupt command
-    ['interrupt'] = {
-        description = 'Interrupt the current agent operation',
-        usage = '/interrupt',
-        handler = function()
-            interrupt_agent()
-        end,
-    },
-    ['stop'] = { alias = 'interrupt' },
-    ['cancel'] = { alias = 'interrupt' },
-}
-
--- Parse and execute slash commands
-local function handle_slash_command(input)
-    -- Parse command and args
-    local cmd, args = input:match('^/(%S+)%s*(.*)')
-    if not cmd then
+-- Send RPC message to connected TUI client
+local function send_rpc(msg)
+    if not M.state.client_conn then
         return false
     end
     
-    cmd = cmd:lower()
-    local command = slash_commands[cmd]
-    
-    if not command then
-        append_message('system', '❌ *Unknown command: /' .. cmd .. '. Type `/help` for available commands.*')
-        return true
+    local json = json_encode(msg)
+    if not json then
+        return false
     end
     
-    -- Handle aliases
-    if command.alias then
-        command = slash_commands[command.alias]
-    end
+    -- Send message with newline delimiter
+    local ok, err = pcall(function()
+        M.state.client_conn:write(json .. '\n')
+    end)
     
-    if command and command.handler then
-        command.handler(args)
+    if not ok then
+        vim.notify('tark chat: Failed to send RPC: ' .. tostring(err), vim.log.levels.DEBUG)
+        return false
     end
     
     return true
 end
 
--- Process input (check for slash commands or send message)
-local function process_input(message)
-    if not message or message == '' then
+-- Send response to a request
+local function send_response(id, result)
+    send_rpc({
+        type = 'response',
+        id = id,
+        result = result,
+    })
+end
+
+-- Send error response
+local function send_error(id, message, code)
+    send_rpc({
+        type = 'error',
+        id = id,
+        message = message,
+        code = code,
+    })
+end
+
+-- ============================================================================
+-- RPC Command Handlers
+-- ============================================================================
+
+-- Handle open_file command
+local function handle_open_file(msg, request_id)
+    local path = msg.path
+    local line = msg.line
+    local col = msg.col
+    
+    if not path or path == '' then
+        send_error(request_id, 'Path is required', -1)
         return
     end
     
-    -- Check if it's a slash command
-    if message:sub(1, 1) == '/' then
-        handle_slash_command(message)
-    else
-        send_message(message)
-    end
+    -- Schedule to run in main thread
+    vim.schedule(function()
+        -- Open the file
+        local ok, err = pcall(function()
+            vim.cmd('edit ' .. vim.fn.fnameescape(path))
+            
+            -- Jump to line/column if specified
+            if line and line > 0 then
+                local target_col = (col and col > 0) and col or 1
+                vim.api.nvim_win_set_cursor(0, {line, target_col - 1})
+            end
+        end)
+        
+        if ok then
+            send_response(request_id, { success = true })
+        else
+            send_error(request_id, tostring(err), -1)
+        end
+    end)
 end
 
-function M.open(initial_message)
-    -- Start LSP proxy server if enabled
-    if M.config.lsp_proxy then
-        local ok, lsp_server = pcall(require, 'tark.lsp_server')
-        if ok then
-            lsp_proxy_port = lsp_server.start()
-            if lsp_proxy_port then
-                vim.notify('tark: LSP proxy started on port ' .. lsp_proxy_port, vim.log.levels.DEBUG)
-            end
-        end
-    end
-
-    local buf = get_chat_buffer()
-    local input = get_input_buffer()
-
-    -- Initialize header
-    update_chat_header()
-
-    -- SPLIT MODE: Create proper docked split windows that resize other content
-    if M.config.window.style == 'split' then
-        -- Create vertical split on right or left
-        if M.config.window.position == 'left' then
-            vim.cmd('topleft vsplit')
-        else
-            vim.cmd('botright vsplit')
-        end
-        
-        -- Now we're in the new split window
-        chat_win = vim.api.nvim_get_current_win()
-        vim.api.nvim_win_set_buf(chat_win, buf)
-        
-        -- Set the width
-        local split_width = M.config.window.split_width or 80
-        vim.api.nvim_win_set_width(chat_win, split_width)
-        
-        -- Configure window options for chat
-        vim.api.nvim_win_set_option(chat_win, 'number', false)
-        vim.api.nvim_win_set_option(chat_win, 'relativenumber', false)
-        vim.api.nvim_win_set_option(chat_win, 'signcolumn', 'no')
-        vim.api.nvim_win_set_option(chat_win, 'wrap', true)
-        vim.api.nvim_win_set_option(chat_win, 'linebreak', true)
-        vim.api.nvim_win_set_option(chat_win, 'winfixwidth', true)
-        
-        -- Create horizontal split at bottom of chat for input
-        vim.cmd('belowright split')
-        input_win = vim.api.nvim_get_current_win()
-        vim.api.nvim_win_set_buf(input_win, input)
-        
-        -- Set input height (3-5 lines)
-        local input_height = 5
-        vim.api.nvim_win_set_height(input_win, input_height)
-        
-        -- Configure window options for input
-        vim.api.nvim_win_set_option(input_win, 'number', false)
-        vim.api.nvim_win_set_option(input_win, 'relativenumber', false)
-        vim.api.nvim_win_set_option(input_win, 'signcolumn', 'no')
-        vim.api.nvim_win_set_option(input_win, 'wrap', true)
-        vim.api.nvim_win_set_option(input_win, 'winfixheight', true)
-        vim.api.nvim_win_set_option(input_win, 'winfixwidth', true)
-        
-        -- Set statusline for split mode to show info (replaces floating title/footer)
-        local mode_icons = { plan = '◇', build = '◆', review = '◈' }
-        local mode_icon = mode_icons[current_mode] or '◆'
-        local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
-        local model_name = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
-        
-        -- Chat window statusline shows model and context
-        vim.api.nvim_win_set_option(chat_win, 'statusline', 
-            string.format('%%#FloatTitle# %s %%#Comment# [0%%%%] 0/128K %%#String# $0.0000 %%#Normal#', model_name))
-        
-        -- Input window statusline shows mode
-        -- Get proper provider display name
-        local provider_display_sl = current_provider_id or current_provider
-        for _, p in ipairs(providers_info) do
-            if p.id == current_provider_id then
-                provider_display_sl = p.name:match('^(%w+)') or p.id
-                break
-            end
-        end
-        vim.api.nvim_win_set_option(input_win, 'statusline',
-            string.format('%%#TarkMode%s# %s %s %%#Comment# %s %%#FloatBorder# %s %%#Comment# tab:mode  /:commands %%#Normal#',
-                current_mode:sub(1,1):upper() .. current_mode:sub(2), mode_icon, mode_label, model_name, 
-                provider_display_sl:sub(1,1):upper() .. provider_display_sl:sub(2)))
-        
-        -- Focus input window
-        vim.api.nvim_set_current_win(input_win)
+-- Handle goto_line command
+local function handle_goto_line(msg, request_id)
+    local line = msg.line
+    local col = msg.col
     
-    -- FLOATING MODES (sidepane/popup)
-    else
-        local editor_width = vim.o.columns
-        local editor_height = vim.o.lines
-        local input_height = 3
-        local width, height, col, row
-        
-        -- Calculate dimensions based on style
-        if M.config.window.style == 'sidepane' then
-            -- SIDEPANE MODE: Full height, intelligent width on right
-            local sidepane_width = M.config.window.sidepane_width
-            if sidepane_width <= 1 then
-                -- Percentage of editor width
-                width = math.floor(editor_width * sidepane_width)
-            else
-                -- Fixed width
-                width = math.floor(sidepane_width)
-            end
-            -- Apply min/max constraints
-            width = math.max(M.config.window.min_width or 50, width)
-            width = math.min(M.config.window.max_width or 100, width)
-            
-            -- Full height (minus statusline, cmdline, tabline)
-            height = editor_height - input_height - 4
-            
-            -- Position on right edge
-            if M.config.window.position == 'left' then
-                col = 0
-            else
-                col = editor_width - width - 2
-            end
-            row = 0
-        else
-            -- POPUP MODE: Centered floating window
-            width = M.config.window.width
-            height = M.config.window.height
-            col = math.floor((editor_width - width) / 2)
-            row = math.floor((editor_height - height - input_height - 4) / 2)
-        end
-
-        -- Build initial chat title (model | context | cost)
-        local model_name_t = (current_model or model_mappings[current_provider] or current_provider):match('[^/]+$') or current_provider
-        
-        -- Layout: [Model] ... [0%] 0/128K ... [$0.0000]
-        local model_part_t = string.format(' %s ', model_name_t)
-        local context_part_t = string.format('[0%%] 0/%s', format_number(128000))
-        local cost_part_t = '$0.0000 '
-        
-        -- INTELLIGENT PADDING: Left-align left, Center center, Right-align right
-        local left_width_t = display_width(model_part_t)
-        local center_width_t = display_width(context_part_t)
-        local right_width_t = display_width(cost_part_t)
-        local usable_width_t = width - 2  -- Account for border chars
-        
-        -- Where should center START to be truly centered?
-        local center_start_t = math.floor((usable_width_t - center_width_t) / 2)
-        -- Where should right START to be truly right-aligned?
-        local right_start_t = usable_width_t - right_width_t
-        
-        -- Calculate padding needed
-        local left_pad_t = center_start_t - left_width_t
-        local right_pad_t = right_start_t - (center_start_t + center_width_t)
-        if left_pad_t < 1 then left_pad_t = 1 end
-        if right_pad_t < 1 then right_pad_t = 1 end
-        
-        local title_config = {
-            { model_part_t, 'FloatTitle' },
-            { string.rep(' ', left_pad_t), 'FloatBorder' },
-            { context_part_t, 'Comment' },
-            { string.rep(' ', right_pad_t), 'FloatBorder' },
-            { cost_part_t, 'String' },
-        }
-        
-        -- Adjust width to make room for tasks window
-        local tasks_width = M.config.window.panel_width or 18
-        local chat_width = width - tasks_width
-        
-        chat_win = vim.api.nvim_open_win(buf, false, {
-            relative = 'editor',
-            width = chat_width,
-            height = height,
-            col = col,
-            row = row,
-            style = 'minimal',
-            border = M.config.window.border,
-            title = title_config,
-            title_pos = 'left',
-        })
-
-        -- Create panel window (slim, on the right) - renamed from tasks
-        local panel = vim.api.nvim_create_buf(false, true)
-        panel_buf = panel
-        tasks_buf = panel  -- Alias for backwards compatibility
-        vim.api.nvim_buf_set_option(panel, 'buftype', 'nofile')
-        vim.api.nvim_buf_set_option(panel, 'filetype', 'tark-panel')
-        vim.api.nvim_buf_set_option(panel, 'modifiable', false)
-        
-        panel_win = vim.api.nvim_open_win(panel, false, {
-            relative = 'editor',
-            width = tasks_width,
-            height = height,
-            col = col + chat_width,
-            row = row,
-            style = 'minimal',
-            border = M.config.window.border,
-            title = {
-                { ' Panel ', 'FloatTitle' },
-            },
-            title_pos = 'center',
-            footer = {
-                { ' j/k ', 'Comment' },
-                { 'zo/zc ', 'FloatBorder' },
-                { 'dd:del ', 'Comment' },
-            },
-            footer_pos = 'center',
-        })
-        tasks_win = panel_win  -- Alias for backwards compatibility
-        
-        -- Configure panel window options (non-modifiable)
-        vim.api.nvim_win_set_option(panel_win, 'number', false)
-        vim.api.nvim_win_set_option(panel_win, 'relativenumber', false)
-        vim.api.nvim_win_set_option(panel_win, 'signcolumn', 'no')
-        vim.api.nvim_win_set_option(panel_win, 'wrap', true)
-        vim.api.nvim_win_set_option(panel_win, 'linebreak', true)
-        vim.api.nvim_win_set_option(panel_win, 'winfixwidth', true)
-        vim.api.nvim_win_set_option(panel_win, 'winfixheight', true)
-        vim.api.nvim_win_set_option(panel_win, 'cursorline', true)
-        
-        -- Panel keymappings (vim-style)
-        local function panel_toggle()
-            if not M._panel_line_map then return end
-            local line = vim.api.nvim_win_get_cursor(panel_win)[1]
-            local map = M._panel_line_map[line]
-            
-            if not map then return end
-            
-            if map.type == 'section' then
-                -- Toggle section expand/collapse
-                panel_sections[map.section].expanded = not panel_sections[map.section].expanded
-                update_panel()
-            elseif map.type == 'task' and map.index then
-                -- Toggle task expand
-                local task = task_queue[map.index]
-                if task then
-                    task.expanded = not task.expanded
-                    update_panel()
-                end
-            end
-        end
-        
-        local function panel_expand()
-            if not M._panel_line_map then return end
-            local line = vim.api.nvim_win_get_cursor(panel_win)[1]
-            local map = M._panel_line_map[line]
-            
-            if not map then return end
-            
-            if map.type == 'section' then
-                panel_sections[map.section].expanded = true
-                update_panel()
-            elseif map.type == 'task' and map.index then
-                local task = task_queue[map.index]
-                if task then
-                    task.expanded = true
-                    update_panel()
-                end
-            end
-        end
-        
-        local function panel_collapse()
-            if not M._panel_line_map then return end
-            local line = vim.api.nvim_win_get_cursor(panel_win)[1]
-            local map = M._panel_line_map[line]
-            
-            if not map then return end
-            
-            if map.type == 'section' then
-                panel_sections[map.section].expanded = false
-                update_panel()
-            elseif map.type == 'task' and map.index then
-                local task = task_queue[map.index]
-                if task then
-                    task.expanded = false
-                    update_panel()
-                end
-            end
-        end
-
-        -- Enter/Tab: toggle
-        vim.api.nvim_buf_set_keymap(panel, 'n', '<CR>', '', {
-            noremap = true, silent = true, callback = panel_toggle
-        })
-        vim.api.nvim_buf_set_keymap(panel, 'n', '<Tab>', '', {
-            noremap = true, silent = true, callback = panel_toggle
-        })
-        
-        -- Vim fold keybinds: zo (open), zc (close), za (toggle)
-        vim.api.nvim_buf_set_keymap(panel, 'n', 'zo', '', {
-            noremap = true, silent = true, callback = panel_expand
-        })
-        vim.api.nvim_buf_set_keymap(panel, 'n', 'zc', '', {
-            noremap = true, silent = true, callback = panel_collapse
-        })
-        vim.api.nvim_buf_set_keymap(panel, 'n', 'za', '', {
-            noremap = true, silent = true, callback = panel_toggle
-        })
-        
-        -- Delete task with dd
-        vim.api.nvim_buf_set_keymap(panel, 'n', 'dd', '', {
-            noremap = true,
-            silent = true,
-            callback = function()
-                local line = vim.api.nvim_win_get_cursor(panel_win)[1]
-                if M._panel_line_map then
-                    local map = M._panel_line_map[line]
-                    if map and map.type == 'task' and map.index then
-                        remove_from_queue(map.index)
-                        vim.notify(string.format('Removed task #%d', map.index), vim.log.levels.INFO)
-                    end
-                end
-            end,
-        })
-        
-        -- i: switch to input
-        vim.api.nvim_buf_set_keymap(panel, 'n', 'i', '', {
-            noremap = true,
-            silent = true,
-            callback = function()
-                focused_window = 'input'
-                vim.api.nvim_set_current_win(input_win)
-                vim.cmd('startinsert')
-            end,
-        })
-        
-        -- q: close panel focus, go back to input
-        vim.api.nvim_buf_set_keymap(panel, 'n', 'q', '', {
-            noremap = true,
-            silent = true,
-            callback = function()
-                focused_window = 'input'
-                vim.api.nvim_set_current_win(input_win)
-            end,
-        })
-        
-        -- Ctrl-z: maximize toggle
-        vim.api.nvim_buf_set_keymap(panel, 'n', '<C-z>', '', {
-            noremap = true,
-            silent = true,
-            callback = function()
-                M.maximize()
-            end,
-        })
-        
-        -- Initialize panel display
-        update_panel()
-
-        -- Create input window with mode-specific title (mode badge is HERE, not in chat window)
-        local mode_icons = { plan = '◇', build = '◆', review = '◈' }
-        local mode_icon = mode_icons[current_mode] or '◆'
-        local mode_label = current_mode:sub(1,1):upper() .. current_mode:sub(2)
-        local input_mode_hl = get_mode_highlight(current_mode, true)
-        local input_mode_part = string.format(' %s %s ', mode_icon, mode_label)
-        
-        -- Get proper provider display name
-        local provider_display_t = current_provider_id or current_provider
-        for _, p in ipairs(providers_info) do
-            if p.id == current_provider_id then
-                provider_display_t = p.name:match('^(%w+)') or p.id
-                break
-            end
-        end
-        local provider_label_t = provider_display_t:sub(1,1):upper() .. provider_display_t:sub(2)
-        
-        -- Position input window below chat (sidepane: at bottom; popup: below chat)
-        local input_row = M.config.window.style == 'sidepane' and (editor_height - input_height - 2) or (row + height + 2)
-        
-        input_win = vim.api.nvim_open_win(input, true, {
-            relative = 'editor',
-            width = width,
-            height = input_height,
-            col = col,
-            row = input_row,
-            style = 'minimal',
-            border = M.config.window.border,
-            title = {
-                { input_mode_part, input_mode_hl },
-            },
-            title_pos = 'left',
-            footer = {
-                { ' tab ', 'Comment' },
-                { current_mode == 'plan' and 'build' or 'plan', get_mode_highlight(current_mode == 'plan' and 'build' or 'plan', false) },
-                { '  /', 'Comment' },
-                { 'commands ', 'FloatBorder' },
-            },
-            footer_pos = 'left',
-        })
-        -- For floating prompt, prevent resize by maximize plugins
-        vim.api.nvim_win_set_option(input_win, 'winfixheight', true)
-        vim.api.nvim_win_set_option(input_win, 'winfixwidth', true)
-        
-        -- Function to update footer with Vim mode
-        local function update_input_footer()
-            if not input_win or not vim.api.nvim_win_is_valid(input_win) then return end
-            
-            -- Get current Vim mode
-            local mode = vim.api.nvim_get_mode().mode
-            local vim_mode_text, vim_mode_hl
-            if mode == 'i' or mode == 'ic' or mode == 'ix' then
-                vim_mode_text = ' INSERT '
-                vim_mode_hl = 'TarkModeBuild'  -- Green
-            elseif mode == 'v' or mode == 'V' or mode == '' then
-                vim_mode_text = ' VISUAL '
-                vim_mode_hl = 'TarkModeReview'  -- Yellow
-            elseif mode == 'R' or mode == 'Rv' then
-                vim_mode_text = ' REPLACE '
-                vim_mode_hl = 'WarningMsg'
-            else
-                vim_mode_text = ' NORMAL '
-                vim_mode_hl = 'TarkModePlan'  -- Blue
-            end
-            
-            local config = vim.api.nvim_win_get_config(input_win)
-            config.footer = {
-                { vim_mode_text, vim_mode_hl },
-                { ' tab ', 'Comment' },
-                { current_mode == 'plan' and 'build' or 'plan', get_mode_highlight(current_mode == 'plan' and 'build' or 'plan', false) },
-                { '  /', 'Comment' },
-                { 'commands ', 'FloatBorder' },
-            }
-            vim.api.nvim_win_set_config(input_win, config)
-        end
-        
-        -- Set up autocmd to update footer on mode change
-        local augroup = vim.api.nvim_create_augroup('TarkInputMode', { clear = true })
-        vim.api.nvim_create_autocmd('ModeChanged', {
-            group = augroup,
-            buffer = input,
-            callback = function()
-                vim.schedule(update_input_footer)
-            end,
-        })
-        
-        -- Initial update
-        update_input_footer()
+    if not line or line < 1 then
+        send_error(request_id, 'Valid line number is required', -1)
+        return
     end
+    
+    vim.schedule(function()
+        local ok, err = pcall(function()
+            local target_col = (col and col > 0) and col or 1
+            vim.api.nvim_win_set_cursor(0, {line, target_col - 1})
+        end)
+        
+        if ok then
+            send_response(request_id, { success = true })
+        else
+            send_error(request_id, tostring(err), -1)
+        end
+    end)
+end
 
-    -- Helper function to process input
-    local function do_send()
-        vim.schedule(function()
-            local lines = vim.api.nvim_buf_get_lines(input, 0, -1, false)
-            local message = table.concat(lines, '\n'):gsub('^%s+', ''):gsub('%s+$', '')
-            if message and message ~= '' then
-                -- Add to prompt history (avoid duplicates at top)
-                if #prompt_history == 0 or prompt_history[1] ~= message then
-                    table.insert(prompt_history, 1, message)
-                    if #prompt_history > prompt_history_max then
-                        table.remove(prompt_history)
-                    end
-                end
-                prompt_history_index = 0  -- Reset navigation
-                prompt_current_input = ''
+-- Handle apply_diff command
+local function handle_apply_diff(msg, request_id)
+    local path = msg.path
+    local diff = msg.diff
+    
+    if not path or path == '' then
+        send_error(request_id, 'Path is required', -1)
+        return
+    end
+    
+    if not diff or diff == '' then
+        send_error(request_id, 'Diff content is required', -1)
+        return
+    end
+    
+    vim.schedule(function()
+        -- Apply diff using patch command
+        local tmpfile = vim.fn.tempname()
+        local f = io.open(tmpfile, 'w')
+        if not f then
+            send_error(request_id, 'Failed to create temp file', -1)
+            return
+        end
+        f:write(diff)
+        f:close()
+        
+        local result = vim.fn.system(string.format(
+            'patch -p1 < %s 2>&1',
+            vim.fn.shellescape(tmpfile)
+        ))
+        local exit_code = vim.v.shell_error
+        
+        os.remove(tmpfile)
+        
+        if exit_code == 0 then
+            -- Reload the buffer if it's open
+            local bufnr = vim.fn.bufnr(path)
+            if bufnr ~= -1 then
+                vim.api.nvim_buf_call(bufnr, function()
+                    vim.cmd('edit!')
+                end)
+            end
+            send_response(request_id, { success = true })
+        else
+            send_error(request_id, 'Patch failed: ' .. result, -1)
+        end
+    end)
+end
+
+-- Handle show_diff command
+local function handle_show_diff(msg, request_id)
+    local path = msg.path
+    local original = msg.original
+    local modified = msg.modified
+    
+    if not path or path == '' then
+        send_error(request_id, 'Path is required', -1)
+        return
+    end
+    
+    vim.schedule(function()
+        local ok, err = pcall(function()
+            -- If original/modified provided, create temp buffers
+            if original and modified then
+                -- Create two scratch buffers for diff view
+                local old_buf = vim.api.nvim_create_buf(false, true)
+                local new_buf = vim.api.nvim_create_buf(false, true)
                 
-                vim.api.nvim_buf_set_lines(input, 0, -1, false, {})
-                process_input(message)
+                local old_lines = vim.split(original, '\n')
+                local new_lines = vim.split(modified, '\n')
+                
+                vim.api.nvim_buf_set_lines(old_buf, 0, -1, false, old_lines)
+                vim.api.nvim_buf_set_lines(new_buf, 0, -1, false, new_lines)
+                
+                local short_name = path:match('[^/]+$') or path
+                vim.api.nvim_buf_set_name(old_buf, '[OLD] ' .. short_name)
+                vim.api.nvim_buf_set_name(new_buf, '[NEW] ' .. short_name)
+                
+                vim.api.nvim_buf_set_option(old_buf, 'buftype', 'nofile')
+                vim.api.nvim_buf_set_option(new_buf, 'buftype', 'nofile')
+                vim.api.nvim_buf_set_option(old_buf, 'modifiable', false)
+                vim.api.nvim_buf_set_option(new_buf, 'modifiable', false)
+                
+                -- Open in vertical split with diff mode
+                vim.cmd('tabnew')
+                vim.api.nvim_win_set_buf(0, old_buf)
+                vim.cmd('diffthis')
+                vim.cmd('vsplit')
+                vim.api.nvim_win_set_buf(0, new_buf)
+                vim.cmd('diffthis')
+            else
+                -- Use git diff for the file
+                local cwd = vim.fn.getcwd()
+                local has_git = vim.fn.isdirectory(cwd .. '/.git') == 1
+                
+                if has_git then
+                    vim.cmd('tabnew')
+                    vim.cmd('terminal git diff --color ' .. vim.fn.shellescape(path))
+                else
+                    vim.cmd('edit ' .. vim.fn.fnameescape(path))
+                end
             end
         end)
-    end
-
-    -- Enter in Normal mode
-    vim.keymap.set('n', '<CR>', do_send, { buffer = input, silent = true, nowait = true })
-
-    -- Enter in Insert mode - select completion or send
-    vim.keymap.set('i', '<CR>', function()
-        if vim.fn.pumvisible() == 1 then
-            -- Accept the selected completion
-            return vim.api.nvim_replace_termcodes('<C-y>', true, false, true)
+        
+        if ok then
+            send_response(request_id, { success = true })
         else
-            vim.cmd('stopinsert')
-            do_send()
-            return ''
+            send_error(request_id, tostring(err), -1)
         end
-    end, { buffer = input, expr = true, silent = true, nowait = true })
+    end)
+end
 
-    -- Ctrl+Enter as alternative
-    vim.keymap.set('i', '<C-CR>', function()
-        vim.cmd('stopinsert')
-        do_send()
-    end, { buffer = input, silent = true, nowait = true })
-    
-    -- Ctrl+C to interrupt agent
-    vim.keymap.set({ 'n', 'i' }, '<C-c>', function()
-        if agent_running then
-            interrupt_agent()
-        else
-            -- Default behavior (exit insert mode if in insert)
-            if vim.fn.mode() == 'i' then
-                vim.cmd('stopinsert')
+-- Handle get_buffers command
+local function handle_get_buffers(request_id)
+    vim.schedule(function()
+        local buffers = {}
+        
+        for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+            if vim.api.nvim_buf_is_loaded(bufnr) then
+                local name = vim.api.nvim_buf_get_name(bufnr)
+                local modified = vim.api.nvim_buf_get_option(bufnr, 'modified')
+                local filetype = vim.api.nvim_buf_get_option(bufnr, 'filetype')
+                local buftype = vim.api.nvim_buf_get_option(bufnr, 'buftype')
+                
+                -- Skip special buffers
+                if buftype == '' or buftype == 'acwrite' then
+                    table.insert(buffers, {
+                        id = bufnr,
+                        path = name ~= '' and name or nil,
+                        name = name ~= '' and vim.fn.fnamemodify(name, ':t') or '[No Name]',
+                        modified = modified,
+                        filetype = filetype ~= '' and filetype or nil,
+                    })
+                end
             end
         end
-    end, { buffer = input, silent = true, nowait = true })
+        
+        send_response(request_id, { buffers = buffers })
+    end)
+end
+
+-- Handle get_diagnostics command
+local function handle_get_diagnostics(msg, request_id)
+    local filter_path = msg.path
     
-    -- Ctrl+z to maximize toggle (normal mode only)
-    vim.keymap.set('n', '<C-z>', function()
-        M.maximize()
-    end, { buffer = input, silent = true, nowait = true })
-
-    -- '/' triggers slash command completion
-    vim.keymap.set('i', '/', function()
-        local line = vim.api.nvim_get_current_line()
-        local col = vim.fn.col('.') - 1
-        -- Insert the slash first
-        vim.api.nvim_put({ '/' }, 'c', false, true)
-        -- If at start of line (or line is empty), trigger completion
-        if col == 0 or line == '' then
-            vim.schedule(function()
-                vim.fn.feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-o>', true, false, true), 'n')
-            end)
+    vim.schedule(function()
+        local diagnostics = {}
+        local all_diags = vim.diagnostic.get()
+        
+        for _, diag in ipairs(all_diags) do
+            local bufnr = diag.bufnr
+            local path = vim.api.nvim_buf_get_name(bufnr)
+            
+            -- Filter by path if specified
+            if not filter_path or path == filter_path or path:match(filter_path .. '$') then
+                local severity_map = {
+                    [vim.diagnostic.severity.ERROR] = 'error',
+                    [vim.diagnostic.severity.WARN] = 'warning',
+                    [vim.diagnostic.severity.INFO] = 'info',
+                    [vim.diagnostic.severity.HINT] = 'hint',
+                }
+                
+                table.insert(diagnostics, {
+                    path = path,
+                    line = diag.lnum + 1,  -- Convert to 1-indexed
+                    col = diag.col + 1,
+                    end_line = diag.end_lnum and (diag.end_lnum + 1) or nil,
+                    end_col = diag.end_col and (diag.end_col + 1) or nil,
+                    severity = severity_map[diag.severity] or 'error',
+                    message = diag.message,
+                    source = diag.source,
+                    code = diag.code and tostring(diag.code) or nil,
+                })
+            end
         end
-    end, { buffer = input, silent = true, nowait = true })
+        
+        send_response(request_id, { diagnostics = diagnostics })
+    end)
+end
 
-    -- '@' triggers file reference completion
-    vim.keymap.set('i', '@', function()
-        -- Insert the @ first
-        vim.api.nvim_put({ '@' }, 'c', false, true)
-        -- Trigger file completion
+-- Handle get_buffer_content command
+local function handle_get_buffer_content(msg, request_id)
+    local path = msg.path
+    
+    if not path or path == '' then
+        send_error(request_id, 'Path is required', -1)
+        return
+    end
+    
+    vim.schedule(function()
+        local bufnr = vim.fn.bufnr(path)
+        local content
+        local truncated = false
+        
+        if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
+            -- Get from buffer
+            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+            content = table.concat(lines, '\n')
+        else
+            -- Read from file
+            local f = io.open(path, 'r')
+            if f then
+                content = f:read('*a')
+                f:close()
+            else
+                send_error(request_id, 'File not found: ' .. path, -1)
+                return
+            end
+        end
+        
+        -- Truncate if too large (> 100KB)
+        local max_size = 100 * 1024
+        if #content > max_size then
+            content = content:sub(1, max_size)
+            truncated = true
+        end
+        
+        send_response(request_id, {
+            path = path,
+            content = content,
+            truncated = truncated,
+        })
+    end)
+end
+
+-- Handle get_cursor command
+local function handle_get_cursor(request_id)
+    vim.schedule(function()
+        local path = vim.api.nvim_buf_get_name(0)
+        local cursor = vim.api.nvim_win_get_cursor(0)
+        
+        send_response(request_id, {
+            path = path,
+            line = cursor[1],
+            col = cursor[2] + 1,  -- Convert to 1-indexed
+        })
+    end)
+end
+
+-- Handle ping command
+local function handle_ping(msg)
+    send_rpc({
+        type = 'pong',
+        seq = msg.seq,
+    })
+end
+
+-- ============================================================================
+-- RPC Message Router
+-- ============================================================================
+
+-- Route incoming RPC message to appropriate handler
+local function handle_rpc_message(msg)
+    if not msg or not msg.type then
+        return
+    end
+    
+    -- Handle request wrapper
+    local request_id = nil
+    local command = msg
+    
+    if msg.type == 'request' then
+        request_id = msg.id
+        command = msg.command
+        if not command then
+            send_error(request_id, 'Missing command in request', -1)
+            return
+        end
+    end
+    
+    -- Route to handler based on type
+    local msg_type = command.type
+    
+    if msg_type == 'open_file' then
+        handle_open_file(command, request_id)
+    elseif msg_type == 'goto_line' then
+        handle_goto_line(command, request_id)
+    elseif msg_type == 'apply_diff' then
+        handle_apply_diff(command, request_id)
+    elseif msg_type == 'show_diff' then
+        handle_show_diff(command, request_id)
+    elseif msg_type == 'get_buffers' then
+        handle_get_buffers(request_id)
+    elseif msg_type == 'get_diagnostics' then
+        handle_get_diagnostics(command, request_id)
+    elseif msg_type == 'get_buffer_content' then
+        handle_get_buffer_content(command, request_id)
+    elseif msg_type == 'get_cursor' then
+        handle_get_cursor(request_id)
+    elseif msg_type == 'ping' then
+        handle_ping(command)
+    else
+        if request_id then
+            send_error(request_id, 'Unknown command type: ' .. tostring(msg_type), -1)
+        end
+    end
+end
+
+-- ============================================================================
+-- Context Synchronization
+-- ============================================================================
+
+local context_timer = nil
+
+-- Debounced context send
+local function send_context_debounced(msg)
+    if not M.config.context_sync.enabled then
+        return
+    end
+    
+    if context_timer then
+        vim.fn.timer_stop(context_timer)
+    end
+    
+    context_timer = vim.fn.timer_start(M.config.context_sync.debounce_ms, function()
+        send_rpc(msg)
+        context_timer = nil
+    end)
+end
+
+-- Send buffer changed notification
+local function send_buffer_changed(bufnr)
+    local path = vim.api.nvim_buf_get_name(bufnr)
+    if path == '' then
+        return
+    end
+    
+    -- Get content (truncate if large)
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local content = table.concat(lines, '\n')
+    local truncated = false
+    
+    local max_size = 50 * 1024  -- 50KB
+    if #content > max_size then
+        content = content:sub(1, max_size)
+        truncated = true
+    end
+    
+    send_context_debounced({
+        type = 'buffer_changed',
+        path = path,
+        content = content,
+        truncated = truncated,
+    })
+end
+
+-- Send diagnostics updated notification
+local function send_diagnostics_updated()
+    local diagnostics = {}
+    local all_diags = vim.diagnostic.get()
+    
+    for _, diag in ipairs(all_diags) do
+        local bufnr = diag.bufnr
+        local path = vim.api.nvim_buf_get_name(bufnr)
+        
+        if path ~= '' then
+            local severity_map = {
+                [vim.diagnostic.severity.ERROR] = 'error',
+                [vim.diagnostic.severity.WARN] = 'warning',
+                [vim.diagnostic.severity.INFO] = 'info',
+                [vim.diagnostic.severity.HINT] = 'hint',
+            }
+            
+            table.insert(diagnostics, {
+                path = path,
+                line = diag.lnum + 1,
+                col = diag.col + 1,
+                end_line = diag.end_lnum and (diag.end_lnum + 1) or nil,
+                end_col = diag.end_col and (diag.end_col + 1) or nil,
+                severity = severity_map[diag.severity] or 'error',
+                message = diag.message,
+                source = diag.source,
+                code = diag.code and tostring(diag.code) or nil,
+            })
+        end
+    end
+    
+    send_context_debounced({
+        type = 'diagnostics_updated',
+        diagnostics = diagnostics,
+    })
+end
+
+-- Send cursor moved notification
+local function send_cursor_moved()
+    local path = vim.api.nvim_buf_get_name(0)
+    if path == '' then
+        return
+    end
+    
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    
+    send_context_debounced({
+        type = 'cursor_moved',
+        path = path,
+        line = cursor[1],
+        col = cursor[2] + 1,
+    })
+end
+
+-- Send buffer entered notification
+local function send_buffer_entered()
+    local path = vim.api.nvim_buf_get_name(0)
+    if path == '' then
+        return
+    end
+    
+    local filetype = vim.api.nvim_buf_get_option(0, 'filetype')
+    
+    send_rpc({
+        type = 'buffer_entered',
+        path = path,
+        filetype = filetype ~= '' and filetype or nil,
+    })
+end
+
+-- ============================================================================
+-- Socket Server
+-- ============================================================================
+
+-- Start the Unix socket server
+local function start_socket_server()
+    local socket_path = get_socket_path()
+    M.state.socket_path = socket_path
+    
+    -- Remove existing socket file
+    os.remove(socket_path)
+    
+    -- Create socket server using vim.loop (libuv)
+    local server = vim.loop.new_pipe(false)
+    if not server then
+        vim.notify('tark chat: Failed to create socket server', vim.log.levels.ERROR)
+        return false
+    end
+    
+    local ok, err = pcall(function()
+        server:bind(socket_path)
+    end)
+    
+    if not ok then
+        vim.notify('tark chat: Failed to bind socket: ' .. tostring(err), vim.log.levels.ERROR)
+        server:close()
+        return false
+    end
+    
+    server:listen(1, function(listen_err)
+        if listen_err then
+            vim.notify('tark chat: Socket listen error: ' .. listen_err, vim.log.levels.ERROR)
+            return
+        end
+        
+        local client = vim.loop.new_pipe(false)
+        server:accept(client)
+        
+        -- Store client connection
+        M.state.client_conn = client
+        
+        -- Buffer for incomplete messages
+        local buffer = ''
+        
+        -- Handle incoming data
+        client:read_start(function(read_err, data)
+            if read_err then
+                vim.schedule(function()
+                    vim.notify('tark chat: Read error: ' .. read_err, vim.log.levels.DEBUG)
+                end)
+                return
+            end
+            
+            if data then
+                buffer = buffer .. data
+                
+                -- Process complete messages (newline-delimited JSON)
+                while true do
+                    local newline_pos = buffer:find('\n')
+                    if not newline_pos then
+                        break
+                    end
+                    
+                    local line = buffer:sub(1, newline_pos - 1)
+                    buffer = buffer:sub(newline_pos + 1)
+                    
+                    if line ~= '' then
+                        local msg = json_decode(line)
+                        if msg then
+                            vim.schedule(function()
+                                handle_rpc_message(msg)
+                            end)
+                        end
+                    end
+                end
+            else
+                -- Client disconnected
+                vim.schedule(function()
+                    M.state.client_conn = nil
+                end)
+            end
+        end)
+        
+        -- Send initial context
         vim.schedule(function()
-            vim.fn.feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n')
+            send_buffer_entered()
+            send_diagnostics_updated()
         end)
-    end, { buffer = input, silent = true, nowait = true })
-
-    -- Tab to accept completion or cycle
-    vim.keymap.set('i', '<Tab>', function()
-        if vim.fn.pumvisible() == 1 then
-            return vim.api.nvim_replace_termcodes('<C-n>', true, false, true)
-        else
-            return vim.api.nvim_replace_termcodes('<Tab>', true, false, true)
-        end
-    end, { buffer = input, expr = true, silent = true })
-
-    -- Shift-Tab to cycle backwards
-    vim.keymap.set('i', '<S-Tab>', function()
-        if vim.fn.pumvisible() == 1 then
-            return vim.api.nvim_replace_termcodes('<C-p>', true, false, true)
-        else
-            return vim.api.nvim_replace_termcodes('<S-Tab>', true, false, true)
-        end
-    end, { buffer = input, expr = true, silent = true })
-
-    -- Escape just exits insert mode (doesn't close window)
-    -- Use <leader>ec to toggle/close the chat window
+    end)
     
-    -- Prompt history navigation (like shell history)
-    local function history_prev()
-        if #prompt_history == 0 then return end
-        
-        -- Save current input if starting navigation
-        if prompt_history_index == 0 then
-            local lines = vim.api.nvim_buf_get_lines(input, 0, -1, false)
-            prompt_current_input = table.concat(lines, '\n')
-        end
-        
-        -- Move to older prompt
-        if prompt_history_index < #prompt_history then
-            prompt_history_index = prompt_history_index + 1
-            vim.api.nvim_buf_set_lines(input, 0, -1, false, 
-                vim.split(prompt_history[prompt_history_index], '\n'))
-        end
+    M.state.socket_server = server
+    return true
+end
+
+-- Stop the socket server
+local function stop_socket_server()
+    if M.state.client_conn then
+        M.state.client_conn:close()
+        M.state.client_conn = nil
     end
     
-    local function history_next()
-        if prompt_history_index == 0 then return end
-        
-        -- Move to newer prompt
-        prompt_history_index = prompt_history_index - 1
-        
-        if prompt_history_index == 0 then
-            -- Restore original input
-            vim.api.nvim_buf_set_lines(input, 0, -1, false, 
-                vim.split(prompt_current_input, '\n'))
-        else
-            vim.api.nvim_buf_set_lines(input, 0, -1, false, 
-                vim.split(prompt_history[prompt_history_index], '\n'))
-        end
+    if M.state.socket_server then
+        M.state.socket_server:close()
+        M.state.socket_server = nil
     end
     
-    -- Up/Down in normal mode - navigate history
-    vim.keymap.set('n', '<Up>', history_prev, { buffer = input, silent = true, desc = 'Previous prompt' })
-    vim.keymap.set('n', '<Down>', history_next, { buffer = input, silent = true, desc = 'Next prompt' })
-    vim.keymap.set('n', 'k', history_prev, { buffer = input, silent = true, desc = 'Previous prompt' })
-    vim.keymap.set('n', 'j', history_next, { buffer = input, silent = true, desc = 'Next prompt' })
-    
-    -- Up/Down in insert mode - navigate history when at first/last line
-    vim.keymap.set('i', '<Up>', function()
-        local cursor = vim.api.nvim_win_get_cursor(0)
-        if cursor[1] == 1 then
-            -- At first line, navigate history
-            history_prev()
-            return ''
-        end
-        -- Normal up movement
-        return vim.api.nvim_replace_termcodes('<Up>', true, false, true)
-    end, { buffer = input, expr = true, silent = true })
-    
-    vim.keymap.set('i', '<Down>', function()
-        local cursor = vim.api.nvim_win_get_cursor(0)
-        local line_count = vim.api.nvim_buf_line_count(input)
-        if cursor[1] == line_count then
-            -- At last line, navigate history
-            history_next()
-            return ''
-        end
-        -- Normal down movement
-        return vim.api.nvim_replace_termcodes('<Down>', true, false, true)
-    end, { buffer = input, expr = true, silent = true })
-    
-    -- q to close (only in normal mode) - optional quick close
-    vim.keymap.set('n', 'q', function()
-        M.close()
-    end, { buffer = input, silent = true, nowait = true })
+    if M.state.socket_path then
+        os.remove(M.state.socket_path)
+        M.state.socket_path = nil
+    end
+end
 
-    -- Tab to toggle between plan and build modes (normal mode)
-    vim.keymap.set('n', '<Tab>', function()
-        if agent_running or queue_processing then
-            append_message('system', '⚠️ *Cannot switch modes while agent is working. Wait or use `/interrupt`.*')
-            return
-        end
-        if current_mode == 'plan' then
-            current_mode = 'build'
-            append_message('system', '🔨 **BUILD mode** - Full access to modify files.')
-        else
-            current_mode = 'plan'
-            append_message('system', '📝 **PLAN mode** - Read-only exploration.')
-        end
-        update_chat_header()
-        if M.save_session then M.save_session() end
-        scroll_to_bottom()
-    end, { buffer = input, silent = true, desc = 'Toggle plan/build mode' })
+-- ============================================================================
+-- Terminal Management
+-- ============================================================================
 
-    -- Also add Tab in chat buffer for toggling
-    vim.keymap.set('n', '<Tab>', function()
-        if agent_running or queue_processing then
-            append_message('system', '⚠️ *Cannot switch modes while agent is working. Wait or use `/interrupt`.*')
-            return
-        end
-        if current_mode == 'plan' then
-            current_mode = 'build'
-            append_message('system', '🔨 **BUILD mode** - Full access to modify files.')
-        else
-            current_mode = 'plan'
-            append_message('system', '📝 **PLAN mode** - Read-only exploration.')
-        end
-        update_chat_header()
-        if M.save_session then M.save_session() end
-        scroll_to_bottom()
-    end, { buffer = chat_buf, silent = true, desc = 'Toggle plan/build mode' })
+-- Get the tark binary path
+local function get_binary_path()
+    -- Check if configured binary exists
+    if vim.fn.executable(M.config.binary) == 1 then
+        return M.config.binary
+    end
+    
+    -- Check local binary (downloaded by plugin)
+    local data_dir = vim.fn.stdpath('data') .. '/tark'
+    local local_binary = data_dir .. '/tark'
+    if vim.fn.filereadable(local_binary) == 1 then
+        return local_binary
+    end
+    
+    return nil
+end
 
-    -- Auto-restore previous session if enabled
-    if M.config.session.auto_restore then
-        local ok_session, session_mod = pcall(require, 'tark.session')
-        if ok_session then
-            session_mod.restore_current(M, function(success, err)
-                if not success and err then
-                    -- Log error but allow fresh start
-                    vim.schedule(function()
-                        vim.notify('tark: Session restore failed: ' .. tostring(err), vim.log.levels.DEBUG)
-                    end)
+-- Open chat in terminal split
+function M.open()
+    -- Check if already open
+    if M.state.terminal_win and vim.api.nvim_win_is_valid(M.state.terminal_win) then
+        vim.api.nvim_set_current_win(M.state.terminal_win)
+        return
+    end
+    
+    -- Get binary path
+    local binary = get_binary_path()
+    if not binary then
+        vim.notify('tark chat: Binary not found. Run :TarkBinaryDownload first.', vim.log.levels.ERROR)
+        return
+    end
+    
+    -- Start socket server
+    if not start_socket_server() then
+        return
+    end
+    
+    -- Build command
+    local cmd = string.format('%s chat --socket %s', binary, M.state.socket_path)
+    
+    -- Open terminal split based on position
+    local pos = M.config.window.position
+    if pos == 'right' then
+        vim.cmd('botright vsplit')
+        vim.cmd('vertical resize ' .. M.config.window.width)
+    elseif pos == 'left' then
+        vim.cmd('topleft vsplit')
+        vim.cmd('vertical resize ' .. M.config.window.width)
+    elseif pos == 'bottom' then
+        vim.cmd('botright split')
+        vim.cmd('resize ' .. M.config.window.height)
+    elseif pos == 'top' then
+        vim.cmd('topleft split')
+        vim.cmd('resize ' .. M.config.window.height)
+    else
+        vim.cmd('botright vsplit')
+        vim.cmd('vertical resize ' .. M.config.window.width)
+    end
+    
+    -- Open terminal
+    M.state.terminal_job = vim.fn.termopen(cmd, {
+        on_exit = function(_, exit_code, _)
+            vim.schedule(function()
+                M.cleanup()
+                if exit_code ~= 0 then
+                    vim.notify('tark chat: Exited with code ' .. exit_code, vim.log.levels.DEBUG)
                 end
             end)
-        end
-    end
-
-    -- Handle initial message if provided
-    if initial_message and initial_message ~= '' then
-        process_input(initial_message)
-    end
-
-    -- Enter insert mode in input window
+        end,
+    })
+    
+    M.state.terminal_buf = vim.api.nvim_get_current_buf()
+    M.state.terminal_win = vim.api.nvim_get_current_win()
+    
+    -- Set buffer options
+    vim.api.nvim_buf_set_option(M.state.terminal_buf, 'buflisted', false)
+    vim.api.nvim_buf_set_name(M.state.terminal_buf, 'tark-chat')
+    
+    -- Enter insert mode
     vim.cmd('startinsert')
+    
+    -- Setup autocmds for context sync
+    M.setup_autocmds()
 end
 
--- Close the chat window
+-- Close chat
 function M.close()
-    -- Save session on close if enabled
-    if M.config.session.save_on_close then
-        -- Trigger session save on backend (sync call for reliability)
-        local ok, session_mod = pcall(require, 'tark.session')
-        if ok and session_mod.trigger_save then
-            session_mod.trigger_save()
-        end
+    if M.state.terminal_win and vim.api.nvim_win_is_valid(M.state.terminal_win) then
+        vim.api.nvim_win_close(M.state.terminal_win, true)
     end
-    
-    if chat_win and vim.api.nvim_win_is_valid(chat_win) then
-        vim.api.nvim_win_close(chat_win, true)
-        chat_win = nil
-    end
-    if tasks_win and vim.api.nvim_win_is_valid(tasks_win) then
-        vim.api.nvim_win_close(tasks_win, true)
-        tasks_win = nil
-    end
-    if input_win and vim.api.nvim_win_is_valid(input_win) then
-        vim.api.nvim_win_close(input_win, true)
-        input_win = nil
-    end
-    
-    -- Stop LSP proxy server
-    if lsp_proxy_port then
-        local ok, lsp_server = pcall(require, 'tark.lsp_server')
-        if ok then
-            lsp_server.stop()
-        end
-        lsp_proxy_port = nil
-    end
+    M.cleanup()
 end
 
--- Check if chat is open
-function M.is_open()
-    if chat_win and vim.api.nvim_win_is_valid(chat_win) then return true end
-    if input_win and vim.api.nvim_win_is_valid(input_win) then return true end
-    return false
-end
-
--- Toggle chat window
+-- Toggle chat
 function M.toggle()
-    if M.is_open() then
+    if M.state.terminal_win and vim.api.nvim_win_is_valid(M.state.terminal_win) then
         M.close()
     else
         M.open()
     end
 end
 
--- Maximize/restore tark windows
-function M.maximize()
-    if not M.is_open() then
-        vim.notify('Tark chat is not open', vim.log.levels.WARN)
-        return
-    end
-    
-    -- Only works in floating modes (sidepane/popup)
-    if M.config.window.style == 'split' then
-        vim.notify('Maximize only works in sidepane/popup mode', vim.log.levels.WARN)
-        return
-    end
-    
-    local editor_width = vim.o.columns
-    local editor_height = vim.o.lines
-    local input_height = 3
-    
-    if maximized then
-        -- RESTORE: Return to saved dimensions
-        if saved_dimensions then
-            local sd = saved_dimensions
-            local panel_width = M.config.window.panel_width or 18
-            local chat_width = sd.width - panel_width
-            local height = editor_height - input_height - 4
-            
-            -- Restore chat window
-            if chat_win and vim.api.nvim_win_is_valid(chat_win) then
-                vim.api.nvim_win_set_config(chat_win, {
-                    relative = 'editor',
-                    width = chat_width,
-                    height = height,
-                    col = sd.col,
-                    row = 0,
-                })
-            end
-            
-            -- Restore panel window
-            if panel_win and vim.api.nvim_win_is_valid(panel_win) then
-                vim.api.nvim_win_set_config(panel_win, {
-                    relative = 'editor',
-                    width = panel_width,
-                    height = height,
-                    col = sd.col + chat_width,
-                    row = 0,
-                })
-            end
-            
-            -- Restore input window
-            if input_win and vim.api.nvim_win_is_valid(input_win) then
-                vim.api.nvim_win_set_config(input_win, {
-                    relative = 'editor',
-                    width = sd.width,
-                    height = input_height,
-                    col = sd.col,
-                    row = editor_height - input_height - 2,
-                })
-            end
-            
-            -- Restore config
-            M.config.window.sidepane_width = sd.sidepane_width
-        end
-        maximized = false
-        saved_dimensions = nil
-        vim.notify('Tark restored', vim.log.levels.INFO)
-    else
-        -- MAXIMIZE: Save current and expand to full screen
-        local current_width = M.config.window.sidepane_width
-        if current_width <= 1 then
-            current_width = math.floor(editor_width * current_width)
-        end
-        
-        local current_col
-        if M.config.window.position == 'left' then
-            current_col = 0
-        else
-            current_col = editor_width - current_width - 2
-        end
-        
-        saved_dimensions = {
-            width = current_width,
-            col = current_col,
-            sidepane_width = M.config.window.sidepane_width,
-        }
-        
-        -- Calculate maximized dimensions (full editor width)
-        local max_width = editor_width - 4  -- Leave small margin
-        local panel_width = (M.config.window.panel_width or 18) + 4  -- Slightly wider panel when maximized
-        local chat_width = max_width - panel_width
-        local height = editor_height - input_height - 4
-        
-        -- Maximize chat window
-        if chat_win and vim.api.nvim_win_is_valid(chat_win) then
-            vim.api.nvim_win_set_config(chat_win, {
-                relative = 'editor',
-                width = chat_width,
-                height = height,
-                col = 1,
-                row = 0,
-            })
-        end
-        
-        -- Maximize panel window
-        if panel_win and vim.api.nvim_win_is_valid(panel_win) then
-            vim.api.nvim_win_set_config(panel_win, {
-                relative = 'editor',
-                width = panel_width,
-                height = height,
-                col = 1 + chat_width,
-                row = 0,
-            })
-        end
-        
-        -- Maximize input window
-        if input_win and vim.api.nvim_win_is_valid(input_win) then
-            vim.api.nvim_win_set_config(input_win, {
-                relative = 'editor',
-                width = max_width,
-                height = input_height,
-                col = 1,
-                row = editor_height - input_height - 2,
-            })
-        end
-        
-        maximized = true
-        vim.notify('Tark maximized (use :TarkMaximize to restore)', vim.log.levels.INFO)
-    end
-    
-    -- Update headers after resize
-    pcall(update_chat_header)
-    pcall(update_input_window_title)
+-- Check if chat is open
+function M.is_open()
+    return M.state.terminal_win and vim.api.nvim_win_is_valid(M.state.terminal_win)
 end
 
--- Check if maximized
-function M.is_maximized()
-    return maximized
+-- Cleanup resources
+function M.cleanup()
+    stop_socket_server()
+    M.state.terminal_buf = nil
+    M.state.terminal_win = nil
+    M.state.terminal_job = nil
 end
 
--- Get current provider
-function M.get_provider()
-    return current_provider
+-- ============================================================================
+-- Autocmds for Context Sync
+-- ============================================================================
+
+local autocmd_group = nil
+
+function M.setup_autocmds()
+    -- Create autocmd group
+    if autocmd_group then
+        vim.api.nvim_del_augroup_by_id(autocmd_group)
+    end
+    autocmd_group = vim.api.nvim_create_augroup('TarkChat', { clear = true })
+    
+    -- Buffer enter
+    vim.api.nvim_create_autocmd('BufEnter', {
+        group = autocmd_group,
+        callback = function()
+            if M.state.client_conn then
+                send_buffer_entered()
+            end
+        end,
+    })
+    
+    -- Buffer write
+    vim.api.nvim_create_autocmd('BufWritePost', {
+        group = autocmd_group,
+        callback = function(args)
+            if M.state.client_conn then
+                send_buffer_changed(args.buf)
+            end
+        end,
+    })
+    
+    -- Diagnostics changed
+    vim.api.nvim_create_autocmd('DiagnosticChanged', {
+        group = autocmd_group,
+        callback = function()
+            if M.state.client_conn then
+                send_diagnostics_updated()
+            end
+        end,
+    })
+    
+    -- Cursor moved (debounced via send_context_debounced)
+    vim.api.nvim_create_autocmd('CursorHold', {
+        group = autocmd_group,
+        callback = function()
+            if M.state.client_conn then
+                send_cursor_moved()
+            end
+        end,
+    })
+    
+    -- Terminal close
+    vim.api.nvim_create_autocmd('TermClose', {
+        group = autocmd_group,
+        buffer = M.state.terminal_buf,
+        callback = function()
+            vim.schedule(function()
+                M.cleanup()
+            end)
+        end,
+    })
 end
 
--- Set provider programmatically
-function M.set_provider(provider)
-    current_provider = provider
-end
+-- ============================================================================
+-- Setup and Commands
+-- ============================================================================
 
 -- Setup function
 function M.setup(opts)
     M.config = vim.tbl_deep_extend('force', M.config, opts or {})
     
-    -- Setup session module with config
-    local ok_session, session_mod = pcall(require, 'tark.session')
-    if ok_session then
-        session_mod.setup(M.config.session)
-    end
-    
-    -- Setup mode-specific highlight groups (distinctive colors)
-    -- Plan mode: Blue/Cyan - analytical, read-only
-    vim.api.nvim_set_hl(0, 'TarkModePlan', { fg = '#61afef', bold = true })
-    vim.api.nvim_set_hl(0, 'TarkModePlanBg', { fg = '#282c34', bg = '#61afef', bold = true })
-    -- Build mode: Green - constructive, active  
-    vim.api.nvim_set_hl(0, 'TarkModeBuild', { fg = '#98c379', bold = true })
-    vim.api.nvim_set_hl(0, 'TarkModeBuildBg', { fg = '#282c34', bg = '#98c379', bold = true })
-    -- Review mode: Yellow/Orange - caution, approval required
-    vim.api.nvim_set_hl(0, 'TarkModeReview', { fg = '#e5c07b', bold = true })
-    vim.api.nvim_set_hl(0, 'TarkModeReviewBg', { fg = '#282c34', bg = '#e5c07b', bold = true })
-    -- Accent colors for user messages per mode
-    vim.api.nvim_set_hl(0, 'TarkUserAccentPlan', { fg = '#61afef' })
-    vim.api.nvim_set_hl(0, 'TarkUserAccentBuild', { fg = '#98c379' })
-    vim.api.nvim_set_hl(0, 'TarkUserAccentReview', { fg = '#e5c07b' })
-    
-    -- Pre-fetch models database from models.dev
-    fetch_models_db()
-    
-    -- Restore session from server (provider, model, mode, style, position)
-    vim.fn.jobstart({
-        'curl', '-s', get_server_url() .. '/session',
-    }, {
-        stdout_buffered = true,
-        on_stdout = function(_, data)
-            if data and data[1] then
-                local ok, resp = pcall(vim.fn.json_decode, table.concat(data, ''))
-                if ok and resp then
-                    if resp.provider then
-                        current_provider = resp.provider
-                        current_provider_id = resp.provider  -- Keep display in sync
-                    end
-                    if resp.model then
-                        current_model = resp.model
-                    end
-                    if resp.mode then
-                        current_mode = resp.mode
-                    end
-                    if resp.style then
-                        M.config.window.style = resp.style
-                    end
-                    if resp.position then
-                        M.config.window.position = resp.position
-                    end
-                end
-            end
-        end,
-    })
-    
-    -- Setup VimLeavePre autocmd to save session on Neovim exit
+    -- Cleanup on Neovim exit
     vim.api.nvim_create_autocmd('VimLeavePre', {
-        group = vim.api.nvim_create_augroup('TarkSessionSave', { clear = true }),
         callback = function()
-            -- Save session on Neovim exit (sync call for reliability)
-            local ok_sess, session_mod = pcall(require, 'tark.session')
-            if ok_sess and session_mod.trigger_save_sync then
-                session_mod.trigger_save_sync()
+            -- Send editor closed notification
+            if M.state.client_conn then
+                send_rpc({ type = 'editor_closed' })
             end
+            M.cleanup()
         end,
     })
 end
 
--- Save session to server (called when model/provider changes)
-local function save_session()
-    local body = vim.fn.json_encode({
-        provider = current_provider,
-        model = current_model,
-        mode = current_mode,
-        style = M.config.window.style,
-        position = M.config.window.position,
-    })
+-- Register commands (called from init.lua)
+function M.register_commands()
+    vim.api.nvim_create_user_command('TarkChatOpen', function()
+        M.open()
+    end, { desc = 'Open tark chat' })
     
-    vim.fn.jobstart({
-        'curl', '-s', '-X', 'POST',
-        '-H', 'Content-Type: application/json',
-        '-d', body,
-        get_server_url() .. '/session/save',
-    }, {
-        stdout_buffered = true,
-        on_stdout = function(_, data)
-            -- Silent save - no notification needed
-        end,
-    })
-end
-
--- Export save function
-M.save_session = save_session
-
--- Test helpers (always export, but document as test-only)
--- These functions should only be used in automated tests
-M._test_get_current_provider = function() return current_provider end
-M._test_get_current_provider_id = function() return current_provider_id end
-M._test_get_current_model = function() return current_model end
-M._test_set_provider_state = function(provider, provider_id, model)
-    current_provider = provider
-    current_provider_id = provider_id
-    current_model = model
-end
-
--- Task queue test helpers
-M._test_get_task_queue = function() return task_queue end
-M._test_add_to_queue = function(prompt) return add_to_queue(prompt) end
-M._test_remove_from_queue = function(index) return remove_from_queue(index) end
-M._test_clear_queue = function() 
-    task_queue = {}
-    task_id_counter = 0
-    update_tasks_window()
-end
-M._test_get_agent_running = function() return agent_running end
-M._test_set_agent_running = function(running) agent_running = running end
-M._test_get_queue_processing = function() return queue_processing end
-M._test_set_queue_processing = function(processing) queue_processing = processing end
-
--- Mode switching test helpers
-M._test_get_current_mode = function() return current_mode end
-M._test_set_mode = function(mode)
-    if mode == 'plan' or mode == 'build' or mode == 'review' then
-        current_mode = mode
-        -- Only update header if chat is actually open
-        if chat_win and vim.api.nvim_win_is_valid(chat_win) then
-            pcall(update_chat_header)
-        end
-    end
-end
-M._test_can_switch_mode = function()
-    return not (agent_running or queue_processing)
-end
-
--- File path detection test helpers
-M._test_find_file_paths_in_line = find_file_paths_in_line
-M._test_get_file_path_map = function() return file_path_map end
-M._test_clear_file_path_map = function() file_path_map = {} end
-
--- Session restore helpers (used by session.lua module)
--- These functions allow the session module to restore messages and stats
-
---- Append a message to the chat buffer (for session restore)
----@param role string Message role ('user', 'assistant', 'system')
----@param content string Message content
-M._session_append_message = function(role, content)
-    append_message(role, content)
-end
-
---- Restore session statistics
----@param stats table Stats with input_tokens, output_tokens, total_cost
-M._session_restore_stats = function(stats)
-    if stats then
-        session_stats.input_tokens = stats.input_tokens or 0
-        session_stats.output_tokens = stats.output_tokens or 0
-        session_stats.total_cost = stats.total_cost or 0
-        -- Update the window title with restored stats
-        vim.schedule(function()
-            update_chat_window_title()
-        end)
-    end
-end
-
---- Update window title with session name
----@param session_name string|nil Session name to display
-M._session_update_title = function(session_name)
-    -- Store session name for title display (use local variable)
-    current_session_name = session_name
-    vim.schedule(function()
-        update_chat_window_title()
-    end)
-end
-
---- Get current session stats (for session module)
----@return table Stats with input_tokens, output_tokens, total_cost
-M._session_get_stats = function()
-    return {
-        input_tokens = session_stats.input_tokens,
-        output_tokens = session_stats.output_tokens,
-        total_cost = session_stats.total_cost,
-    }
-end
-
---- Get the chat buffer handle (for session module)
----@return number|nil Buffer handle or nil if not created
-M._session_get_buffer = function()
-    return chat_buf
-end
-
---- Clear the chat buffer (for new session)
-M._session_clear_buffer = function()
-    if chat_buf and vim.api.nvim_buf_is_valid(chat_buf) then
-        vim.api.nvim_buf_set_option(chat_buf, 'modifiable', true)
-        vim.api.nvim_buf_set_lines(chat_buf, 0, -1, false, { '' })
-        vim.api.nvim_buf_set_option(chat_buf, 'modifiable', false)
-    end
-    -- Reset stats
-    session_stats.input_tokens = 0
-    session_stats.output_tokens = 0
-    session_stats.total_cost = 0
-    -- Clear file path map
-    file_path_map = {}
-    -- Update title
-    vim.schedule(function()
-        update_chat_window_title()
-    end)
+    vim.api.nvim_create_user_command('TarkChatClose', function()
+        M.close()
+    end, { desc = 'Close tark chat' })
+    
+    vim.api.nvim_create_user_command('TarkChatToggle', function()
+        M.toggle()
+    end, { desc = 'Toggle tark chat' })
 end
 
 return M

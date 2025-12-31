@@ -1,6 +1,6 @@
 [package]
 name = "tark-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "AI-powered CLI agent with LSP server for code completion, hover, diagnostics, and chat"
 authors = ["tark contributors"]
@@ -78,9 +78,16 @@ tree-sitter-json = "0.21"
 # Usage tracking
 rusqlite = { version = "0.31", features = ["bundled"] }
 whoami = "1"
-tabled = "0.16"
+tabled = "0.17"
 colored = "2"
+
+# TUI (Terminal User Interface)
+ratatui = "0.28"
+crossterm = "0.28"
+arboard = "3.4"
+image = "0.25"
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+proptest = "1.5"

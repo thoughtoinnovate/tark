@@ -33,3 +33,4 @@ id_rsa*
 coverage/
 *.profraw
 .tark/
+.kiro/
