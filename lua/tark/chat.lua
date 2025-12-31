@@ -15,6 +15,7 @@ M.config = {
         height = 20,         -- for popup mode
         sidepane_width = 0.35,  -- 35% of editor width (or fixed number like 60)
         split_width = 80,    -- fixed width for split mode (columns)
+        panel_width = 18,    -- width of the panel (tasks/notifications) in columns
         min_width = 50,
         max_width = 100,
         border = 'rounded',
@@ -4018,7 +4019,7 @@ function M.open(initial_message)
         }
         
         -- Adjust width to make room for tasks window
-        local tasks_width = 22
+        local tasks_width = M.config.window.panel_width or 18
         local chat_width = width - tasks_width
         
         chat_win = vim.api.nvim_open_win(buf, false, {
@@ -4595,7 +4596,7 @@ function M.maximize()
         -- RESTORE: Return to saved dimensions
         if saved_dimensions then
             local sd = saved_dimensions
-            local panel_width = 22
+            local panel_width = M.config.window.panel_width or 18
             local chat_width = sd.width - panel_width
             local height = editor_height - input_height - 4
             
@@ -4660,7 +4661,7 @@ function M.maximize()
         
         -- Calculate maximized dimensions (full editor width)
         local max_width = editor_width - 4  -- Leave small margin
-        local panel_width = 26  -- Slightly wider panel when maximized
+        local panel_width = (M.config.window.panel_width or 18) + 4  -- Slightly wider panel when maximized
         local chat_width = max_width - panel_width
         local height = editor_height - input_height - 4
         
