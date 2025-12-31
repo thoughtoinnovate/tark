@@ -4,6 +4,10 @@
 //! via Unix socket RPC protocol. It handles sending commands to Neovim
 //! (open file, apply diff, etc.) and receiving notifications (buffer changes,
 //! diagnostics updates, cursor movements).
+//!
+//! Note: Unix socket communication is only available on Unix platforms.
+//! On Windows, the editor bridge provides stub implementations that return
+//! appropriate errors.
 
 // Allow dead code for intentionally unused API methods that are part of the public interface
 // These methods are designed for future use when the TUI is fully integrated with Neovim
@@ -15,7 +19,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -723,6 +729,9 @@ pub enum EditorBridgeError {
 
     #[error("Channel closed")]
     ChannelClosed,
+
+    #[error("Unix sockets not supported on this platform")]
+    NotSupported,
 }
 
 /// Result type for editor bridge operations
@@ -762,11 +771,17 @@ impl Default for EditorBridgeConfig {
 /// - Sending commands and receiving responses
 /// - Receiving notifications from Neovim
 /// - Graceful disconnection handling
+///
+/// Note: On Windows, this struct provides stub implementations since Unix sockets
+/// are not available. All connection attempts will fail with NotSupported error.
 pub struct EditorBridge {
     /// Configuration
     config: EditorBridgeConfig,
     /// Socket connection (wrapped in Arc<Mutex> for async access)
+    #[cfg(unix)]
     socket: Arc<Mutex<Option<UnixStream>>>,
+    #[cfg(not(unix))]
+    socket: Arc<Mutex<Option<()>>>,
     /// Request ID counter
     request_id: AtomicU64,
     /// Pending requests waiting for responses
@@ -818,6 +833,7 @@ impl EditorBridge {
     }
 
     /// Connect to the Neovim socket
+    #[cfg(unix)]
     pub async fn connect(&self) -> EditorBridgeResult<()> {
         let socket_path = &self.config.socket_path;
 
@@ -858,6 +874,12 @@ impl EditorBridge {
         Ok(())
     }
 
+    /// Connect to the Neovim socket (stub for non-Unix platforms)
+    #[cfg(not(unix))]
+    pub async fn connect(&self) -> EditorBridgeResult<()> {
+        Err(EditorBridgeError::NotSupported)
+    }
+
     /// Disconnect from the Neovim socket
     pub async fn disconnect(&self) {
         self.connected.store(false, Ordering::SeqCst);
@@ -884,6 +906,7 @@ impl EditorBridge {
     }
 
     /// Start the background reader task
+    #[cfg(unix)]
     async fn start_reader_task(&self) {
         let socket = self.socket.clone();
         let pending_requests = self.pending_requests.clone();
@@ -946,6 +969,12 @@ impl EditorBridge {
         });
     }
 
+    /// Start the background reader task (stub for non-Unix platforms)
+    #[cfg(not(unix))]
+    async fn start_reader_task(&self) {
+        // No-op on non-Unix platforms
+    }
+
     /// Handle an incoming message from the socket
     async fn handle_incoming_message(
         msg: RpcMessage,
@@ -1005,6 +1034,7 @@ impl EditorBridge {
     }
 
     /// Send a message to Neovim (fire and forget)
+    #[cfg(unix)]
     pub async fn send(&self, msg: &RpcMessage) -> EditorBridgeResult<()> {
         if !self.is_connected() {
             return Err(EditorBridgeError::NotConnected);
@@ -1027,6 +1057,12 @@ impl EditorBridge {
         } else {
             Err(EditorBridgeError::NotConnected)
         }
+    }
+
+    /// Send a message to Neovim (stub for non-Unix platforms)
+    #[cfg(not(unix))]
+    pub async fn send(&self, _msg: &RpcMessage) -> EditorBridgeResult<()> {
+        Err(EditorBridgeError::NotSupported)
     }
 
     /// Send a request and wait for a response
