@@ -6,7 +6,7 @@
 # =============================================================================
 # Stage 1: Build the binary
 # =============================================================================
-FROM rust:1.85-alpine AS builder
+FROM rust:1.87-alpine AS builder
 
 # Detect architecture for conditional operations
 ARG TARGETARCH
