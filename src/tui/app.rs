@@ -746,83 +746,220 @@ impl TuiApp {
 
     /// Render the UI
     pub fn render(&mut self) -> anyhow::Result<()> {
+        use super::widgets::InputWidgetRenderer;
+        use ratatui::layout::{Constraint, Direction, Layout};
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::widgets::{Block, Borders, Paragraph};
+
         let input_mode = self.state.input_mode;
         let focused = self.state.focused_component;
         let pending_key = self.keybindings.pending_key();
         let agent_mode = self.state.mode;
         let thinking_mode = self.state.thinking_mode;
         let status_message = self.state.status_message.take();
+        let editor_connected = self.state.editor_connected;
+
+        // Clone input widget for rendering (it implements Clone)
+        let input_widget = self.state.input_widget.clone();
+
+        // Collect message data for rendering
+        let messages_data: Vec<(super::widgets::Role, String)> = self
+            .state
+            .message_list
+            .messages()
+            .iter()
+            .map(|msg| (msg.role, msg.content.clone()))
+            .collect();
+        let messages_empty = messages_data.is_empty();
 
         self.terminal.draw(|frame| {
-            use ratatui::layout::{Constraint, Direction, Layout};
-            use ratatui::style::{Color, Style};
-            use ratatui::widgets::{Block, Borders};
-
             let area = frame.area();
 
-            // Main layout: messages area + input area + status bar
-            let chunks = Layout::default()
+            // Main vertical layout: content area + input + status bar
+            let main_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(3),    // Messages
+                    Constraint::Min(5),    // Content (messages + panel)
                     Constraint::Length(3), // Input
                     Constraint::Length(1), // Status bar
                 ])
                 .split(area);
 
+            // Content area: messages (left) + panel (right)
+            let content_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(75), // Messages area
+                    Constraint::Percentage(25), // Panel
+                ])
+                .split(main_chunks[0]);
+
             // Messages area
             let messages_block = Block::default()
-                .title(format!(
-                    " Messages {} ",
-                    if focused == FocusedComponent::Messages {
-                        "[focused]"
-                    } else {
-                        ""
-                    }
-                ))
+                .title(" Messages ")
                 .borders(Borders::ALL)
                 .border_style(if focused == FocusedComponent::Messages {
                     Style::default().fg(Color::Cyan)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 });
-            frame.render_widget(messages_block, chunks[0]);
 
-            // Input area
-            let mode_indicator = match input_mode {
-                InputMode::Normal => "[NORMAL]",
-                InputMode::Insert => "[INSERT]",
-                InputMode::Command => "[COMMAND]",
-            };
-            let pending_indicator = pending_key.map(|k| format!(" {}", k)).unwrap_or_default();
-            let input_block = Block::default()
-                .title(format!(" {} {} ", mode_indicator, pending_indicator))
+            let messages_inner = messages_block.inner(content_chunks[0]);
+            frame.render_widget(messages_block, content_chunks[0]);
+
+            // Render message content
+            if messages_empty {
+                let welcome_text = vec![
+                    ratatui::text::Line::from(""),
+                    ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  Welcome to tark chat!",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    ratatui::text::Line::from(""),
+                    ratatui::text::Line::from("  Type a message to start chatting."),
+                    ratatui::text::Line::from("  Use /help for available commands."),
+                    ratatui::text::Line::from(""),
+                    ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  Keybindings:",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    ratatui::text::Line::from("    i     - Enter insert mode"),
+                    ratatui::text::Line::from("    Esc   - Exit insert mode"),
+                    ratatui::text::Line::from("    Enter - Send message"),
+                    ratatui::text::Line::from("    q     - Quit (in normal mode)"),
+                    ratatui::text::Line::from("    Tab   - Cycle focus"),
+                ];
+                let welcome = Paragraph::new(welcome_text);
+                frame.render_widget(welcome, messages_inner);
+            } else {
+                // Render messages from the list
+                let messages: Vec<ratatui::text::Line> = messages_data
+                    .iter()
+                    .flat_map(|(role, content)| {
+                        let (role_style, role_icon) = match role {
+                            super::widgets::Role::User => {
+                                (Style::default().fg(Color::Green), "👤 You")
+                            }
+                            super::widgets::Role::Assistant => {
+                                (Style::default().fg(Color::Cyan), "🤖 Assistant")
+                            }
+                            super::widgets::Role::System => {
+                                (Style::default().fg(Color::Yellow), "⚙ System")
+                            }
+                            super::widgets::Role::Tool => {
+                                (Style::default().fg(Color::Magenta), "🔧 Tool")
+                            }
+                        };
+
+                        let mut lines =
+                            vec![ratatui::text::Line::from(ratatui::text::Span::styled(
+                                role_icon,
+                                role_style.add_modifier(Modifier::BOLD),
+                            ))];
+
+                        // Add message content lines
+                        for line in content.lines() {
+                            lines.push(ratatui::text::Line::from(format!("  {}", line)));
+                        }
+
+                        // Add spacing between messages
+                        lines.push(ratatui::text::Line::from(""));
+
+                        lines
+                    })
+                    .collect();
+
+                let messages_paragraph = Paragraph::new(messages);
+                frame.render_widget(messages_paragraph, messages_inner);
+            }
+
+            // Panel area (right side)
+            let panel_block = Block::default()
+                .title(" Panel ")
                 .borders(Borders::ALL)
-                .border_style(if focused == FocusedComponent::Input {
-                    Style::default().fg(Color::Green)
+                .border_style(if focused == FocusedComponent::Panel {
+                    Style::default().fg(Color::Magenta)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 });
-            frame.render_widget(input_block, chunks[1]);
 
-            // Status bar with mode and status message
+            let panel_inner = panel_block.inner(content_chunks[1]);
+            frame.render_widget(panel_block, content_chunks[1]);
+
+            // Panel content
+            let panel_content = vec![
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    " Tasks",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                ratatui::text::Line::from("   No active tasks"),
+                ratatui::text::Line::from(""),
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    " Files",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                ratatui::text::Line::from("   No files attached"),
+            ];
+            let panel_paragraph = Paragraph::new(panel_content);
+            frame.render_widget(panel_paragraph, panel_inner);
+
+            // Input area
+            let mode_indicator = match input_mode {
+                InputMode::Normal => ("NORMAL", Color::Blue),
+                InputMode::Insert => ("INSERT", Color::Green),
+                InputMode::Command => ("COMMAND", Color::Yellow),
+            };
+            let pending_indicator = pending_key.map(|k| format!(" {}", k)).unwrap_or_default();
+            let input_block = Block::default()
+                .title(format!(" [{}]{} ", mode_indicator.0, pending_indicator))
+                .borders(Borders::ALL)
+                .border_style(if focused == FocusedComponent::Input {
+                    Style::default().fg(mode_indicator.1)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                });
+
+            // Render the actual input widget content
+            let input_renderer = InputWidgetRenderer::new(&input_widget).block(input_block);
+            frame.render_widget(input_renderer, main_chunks[1]);
+
+            // Status bar
             let mode_str = match agent_mode {
-                AgentMode::Build => "◆ Build",
-                AgentMode::Plan => "◇ Plan",
-                AgentMode::Review => "◈ Review",
+                AgentMode::Build => ("◆ Build", Color::Green),
+                AgentMode::Plan => ("◇ Plan", Color::Yellow),
+                AgentMode::Review => ("◈ Review", Color::Cyan),
             };
             let thinking_str = if thinking_mode { " [verbose]" } else { "" };
-            let status_text = if let Some(msg) = status_message {
-                format!(" {} {} | {} ", mode_str, thinking_str, msg)
+            let connection_str = if editor_connected {
+                ("◉ Connected", Color::Green)
             } else {
-                format!(
-                    " {} {} | Press 'q' to quit, 'i' for insert mode, /help for commands ",
-                    mode_str, thinking_str
-                )
+                ("○ Standalone", Color::DarkGray)
             };
-            let status = ratatui::widgets::Paragraph::new(status_text)
+
+            let status_spans = vec![
+                ratatui::text::Span::styled(
+                    format!(" {} ", mode_str.0),
+                    Style::default().fg(mode_str.1),
+                ),
+                ratatui::text::Span::raw("│"),
+                ratatui::text::Span::styled(
+                    format!(" {} ", connection_str.0),
+                    Style::default().fg(connection_str.1),
+                ),
+                ratatui::text::Span::raw("│"),
+                ratatui::text::Span::styled(thinking_str, Style::default().fg(Color::Magenta)),
+                ratatui::text::Span::raw(" "),
+                ratatui::text::Span::styled(
+                    status_message.unwrap_or_else(|| "Ready".to_string()),
+                    Style::default().fg(Color::White),
+                ),
+            ];
+
+            let status = Paragraph::new(ratatui::text::Line::from(status_spans))
                 .style(Style::default().bg(Color::DarkGray));
-            frame.render_widget(status, chunks[2]);
+            frame.render_widget(status, main_chunks[2]);
         })?;
         Ok(())
     }

@@ -10,7 +10,7 @@ mod picker;
 mod status_bar;
 
 pub use attachment_bar::{AttachmentBar, AttachmentPreview};
-pub use input::InputWidget;
+pub use input::{InputWidget, InputWidgetRenderer};
 pub use message_list::{ChatMessage, MessageList, Role};
 pub use panel::{NotificationLevel, PanelSection, PanelWidget, SectionItem, TaskStatus};
 pub use picker::{Picker, PickerItem, PickerWidget};
