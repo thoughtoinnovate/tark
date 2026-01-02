@@ -34,11 +34,23 @@ pub async fn run_tui_chat(
 ) -> Result<()> {
     let working_dir = PathBuf::from(working_dir).canonicalize()?;
 
+    // Load configuration
+    let config = Config::load().unwrap_or_default();
+
+    // Check if LLM is configured before starting TUI
+    let llm_status = check_llm_configuration(&config);
+
     // Load TUI configuration
-    let config = TuiConfig::load().unwrap_or_default();
+    let tui_config = TuiConfig::load().unwrap_or_default();
 
     // Create the TUI application
-    let mut app = TuiApp::with_config(config)?;
+    let mut app = TuiApp::with_config(tui_config)?;
+
+    // Set LLM configuration status
+    app.state.llm_configured = llm_status.is_ok();
+    if let Err(ref error_msg) = llm_status {
+        app.state.llm_error = Some(error_msg.clone());
+    }
 
     // Determine standalone mode
     let is_standalone = socket_path.is_none();
@@ -83,6 +95,59 @@ pub async fn run_tui_chat(
 
     // Run the TUI event loop
     app.run()?;
+
+    Ok(())
+}
+
+/// Check if LLM is properly configured
+/// Returns Ok(()) if configured, Err(message) with helpful guidance if not
+fn check_llm_configuration(config: &Config) -> Result<(), String> {
+    let provider = &config.llm.default_provider;
+
+    match provider.to_lowercase().as_str() {
+        "openai" | "gpt" => {
+            if std::env::var("OPENAI_API_KEY").is_err() {
+                return Err(
+                    "OpenAI API key not configured.\n\n\
+                    To use OpenAI, set the OPENAI_API_KEY environment variable:\n\
+                    \n\
+                    export OPENAI_API_KEY=\"your-api-key-here\"\n\
+                    \n\
+                    Get your API key from: https://platform.openai.com/api-keys"
+                        .to_string(),
+                );
+            }
+        }
+        "claude" | "anthropic" => {
+            if std::env::var("ANTHROPIC_API_KEY").is_err() {
+                return Err(
+                    "Anthropic API key not configured.\n\n\
+                    To use Claude, set the ANTHROPIC_API_KEY environment variable:\n\
+                    \n\
+                    export ANTHROPIC_API_KEY=\"your-api-key-here\"\n\
+                    \n\
+                    Get your API key from: https://console.anthropic.com/settings/keys"
+                        .to_string(),
+                );
+            }
+        }
+        "ollama" | "local" => {
+            // Ollama doesn't require an API key, but we could check if it's running
+            // For now, assume it's configured if selected
+        }
+        _ => {
+            return Err(format!(
+                "Unknown LLM provider: '{}'\n\n\
+                Supported providers:\n\
+                - openai (requires OPENAI_API_KEY)\n\
+                - claude (requires ANTHROPIC_API_KEY)\n\
+                - ollama (local, no API key needed)\n\
+                \n\
+                Configure in ~/.config/tark/config.toml or set default_provider",
+                provider
+            ));
+        }
+    }
 
     Ok(())
 }

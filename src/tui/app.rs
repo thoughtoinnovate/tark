@@ -52,6 +52,10 @@ pub struct AppState {
     pub completion_state: CompletionState,
     /// TUI configuration
     pub config: TuiConfig,
+    /// Whether LLM is properly configured
+    pub llm_configured: bool,
+    /// LLM configuration error message (if not configured)
+    pub llm_error: Option<String>,
 }
 
 /// State for tab completion
@@ -561,6 +565,25 @@ impl TuiApp {
         } else {
             // Regular message - add to the list
             self.state.message_list.push(ChatMessage::user(content));
+
+            // Check if LLM is configured
+            if !self.state.llm_configured {
+                // Show error message about LLM configuration
+                let error_msg = self.state.llm_error.clone().unwrap_or_else(|| {
+                    "No LLM provider configured. Please set up an API key.".to_string()
+                });
+                self.state.message_list.push(ChatMessage::system(format!(
+                    "⚠️ Cannot send message - LLM not configured\n\n{}",
+                    error_msg
+                )));
+            } else {
+                // TODO: Send message to LLM via ChatAgent
+                // For now, show a placeholder message indicating the message was received
+                // This will be replaced with actual LLM integration
+                self.state.message_list.push(ChatMessage::system(
+                    "💭 Processing... (LLM integration pending)".to_string(),
+                ));
+            }
         }
     }
 
@@ -758,6 +781,8 @@ impl TuiApp {
         let thinking_mode = self.state.thinking_mode;
         let status_message = self.state.status_message.take();
         let editor_connected = self.state.editor_connected;
+        let llm_configured = self.state.llm_configured;
+        let llm_error = self.state.llm_error.clone();
 
         // Clone input widget for rendering (it implements Clone)
         let input_widget = self.state.input_widget.clone();
@@ -809,7 +834,7 @@ impl TuiApp {
 
             // Render message content
             if messages_empty {
-                let welcome_text = vec![
+                let mut welcome_text = vec![
                     ratatui::text::Line::from(""),
                     ratatui::text::Line::from(ratatui::text::Span::styled(
                         "  Welcome to tark chat!",
@@ -817,6 +842,36 @@ impl TuiApp {
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     )),
+                    ratatui::text::Line::from(""),
+                ];
+
+                // Show LLM status
+                if llm_configured {
+                    welcome_text.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  ✓ LLM configured - ready to chat",
+                        Style::default().fg(Color::Green),
+                    )));
+                } else {
+                    welcome_text.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  ⚠ LLM not configured",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )));
+                    welcome_text.push(ratatui::text::Line::from(""));
+
+                    // Show the error message if available
+                    if let Some(ref error) = llm_error {
+                        for line in error.lines() {
+                            welcome_text.push(ratatui::text::Line::from(
+                                ratatui::text::Span::styled(
+                                    format!("  {}", line),
+                                    Style::default().fg(Color::Yellow),
+                                ),
+                            ));
+                        }
+                    }
+                }
+
+                welcome_text.extend(vec![
                     ratatui::text::Line::from(""),
                     ratatui::text::Line::from("  Type a message to start chatting."),
                     ratatui::text::Line::from("  Use /help for available commands."),
@@ -830,7 +885,7 @@ impl TuiApp {
                     ratatui::text::Line::from("    Enter - Send message"),
                     ratatui::text::Line::from("    q     - Quit (in normal mode)"),
                     ratatui::text::Line::from("    Tab   - Cycle focus"),
-                ];
+                ]);
                 let welcome = Paragraph::new(welcome_text);
                 frame.render_widget(welcome, messages_inner);
             } else {
@@ -937,6 +992,11 @@ impl TuiApp {
             } else {
                 ("○ Standalone", Color::DarkGray)
             };
+            let llm_str = if llm_configured {
+                ("● LLM", Color::Green)
+            } else {
+                ("○ No LLM", Color::Red)
+            };
 
             let status_spans = vec![
                 ratatui::text::Span::styled(
@@ -947,6 +1007,11 @@ impl TuiApp {
                 ratatui::text::Span::styled(
                     format!(" {} ", connection_str.0),
                     Style::default().fg(connection_str.1),
+                ),
+                ratatui::text::Span::raw("│"),
+                ratatui::text::Span::styled(
+                    format!(" {} ", llm_str.0),
+                    Style::default().fg(llm_str.1),
                 ),
                 ratatui::text::Span::raw("│"),
                 ratatui::text::Span::styled(thinking_str, Style::default().fg(Color::Magenta)),
