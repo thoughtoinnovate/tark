@@ -3,11 +3,13 @@
 #![allow(dead_code)]
 
 mod claude;
+mod models_db;
 mod ollama;
 mod openai;
 mod types;
 
 pub use claude::ClaudeProvider;
+pub use models_db::{models_db, ModelCapabilities};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use types::*;

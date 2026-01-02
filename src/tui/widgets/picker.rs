@@ -25,6 +25,8 @@ pub struct PickerItem {
     pub icon: Option<String>,
     /// Whether this item is currently active/selected
     pub is_active: bool,
+    /// Whether this item is disabled (cannot be selected)
+    pub is_disabled: bool,
 }
 
 impl PickerItem {
@@ -36,6 +38,7 @@ impl PickerItem {
             description: None,
             icon: None,
             is_active: false,
+            is_disabled: false,
         }
     }
 
@@ -54,6 +57,12 @@ impl PickerItem {
     /// Set the active state
     pub fn with_active(mut self, active: bool) -> Self {
         self.is_active = active;
+        self
+    }
+
+    /// Set the disabled state
+    pub fn with_disabled(mut self, disabled: bool) -> Self {
+        self.is_disabled = disabled;
         self
     }
 }
@@ -359,10 +368,12 @@ impl Widget for PickerWidget<'_> {
 
             // Icon if present
             if let Some(ref icon) = item.icon {
-                spans.push(Span::styled(
-                    format!("{} ", icon),
-                    Style::default().fg(Color::Yellow),
-                ));
+                let icon_style = if item.is_disabled {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                };
+                spans.push(Span::styled(format!("{} ", icon), icon_style));
             }
 
             // Active indicator
@@ -370,8 +381,10 @@ impl Widget for PickerWidget<'_> {
                 spans.push(Span::styled("● ", Style::default().fg(Color::Green)));
             }
 
-            // Label
-            let label_style = if is_selected {
+            // Label - use dimmed style for disabled items
+            let label_style = if item.is_disabled {
+                Style::default().fg(Color::DarkGray)
+            } else if is_selected {
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
@@ -380,12 +393,16 @@ impl Widget for PickerWidget<'_> {
             };
             spans.push(Span::styled(item.label.clone(), label_style));
 
-            // Description if present
+            // Description if present - use dimmed style for disabled items
             if let Some(ref desc) = item.description {
-                spans.push(Span::styled(
-                    format!(" - {}", desc),
-                    Style::default().fg(Color::DarkGray),
-                ));
+                let desc_style = if item.is_disabled {
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                spans.push(Span::styled(format!(" - {}", desc), desc_style));
             }
 
             lines.push(Line::from(spans));
@@ -403,6 +420,7 @@ impl Widget for PickerWidget<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_picker_item_creation() {
@@ -416,6 +434,14 @@ mod tests {
         assert_eq!(item.description, Some("Description".to_string()));
         assert_eq!(item.icon, Some("🔧".to_string()));
         assert!(item.is_active);
+    }
+
+    #[test]
+    fn test_picker_item_disabled() {
+        let item = PickerItem::new("id1", "Label 1").with_disabled(true);
+
+        assert!(item.is_disabled);
+        assert!(!item.is_active);
     }
 
     #[test]
@@ -545,5 +571,123 @@ mod tests {
         picker.set_filter("first");
         assert_eq!(picker.visible_count(), 1);
         assert_eq!(picker.selected_id(), Some("1"));
+    }
+
+    // Strategy to generate a valid provider ID
+    fn provider_id_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("openai".to_string()),
+            Just("claude".to_string()),
+            Just("ollama".to_string()),
+        ]
+    }
+
+    // Strategy to generate a valid model ID for a provider
+    fn model_id_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("gpt-4o".to_string()),
+            Just("gpt-4o-mini".to_string()),
+            Just("claude-sonnet-4-20250514".to_string()),
+            Just("claude-3-5-sonnet-20241022".to_string()),
+            Just("llama3.2".to_string()),
+            Just("mistral".to_string()),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20))]
+
+        /// **Feature: unified-model-selection, Property 1: Picker Highlights Current Selection**
+        /// **Validates: Requirements 1.2, 1.4**
+        ///
+        /// *For any* provider picker display with a current provider set, the picker items
+        /// SHALL contain exactly one item marked as active, and that item's ID SHALL match
+        /// the current provider.
+        #[test]
+        fn prop_picker_highlights_current_provider(current_provider in provider_id_strategy()) {
+            // Create picker items with one marked as active (current provider)
+            let items = vec![
+                PickerItem::new("openai", "OpenAI")
+                    .with_description("GPT-4, GPT-4o")
+                    .with_active(current_provider == "openai"),
+                PickerItem::new("claude", "Claude")
+                    .with_description("Claude models")
+                    .with_active(current_provider == "claude"),
+                PickerItem::new("ollama", "Ollama")
+                    .with_description("Local models")
+                    .with_active(current_provider == "ollama"),
+            ];
+
+            let picker = Picker::new("Select Provider").with_items(items);
+
+            // Count active items
+            let active_count = picker.items.iter().filter(|item| item.is_active).count();
+
+            // Property: Exactly one item should be marked as active
+            prop_assert_eq!(active_count, 1, "Expected exactly one active item, found {}", active_count);
+
+            // Property: The active item's ID should match the current provider
+            let active_item = picker.items.iter().find(|item| item.is_active);
+            prop_assert!(active_item.is_some(), "No active item found");
+            let active_id = &active_item.unwrap().id;
+            prop_assert_eq!(
+                active_id,
+                &current_provider,
+                "Active item ID '{}' does not match current provider '{}'",
+                active_id,
+                current_provider
+            );
+        }
+
+        /// **Feature: unified-model-selection, Property 1: Picker Highlights Current Model**
+        /// **Validates: Requirements 1.2, 1.4**
+        ///
+        /// *For any* model picker display with a current model set, the picker items
+        /// SHALL contain exactly one item marked as active, and that item's ID SHALL match
+        /// the current model.
+        #[test]
+        fn prop_picker_highlights_current_model(current_model in model_id_strategy()) {
+            // Create picker items with one marked as active (current model)
+            let items = vec![
+                PickerItem::new("gpt-4o", "GPT-4o")
+                    .with_description("Most capable")
+                    .with_active(current_model == "gpt-4o"),
+                PickerItem::new("gpt-4o-mini", "GPT-4o Mini")
+                    .with_description("Fast and affordable")
+                    .with_active(current_model == "gpt-4o-mini"),
+                PickerItem::new("claude-sonnet-4-20250514", "Claude Sonnet 4")
+                    .with_description("Latest Claude")
+                    .with_active(current_model == "claude-sonnet-4-20250514"),
+                PickerItem::new("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet")
+                    .with_description("Best balance")
+                    .with_active(current_model == "claude-3-5-sonnet-20241022"),
+                PickerItem::new("llama3.2", "Llama 3.2")
+                    .with_description("Meta's model")
+                    .with_active(current_model == "llama3.2"),
+                PickerItem::new("mistral", "Mistral")
+                    .with_description("Fast and capable")
+                    .with_active(current_model == "mistral"),
+            ];
+
+            let picker = Picker::new("Select Model").with_items(items);
+
+            // Count active items
+            let active_count = picker.items.iter().filter(|item| item.is_active).count();
+
+            // Property: Exactly one item should be marked as active
+            prop_assert_eq!(active_count, 1, "Expected exactly one active item, found {}", active_count);
+
+            // Property: The active item's ID should match the current model
+            let active_item = picker.items.iter().find(|item| item.is_active);
+            prop_assert!(active_item.is_some(), "No active item found");
+            let active_id = &active_item.unwrap().id;
+            prop_assert_eq!(
+                active_id,
+                &current_model,
+                "Active item ID '{}' does not match current model '{}'",
+                active_id,
+                current_model
+            );
+        }
     }
 }

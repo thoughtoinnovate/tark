@@ -1178,6 +1178,74 @@ pub struct ConversationSummary {
 
 // ========== Chat Sessions ==========
 
+/// Model preference for a specific agent mode
+///
+/// Stores the provider and model selection for a single mode (Build/Plan/Ask).
+/// Empty strings indicate no preference has been set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelPreference {
+    /// Provider ID (e.g., "openai", "claude", "ollama")
+    pub provider: String,
+    /// Model ID (e.g., "gpt-4o", "claude-sonnet-4")
+    pub model: String,
+}
+
+impl ModelPreference {
+    /// Create a new model preference
+    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+        }
+    }
+
+    /// Check if this preference is empty (no selection made)
+    pub fn is_empty(&self) -> bool {
+        self.provider.is_empty() && self.model.is_empty()
+    }
+}
+
+/// Per-mode model preferences
+///
+/// Stores separate provider/model preferences for each agent mode,
+/// allowing different model configurations for different workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModePreferences {
+    /// Model preference for Build mode
+    pub build: ModelPreference,
+    /// Model preference for Plan mode
+    pub plan: ModelPreference,
+    /// Model preference for Ask mode
+    pub ask: ModelPreference,
+}
+
+impl ModePreferences {
+    /// Get the preference for a specific mode
+    pub fn get(&self, mode: &str) -> &ModelPreference {
+        match mode.to_lowercase().as_str() {
+            "build" => &self.build,
+            "plan" => &self.plan,
+            "ask" => &self.ask,
+            _ => &self.build, // Default to build mode
+        }
+    }
+
+    /// Set the preference for a specific mode
+    pub fn set(&mut self, mode: &str, preference: ModelPreference) {
+        match mode.to_lowercase().as_str() {
+            "build" => self.build = preference,
+            "plan" => self.plan = preference,
+            "ask" => self.ask = preference,
+            _ => {} // Ignore unknown modes
+        }
+    }
+
+    /// Check if a mode has a preference set
+    pub fn has_preference(&self, mode: &str) -> bool {
+        !self.get(mode).is_empty()
+    }
+}
+
 /// A chat session with conversation history
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatSession {
@@ -1199,6 +1267,9 @@ pub struct ChatSession {
     pub window_style: String,
     /// Window position
     pub window_position: String,
+    /// Per-mode model preferences (Build/Plan/Ask)
+    #[serde(default)]
+    pub mode_preferences: ModePreferences,
     /// Conversation messages
     pub messages: Vec<SessionMessage>,
     /// Total input tokens used
@@ -1224,6 +1295,7 @@ impl ChatSession {
             mode: "build".to_string(),
             window_style: "sidepane".to_string(),
             window_position: "right".to_string(),
+            mode_preferences: ModePreferences::default(),
             messages: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,

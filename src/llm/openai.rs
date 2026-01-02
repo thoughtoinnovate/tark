@@ -16,6 +16,22 @@ use std::env;
 
 /// Official OpenAI API endpoint - API key is ONLY sent here
 const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
+/// Official OpenAI models endpoint
+const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
+
+/// Model info returned from OpenAI API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub owned_by: String,
+}
+
+/// Response from OpenAI models endpoint
+#[derive(Debug, Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelInfo>,
+}
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -45,6 +61,45 @@ impl OpenAiProvider {
     pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
         self.max_tokens = max_tokens;
         self
+    }
+
+    /// Fetch available models from OpenAI API
+    /// Returns only chat-capable models (gpt-* and o1-*)
+    pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let response = self
+            .client
+            .get(OPENAI_MODELS_URL)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+            .context("Failed to fetch models from OpenAI")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenAI API error {}: {}", status, body);
+        }
+
+        let models_response: ModelsResponse = response
+            .json()
+            .await
+            .context("Failed to parse models response")?;
+
+        // Filter to only chat-capable models
+        let chat_models: Vec<ModelInfo> = models_response
+            .data
+            .into_iter()
+            .filter(|m| {
+                let id = m.id.as_str();
+                // Include GPT models and O1 models, exclude embeddings, tts, whisper, dall-e
+                (id.starts_with("gpt-") || id.starts_with("o1") || id.starts_with("o3"))
+                    && !id.contains("instruct")
+                    && !id.contains("realtime")
+                    && !id.contains("audio")
+            })
+            .collect();
+
+        Ok(chat_models)
     }
 
     /// Sanitize message history to fix orphaned tool calls and tool responses.

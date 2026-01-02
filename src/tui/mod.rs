@@ -9,12 +9,14 @@
 pub mod agent_bridge;
 pub mod app;
 pub mod attachments;
+pub mod clipboard;
 pub mod commands;
 pub mod config;
 pub mod editor_bridge;
 mod events;
 pub mod keybindings;
 pub mod plan_manager;
+pub mod prompt_history;
 pub mod usage_manager;
 pub mod widgets;
 
@@ -28,6 +30,7 @@ pub use attachments::{
     AttachmentContent, AttachmentError, AttachmentManager, AttachmentType, DataFormat,
     DocumentFormat, ImageFormat, MessageAttachment,
 };
+pub use clipboard::{ClipboardContent, ClipboardHandler, ImageData};
 pub use commands::{
     AgentModeChange, Command, CommandCategory, CommandHandler, CommandResult, PickerType,
     ToggleSetting,
@@ -43,9 +46,13 @@ pub use keybindings::{Action, FocusedComponent, InputMode, KeybindingHandler};
 pub use plan_manager::{
     NextTask, PanelTask, PlanManager, PlanStatusSummary, TaskInfo, TaskTransitionResult,
 };
+pub use prompt_history::PromptHistory;
 pub use usage_manager::{UsageDisplayInfo, UsageManager};
 pub use widgets::{
-    AttachmentBar, AttachmentPreview, ChatMessage, InputWidget, MessageList, NotificationLevel,
-    PanelSection, PanelWidget, Picker, PickerItem, PickerWidget, Role, SectionItem, StatusBar,
-    TaskStatus as PanelTaskStatus,
+    AttachmentBar, AttachmentDropdownState, AttachmentPreview, BlockType, ChatMessage,
+    CollapsibleBlock, CollapsibleBlockState, ContentSegment, ContextInfo, EnhancedPanelData,
+    EnhancedPanelSection, EnhancedPanelWidget, FileItem, InputWidget, MessageList,
+    NotificationLevel, PanelDataProvider, PanelSection, PanelSectionState, PanelWidget,
+    ParsedMessageContent, Picker, PickerItem, PickerWidget, Role, SectionItem, SessionInfo,
+    StatusBar, TaskItem, TaskStatus as PanelTaskStatus, ToolCallInfo,
 };

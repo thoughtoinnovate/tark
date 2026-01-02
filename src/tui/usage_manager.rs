@@ -1,10 +1,11 @@
 //! Usage tracking manager for the TUI
 //!
 //! Manages token usage, cost tracking, and persistence to the SQLite database.
-//! Integrates with the storage layer for usage data.
+//! Integrates with the storage layer for usage data and models.dev for pricing.
 
 #![allow(dead_code)]
 
+use crate::llm::models_db;
 use crate::storage::usage::{
     ModeUsage, ModelUsage, SessionWithStats, UsageLog, UsageSummary, UsageTracker,
 };
@@ -27,6 +28,8 @@ pub struct UsageManager {
     provider: String,
     /// Current model
     model: String,
+    /// Cached model capabilities (from models.dev)
+    cached_capabilities: Option<crate::llm::ModelCapabilities>,
 }
 
 impl Default for UsageManager {
@@ -46,6 +49,7 @@ impl UsageManager {
             current_cost: 0.0,
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
+            cached_capabilities: None,
         }
     }
 
@@ -91,11 +95,13 @@ impl UsageManager {
     /// Set the current provider
     pub fn set_provider(&mut self, provider: &str) {
         self.provider = provider.to_string();
+        self.cached_capabilities = None; // Clear cache when provider changes
     }
 
     /// Set the current model
     pub fn set_model(&mut self, model: &str) {
         self.model = model.to_string();
+        self.cached_capabilities = None; // Clear cache when model changes
     }
 
     /// Get current provider
@@ -142,22 +148,55 @@ impl UsageManager {
         Ok(())
     }
 
-    /// Calculate cost for tokens (using default pricing)
+    /// Calculate cost for tokens using models.dev pricing
+    ///
+    /// Falls back to hardcoded defaults if the model isn't found in the database.
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> f64 {
-        // Default pricing per million tokens
-        let (input_price, output_price) = match (self.provider.as_str(), self.model.as_str()) {
-            ("openai", "gpt-4o") => (5.0, 15.0),
-            ("openai", "gpt-4o-mini") => (0.15, 0.60),
-            ("anthropic", _) if self.model.contains("sonnet") => (3.0, 15.0),
-            ("anthropic", _) if self.model.contains("opus") => (15.0, 75.0),
-            ("anthropic", _) if self.model.contains("haiku") => (0.25, 1.25),
-            ("ollama", _) => (0.0, 0.0), // Ollama is free
-            _ => (0.0, 0.0),             // Unknown = free
+        // Try to use cached capabilities first
+        if let Some(ref caps) = self.cached_capabilities {
+            if caps.input_cost > 0.0 || caps.output_cost > 0.0 {
+                let input_cost = (input_tokens as f64) * caps.input_cost / 1_000_000.0;
+                let output_cost = (output_tokens as f64) * caps.output_cost / 1_000_000.0;
+                return input_cost + output_cost;
+            }
+        }
+
+        // Fallback to hardcoded pricing
+        Self::fallback_cost(&self.provider, &self.model, input_tokens, output_tokens)
+    }
+
+    /// Fallback cost calculation when models.dev data isn't available
+    fn fallback_cost(provider: &str, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
+        let (input_price, output_price) = match (provider.to_lowercase().as_str(), model) {
+            ("openai" | "gpt", m) if m.contains("gpt-4o-mini") => (0.15, 0.60),
+            ("openai" | "gpt", m) if m.contains("gpt-4o") => (2.5, 10.0),
+            ("openai" | "gpt", m) if m.contains("o1") => (15.0, 60.0),
+            ("openai" | "gpt", m) if m.contains("o3") => (10.0, 40.0),
+            ("openai" | "gpt", _) => (5.0, 15.0),
+            ("anthropic" | "claude", m) if m.contains("haiku") => (0.25, 1.25),
+            ("anthropic" | "claude", m) if m.contains("sonnet") => (3.0, 15.0),
+            ("anthropic" | "claude", m) if m.contains("opus") => (15.0, 75.0),
+            ("anthropic" | "claude", _) => (3.0, 15.0),
+            ("ollama" | "local", _) => (0.0, 0.0),
+            _ => (0.0, 0.0),
         };
 
         let input_cost = (input_tokens as f64) * input_price / 1_000_000.0;
         let output_cost = (output_tokens as f64) * output_price / 1_000_000.0;
         input_cost + output_cost
+    }
+
+    /// Async method to refresh capabilities from models.dev
+    pub async fn refresh_capabilities(&mut self) {
+        let caps = models_db()
+            .get_capabilities(&self.provider, &self.model)
+            .await;
+        self.cached_capabilities = Some(caps);
+    }
+
+    /// Get cached capabilities (if available)
+    pub fn capabilities(&self) -> Option<&crate::llm::ModelCapabilities> {
+        self.cached_capabilities.as_ref()
     }
 
     /// Get current session input tokens
@@ -265,18 +304,112 @@ impl UsageManager {
     }
 
     /// Get max tokens for current model
+    ///
+    /// Uses cached capabilities from models.dev if available.
     pub fn max_tokens_for_model(&self) -> u32 {
-        match (self.provider.as_str(), self.model.as_str()) {
-            ("openai", "gpt-4o") => 128_000,
-            ("openai", "gpt-4o-mini") => 128_000,
-            ("openai", "gpt-4-turbo") => 128_000,
-            ("openai", "gpt-4") => 8_192,
-            ("openai", "gpt-3.5-turbo") => 16_385,
-            ("anthropic", _) if self.model.contains("sonnet") => 200_000,
-            ("anthropic", _) if self.model.contains("opus") => 200_000,
-            ("anthropic", _) if self.model.contains("haiku") => 200_000,
-            ("ollama", _) => 32_000, // Default for most Ollama models
-            _ => 128_000,            // Default
+        // Try cached capabilities first
+        if let Some(ref caps) = self.cached_capabilities {
+            if caps.context_limit > 0 {
+                return caps.context_limit;
+            }
+        }
+
+        // Fallback to hardcoded values
+        Self::fallback_context_limit(&self.provider, &self.model)
+    }
+
+    /// Fallback context limit when models.dev data isn't available
+    fn fallback_context_limit(provider: &str, model: &str) -> u32 {
+        match (provider.to_lowercase().as_str(), model) {
+            ("openai" | "gpt", m) if m.contains("gpt-4o") => 128_000,
+            ("openai" | "gpt", m) if m.contains("gpt-4-turbo") => 128_000,
+            ("openai" | "gpt", m) if m.contains("gpt-4") => 8_192,
+            ("openai" | "gpt", m) if m.contains("gpt-3.5") => 16_385,
+            ("openai" | "gpt", m) if m.contains("o1") || m.contains("o3") => 200_000,
+            ("anthropic" | "claude", _) => 200_000,
+            ("ollama" | "local", _) => 32_000,
+            _ => 128_000,
+        }
+    }
+
+    /// Check if current model supports tool calling
+    pub fn supports_tools(&self) -> bool {
+        if let Some(ref caps) = self.cached_capabilities {
+            return caps.tool_call;
+        }
+        // Assume true for major providers
+        !matches!(self.provider.to_lowercase().as_str(), "ollama" | "local")
+    }
+
+    /// Check if current model supports reasoning/thinking mode
+    pub fn supports_reasoning(&self) -> bool {
+        if let Some(ref caps) = self.cached_capabilities {
+            return caps.reasoning;
+        }
+        // Check known reasoning models
+        self.model.contains("o1")
+            || self.model.contains("o3")
+            || self.model.contains("deepseek-r1")
+            || self.model.contains("thinking")
+    }
+
+    /// Check if current model supports vision
+    pub fn supports_vision(&self) -> bool {
+        if let Some(ref caps) = self.cached_capabilities {
+            return caps.vision;
+        }
+        // Fallback check
+        self.model.contains("vision")
+            || self.model.contains("4o")
+            || self.model.contains("claude-3")
+            || self.model.contains("gemini")
+            || self.model.contains("llava")
+    }
+
+    /// Check if current model supports prompt caching
+    pub fn supports_caching(&self) -> bool {
+        if let Some(ref caps) = self.cached_capabilities {
+            return caps.supports_caching;
+        }
+        // Known models with caching support
+        self.provider.to_lowercase() == "anthropic" || self.model.contains("gpt-4")
+    }
+
+    /// Get a capability summary string for display
+    pub fn capability_summary(&self) -> String {
+        if let Some(ref caps) = self.cached_capabilities {
+            caps.summary()
+        } else {
+            let mut caps = Vec::new();
+            if self.supports_tools() {
+                caps.push("tools");
+            }
+            if self.supports_reasoning() {
+                caps.push("reasoning");
+            }
+            if self.supports_vision() {
+                caps.push("vision");
+            }
+            if caps.is_empty() {
+                "text".to_string()
+            } else {
+                caps.join(", ")
+            }
+        }
+    }
+
+    /// Get pricing info string for display
+    pub fn pricing_info(&self) -> String {
+        if let Some(ref caps) = self.cached_capabilities {
+            caps.cost_string()
+        } else {
+            let (input, output) = match self.provider.to_lowercase().as_str() {
+                "ollama" | "local" => return "free".to_string(),
+                "openai" | "gpt" => (2.5, 10.0),
+                "anthropic" | "claude" => (3.0, 15.0),
+                _ => return "unknown".to_string(),
+            };
+            format!("${:.2}/${:.2} per 1M tokens", input, output)
         }
     }
 
@@ -342,19 +475,16 @@ mod tests {
 
     #[test]
     fn test_usage_manager_calculate_cost_openai() {
-        let manager = UsageManager::new(); // Default is openai/gpt-4o
-        let cost = manager.calculate_cost(1000, 500);
-        // gpt-4o: $5/M input, $15/M output
-        // Expected: (1000 * 5 + 500 * 15) / 1_000_000 = 0.0125
-        assert!((cost - 0.0125).abs() < 0.0001);
+        let _manager = UsageManager::new(); // Default is openai/gpt-4o
+        let cost = UsageManager::fallback_cost("openai", "gpt-4o", 1000, 500);
+        // gpt-4o: $2.5/M input, $10/M output
+        // Expected: (1000 * 2.5 + 500 * 10) / 1_000_000 = 0.0075
+        assert!((cost - 0.0075).abs() < 0.0001);
     }
 
     #[test]
     fn test_usage_manager_calculate_cost_ollama() {
-        let mut manager = UsageManager::new();
-        manager.set_provider("ollama");
-        manager.set_model("llama3");
-        let cost = manager.calculate_cost(10000, 5000);
+        let cost = UsageManager::fallback_cost("ollama", "llama3", 10000, 5000);
         assert_eq!(cost, 0.0); // Ollama is free
     }
 

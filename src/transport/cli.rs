@@ -94,7 +94,7 @@ pub async fn run_tui_chat(
     }
 
     // Run the TUI event loop
-    app.run()?;
+    app.run().await?;
 
     Ok(())
 }
@@ -107,28 +107,24 @@ fn check_llm_configuration(config: &Config) -> Result<(), String> {
     match provider.to_lowercase().as_str() {
         "openai" | "gpt" => {
             if std::env::var("OPENAI_API_KEY").is_err() {
-                return Err(
-                    "OpenAI API key not configured.\n\n\
+                return Err("OpenAI API key not configured.\n\n\
                     To use OpenAI, set the OPENAI_API_KEY environment variable:\n\
                     \n\
                     export OPENAI_API_KEY=\"your-api-key-here\"\n\
                     \n\
                     Get your API key from: https://platform.openai.com/api-keys"
-                        .to_string(),
-                );
+                    .to_string());
             }
         }
         "claude" | "anthropic" => {
             if std::env::var("ANTHROPIC_API_KEY").is_err() {
-                return Err(
-                    "Anthropic API key not configured.\n\n\
+                return Err("Anthropic API key not configured.\n\n\
                     To use Claude, set the ANTHROPIC_API_KEY environment variable:\n\
                     \n\
                     export ANTHROPIC_API_KEY=\"your-api-key-here\"\n\
                     \n\
                     Get your API key from: https://console.anthropic.com/settings/keys"
-                        .to_string(),
-                );
+                    .to_string());
             }
         }
         "ollama" | "local" => {

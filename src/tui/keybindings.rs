@@ -45,11 +45,38 @@ pub enum Action {
     /// Toggle section (za)
     ToggleSection,
 
+    // Collapsible block actions
+    /// Toggle collapsible block under cursor (Enter in messages)
+    ToggleBlock,
+
+    // Attachment dropdown actions
+    /// Toggle attachment dropdown
+    ToggleAttachmentDropdown,
+    /// Delete selected attachment (d)
+    DeleteAttachment,
+    /// Confirm action (y)
+    Confirm,
+    /// Reject/cancel action (n)
+    Reject,
+
     // Input mode
     /// Enter insert mode (i)
     EnterInsertMode,
     /// Exit insert mode (Escape)
     ExitInsertMode,
+
+    // Clipboard
+    /// Paste from clipboard (Ctrl+V)
+    /// Requirements: 11.1
+    Paste,
+
+    // Mode cycling
+    /// Cycle to next agent mode (Ctrl+Tab)
+    /// Requirements: 13.1
+    CycleModeNext,
+    /// Cycle to previous agent mode (Ctrl+Shift+Tab)
+    /// Requirements: 13.2
+    CycleModePrev,
 
     // General
     /// Quit application (q, Ctrl-c, Ctrl-q)
@@ -58,6 +85,9 @@ pub enum Action {
     Submit,
     /// Cancel/Escape
     Cancel,
+    /// Interrupt current operation (Ctrl+C during streaming)
+    /// Requirements: 8.1, 8.2
+    Interrupt,
 }
 
 /// Input mode for the application
@@ -190,9 +220,11 @@ impl KeybindingHandler {
 
         // Handle single key bindings
         match (key.code, key.modifiers) {
-            // Quit
-            (KeyCode::Char('c'), KeyModifiers::CONTROL)
-            | (KeyCode::Char('q'), KeyModifiers::CONTROL) => Some(Action::Quit),
+            // Quit (Ctrl+Q always quits, Ctrl+C interrupts or quits based on context)
+            (KeyCode::Char('q'), KeyModifiers::CONTROL) => Some(Action::Quit),
+            // Ctrl+C in normal mode - interrupt if processing, otherwise quit
+            // The actual behavior is determined by the app based on agent_processing state
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::Interrupt),
             (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Action::Quit),
 
             // Navigation
@@ -205,6 +237,13 @@ impl KeybindingHandler {
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Action::HalfPageDown),
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Action::HalfPageUp),
             (KeyCode::Char('G'), KeyModifiers::SHIFT) => Some(Action::GoToBottom),
+
+            // Delete attachment (d key in normal mode)
+            (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Action::DeleteAttachment),
+
+            // Confirm/Reject actions (y/n keys)
+            (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Action::Confirm),
+            (KeyCode::Char('n'), KeyModifiers::NONE) => Some(Action::Reject),
 
             // Multi-key sequences
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
@@ -222,10 +261,23 @@ impl KeybindingHandler {
                 Some(Action::FocusPrevious)
             }
 
-            // Enter insert mode
-            (KeyCode::Char('i'), KeyModifiers::NONE) | (KeyCode::Enter, KeyModifiers::NONE) => {
-                Some(Action::EnterInsertMode)
+            // Mode cycling (Ctrl+Tab and Ctrl+Shift+Tab)
+            // Requirements: 13.1 - WHEN the user presses Ctrl+Tab, THE TUI SHALL cycle to the next agent mode
+            (KeyCode::Tab, KeyModifiers::CONTROL) => Some(Action::CycleModeNext),
+            // Requirements: 13.2 - WHEN the user presses Ctrl+Shift+Tab, THE TUI SHALL cycle to the previous agent mode
+            (KeyCode::Tab, modifiers)
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                Some(Action::CycleModePrev)
             }
+            (KeyCode::BackTab, KeyModifiers::CONTROL) => Some(Action::CycleModePrev),
+
+            // Enter insert mode
+            (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Action::EnterInsertMode),
+
+            // Enter key - context-dependent (toggle block in messages, toggle section in panel)
+            (KeyCode::Enter, KeyModifiers::NONE) => Some(Action::ToggleBlock),
 
             // Escape
             (KeyCode::Esc, KeyModifiers::NONE) => Some(Action::Cancel),
@@ -243,8 +295,25 @@ impl KeybindingHandler {
             // Exit insert mode
             (KeyCode::Esc, KeyModifiers::NONE) => Some(Action::ExitInsertMode),
 
-            // Quit (always available)
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
+            // Interrupt current operation (Ctrl+C during streaming)
+            // Requirements: 8.1 - WHEN the user presses Ctrl+C during streaming, THE TUI SHALL stop the current response
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::Interrupt),
+
+            // Paste from clipboard (Ctrl+V)
+            // Requirements: 11.1 - WHEN the user presses Ctrl+V or Cmd+V, THE TUI SHALL check the clipboard for content
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Action::Paste),
+
+            // Mode cycling (Ctrl+Tab and Ctrl+Shift+Tab)
+            // Requirements: 13.1 - WHEN the user presses Ctrl+Tab, THE TUI SHALL cycle to the next agent mode
+            (KeyCode::Tab, KeyModifiers::CONTROL) => Some(Action::CycleModeNext),
+            // Requirements: 13.2 - WHEN the user presses Ctrl+Shift+Tab, THE TUI SHALL cycle to the previous agent mode
+            (KeyCode::Tab, modifiers)
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                Some(Action::CycleModePrev)
+            }
+            (KeyCode::BackTab, KeyModifiers::CONTROL) => Some(Action::CycleModePrev),
 
             // Submit
             (KeyCode::Enter, KeyModifiers::NONE) => Some(Action::Submit),
@@ -416,6 +485,11 @@ mod tests {
         let action = handler.handle_insert_mode(make_key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(action, Some(Action::Submit));
 
+        // Ctrl+C interrupts (Requirements 8.1)
+        let action =
+            handler.handle_insert_mode(make_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(action, Some(Action::Interrupt));
+
         // Regular keys return None (handled by input widget)
         let action =
             handler.handle_insert_mode(make_key_event(KeyCode::Char('a'), KeyModifiers::NONE));
@@ -431,14 +505,19 @@ mod tests {
             handler.handle_normal_mode(make_key_event(KeyCode::Char('q'), KeyModifiers::NONE));
         assert_eq!(action, Some(Action::Quit));
 
-        // Ctrl-c quits in any mode
+        // Ctrl-q quits in normal mode
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert_eq!(action, Some(Action::Quit));
+
+        // Ctrl-c triggers interrupt (which quits if not processing)
         let action =
             handler.handle_normal_mode(make_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert_eq!(action, Some(Action::Quit));
+        assert_eq!(action, Some(Action::Interrupt));
 
         let action =
             handler.handle_insert_mode(make_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert_eq!(action, Some(Action::Quit));
+        assert_eq!(action, Some(Action::Interrupt));
     }
 
     #[test]
@@ -450,9 +529,34 @@ mod tests {
             handler.handle_normal_mode(make_key_event(KeyCode::Char('i'), KeyModifiers::NONE));
         assert_eq!(action, Some(Action::EnterInsertMode));
 
-        // Enter also enters insert mode (for quick typing)
+        // Enter toggles block in normal mode (context-dependent)
         let action = handler.handle_normal_mode(make_key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(action, Some(Action::EnterInsertMode));
+        assert_eq!(action, Some(Action::ToggleBlock));
+    }
+
+    #[test]
+    fn test_delete_attachment_key() {
+        let mut handler = KeybindingHandler::new();
+
+        // d for delete attachment in normal mode
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(action, Some(Action::DeleteAttachment));
+    }
+
+    #[test]
+    fn test_confirm_reject_keys() {
+        let mut handler = KeybindingHandler::new();
+
+        // y for confirm
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(action, Some(Action::Confirm));
+
+        // n for reject
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(action, Some(Action::Reject));
     }
 
     #[test]
@@ -513,5 +617,59 @@ mod tests {
             InputMode::Insert,
         );
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn test_paste_keybinding() {
+        let mut handler = KeybindingHandler::new();
+
+        // Ctrl+V triggers paste in insert mode (Requirements 11.1)
+        let action =
+            handler.handle_insert_mode(make_key_event(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        assert_eq!(action, Some(Action::Paste));
+    }
+
+    #[test]
+    fn test_mode_cycling_keybindings_insert_mode() {
+        let mut handler = KeybindingHandler::new();
+
+        // Ctrl+Tab triggers CycleModeNext in insert mode (Requirements 13.1)
+        let action =
+            handler.handle_insert_mode(make_key_event(KeyCode::Tab, KeyModifiers::CONTROL));
+        assert_eq!(action, Some(Action::CycleModeNext));
+
+        // Ctrl+Shift+Tab triggers CycleModePrev in insert mode (Requirements 13.2)
+        let action = handler.handle_insert_mode(make_key_event(
+            KeyCode::Tab,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(action, Some(Action::CycleModePrev));
+
+        // Ctrl+BackTab also triggers CycleModePrev
+        let action =
+            handler.handle_insert_mode(make_key_event(KeyCode::BackTab, KeyModifiers::CONTROL));
+        assert_eq!(action, Some(Action::CycleModePrev));
+    }
+
+    #[test]
+    fn test_mode_cycling_keybindings_normal_mode() {
+        let mut handler = KeybindingHandler::new();
+
+        // Ctrl+Tab triggers CycleModeNext in normal mode (Requirements 13.1)
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::Tab, KeyModifiers::CONTROL));
+        assert_eq!(action, Some(Action::CycleModeNext));
+
+        // Ctrl+Shift+Tab triggers CycleModePrev in normal mode (Requirements 13.2)
+        let action = handler.handle_normal_mode(make_key_event(
+            KeyCode::Tab,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(action, Some(Action::CycleModePrev));
+
+        // Ctrl+BackTab also triggers CycleModePrev
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::BackTab, KeyModifiers::CONTROL));
+        assert_eq!(action, Some(Action::CycleModePrev));
     }
 }

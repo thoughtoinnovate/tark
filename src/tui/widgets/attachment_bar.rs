@@ -2,6 +2,7 @@
 //!
 //! Displays pending attachments above the input area with filename, type, and size.
 //! Supports selection and removal of attachments.
+//! Includes dropdown support for managing multiple attachments.
 
 #![allow(dead_code)]
 
@@ -10,11 +11,228 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 use uuid::Uuid;
 
 use crate::tui::attachments::{format_size, Attachment, AttachmentType};
+
+/// State for the attachments dropdown
+///
+/// Manages the dropdown visibility, selection, and delete confirmation state.
+#[derive(Debug, Clone, Default)]
+pub struct AttachmentDropdownState {
+    /// Whether the dropdown is open
+    pub is_open: bool,
+    /// Currently selected attachment index (for keyboard navigation)
+    pub selected_index: Option<usize>,
+    /// Whether we're showing a delete confirmation (index of attachment to delete)
+    pub pending_delete: Option<usize>,
+}
+
+impl AttachmentDropdownState {
+    /// Create a new dropdown state
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Toggle dropdown visibility
+    pub fn toggle(&mut self) {
+        self.is_open = !self.is_open;
+        if !self.is_open {
+            self.selected_index = None;
+            self.pending_delete = None;
+        }
+    }
+
+    /// Open the dropdown
+    pub fn open(&mut self) {
+        self.is_open = true;
+    }
+
+    /// Close the dropdown
+    pub fn close(&mut self) {
+        self.is_open = false;
+        self.selected_index = None;
+        self.pending_delete = None;
+    }
+
+    /// Select next attachment (wraps around)
+    pub fn select_next(&mut self, max: usize) {
+        if max == 0 {
+            return;
+        }
+        self.selected_index = Some(match self.selected_index {
+            Some(i) => (i + 1) % max,
+            None => 0,
+        });
+    }
+
+    /// Select previous attachment (wraps around)
+    pub fn select_prev(&mut self, max: usize) {
+        if max == 0 {
+            return;
+        }
+        self.selected_index = Some(match self.selected_index {
+            Some(i) => {
+                if i == 0 {
+                    max - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => max - 1,
+        });
+    }
+
+    /// Request deletion of selected attachment (shows confirmation)
+    pub fn request_delete(&mut self) {
+        if let Some(idx) = self.selected_index {
+            self.pending_delete = Some(idx);
+        }
+    }
+
+    /// Confirm pending deletion
+    ///
+    /// Returns the index of the attachment to delete, if any.
+    pub fn confirm_delete(&mut self) -> Option<usize> {
+        self.pending_delete.take()
+    }
+
+    /// Cancel pending deletion
+    pub fn cancel_delete(&mut self) {
+        self.pending_delete = None;
+    }
+
+    /// Check if there's a pending delete confirmation
+    pub fn has_pending_delete(&self) -> bool {
+        self.pending_delete.is_some()
+    }
+
+    /// Check if the dropdown is open
+    pub fn is_open(&self) -> bool {
+        self.is_open
+    }
+
+    /// Get the currently selected index
+    pub fn selected(&self) -> Option<usize> {
+        self.selected_index
+    }
+}
+
+/// Render the attachment bar with dropdown support
+///
+/// This function renders a compact attachment display in the status bar area.
+/// - For a single file: shows "🖇️ filename.ext ✕"
+/// - For multiple files: shows "🖇️ N files ▼" with dropdown support
+///
+/// The dropdown appears above the status bar when opened.
+pub fn render_attachment_bar(
+    attachments: &[Attachment],
+    state: &AttachmentDropdownState,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    if attachments.is_empty() {
+        return;
+    }
+
+    // Compact display: "🖇️ N files ▼" or "🖇️ filename ✕"
+    let display = if attachments.len() == 1 {
+        format!("🖇️ {} ✕", attachments[0].filename)
+    } else {
+        let indicator = if state.is_open { "▲" } else { "▼" };
+        format!("🖇️ {} files {}", attachments.len(), indicator)
+    };
+
+    // Render compact bar
+    let span = Span::styled(display, Style::default().fg(Color::Cyan));
+    buf.set_span(area.x, area.y, &span, area.width);
+
+    // Render dropdown if open and multiple files
+    if state.is_open && attachments.len() > 1 {
+        render_dropdown(attachments, state, area, buf);
+    }
+}
+
+/// Render the dropdown list of attachments
+fn render_dropdown(
+    attachments: &[Attachment],
+    state: &AttachmentDropdownState,
+    anchor: Rect,
+    buf: &mut Buffer,
+) {
+    // Calculate dropdown dimensions
+    let max_visible = 5;
+    let dropdown_height = std::cmp::min(attachments.len() as u16, max_visible) + 2; // +2 for borders
+    let dropdown_width = 40u16;
+
+    // Position dropdown above the anchor area
+    let dropdown_area = Rect {
+        x: anchor.x,
+        y: anchor.y.saturating_sub(dropdown_height),
+        width: std::cmp::min(dropdown_width, anchor.width),
+        height: dropdown_height,
+    };
+
+    // Clear the area first
+    Clear.render(dropdown_area, buf);
+
+    // Draw border
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Attachments ");
+    let inner = block.inner(dropdown_area);
+    block.render(dropdown_area, buf);
+
+    // Render each attachment
+    for (i, attachment) in attachments.iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+
+        let is_selected = state.selected_index == Some(i);
+        let is_pending_delete = state.pending_delete == Some(i);
+
+        let style = if is_pending_delete {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else if is_selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let text = if is_pending_delete {
+            format!(
+                " {} [y/n]",
+                truncate_filename(&attachment.filename, inner.width as usize - 8)
+            )
+        } else {
+            format!(
+                " {} {} ✕",
+                attachment.file_type.icon(),
+                truncate_filename(&attachment.filename, inner.width as usize - 6)
+            )
+        };
+
+        buf.set_string(inner.x, y, &text, style);
+    }
+}
+
+/// Truncate a filename to fit within a given width
+fn truncate_filename(filename: &str, max_width: usize) -> String {
+    if filename.len() <= max_width {
+        filename.to_string()
+    } else if max_width <= 3 {
+        "...".to_string()
+    } else {
+        format!("{}...", &filename[..max_width - 3])
+    }
+}
 
 /// Preview information for an attachment
 #[derive(Debug, Clone)]
@@ -432,5 +650,381 @@ mod tests {
         bar.select_previous();
 
         assert!(bar.selected_index().is_none());
+    }
+
+    // AttachmentDropdownState tests
+
+    #[test]
+    fn test_dropdown_state_new() {
+        let state = AttachmentDropdownState::new();
+        assert!(!state.is_open());
+        assert!(state.selected().is_none());
+        assert!(!state.has_pending_delete());
+    }
+
+    #[test]
+    fn test_dropdown_state_toggle() {
+        let mut state = AttachmentDropdownState::new();
+
+        state.toggle();
+        assert!(state.is_open());
+
+        state.toggle();
+        assert!(!state.is_open());
+    }
+
+    #[test]
+    fn test_dropdown_state_open_close() {
+        let mut state = AttachmentDropdownState::new();
+
+        state.open();
+        assert!(state.is_open());
+
+        state.close();
+        assert!(!state.is_open());
+    }
+
+    #[test]
+    fn test_dropdown_state_select_next() {
+        let mut state = AttachmentDropdownState::new();
+
+        // Empty list should not change selection
+        state.select_next(0);
+        assert!(state.selected().is_none());
+
+        // First selection
+        state.select_next(3);
+        assert_eq!(state.selected(), Some(0));
+
+        // Navigate forward
+        state.select_next(3);
+        assert_eq!(state.selected(), Some(1));
+
+        state.select_next(3);
+        assert_eq!(state.selected(), Some(2));
+
+        // Wrap around
+        state.select_next(3);
+        assert_eq!(state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_dropdown_state_select_prev() {
+        let mut state = AttachmentDropdownState::new();
+
+        // Empty list should not change selection
+        state.select_prev(0);
+        assert!(state.selected().is_none());
+
+        // First selection (from end)
+        state.select_prev(3);
+        assert_eq!(state.selected(), Some(2));
+
+        // Navigate backward
+        state.select_prev(3);
+        assert_eq!(state.selected(), Some(1));
+
+        state.select_prev(3);
+        assert_eq!(state.selected(), Some(0));
+
+        // Wrap around
+        state.select_prev(3);
+        assert_eq!(state.selected(), Some(2));
+    }
+
+    #[test]
+    fn test_dropdown_state_delete_flow() {
+        let mut state = AttachmentDropdownState::new();
+
+        // Select an item first
+        state.select_next(3);
+        assert_eq!(state.selected(), Some(0));
+
+        // Request delete
+        state.request_delete();
+        assert!(state.has_pending_delete());
+        assert_eq!(state.pending_delete, Some(0));
+
+        // Cancel delete
+        state.cancel_delete();
+        assert!(!state.has_pending_delete());
+        assert!(state.pending_delete.is_none());
+
+        // Request delete again
+        state.request_delete();
+        assert!(state.has_pending_delete());
+
+        // Confirm delete
+        let deleted_idx = state.confirm_delete();
+        assert_eq!(deleted_idx, Some(0));
+        assert!(!state.has_pending_delete());
+    }
+
+    #[test]
+    fn test_dropdown_state_request_delete_without_selection() {
+        let mut state = AttachmentDropdownState::new();
+
+        // Request delete without selection should do nothing
+        state.request_delete();
+        assert!(!state.has_pending_delete());
+    }
+
+    #[test]
+    fn test_dropdown_state_close_clears_state() {
+        let mut state = AttachmentDropdownState::new();
+
+        state.open();
+        state.select_next(3);
+        state.request_delete();
+
+        assert!(state.is_open());
+        assert!(state.selected().is_some());
+        assert!(state.has_pending_delete());
+
+        state.close();
+
+        assert!(!state.is_open());
+        assert!(state.selected().is_none());
+        assert!(!state.has_pending_delete());
+    }
+
+    #[test]
+    fn test_dropdown_state_toggle_clears_state_when_closing() {
+        let mut state = AttachmentDropdownState::new();
+
+        state.toggle(); // Open
+        state.select_next(3);
+        state.request_delete();
+
+        state.toggle(); // Close
+
+        assert!(!state.is_open());
+        assert!(state.selected().is_none());
+        assert!(!state.has_pending_delete());
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Feature: enhanced-tui-layout, Property 14: Attachment Dropdown Navigation
+    // **Validates: Requirements 11.3, 11.4**
+    //
+    // *For any* list of attachments, navigating with select_next/select_prev
+    // should cycle through all items and wrap around at boundaries.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn prop_dropdown_navigation_cycles_through_all_items(
+            list_size in 1usize..20,
+            nav_steps in 1usize..50
+        ) {
+            let mut state = AttachmentDropdownState::new();
+
+            // Navigate forward nav_steps times
+            for _ in 0..nav_steps {
+                state.select_next(list_size);
+            }
+
+            // Selection should be within bounds
+            let selected = state.selected().unwrap();
+            prop_assert!(selected < list_size, "Selection {} should be < list_size {}", selected, list_size);
+
+            // Selection should be nav_steps % list_size (accounting for initial None -> 0)
+            let expected = (nav_steps - 1) % list_size;
+            prop_assert_eq!(selected, expected, "After {} steps in list of {}, expected {} but got {}", nav_steps, list_size, expected, selected);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn prop_dropdown_navigation_prev_cycles_through_all_items(
+            list_size in 1usize..20,
+            nav_steps in 1usize..50
+        ) {
+            let mut state = AttachmentDropdownState::new();
+
+            // Navigate backward nav_steps times
+            for _ in 0..nav_steps {
+                state.select_prev(list_size);
+            }
+
+            // Selection should be within bounds
+            let selected = state.selected().unwrap();
+            prop_assert!(selected < list_size, "Selection {} should be < list_size {}", selected, list_size);
+
+            // First select_prev goes to list_size - 1, then each subsequent call decrements by 1
+            // After nav_steps calls: (list_size - nav_steps % list_size) % list_size
+            // This handles the wrap-around correctly
+            let expected = (list_size - (nav_steps % list_size)) % list_size;
+            prop_assert_eq!(selected, expected, "After {} backward steps in list of {}, expected {} but got {}", nav_steps, list_size, expected, selected);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn prop_dropdown_navigation_wraps_at_boundaries(list_size in 1usize..20) {
+            let mut state = AttachmentDropdownState::new();
+
+            // Navigate to the end
+            for _ in 0..list_size {
+                state.select_next(list_size);
+            }
+
+            // Should wrap to 0 after going through all items
+            // First select_next sets to 0, then list_size-1 more steps
+            // So after list_size steps, we're at (list_size - 1) % list_size = list_size - 1
+            // Wait, let's trace: None -> 0 -> 1 -> ... -> list_size-1 -> 0
+            // After list_size steps: we're at list_size - 1
+            let selected = state.selected().unwrap();
+            let expected = (list_size - 1) % list_size;
+            prop_assert_eq!(selected, expected);
+
+            // One more step should wrap to 0
+            state.select_next(list_size);
+            prop_assert_eq!(state.selected().unwrap(), 0);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn prop_dropdown_empty_list_navigation_safe(nav_steps in 0usize..50) {
+            let mut state = AttachmentDropdownState::new();
+
+            // Navigation on empty list should not panic and selection should remain None
+            for _ in 0..nav_steps {
+                state.select_next(0);
+            }
+            prop_assert!(state.selected().is_none());
+
+            for _ in 0..nav_steps {
+                state.select_prev(0);
+            }
+            prop_assert!(state.selected().is_none());
+        }
+    }
+
+    // Feature: enhanced-tui-layout, Property 15: Attachment Delete Confirmation
+    // **Validates: Requirements 11.6, 11.7, 11.8**
+    //
+    // *For any* attachment deletion request, the attachment should only be removed
+    // after explicit confirmation (confirm_delete returns the index).
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn prop_delete_requires_confirmation(
+            list_size in 1usize..20,
+            selected_idx in 0usize..20
+        ) {
+            // Ensure selected_idx is within bounds
+            let selected_idx = selected_idx % list_size;
+
+            let mut state = AttachmentDropdownState::new();
+
+            // Navigate to the selected index
+            for _ in 0..=selected_idx {
+                state.select_next(list_size);
+            }
+
+            // Request delete
+            state.request_delete();
+
+            // Pending delete should be set
+            prop_assert!(state.has_pending_delete());
+            prop_assert_eq!(state.pending_delete, Some(selected_idx));
+
+            // Without confirmation, pending_delete should remain
+            prop_assert!(state.has_pending_delete());
+
+            // Confirm delete should return the index and clear pending
+            let deleted = state.confirm_delete();
+            prop_assert_eq!(deleted, Some(selected_idx));
+            prop_assert!(!state.has_pending_delete());
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn prop_delete_cancel_preserves_state(
+            list_size in 1usize..20,
+            selected_idx in 0usize..20
+        ) {
+            // Ensure selected_idx is within bounds
+            let selected_idx = selected_idx % list_size;
+
+            let mut state = AttachmentDropdownState::new();
+
+            // Navigate to the selected index
+            for _ in 0..=selected_idx {
+                state.select_next(list_size);
+            }
+
+            // Request delete
+            state.request_delete();
+            prop_assert!(state.has_pending_delete());
+
+            // Cancel delete
+            state.cancel_delete();
+
+            // Pending delete should be cleared
+            prop_assert!(!state.has_pending_delete());
+
+            // Selection should still be valid
+            prop_assert_eq!(state.selected(), Some(selected_idx));
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn prop_delete_without_selection_does_nothing(_list_size in 0usize..20) {
+            let mut state = AttachmentDropdownState::new();
+
+            // Don't select anything, just request delete
+            state.request_delete();
+
+            // Should have no pending delete
+            prop_assert!(!state.has_pending_delete());
+
+            // Confirm should return None
+            let deleted = state.confirm_delete();
+            prop_assert!(deleted.is_none());
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn prop_confirm_delete_only_returns_once(
+            list_size in 1usize..20,
+            selected_idx in 0usize..20
+        ) {
+            // Ensure selected_idx is within bounds
+            let selected_idx = selected_idx % list_size;
+
+            let mut state = AttachmentDropdownState::new();
+
+            // Navigate to the selected index
+            for _ in 0..=selected_idx {
+                state.select_next(list_size);
+            }
+
+            // Request delete
+            state.request_delete();
+
+            // First confirm should return the index
+            let first_confirm = state.confirm_delete();
+            prop_assert_eq!(first_confirm, Some(selected_idx));
+
+            // Second confirm should return None (already consumed)
+            let second_confirm = state.confirm_delete();
+            prop_assert!(second_confirm.is_none());
+        }
     }
 }

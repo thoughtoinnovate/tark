@@ -1,7 +1,8 @@
 //! Message list widget for displaying chat history
 //!
 //! Provides a scrollable list of chat messages with role indicators
-//! and markdown-like formatting support.
+//! and markdown-like formatting support, including collapsible blocks
+//! for thinking and tool execution content.
 
 #![allow(dead_code)]
 
@@ -15,6 +16,11 @@ use ratatui::{
     widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget},
 };
 use uuid::Uuid;
+
+use super::collapsible::{
+    BlockType, CollapsibleBlock, CollapsibleBlockState, ContentSegment, ParsedMessageContent,
+    ToolCallInfo,
+};
 
 /// Role of a message sender
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -52,10 +58,14 @@ impl Role {
     }
 
     /// Get the display name for this role
+    ///
+    /// Note: For user messages, the actual username should be used instead
+    /// of this default. This method returns fallback values.
+    /// Requirements 2.2, 2.3, 2.5
     pub fn name(&self) -> &'static str {
         match self {
-            Role::User => "You",
-            Role::Assistant => "Assistant",
+            Role::User => "You", // Fallback when username detection fails (Requirement 2.5)
+            Role::Assistant => "Tark", // Always "Tark" for assistant (Requirement 2.3)
             Role::System => "System",
             Role::Tool => "Tool",
         }
@@ -71,12 +81,17 @@ pub struct ChatMessage {
     pub role: Role,
     /// Message content
     pub content: String,
+    /// Thinking content (for assistant messages when thinking mode is enabled)
+    /// Requirements: 9.1, 9.3
+    pub thinking_content: String,
     /// Timestamp
     pub timestamp: DateTime<Utc>,
     /// Whether this message is currently streaming
     pub is_streaming: bool,
     /// Tool calls associated with this message (for assistant messages)
     pub tool_calls: Vec<String>,
+    /// Detailed tool call info for collapsible block rendering
+    pub tool_call_info: Vec<ToolCallInfo>,
 }
 
 impl ChatMessage {
@@ -86,9 +101,11 @@ impl ChatMessage {
             id: Uuid::new_v4(),
             role,
             content: content.into(),
+            thinking_content: String::new(),
             timestamp: Utc::now(),
             is_streaming: false,
             tool_calls: Vec::new(),
+            tool_call_info: Vec::new(),
         }
     }
 
@@ -121,6 +138,18 @@ impl ChatMessage {
     /// Add a tool call
     pub fn with_tool_call(mut self, tool_call: impl Into<String>) -> Self {
         self.tool_calls.push(tool_call.into());
+        self
+    }
+
+    /// Add detailed tool call info for collapsible block rendering
+    pub fn with_tool_call_info(mut self, info: ToolCallInfo) -> Self {
+        self.tool_call_info.push(info);
+        self
+    }
+
+    /// Add multiple tool call infos
+    pub fn with_tool_call_infos(mut self, infos: Vec<ToolCallInfo>) -> Self {
+        self.tool_call_info.extend(infos);
         self
     }
 
@@ -160,6 +189,8 @@ pub struct MessageList {
     selected: Option<usize>,
     /// Total visible height (set during render)
     visible_height: u16,
+    /// State for collapsible blocks (expand/collapse tracking)
+    block_state: CollapsibleBlockState,
 }
 
 impl MessageList {
@@ -175,7 +206,23 @@ impl MessageList {
             scroll_offset: 0,
             selected: None,
             visible_height: 0,
+            block_state: CollapsibleBlockState::new(),
         }
+    }
+
+    /// Get a reference to the collapsible block state
+    pub fn block_state(&self) -> &CollapsibleBlockState {
+        &self.block_state
+    }
+
+    /// Get a mutable reference to the collapsible block state
+    pub fn block_state_mut(&mut self) -> &mut CollapsibleBlockState {
+        &mut self.block_state
+    }
+
+    /// Toggle a collapsible block's expanded state
+    pub fn toggle_block(&mut self, block_id: &str, block_type: BlockType) {
+        self.block_state.toggle(block_id, block_type);
     }
 
     /// Add a message to the list
@@ -426,7 +473,15 @@ fn format_inline(line: &str, base_style: Style) -> Line<'_> {
 }
 
 /// Render a single message to lines
-fn render_message(message: &ChatMessage, is_selected: bool, width: u16) -> Vec<Line<'static>> {
+///
+/// Note: This function is kept for backward compatibility but
+/// `render_message_with_blocks` is preferred for full functionality.
+fn render_message(
+    message: &ChatMessage,
+    is_selected: bool,
+    width: u16,
+    username: &str,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     // Header line with role icon and name
@@ -440,13 +495,15 @@ fn render_message(message: &ChatMessage, is_selected: bool, width: u16) -> Vec<L
             .add_modifier(Modifier::BOLD)
     };
 
+    // Use detected username for user messages, "Tark" for assistant (Requirements 2.2, 2.3, 2.4)
+    let display_name = match message.role {
+        Role::User => username.to_string(),
+        Role::Assistant => "Tark".to_string(),
+        _ => message.role.name().to_string(),
+    };
+
     let timestamp = message.timestamp.format("%H:%M").to_string();
-    let header = format!(
-        "{} {} [{}]",
-        message.role.icon(),
-        message.role.name(),
-        timestamp
-    );
+    let header = format!("{} {} [{}]", message.role.icon(), display_name, timestamp);
     lines.push(Line::from(Span::styled(header, header_style)));
 
     // Content lines
@@ -487,6 +544,249 @@ fn render_message(message: &ChatMessage, is_selected: bool, width: u16) -> Vec<L
 
     // Ensure we don't exceed width (basic truncation)
     let _ = width; // Width is used for future wrapping implementation
+
+    lines
+}
+
+/// Render a collapsible block to lines
+///
+/// Renders the block header with expand/collapse indicator and icon,
+/// and optionally the content if expanded.
+///
+/// # Requirements
+/// - 7.2, 7.3: Thinking block headers with ▼/▶ indicators
+/// - 8.2, 8.3: Tool block headers with ▼/▶ indicators
+/// - 8.4, 8.5: Tool block content with command/result
+fn render_collapsible_block(
+    block: &CollapsibleBlock,
+    is_expanded: bool,
+    _width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // Determine colors based on block type and error state (Requirements 7.2)
+    let (header_color, border_color) = if block.has_error {
+        // Error blocks use red styling
+        (Color::Red, Color::Red)
+    } else {
+        match block.block_type() {
+            BlockType::Thinking => (Color::Cyan, Color::DarkGray),
+            BlockType::Tool => (Color::Magenta, Color::DarkGray),
+        }
+    };
+
+    // Header style
+    let header_style = Style::default()
+        .fg(header_color)
+        .add_modifier(Modifier::BOLD);
+
+    // Build header with indicator and error marker if applicable
+    let indicator = if is_expanded { "▼" } else { "▶" };
+    let icon = if block.has_error {
+        "✗"
+    } else {
+        block.block_type().icon()
+    };
+    let header_text = match block.block_type() {
+        BlockType::Thinking => format!("╭── {} {} {} ", indicator, icon, block.header()),
+        BlockType::Tool => {
+            if block.has_error {
+                format!(
+                    "╭── {} {} Tool: {} [FAILED] ",
+                    indicator,
+                    icon,
+                    block.header()
+                )
+            } else {
+                format!("╭── {} {} Tool: {} ", indicator, icon, block.header())
+            }
+        }
+    };
+
+    // Pad header to create a box effect
+    lines.push(Line::from(Span::styled(header_text, header_style)));
+
+    // Render content if expanded
+    if is_expanded {
+        let border_style = Style::default().fg(border_color);
+
+        for content_line in block.content() {
+            // Use red for error content lines that start with ✗
+            let content_style = if block.has_error && content_line.starts_with('✗') {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+
+            // Add border and content
+            let line = Line::from(vec![
+                Span::styled("│ ", border_style),
+                Span::styled(content_line.clone(), content_style),
+            ]);
+            lines.push(line);
+        }
+
+        // Closing border
+        lines.push(Line::from(Span::styled(
+            "╰──────────────────────────────────────────────────",
+            border_style,
+        )));
+    }
+
+    lines
+}
+
+/// Render a message with collapsible blocks for assistant messages
+///
+/// For assistant messages, this parses the content to extract thinking
+/// and tool blocks, rendering them as collapsible elements.
+///
+/// # Requirements
+/// - 2.2, 2.3: Display detected username for user, "Tark" for assistant
+/// - 7.1: Display thinking content in Thinking_Block
+/// - 8.1: Display tool execution in Tool_Block
+/// - 9.1, 9.3: Display thinking_content in collapsible ThinkingBlock
+fn render_message_with_blocks(
+    message: &ChatMessage,
+    is_selected: bool,
+    width: u16,
+    block_state: &CollapsibleBlockState,
+    username: &str,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // Header line with role icon and name
+    let header_style = if is_selected {
+        Style::default()
+            .fg(message.role.color())
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(message.role.color())
+            .add_modifier(Modifier::BOLD)
+    };
+
+    // Use detected username for user messages, "Tark" for assistant (Requirements 2.2, 2.3, 2.4)
+    let display_name = match message.role {
+        Role::User => username.to_string(),
+        Role::Assistant => "Tark".to_string(),
+        _ => message.role.name().to_string(),
+    };
+
+    let timestamp = message.timestamp.format("%H:%M").to_string();
+    let header = format!("{} {} [{}]", message.role.icon(), display_name, timestamp);
+    lines.push(Line::from(Span::styled(header, header_style)));
+
+    // Render thinking_content as a collapsible block if present (Requirements 9.1, 9.3)
+    if message.role == Role::Assistant && !message.thinking_content.is_empty() {
+        let thinking_block_id = format!("{}-thinking-stream", message.id);
+        let thinking_content: Vec<String> = message
+            .thinking_content
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
+        let thinking_block =
+            CollapsibleBlock::thinking(thinking_block_id.clone(), thinking_content);
+        let is_expanded = block_state.is_expanded(&thinking_block_id, BlockType::Thinking);
+        let block_lines = render_collapsible_block(&thinking_block, is_expanded, width);
+        lines.extend(block_lines);
+    }
+
+    // For assistant messages, parse and render with collapsible blocks
+    if message.role == Role::Assistant && !message.tool_call_info.is_empty() {
+        // Parse the message content
+        let message_id = message.id.to_string();
+        let parsed =
+            ParsedMessageContent::parse(&message.content, &message.tool_call_info, &message_id);
+
+        // Render each segment
+        for segment in &parsed.segments {
+            match segment {
+                ContentSegment::Text(text) => {
+                    let content_style = if is_selected {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default()
+                    };
+                    let content_lines = format_content_owned(text.clone(), content_style);
+                    lines.extend(content_lines);
+                }
+                ContentSegment::Block(block) => {
+                    let is_expanded = block_state.is_expanded(block.id(), block.block_type());
+                    let block_lines = render_collapsible_block(block, is_expanded, width);
+                    lines.extend(block_lines);
+                }
+            }
+        }
+    } else if message.role == Role::Assistant {
+        // Check for thinking blocks in content even without tool calls
+        let message_id = message.id.to_string();
+        let parsed = ParsedMessageContent::parse(&message.content, &[], &message_id);
+
+        if parsed.has_thinking() {
+            // Render with collapsible blocks
+            for segment in &parsed.segments {
+                match segment {
+                    ContentSegment::Text(text) => {
+                        let content_style = if is_selected {
+                            Style::default().add_modifier(Modifier::REVERSED)
+                        } else {
+                            Style::default()
+                        };
+                        let content_lines = format_content_owned(text.clone(), content_style);
+                        lines.extend(content_lines);
+                    }
+                    ContentSegment::Block(block) => {
+                        let is_expanded = block_state.is_expanded(block.id(), block.block_type());
+                        let block_lines = render_collapsible_block(block, is_expanded, width);
+                        lines.extend(block_lines);
+                    }
+                }
+            }
+        } else {
+            // No thinking blocks, render normally
+            let content_style = if is_selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let content_lines = format_content_owned(message.content.clone(), content_style);
+            lines.extend(content_lines);
+        }
+    } else {
+        // Non-assistant messages: render content normally
+        let content_style = if is_selected {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        let content_lines = format_content_owned(message.content.clone(), content_style);
+        lines.extend(content_lines);
+    }
+
+    // Legacy tool calls display (for backward compatibility)
+    for tool_call in &message.tool_calls {
+        let tool_style = Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::ITALIC);
+        lines.push(Line::from(Span::styled(
+            format!("  [tool: {}]", tool_call.clone()),
+            tool_style,
+        )));
+    }
+
+    // Streaming indicator
+    if message.is_streaming {
+        lines.push(Line::from(Span::styled(
+            "  ▌",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::SLOW_BLINK),
+        )));
+    }
+
+    // Add spacing
+    lines.push(Line::from(""));
 
     lines
 }
@@ -596,6 +896,8 @@ fn format_inline_owned(line: String, base_style: Style) -> Line<'static> {
 pub struct MessageListWidget<'a> {
     message_list: &'a mut MessageList,
     block: Option<Block<'a>>,
+    /// Username to display for user messages (Requirements 2.2, 2.5)
+    username: String,
 }
 
 impl<'a> MessageListWidget<'a> {
@@ -604,12 +906,19 @@ impl<'a> MessageListWidget<'a> {
         Self {
             message_list,
             block: None,
+            username: "You".to_string(), // Default fallback (Requirement 2.5)
         }
     }
 
     /// Set the block for the widget
     pub fn block(mut self, block: Block<'a>) -> Self {
         self.block = Some(block);
+        self
+    }
+
+    /// Set the username to display for user messages (Requirements 2.2, 2.5)
+    pub fn username(mut self, username: impl Into<String>) -> Self {
+        self.username = username.into();
         self
     }
 
@@ -635,11 +944,21 @@ impl<'a> MessageListWidget<'a> {
             return;
         }
 
-        // Collect all lines from all messages
+        // Collect all lines from all messages, using collapsible block rendering
         let mut all_lines: Vec<Line<'static>> = Vec::new();
+        let block_state = &self.message_list.block_state;
+        let username = &self.username;
         for (idx, message) in self.message_list.messages.iter().enumerate() {
             let is_selected = self.message_list.selected == Some(idx);
-            let message_lines = render_message(message, is_selected, inner.width);
+            // Use the new render function that supports collapsible blocks
+            // Pass username for display name formatting (Requirements 2.2, 2.3)
+            let message_lines = render_message_with_blocks(
+                message,
+                is_selected,
+                inner.width,
+                block_state,
+                username,
+            );
             all_lines.extend(message_lines);
         }
 
@@ -697,7 +1016,7 @@ mod tests {
     #[test]
     fn test_role_name() {
         assert_eq!(Role::User.name(), "You");
-        assert_eq!(Role::Assistant.name(), "Assistant");
+        assert_eq!(Role::Assistant.name(), "Tark"); // Changed from "Assistant" per Requirements 2.3
         assert_eq!(Role::System.name(), "System");
         assert_eq!(Role::Tool.name(), "Tool");
     }
@@ -1024,6 +1343,104 @@ mod property_tests {
             list.select_next();
             prop_assert_eq!(list.selected(), Some(n - 1),
                 "Selection should stay at last index");
+        }
+
+        /// **Feature: tui-llm-integration, Property 2: Display Name Formatting**
+        /// **Validates: Requirements 2.2, 2.3**
+        ///
+        /// For any message displayed in the TUI, user messages SHALL show the detected
+        /// system username (or "You" as fallback), and assistant messages SHALL show "Tark".
+        /// Icons SHALL be preserved: 👤 for user, 🤖 for assistant.
+        #[test]
+        fn prop_display_name_formatting(
+            messages in arb_message_list(20).prop_filter("non-empty", |m| !m.is_empty()),
+            // Use usernames that won't be substrings of "Tark" to avoid false positives
+            username in "[a-zA-Z][a-zA-Z0-9_]{3,15}".prop_filter("not-in-tark", |u| !u.to_lowercase().contains("tark") && !"tark".contains(&u.to_lowercase())),
+        ) {
+            // Test that render_message_with_blocks produces correct display names
+            let block_state = CollapsibleBlockState::new();
+
+            for message in &messages {
+                let lines = render_message_with_blocks(message, false, 80, &block_state, &username);
+
+                // The first line should be the header with icon and name
+                prop_assert!(!lines.is_empty(), "Message should produce at least one line");
+
+                // Convert the first line to a string for checking
+                let header_line = &lines[0];
+                let header_text: String = header_line.spans.iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+
+                // Verify icon is present based on role (Requirements 2.4)
+                match message.role {
+                    Role::User => {
+                        prop_assert!(header_text.contains("👤"),
+                            "User message should have 👤 icon, got: {}", header_text);
+                        // Verify username is displayed (Requirements 2.2)
+                        prop_assert!(header_text.contains(&username),
+                            "User message should show username '{}', got: {}", username, header_text);
+                        // Verify "Tark" is NOT displayed for user messages
+                        prop_assert!(!header_text.contains("Tark"),
+                            "User message should not show 'Tark', got: {}", header_text);
+                    }
+                    Role::Assistant => {
+                        prop_assert!(header_text.contains("🤖"),
+                            "Assistant message should have 🤖 icon, got: {}", header_text);
+                        // Verify "Tark" is displayed (Requirements 2.3)
+                        prop_assert!(header_text.contains("Tark"),
+                            "Assistant message should show 'Tark', got: {}", header_text);
+                        // Verify username is NOT displayed for assistant messages
+                        // (username is filtered to not be a substring of "Tark")
+                        prop_assert!(!header_text.contains(&username),
+                            "Assistant message should not show username '{}', got: {}", username, header_text);
+                    }
+                    Role::System => {
+                        prop_assert!(header_text.contains("⚙️"),
+                            "System message should have ⚙️ icon, got: {}", header_text);
+                        prop_assert!(header_text.contains("System"),
+                            "System message should show 'System', got: {}", header_text);
+                    }
+                    Role::Tool => {
+                        prop_assert!(header_text.contains("🔧"),
+                            "Tool message should have 🔧 icon, got: {}", header_text);
+                        prop_assert!(header_text.contains("Tool"),
+                            "Tool message should show 'Tool', got: {}", header_text);
+                    }
+                }
+            }
+        }
+
+        /// **Feature: tui-llm-integration, Property 2: Display Name Formatting**
+        /// **Validates: Requirements 2.5**
+        ///
+        /// When username detection fails (empty or whitespace-only username),
+        /// the TUI SHALL fall back to "You" for user messages.
+        #[test]
+        fn prop_display_name_fallback(
+            messages in arb_message_list(10).prop_filter("has-user", |m| m.iter().any(|msg| msg.role == Role::User)),
+        ) {
+            let block_state = CollapsibleBlockState::new();
+
+            // Test with fallback username "You"
+            let fallback_username = "You";
+
+            for message in messages.iter().filter(|m| m.role == Role::User) {
+                let lines = render_message_with_blocks(message, false, 80, &block_state, fallback_username);
+
+                prop_assert!(!lines.is_empty(), "Message should produce at least one line");
+
+                let header_line = &lines[0];
+                let header_text: String = header_line.spans.iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+
+                // Verify fallback "You" is displayed (Requirements 2.5)
+                prop_assert!(header_text.contains("You"),
+                    "User message with fallback should show 'You', got: {}", header_text);
+                prop_assert!(header_text.contains("👤"),
+                    "User message should have 👤 icon, got: {}", header_text);
+            }
         }
     }
 }

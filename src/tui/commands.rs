@@ -75,6 +75,133 @@ pub enum PickerType {
     Session,
 }
 
+/// State for the two-step model picker flow
+///
+/// This enum tracks where we are in the unified `/model` command flow:
+/// 1. First, user selects a provider
+/// 2. Then, user selects a model within that provider
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelPickerState {
+    /// Selecting a provider (step 1)
+    SelectingProvider,
+    /// Selecting a model for the chosen provider (step 2)
+    SelectingModel {
+        /// The provider selected in step 1
+        provider: String,
+    },
+}
+
+/// Information about a provider for display in the picker
+///
+/// Used to show provider options with availability status and configuration hints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInfo {
+    /// Unique identifier for the provider (e.g., "openai", "claude", "ollama")
+    pub id: String,
+    /// Display name for the provider (e.g., "OpenAI", "Claude", "Ollama")
+    pub name: String,
+    /// Brief description of the provider
+    pub description: String,
+    /// Whether the provider is available (has API key configured)
+    pub available: bool,
+    /// Configuration hint if provider is not available
+    pub hint: Option<String>,
+}
+
+impl ProviderInfo {
+    /// Create a new ProviderInfo
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        available: bool,
+        hint: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            description: description.into(),
+            available,
+            hint,
+        }
+    }
+
+    /// Check if a provider is available based on environment variables
+    ///
+    /// Returns true if the provider's required API key is set, or for Ollama
+    /// if the OLLAMA_MODEL env var is set (Ollama doesn't require an API key).
+    pub fn check_provider_availability(provider_id: &str) -> bool {
+        match provider_id {
+            "openai" => std::env::var("OPENAI_API_KEY").is_ok(),
+            "claude" => std::env::var("ANTHROPIC_API_KEY").is_ok(),
+            "ollama" => {
+                // Ollama is available if OLLAMA_MODEL is set or if we assume local availability
+                // For now, we check if OLLAMA_MODEL or OLLAMA_BASE_URL is set
+                std::env::var("OLLAMA_MODEL").is_ok() || std::env::var("OLLAMA_BASE_URL").is_ok()
+            }
+            _ => false,
+        }
+    }
+
+    /// Get the configuration hint for a provider
+    pub fn get_provider_hint(provider_id: &str) -> Option<String> {
+        match provider_id {
+            "openai" => Some("Set OPENAI_API_KEY environment variable".to_string()),
+            "claude" => Some("Set ANTHROPIC_API_KEY environment variable".to_string()),
+            "ollama" => Some("Set OLLAMA_MODEL or ensure Ollama is running locally".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Get all known providers with their availability status
+    pub fn get_all_providers() -> Vec<ProviderInfo> {
+        vec![
+            {
+                let available = Self::check_provider_availability("openai");
+                ProviderInfo::new(
+                    "openai",
+                    "OpenAI",
+                    "GPT-4, GPT-4o, and other OpenAI models",
+                    available,
+                    if available {
+                        None
+                    } else {
+                        Self::get_provider_hint("openai")
+                    },
+                )
+            },
+            {
+                let available = Self::check_provider_availability("claude");
+                ProviderInfo::new(
+                    "claude",
+                    "Claude",
+                    "Anthropic's Claude models (Sonnet, Opus, Haiku)",
+                    available,
+                    if available {
+                        None
+                    } else {
+                        Self::get_provider_hint("claude")
+                    },
+                )
+            },
+            {
+                let available = Self::check_provider_availability("ollama");
+                ProviderInfo::new(
+                    "ollama",
+                    "Ollama",
+                    "Local models via Ollama (CodeLlama, Mistral, etc.)",
+                    available,
+                    if available {
+                        None
+                    } else {
+                        Self::get_provider_hint("ollama")
+                    },
+                )
+            },
+        ]
+    }
+}
+
 /// Agent mode changes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentModeChange {
@@ -223,24 +350,18 @@ impl CommandHandler {
         self.add_alias("cancel", "interrupt");
 
         // Model/Provider commands
+        // /model now provides unified two-step flow: provider → model selection
+        // /provider is an alias to /model (Requirements: 1.1, 1.7)
         self.register(Command {
             name: "model".to_string(),
-            description: "Switch AI model".to_string(),
-            usage: "/model [name]".to_string(),
+            description: "Select provider and model (two-step flow)".to_string(),
+            usage: "/model".to_string(),
             category: CommandCategory::Model,
             requires_args: false,
             requires_editor: false,
         });
         self.add_alias("m", "model");
-
-        self.register(Command {
-            name: "provider".to_string(),
-            description: "Switch AI provider".to_string(),
-            usage: "/provider [name]".to_string(),
-            category: CommandCategory::Model,
-            requires_args: false,
-            requires_editor: false,
-        });
+        self.add_alias("provider", "model"); // Redirect /provider to /model (Requirements: 1.7)
 
         self.register(Command {
             name: "ollama".to_string(),
@@ -589,18 +710,14 @@ impl CommandHandler {
             "tasks" => CommandResult::FocusTasks,
 
             // Model/Provider commands
-            "model" => {
+            // /model now starts the two-step flow: provider → model selection
+            // Requirements: 1.1, 1.7
+            "model" | "provider" => {
                 if args.is_empty() {
-                    CommandResult::ShowPicker(PickerType::Model)
-                } else {
-                    CommandResult::Message(format!("Switching to model: {}", args))
-                }
-            }
-            "provider" => {
-                if args.is_empty() {
+                    // Start two-step flow with provider selection
                     CommandResult::ShowPicker(PickerType::Provider)
                 } else {
-                    CommandResult::Message(format!("Switching to provider: {}", args))
+                    CommandResult::Message(format!("Switching to model: {}", args))
                 }
             }
             "ollama" => CommandResult::Message("Switching to Ollama provider".to_string()),
@@ -961,19 +1078,21 @@ mod tests {
     #[test]
     fn test_execute_model_picker() {
         let handler = CommandHandler::new();
+        // /model now starts two-step flow with provider selection first
         assert_eq!(
             handler.execute("/model"),
-            CommandResult::ShowPicker(PickerType::Model)
+            CommandResult::ShowPicker(PickerType::Provider)
         );
         assert_eq!(
             handler.execute("/m"),
-            CommandResult::ShowPicker(PickerType::Model)
+            CommandResult::ShowPicker(PickerType::Provider)
         );
     }
 
     #[test]
     fn test_execute_provider_picker() {
         let handler = CommandHandler::new();
+        // /provider is now an alias to /model, starts two-step flow
         assert_eq!(
             handler.execute("/provider"),
             CommandResult::ShowPicker(PickerType::Provider)
@@ -1513,6 +1632,117 @@ mod property_tests {
                 !cmd.requires_editor,
                 "is_available_standalone should be inverse of requires_editor for '{}'",
                 cmd.name
+            );
+        }
+
+        /// **Feature: unified-model-selection, Property 6: Provider Availability Indication**
+        /// **Validates: Requirements 3.1, 3.2**
+        ///
+        /// For any provider in the picker, if the provider's API key environment variable
+        /// is not set, the provider SHALL be marked as unavailable with a configuration hint.
+        #[test]
+        fn prop_provider_availability_indication(provider_idx in 0usize..10) {
+            let providers = ProviderInfo::get_all_providers();
+
+            if providers.is_empty() {
+                return Ok(());
+            }
+
+            let idx = provider_idx % providers.len();
+            let provider = &providers[idx];
+
+            // Check that availability matches the environment variable check
+            let expected_available = ProviderInfo::check_provider_availability(&provider.id);
+            prop_assert_eq!(
+                provider.available,
+                expected_available,
+                "Provider '{}' availability should match env var check", provider.id
+            );
+
+            // If provider is unavailable, it should have a hint
+            if !provider.available {
+                prop_assert!(
+                    provider.hint.is_some(),
+                    "Unavailable provider '{}' should have a configuration hint", provider.id
+                );
+
+                // Hint should be non-empty
+                let hint = provider.hint.as_ref().unwrap();
+                prop_assert!(
+                    !hint.is_empty(),
+                    "Configuration hint for '{}' should not be empty", provider.id
+                );
+            }
+
+            // If provider is available, hint should be None
+            if provider.available {
+                prop_assert!(
+                    provider.hint.is_none(),
+                    "Available provider '{}' should not have a hint", provider.id
+                );
+            }
+
+            // Provider should have non-empty id, name, and description
+            prop_assert!(
+                !provider.id.is_empty(),
+                "Provider id should not be empty"
+            );
+            prop_assert!(
+                !provider.name.is_empty(),
+                "Provider name should not be empty"
+            );
+            prop_assert!(
+                !provider.description.is_empty(),
+                "Provider description should not be empty"
+            );
+        }
+
+        /// **Feature: unified-model-selection, Property 6: Provider Availability Indication**
+        /// **Validates: Requirements 3.1, 3.2**
+        ///
+        /// For any known provider ID, check_provider_availability should return
+        /// consistent results based on environment variables.
+        #[test]
+        fn prop_provider_availability_check_consistency(
+            provider_id in prop::sample::select(vec!["openai", "claude", "ollama"])
+        ) {
+            // Call check twice - should return same result
+            let first_check = ProviderInfo::check_provider_availability(provider_id);
+            let second_check = ProviderInfo::check_provider_availability(provider_id);
+
+            prop_assert_eq!(
+                first_check,
+                second_check,
+                "Provider availability check should be consistent for '{}'", provider_id
+            );
+
+            // Get hint should return Some for known providers
+            let hint = ProviderInfo::get_provider_hint(provider_id);
+            prop_assert!(
+                hint.is_some(),
+                "Known provider '{}' should have a hint available", provider_id
+            );
+        }
+
+        /// **Feature: unified-model-selection, Property 6: Provider Availability Indication**
+        /// **Validates: Requirements 3.1, 3.2**
+        ///
+        /// For any unknown provider ID, check_provider_availability should return false.
+        #[test]
+        fn prop_unknown_provider_unavailable(
+            unknown_id in "[a-z]{5,10}".prop_filter("Not a known provider",
+                |s| s != "openai" && s != "claude" && s != "ollama")
+        ) {
+            let available = ProviderInfo::check_provider_availability(&unknown_id);
+            prop_assert!(
+                !available,
+                "Unknown provider '{}' should not be available", unknown_id
+            );
+
+            let hint = ProviderInfo::get_provider_hint(&unknown_id);
+            prop_assert!(
+                hint.is_none(),
+                "Unknown provider '{}' should not have a hint", unknown_id
             );
         }
     }
