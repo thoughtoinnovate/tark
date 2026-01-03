@@ -163,6 +163,7 @@ impl CopilotProvider {
         let device_response = self.request_device_code().await?;
 
         // Step 2: Display user instructions
+        let timeout_minutes = self.auth_timeout_secs.max(device_response.expires_in) / 60;
         println!("\n╭─────────────────────────────────────────────────────╮");
         println!("│  GitHub Copilot Authentication Required            │");
         println!("╰─────────────────────────────────────────────────────╯");
@@ -170,7 +171,10 @@ impl CopilotProvider {
         println!("   1. Visit: {}", device_response.verification_uri);
         println!("   2. Enter code: {}", device_response.user_code);
         println!("   3. Authorize Tark to use GitHub Copilot");
-        println!("\n⏳ Waiting for authorization...\n");
+        println!(
+            "\n⏳ Waiting for authorization (timeout: {} minutes)...\n",
+            timeout_minutes
+        );
 
         // Step 3: Poll for token
         let token_response = self
@@ -233,7 +237,7 @@ impl CopilotProvider {
         // Use the longer of GitHub's expires_in or our configured timeout
         let timeout_secs = expires_in.max(self.auth_timeout_secs);
         let timeout = std::time::Duration::from_secs(timeout_secs);
-        
+
         tracing::info!(
             "Waiting for GitHub Device Flow authorization (timeout: {}s = {} minutes)",
             timeout_secs,
