@@ -853,6 +853,8 @@ impl AgentBridge {
     }
 
     /// Change the provider
+    ///
+    /// Also updates the context limit based on the current model and new provider.
     pub fn set_provider(&mut self, provider_name: &str) -> Result<()> {
         let provider = llm::create_provider(provider_name)?;
         let provider = Arc::from(provider);
@@ -863,16 +865,46 @@ impl AgentBridge {
         // Update agent provider
         self.agent.update_provider(provider);
 
+        // Update context limit for the new provider + current model
+        let context_limit = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                crate::llm::models_db()
+                    .get_context_limit(provider_name, &self.model_name)
+                    .await
+            })
+        });
+        self.agent.set_max_context_tokens(context_limit as usize);
+
         // Save session
         let _ = self.storage.save_session(&self.current_session);
 
         Ok(())
     }
 
-    /// Set the model name
+    /// Set the model name and update context limit
+    ///
+    /// When switching models, this updates the agent's context limit to match
+    /// the new model's context window. If current context exceeds the new limit,
+    /// it will be trimmed or auto-compacted on the next message.
     pub fn set_model(&mut self, model_name: &str) {
         self.model_name = model_name.to_string();
         self.current_session.model = model_name.to_string();
+
+        // Fetch the new model's context limit and update the agent
+        let context_limit = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                crate::llm::models_db()
+                    .get_context_limit(&self.provider_name, model_name)
+                    .await
+            })
+        });
+
+        self.agent.set_max_context_tokens(context_limit as usize);
+        tracing::info!(
+            "Model switched to {} (context limit: {} tokens)",
+            model_name,
+            context_limit
+        );
 
         // Save session
         let _ = self.storage.save_session(&self.current_session);

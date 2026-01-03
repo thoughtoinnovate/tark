@@ -305,6 +305,37 @@ impl ChatAgent {
         self.llm = llm;
     }
 
+    /// Update the max context tokens for the agent
+    ///
+    /// Call this when switching to a model with a different context window.
+    /// If current context exceeds the new limit, it will be automatically trimmed.
+    pub fn set_max_context_tokens(&mut self, max_tokens: usize) {
+        tracing::info!(
+            "Updating max context tokens: {} -> {}",
+            self.context.max_context_tokens(),
+            max_tokens
+        );
+        self.context.set_max_context_tokens(max_tokens);
+
+        // Check if we're now near limit and need to compact
+        if self.context.is_near_limit() {
+            tracing::warn!(
+                "Context at {}% after model switch, may need compaction",
+                self.context.usage_percentage()
+            );
+        }
+    }
+
+    /// Get the current context usage percentage
+    pub fn context_usage_percentage(&self) -> usize {
+        self.context.usage_percentage()
+    }
+
+    /// Check if context is near limit (80%+)
+    pub fn is_context_near_limit(&self) -> bool {
+        self.context.is_near_limit()
+    }
+
     /// Get the current mode
     pub fn mode(&self) -> AgentMode {
         self.mode

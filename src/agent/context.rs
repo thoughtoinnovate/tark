@@ -36,6 +36,21 @@ impl ConversationContext {
         self
     }
 
+    /// Update max context tokens (for model switching)
+    ///
+    /// This should be called when switching to a model with a different context window.
+    /// If the new limit is smaller and current context exceeds it, auto-trim will happen.
+    pub fn set_max_context_tokens(&mut self, max: usize) {
+        self.max_context_tokens = max;
+        // Trigger trim in case new limit is smaller
+        self.trim();
+    }
+
+    /// Get max context tokens
+    pub fn max_context_tokens(&self) -> usize {
+        self.max_context_tokens
+    }
+
     /// Add a system message
     pub fn add_system(&mut self, content: impl Into<String>) {
         self.messages.push(Message::system(content));
