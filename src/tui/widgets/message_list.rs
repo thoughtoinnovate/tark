@@ -792,23 +792,36 @@ fn render_message_with_blocks(
 }
 
 /// Format content with owned strings for 'static lifetime
+/// Supports markdown: headers, code blocks, lists, blockquotes, horizontal rules
 fn format_content_owned(content: String, base_style: Style) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
     let mut code_block_lines: Vec<String> = Vec::new();
+    let mut code_lang = String::new();
 
     for line in content.lines() {
+        // Code block handling
         if line.starts_with("```") {
             if in_code_block {
+                // End of code block - render accumulated lines
                 for code_line in &code_block_lines {
                     lines.push(Line::from(Span::styled(
-                        format!("  {}", code_line),
-                        Style::default().fg(Color::Gray).bg(Color::DarkGray),
+                        format!("  │ {}", code_line),
+                        Style::default().fg(Color::Cyan).bg(Color::Rgb(30, 30, 40)),
                     )));
                 }
                 code_block_lines.clear();
                 in_code_block = false;
+                code_lang.clear();
             } else {
+                // Start of code block - capture language
+                code_lang = line.trim_start_matches('`').to_string();
+                if !code_lang.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ┌─ {} ", code_lang),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
                 in_code_block = true;
             }
             continue;
@@ -819,15 +832,59 @@ fn format_content_owned(content: String, base_style: Style) -> Vec<Line<'static>
             continue;
         }
 
+        // Horizontal rule
+        if line.trim() == "---" || line.trim() == "***" || line.trim() == "___" {
+            lines.push(Line::from(Span::styled(
+                "────────────────────────────────────────",
+                Style::default().fg(Color::DarkGray),
+            )));
+            continue;
+        }
+
+        // Headers (# ## ###)
+        if let Some(header_line) = format_header(line.to_string()) {
+            lines.push(header_line);
+            continue;
+        }
+
+        // Blockquote (> text)
+        if line.trim_start().starts_with('>') {
+            let quote_text = line.trim_start().trim_start_matches('>').trim();
+            lines.push(Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(Color::Blue)),
+                Span::styled(
+                    quote_text.to_string(),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+            continue;
+        }
+
+        // Unordered list (- or * at start)
+        if let Some(list_line) = format_list_item(line.to_string(), base_style) {
+            lines.push(list_line);
+            continue;
+        }
+
+        // Numbered list (1. 2. etc)
+        if let Some(num_line) = format_numbered_list(line.to_string(), base_style) {
+            lines.push(num_line);
+            continue;
+        }
+
+        // Regular line with inline formatting
         let formatted_line = format_inline_owned(line.to_string(), base_style);
         lines.push(formatted_line);
     }
 
+    // Handle unclosed code block
     if in_code_block {
         for code_line in &code_block_lines {
             lines.push(Line::from(Span::styled(
-                format!("  {}", code_line),
-                Style::default().fg(Color::Gray).bg(Color::DarkGray),
+                format!("  │ {}", code_line),
+                Style::default().fg(Color::Cyan).bg(Color::Rgb(30, 30, 40)),
             )));
         }
     }
@@ -839,34 +896,159 @@ fn format_content_owned(content: String, base_style: Style) -> Vec<Line<'static>
     lines
 }
 
+/// Format markdown header (# ## ### etc)
+fn format_header(line: String) -> Option<Line<'static>> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        let level = trimmed.chars().take_while(|c| *c == '#').count();
+        if level <= 6 {
+            let text = trimmed.trim_start_matches('#').trim();
+            if !text.is_empty() {
+                let (style, prefix) = match level {
+                    1 => (
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                        "█ ",
+                    ),
+                    2 => (
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::BOLD),
+                        "▌ ",
+                    ),
+                    3 => (
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                        "▎ ",
+                    ),
+                    _ => (
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                        "  ",
+                    ),
+                };
+                return Some(Line::from(vec![
+                    Span::styled(prefix.to_string(), style),
+                    Span::styled(text.to_string(), style),
+                ]));
+            }
+        }
+    }
+    None
+}
+
+/// Format unordered list item (- or * at start)
+fn format_list_item(line: String, base_style: Style) -> Option<Line<'static>> {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let indent_str = "  ".repeat(indent / 2);
+
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+        let text = trimmed[2..].to_string();
+        let formatted = format_inline_owned(text, base_style);
+        let mut spans = vec![
+            Span::raw(indent_str),
+            Span::styled("  • ", Style::default().fg(Color::Yellow)),
+        ];
+        spans.extend(formatted.spans);
+        return Some(Line::from(spans));
+    }
+    None
+}
+
+/// Format numbered list item (1. 2. etc)
+fn format_numbered_list(line: String, base_style: Style) -> Option<Line<'static>> {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let indent_str = "  ".repeat(indent / 2);
+
+    // Check for pattern like "1. " "2. " "10. " etc
+    if let Some(dot_pos) = trimmed.find(". ") {
+        let num_part = &trimmed[..dot_pos];
+        if num_part.chars().all(|c| c.is_ascii_digit()) {
+            let text = trimmed[dot_pos + 2..].to_string();
+            let formatted = format_inline_owned(text, base_style);
+            let mut spans = vec![
+                Span::raw(indent_str),
+                Span::styled(
+                    format!("  {}. ", num_part),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ];
+            spans.extend(formatted.spans);
+            return Some(Line::from(spans));
+        }
+    }
+    None
+}
+
 /// Format inline markdown with owned strings
+/// Supports: **bold**, *italic*, _italic_, `code`, ~~strikethrough~~
 fn format_inline_owned(line: String, base_style: Style) -> Line<'static> {
     let mut spans = Vec::new();
     let mut current = String::new();
     let mut chars = line.chars().peekable();
     let mut in_bold = false;
+    let mut in_italic = false;
     let mut in_code = false;
+    let mut in_strike = false;
 
     while let Some(c) = chars.next() {
         match c {
+            // Bold: **text**
             '*' if chars.peek() == Some(&'*') && !in_code => {
                 chars.next();
                 if !current.is_empty() {
-                    let style = if in_bold {
-                        base_style.add_modifier(Modifier::BOLD)
-                    } else {
-                        base_style
-                    };
-                    spans.push(Span::styled(std::mem::take(&mut current), style));
+                    spans.push(Span::styled(
+                        std::mem::take(&mut current),
+                        get_inline_style(base_style, in_bold, in_italic, in_strike),
+                    ));
                 }
                 in_bold = !in_bold;
             }
-            '`' if !in_bold => {
+            // Italic: *text* (single asterisk, not at word boundary for list items)
+            '*' if !in_code && !in_bold => {
+                if !current.is_empty() {
+                    spans.push(Span::styled(
+                        std::mem::take(&mut current),
+                        get_inline_style(base_style, in_bold, in_italic, in_strike),
+                    ));
+                }
+                in_italic = !in_italic;
+            }
+            // Italic: _text_
+            '_' if !in_code => {
+                if !current.is_empty() {
+                    spans.push(Span::styled(
+                        std::mem::take(&mut current),
+                        get_inline_style(base_style, in_bold, in_italic, in_strike),
+                    ));
+                }
+                in_italic = !in_italic;
+            }
+            // Strikethrough: ~~text~~
+            '~' if chars.peek() == Some(&'~') && !in_code => {
+                chars.next();
+                if !current.is_empty() {
+                    spans.push(Span::styled(
+                        std::mem::take(&mut current),
+                        get_inline_style(base_style, in_bold, in_italic, in_strike),
+                    ));
+                }
+                in_strike = !in_strike;
+            }
+            // Inline code: `code`
+            '`' => {
                 if !current.is_empty() {
                     let style = if in_code {
-                        Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .bg(Color::Rgb(40, 40, 50))
                     } else {
-                        base_style
+                        get_inline_style(base_style, in_bold, in_italic, in_strike)
                     };
                     spans.push(Span::styled(std::mem::take(&mut current), style));
                 }
@@ -879,17 +1061,36 @@ fn format_inline_owned(line: String, base_style: Style) -> Line<'static> {
     }
 
     if !current.is_empty() {
-        let style = if in_bold {
-            base_style.add_modifier(Modifier::BOLD)
-        } else if in_code {
-            Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+        let style = if in_code {
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::Rgb(40, 40, 50))
         } else {
-            base_style
+            get_inline_style(base_style, in_bold, in_italic, in_strike)
         };
         spans.push(Span::styled(current, style));
     }
 
-    Line::from(spans)
+    if spans.is_empty() {
+        Line::from("")
+    } else {
+        Line::from(spans)
+    }
+}
+
+/// Get style for inline markdown based on active formatting
+fn get_inline_style(base_style: Style, bold: bool, italic: bool, strike: bool) -> Style {
+    let mut style = base_style;
+    if bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if italic {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if strike {
+        style = style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    style
 }
 
 /// Widget implementation for MessageList

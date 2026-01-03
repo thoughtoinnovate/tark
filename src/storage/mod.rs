@@ -1348,12 +1348,12 @@ impl ChatSession {
         self.updated_at = Utc::now();
     }
 
-    /// Clear messages but keep settings
+    /// Clear messages but keep settings and accumulated cost
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.input_tokens = 0;
         self.output_tokens = 0;
-        self.total_cost = 0.0;
+        // Note: total_cost is intentionally NOT reset - it accumulates across the session
         self.updated_at = Utc::now();
     }
 }
