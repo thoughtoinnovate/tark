@@ -212,6 +212,9 @@ impl CopilotProvider {
             .get(GITHUB_COPILOT_TOKEN_URL)
             .header("Authorization", format!("token {}", github_token))
             .header("Accept", "application/json")
+            .header("User-Agent", "Tark/0.3.0")
+            .header("Editor-Version", "Tark/0.3.0")
+            .header("Editor-Plugin-Version", "copilot/0.3.0")
             .send()
             .await
             .context("Failed to get Copilot token")?;
