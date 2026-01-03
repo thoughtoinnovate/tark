@@ -1099,6 +1099,8 @@ pub struct MessageListWidget<'a> {
     block: Option<Block<'a>>,
     /// Username to display for user messages (Requirements 2.2, 2.5)
     username: String,
+    /// Whether the widget is focused (controls scrollbar visibility)
+    focused: bool,
 }
 
 impl<'a> MessageListWidget<'a> {
@@ -1108,6 +1110,7 @@ impl<'a> MessageListWidget<'a> {
             message_list,
             block: None,
             username: "You".to_string(), // Default fallback (Requirement 2.5)
+            focused: false,
         }
     }
 
@@ -1120,6 +1123,12 @@ impl<'a> MessageListWidget<'a> {
     /// Set the username to display for user messages (Requirements 2.2, 2.5)
     pub fn username(mut self, username: impl Into<String>) -> Self {
         self.username = username.into();
+        self
+    }
+
+    /// Set whether the widget is focused (controls scrollbar visibility)
+    pub fn focused(mut self, focused: bool) -> Self {
+        self.focused = focused;
         self
     }
 
@@ -1175,14 +1184,28 @@ impl<'a> MessageListWidget<'a> {
         let paragraph = Paragraph::new(Text::from(visible_lines));
         paragraph.render(inner, buf);
 
-        // Render scrollbar if needed
+        // Render scrollbar only when focused and content overflows
         let total_lines = self.message_list.total_lines(inner.width);
-        if total_lines > inner.height as usize {
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"));
+        let visible_height = inner.height as usize;
 
-            let mut scrollbar_state = ScrollbarState::new(total_lines).position(scroll_offset);
+        if self.focused && total_lines > visible_height {
+            // Calculate max scroll (how far we can scroll)
+            let max_scroll = total_lines.saturating_sub(visible_height);
+
+            // The scrollbar needs to know:
+            // - content_length: the scrollable range (max_scroll + 1 positions, 0 to max_scroll)
+            // - position: current scroll position (0 at top, max_scroll at bottom)
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼"))
+                .track_symbol(Some("│"))
+                .thumb_symbol("█");
+
+            // Use max_scroll as content length so position maps correctly
+            // When scroll_offset = 0, thumb at top
+            // When scroll_offset = max_scroll, thumb at bottom
+            let mut scrollbar_state =
+                ScrollbarState::new(max_scroll.max(1)).position(scroll_offset.min(max_scroll));
 
             let scrollbar_area = Rect {
                 x: inner.x + inner.width.saturating_sub(1),
