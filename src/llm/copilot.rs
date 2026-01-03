@@ -130,7 +130,7 @@ impl CopilotProvider {
     }
 
     /// Ensure we have a valid token, initiating Device Flow if needed
-    async fn ensure_token(&mut self) -> Result<String> {
+    pub async fn ensure_token(&mut self) -> Result<String> {
         // Check if we have a token and it's not expired
         if let Some(ref token) = self.token {
             if !token.is_expired() {
@@ -253,14 +253,8 @@ impl CopilotProvider {
             let status = response.status();
             let text = response.text().await?;
 
-            if status.is_success() {
-                // Got the token!
-                let token: AccessTokenResponse =
-                    serde_json::from_str(&text).context("Failed to parse access token response")?;
-                return Ok(token);
-            }
-
-            // Check error
+            // GitHub returns 200 OK even for errors (authorization_pending, etc.)
+            // So we need to check for error field first
             if let Ok(error) = serde_json::from_str::<TokenError>(&text) {
                 match error.error.as_str() {
                     "authorization_pending" => {
@@ -288,7 +282,19 @@ impl CopilotProvider {
                 }
             }
 
-            anyhow::bail!("Unexpected response from GitHub: {}", text);
+            // If we get here, it's a successful response (no error field)
+            if status.is_success() {
+                // Parse as access token response
+                let token: AccessTokenResponse =
+                    serde_json::from_str(&text).context("Failed to parse access token response")?;
+                return Ok(token);
+            }
+
+            anyhow::bail!(
+                "Unexpected response from GitHub (status {}): {}",
+                status,
+                text
+            );
         }
     }
 

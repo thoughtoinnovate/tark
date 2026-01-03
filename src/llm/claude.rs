@@ -104,6 +104,26 @@ impl ClaudeProvider {
             .collect()
     }
 
+    /// Check if the model supports native extended thinking
+    fn supports_extended_thinking(&self) -> bool {
+        // Claude Sonnet 4 and Claude 3.5+ support extended thinking
+        self.model.contains("sonnet-4")
+            || self.model.contains("claude-3-5-sonnet")
+            || self.model.contains("claude-3.5-sonnet")
+    }
+
+    /// Create thinking config for models that support it
+    fn create_thinking_config(&self) -> Option<ThinkingConfig> {
+        if self.supports_extended_thinking() {
+            Some(ThinkingConfig {
+                thinking_type: "enabled".to_string(),
+                budget_tokens: 10000,
+            })
+        } else {
+            None
+        }
+    }
+
     async fn send_request(&self, request: ClaudeRequest) -> Result<ClaudeResponse> {
         let response = self
             .client
@@ -135,6 +155,10 @@ impl LlmProvider for ClaudeProvider {
         "claude"
     }
 
+    fn supports_native_thinking(&self) -> bool {
+        self.supports_extended_thinking()
+    }
+
     async fn chat(
         &self,
         messages: &[Message],
@@ -149,6 +173,7 @@ impl LlmProvider for ClaudeProvider {
             messages: claude_messages,
             tools: None,
             stream: None, // Non-streaming
+            thinking: self.create_thinking_config(),
         };
 
         if let Some(tools) = tools {
@@ -226,6 +251,7 @@ impl LlmProvider for ClaudeProvider {
             messages: claude_messages,
             tools: None,
             stream: Some(true), // Enable streaming
+            thinking: self.create_thinking_config(),
         };
 
         if let Some(tools) = tools {
@@ -418,6 +444,7 @@ impl LlmProvider for ClaudeProvider {
             }],
             tools: None,
             stream: None,
+            thinking: None, // FIM doesn't need extended thinking
         };
 
         let response = self.send_request(request).await?;
@@ -458,6 +485,7 @@ impl LlmProvider for ClaudeProvider {
             }],
             tools: None,
             stream: None,
+            thinking: None, // Code explanation doesn't need extended thinking
         };
 
         let response = self.send_request(request).await?;
@@ -495,6 +523,7 @@ Only return the JSON array, no other text."#;
             }],
             tools: None,
             stream: None,
+            thinking: None, // Refactoring suggestions don't need extended thinking
         };
 
         let response = self.send_request(request).await?;
@@ -541,6 +570,7 @@ Focus on: bugs, security issues, performance problems, and code quality."#;
             }],
             tools: None,
             stream: None,
+            thinking: None, // Code review doesn't need extended thinking
         };
 
         let response = self.send_request(request).await?;
@@ -580,6 +610,15 @@ struct ClaudeRequest {
     tools: Option<Vec<ClaudeTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    thinking_type: String,
+    budget_tokens: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

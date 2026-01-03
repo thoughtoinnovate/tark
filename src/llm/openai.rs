@@ -227,6 +227,20 @@ impl OpenAiProvider {
         result
     }
 
+    /// Check if the model supports reasoning (o1/o3 models)
+    fn supports_reasoning(&self) -> bool {
+        self.model.starts_with("o1") || self.model.starts_with("o3")
+    }
+
+    /// Get reasoning effort for o1/o3 models
+    fn get_reasoning_effort(&self) -> Option<String> {
+        if self.supports_reasoning() {
+            Some("medium".to_string())
+        } else {
+            None
+        }
+    }
+
     fn convert_messages(&self, messages: &[Message]) -> Vec<OpenAiMessage> {
         // Log input messages for debugging
         tracing::debug!("convert_messages input: {} messages", messages.len());
@@ -511,6 +525,10 @@ impl LlmProvider for OpenAiProvider {
         "openai"
     }
 
+    fn supports_native_thinking(&self) -> bool {
+        self.supports_reasoning()
+    }
+
     async fn chat(
         &self,
         messages: &[Message],
@@ -526,6 +544,7 @@ impl LlmProvider for OpenAiProvider {
             tool_choice: None,
             stream: None, // Non-streaming
             stream_options: None,
+            reasoning_effort: self.get_reasoning_effort(),
         };
 
         if let Some(tools) = tools {
@@ -612,6 +631,7 @@ impl LlmProvider for OpenAiProvider {
             stream_options: Some(StreamOptions {
                 include_usage: true,
             }), // Get usage stats at end
+            reasoning_effort: self.get_reasoning_effort(),
         };
 
         if let Some(tools) = tools {
@@ -806,6 +826,7 @@ impl LlmProvider for OpenAiProvider {
             tool_choice: None,
             stream: None,
             stream_options: None,
+            reasoning_effort: None, // FIM doesn't need reasoning
         };
 
         let response = self.send_request(request).await?;
@@ -860,6 +881,7 @@ impl LlmProvider for OpenAiProvider {
             tool_choice: None,
             stream: None,
             stream_options: None,
+            reasoning_effort: None, // Code explanation doesn't need reasoning
         };
 
         let response = self.send_request(request).await?;
@@ -910,6 +932,7 @@ Only return the JSON array, no other text."#;
             tool_choice: None,
             stream: None,
             stream_options: None,
+            reasoning_effort: None, // Refactoring suggestions don't need reasoning
         };
 
         let response = self.send_request(request).await?;
@@ -965,6 +988,7 @@ Focus on: bugs, security issues, performance problems, and code quality."#;
             tools: None,
             tool_choice: None,
             stream: None,
+            reasoning_effort: None, // Code review doesn't need reasoning
             stream_options: None,
         };
 
@@ -1006,6 +1030,8 @@ struct OpenAiRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 /// Options for streaming responses

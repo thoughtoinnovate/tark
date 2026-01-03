@@ -497,18 +497,28 @@ pub async fn run_auth(provider: Option<&str>) -> Result<()> {
 
     match provider.as_str() {
         "copilot" | "github" => {
-            // Use Device Flow OAuth
-            println!("{}", "Using GitHub Device Flow OAuth...".bold());
-            println!();
-
             use crate::llm::CopilotProvider;
 
-            // Create provider (will trigger Device Flow if needed)
-            let _provider = CopilotProvider::new()?;
+            println!("Checking for existing token...");
 
-            // If we get here, authentication succeeded
+            // Create provider and trigger authentication
+            let mut provider = CopilotProvider::new()?;
+
+            println!("Initiating authentication flow...");
+            println!();
+
+            // Call ensure_token to trigger Device Flow if needed
+            // This will display the URL and code to the user if authentication is required
+            let token = provider.ensure_token().await?;
+
+            println!();
             println!("✅ Successfully authenticated with GitHub Copilot!");
-            println!("Token saved to ~/.config/tark/copilot_token.json");
+            println!("Token saved to: ~/.config/tark/copilot_token.json");
+            println!("Token preview: {}...", &token[..token.len().min(20)]);
+            println!();
+            println!("You can now use GitHub Copilot as your provider:");
+            println!("  tark chat --provider copilot");
+            println!("  Or within TUI: /model → Select 'GitHub Copilot'");
         }
         "openai" | "gpt" => {
             if std::env::var("OPENAI_API_KEY").is_ok() {

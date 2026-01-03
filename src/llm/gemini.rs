@@ -133,6 +133,10 @@ impl LlmProvider for GeminiProvider {
         "gemini"
     }
 
+    fn supports_native_thinking(&self) -> bool {
+        self.model.contains("thinking")
+    }
+
     async fn chat(
         &self,
         messages: &[Message],

@@ -190,6 +190,16 @@ impl LlmProvider for OpenRouterProvider {
         "openrouter"
     }
 
+    fn supports_native_thinking(&self) -> bool {
+        // OpenRouter passes through to underlying models
+        // Check for thinking-capable models
+        self.model.contains("sonnet")
+            || self.model.contains("o1")
+            || self.model.contains("o3")
+            || self.model.contains("thinking")
+            || self.model.contains("deepseek-r1")
+    }
+
     async fn chat(
         &self,
         messages: &[Message],

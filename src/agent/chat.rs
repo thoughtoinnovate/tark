@@ -12,9 +12,9 @@ use crate::transport::update_status;
 use anyhow::Result;
 use std::sync::Arc;
 
-/// Generate system prompt based on agent mode
-fn get_system_prompt(mode: AgentMode) -> String {
-    match mode {
+/// Generate system prompt based on agent mode and thinking capability
+fn get_system_prompt(mode: AgentMode, supports_native_thinking: bool) -> String {
+    let base_prompt = match mode {
         AgentMode::Plan => r#"You are an AI coding assistant in PLAN MODE (READ-ONLY).
 
 ⚠️ You CANNOT make changes. You can ONLY explore, analyze, and CREATE EXECUTION PLANS.
@@ -232,6 +232,25 @@ Safe shell commands (OK to run):
 - Be cautious with shell commands - prefer read-only commands when possible"#
                 .to_string()
         }
+    };
+
+    // Add Chain of Thought instructions for models without native thinking
+    if !supports_native_thinking {
+        format!(
+            "{}\n\n\
+            ⚙️ THINKING PROCESS:\n\
+            Before providing your final response, reason through the problem step by step.\n\
+            Wrap your reasoning process in <thinking> tags like this:\n\
+            <thinking>\n\
+            1. First, I'll analyze the problem...\n\
+            2. Then I need to consider...\n\
+            3. The best approach is...\n\
+            </thinking>\n\n\
+            This ensures thorough analysis before taking action.",
+            base_prompt
+        )
+    } else {
+        base_prompt
     }
 }
 
@@ -270,7 +289,8 @@ impl ChatAgent {
 
     pub fn with_mode(llm: Arc<dyn LlmProvider>, tools: ToolRegistry, mode: AgentMode) -> Self {
         let mut context = ConversationContext::new();
-        context.add_system(get_system_prompt(mode));
+        let supports_thinking = llm.supports_native_thinking();
+        context.add_system(get_system_prompt(mode, supports_thinking));
 
         Self {
             llm,
@@ -297,7 +317,9 @@ impl ChatAgent {
         self.tools = tools;
         self.mode = mode;
         // Update the system prompt in context (replace the first system message)
-        self.context.update_system_prompt(&get_system_prompt(mode));
+        let supports_thinking = self.llm.supports_native_thinking();
+        self.context
+            .update_system_prompt(&get_system_prompt(mode, supports_thinking));
     }
 
     /// Update just the LLM provider while preserving conversation history
@@ -344,7 +366,8 @@ impl ChatAgent {
     /// Clear conversation history (keeps system prompt)
     pub fn clear_history(&mut self) {
         // Get the current system prompt
-        let system_prompt = get_system_prompt(self.mode);
+        let supports_thinking = self.llm.supports_native_thinking();
+        let system_prompt = get_system_prompt(self.mode, supports_thinking);
 
         // Clear and reinitialize with system prompt
         self.context.clear();
@@ -356,7 +379,8 @@ impl ChatAgent {
     /// Restore conversation from a saved session
     pub fn restore_from_session(&mut self, session: &crate::storage::ChatSession) {
         // Clear existing history
-        let system_prompt = get_system_prompt(self.mode);
+        let supports_thinking = self.llm.supports_native_thinking();
+        let system_prompt = get_system_prompt(self.mode, supports_thinking);
         self.context.clear();
         self.context.add_system(system_prompt);
 
@@ -841,7 +865,9 @@ impl ChatAgent {
     /// Clear conversation history (keeps system prompt)
     pub fn reset(&mut self) {
         self.context.clear();
-        self.context.add_system(get_system_prompt(self.mode));
+        let supports_thinking = self.llm.supports_native_thinking();
+        self.context
+            .add_system(get_system_prompt(self.mode, supports_thinking));
     }
 
     /// Process a user message with interrupt checking

@@ -29,6 +29,12 @@ pub trait LlmProvider: Send + Sync {
     /// Get the provider name
     fn name(&self) -> &str;
 
+    /// Check if the provider/model supports native extended thinking
+    /// Default returns false; providers with native thinking should override
+    fn supports_native_thinking(&self) -> bool {
+        false
+    }
+
     /// Send a chat completion request (non-streaming)
     async fn chat(
         &self,
