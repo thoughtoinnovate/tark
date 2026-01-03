@@ -2793,6 +2793,21 @@ impl TuiApp {
     /// Requirements: 1.5, 2.3
     fn handle_two_step_model_selection(&mut self, provider_id: &str, model_id: &str) {
         if let Some(ref mut bridge) = self.agent_bridge {
+            // Check if provider requires authentication first
+            if provider_id == "copilot" || provider_id == "github" {
+                // Check if Copilot token exists
+                if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "tark") {
+                    let token_path = proj_dirs.config_dir().join("copilot_token.json");
+                    if !token_path.exists() {
+                        self.state.status_message = Some(
+                            "⚠️  GitHub Copilot not authenticated. Run: tark auth copilot"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                }
+            }
+
             // Switch provider first
             if let Err(e) = bridge.set_provider(provider_id) {
                 self.state.status_message = Some(format!("Failed to switch provider: {}", e));
@@ -2897,6 +2912,20 @@ impl TuiApp {
     /// Requirements: 12.3, 12.5
     fn handle_provider_switch(&mut self, provider_id: &str) {
         if let Some(ref mut bridge) = self.agent_bridge {
+            // Check if provider requires authentication first
+            if provider_id == "copilot" || provider_id == "github" {
+                if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "tark") {
+                    let token_path = proj_dirs.config_dir().join("copilot_token.json");
+                    if !token_path.exists() {
+                        self.state.status_message = Some(
+                            "⚠️  GitHub Copilot not authenticated. Run: tark auth copilot"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                }
+            }
+
             match bridge.set_provider(provider_id) {
                 Ok(()) => {
                     self.state.status_message =
