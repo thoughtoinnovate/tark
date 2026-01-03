@@ -1509,6 +1509,7 @@ pub fn get_progress_bar_color(usage_percent: f32) -> Color {
 }
 
 /// Format a number with thousands separators (e.g., 12000 -> "12,000")
+#[allow(clippy::manual_is_multiple_of)] // is_multiple_of is unstable in stable Rust
 pub fn format_with_thousands_separator(n: u32) -> String {
     let s = n.to_string();
     let mut result = String::new();
