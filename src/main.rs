@@ -65,6 +65,14 @@ enum Commands {
         /// When provided, connects to Neovim for editor features
         #[arg(long)]
         socket: Option<String>,
+
+        /// LLM provider to use (openai, claude, copilot, gemini, openrouter, ollama)
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// Model to use (e.g., gpt-4o, claude-sonnet-4, gemini-2.0-flash-exp)
+        #[arg(short, long)]
+        model: Option<String>,
     },
 
     /// Get a one-shot completion for a file position
@@ -158,6 +166,8 @@ async fn main() -> Result<()> {
             message,
             cwd,
             socket,
+            provider,
+            model,
         } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());
 
@@ -175,7 +185,7 @@ async fn main() -> Result<()> {
             }
 
             // Run the TUI application
-            transport::cli::run_tui_chat(message, &working_dir, socket).await?;
+            transport::cli::run_tui_chat(message, &working_dir, socket, provider, model).await?;
         }
         Commands::Complete { file, line, col } => {
             transport::cli::run_complete(&file, line, col).await?;

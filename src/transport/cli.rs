@@ -31,6 +31,8 @@ pub async fn run_tui_chat(
     _initial_message: Option<String>,
     working_dir: &str,
     socket_path: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
 ) -> Result<()> {
     let working_dir = PathBuf::from(working_dir).canonicalize()?;
 
@@ -45,6 +47,21 @@ pub async fn run_tui_chat(
 
     // Create the TUI application
     let mut app = TuiApp::with_config(tui_config)?;
+
+    // Override provider and model from CLI args if provided
+    if let Some(ref mut bridge) = app.agent_bridge_mut() {
+        if let Some(p) = provider {
+            if let Err(e) = bridge.set_provider(&p) {
+                tracing::warn!("Failed to set provider from CLI: {}", e);
+            } else {
+                tracing::info!("Set provider from CLI: {}", p);
+            }
+        }
+        if let Some(m) = model {
+            bridge.set_model(&m);
+            tracing::info!("Set model from CLI: {}", m);
+        }
+    }
 
     // Set LLM configuration status
     app.state.llm_configured = llm_status.is_ok();
