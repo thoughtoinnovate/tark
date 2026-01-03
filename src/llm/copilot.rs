@@ -18,6 +18,8 @@ use std::path::PathBuf;
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 /// Official GitHub OAuth token endpoint
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+/// GitHub Copilot token exchange endpoint
+const GITHUB_COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 /// Official GitHub Copilot API endpoint
 const COPILOT_API_URL: &str = "https://api.githubcopilot.com/chat/completions";
 /// Official GitHub Copilot client ID (used by copilot.vim and others)
@@ -29,6 +31,13 @@ struct CopilotToken {
     access_token: String,
     token_type: String,
     expires_at: u64, // Unix timestamp
+}
+
+/// Copilot token response from GitHub API
+#[derive(Debug, Deserialize)]
+struct CopilotTokenResponse {
+    token: String,
+    expires_at: u64,
 }
 
 impl CopilotToken {
@@ -185,19 +194,43 @@ impl CopilotProvider {
             )
             .await?;
 
-        println!("✅ Successfully authenticated with GitHub Copilot!\n");
+        println!("✅ Successfully authenticated with GitHub!\n");
+        println!("📝 Exchanging for Copilot token...");
 
-        // Calculate expiry timestamp
-        let expires_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-            + token_response.expires_in.unwrap_or(28800); // Default 8 hours
+        // Step 4: Exchange OAuth token for Copilot token
+        let copilot_token = self.get_copilot_token(&token_response.access_token).await?;
+
+        println!("✅ Successfully obtained Copilot token!\n");
+
+        Ok(copilot_token)
+    }
+
+    /// Exchange GitHub OAuth token for Copilot token
+    async fn get_copilot_token(&self, github_token: &str) -> Result<CopilotToken> {
+        let response = self
+            .client
+            .get(GITHUB_COPILOT_TOKEN_URL)
+            .header("Authorization", format!("token {}", github_token))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .context("Failed to get Copilot token")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to get Copilot token ({}): {}", status, text);
+        }
+
+        let copilot_response: CopilotTokenResponse = response
+            .json()
+            .await
+            .context("Failed to parse Copilot token response")?;
 
         Ok(CopilotToken {
-            access_token: token_response.access_token,
-            token_type: token_response.token_type,
-            expires_at,
+            access_token: copilot_response.token,
+            token_type: "bearer".to_string(),
+            expires_at: copilot_response.expires_at,
         })
     }
 
