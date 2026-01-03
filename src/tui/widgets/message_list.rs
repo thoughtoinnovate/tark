@@ -1644,4 +1644,211 @@ mod property_tests {
             }
         }
     }
+
+    // ============================================================================
+    // Markdown Rendering Tests
+    // ============================================================================
+
+    #[test]
+    fn test_markdown_headers() {
+        // H1 header
+        let h1 = format_header("# Main Title".to_string());
+        assert!(h1.is_some());
+        let h1_text: String = h1
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(h1_text.contains("Main Title"));
+
+        // H2 header
+        let h2 = format_header("## Section".to_string());
+        assert!(h2.is_some());
+
+        // H3 header
+        let h3 = format_header("### Subsection".to_string());
+        assert!(h3.is_some());
+
+        // Not a header
+        let not_header = format_header("Normal text".to_string());
+        assert!(not_header.is_none());
+
+        // Empty hash
+        let empty = format_header("#".to_string());
+        assert!(empty.is_none());
+    }
+
+    #[test]
+    fn test_markdown_list_items() {
+        let base_style = Style::default();
+
+        // Dash list
+        let dash = format_list_item("- Item one".to_string(), base_style);
+        assert!(dash.is_some());
+        let dash_text: String = dash
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(dash_text.contains("•"));
+        assert!(dash_text.contains("Item one"));
+
+        // Asterisk list
+        let asterisk = format_list_item("* Item two".to_string(), base_style);
+        assert!(asterisk.is_some());
+
+        // Not a list
+        let not_list = format_list_item("Normal text".to_string(), base_style);
+        assert!(not_list.is_none());
+
+        // Indented list
+        let indented = format_list_item("  - Nested".to_string(), base_style);
+        assert!(indented.is_some());
+    }
+
+    #[test]
+    fn test_markdown_numbered_list() {
+        let base_style = Style::default();
+
+        // Single digit
+        let num1 = format_numbered_list("1. First item".to_string(), base_style);
+        assert!(num1.is_some());
+        let num1_text: String = num1
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(num1_text.contains("1."));
+        assert!(num1_text.contains("First item"));
+
+        // Double digit
+        let num10 = format_numbered_list("10. Tenth item".to_string(), base_style);
+        assert!(num10.is_some());
+
+        // Not a numbered list
+        let not_num = format_numbered_list("Not numbered".to_string(), base_style);
+        assert!(not_num.is_none());
+
+        // Missing space after dot
+        let no_space = format_numbered_list("1.No space".to_string(), base_style);
+        assert!(no_space.is_none());
+    }
+
+    #[test]
+    fn test_markdown_inline_bold() {
+        let base_style = Style::default();
+
+        let line = format_inline_owned("This is **bold** text".to_string(), base_style);
+        assert!(!line.spans.is_empty());
+
+        // Should have at least 3 spans: before, bold, after
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("bold"));
+        assert!(text.contains("This is"));
+        assert!(text.contains("text"));
+    }
+
+    #[test]
+    fn test_markdown_inline_italic() {
+        let base_style = Style::default();
+
+        // Underscore italic
+        let line = format_inline_owned("This is _italic_ text".to_string(), base_style);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("italic"));
+    }
+
+    #[test]
+    fn test_markdown_inline_code() {
+        let base_style = Style::default();
+
+        let line = format_inline_owned("Run `cargo build` command".to_string(), base_style);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("cargo build"));
+    }
+
+    #[test]
+    fn test_markdown_code_block() {
+        let base_style = Style::default();
+
+        let content = "```rust\nfn main() {\n    println!(\"Hello\");\n}\n```".to_string();
+        let lines = format_content_owned(content, base_style);
+
+        // Should have language header + code lines
+        assert!(lines.len() >= 3);
+
+        // Check that code is rendered
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("rust") || all_text.contains("fn main"));
+    }
+
+    #[test]
+    fn test_markdown_blockquote() {
+        let base_style = Style::default();
+
+        let content = "> This is a quote".to_string();
+        let lines = format_content_owned(content, base_style);
+
+        assert!(!lines.is_empty());
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("This is a quote"));
+        assert!(text.contains("│")); // Quote border
+    }
+
+    #[test]
+    fn test_markdown_horizontal_rule() {
+        let base_style = Style::default();
+
+        for rule in &["---", "***", "___"] {
+            let lines = format_content_owned(rule.to_string(), base_style);
+            assert!(!lines.is_empty());
+            let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains("─")); // Horizontal line character
+        }
+    }
+
+    #[test]
+    fn test_markdown_mixed_content() {
+        let base_style = Style::default();
+
+        let content = r#"# Header
+
+This is **bold** and `code`.
+
+- List item 1
+- List item 2
+
+> A quote
+
+```
+code block
+```
+"#
+        .to_string();
+
+        let lines = format_content_owned(content, base_style);
+
+        // Should render multiple lines
+        assert!(lines.len() > 5);
+
+        // Collect all text
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+
+        // Verify various elements are present
+        assert!(all_text.contains("Header"));
+        assert!(all_text.contains("bold"));
+        assert!(all_text.contains("List item"));
+        assert!(all_text.contains("quote"));
+    }
 }

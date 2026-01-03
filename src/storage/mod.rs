@@ -2018,4 +2018,55 @@ mod tests {
         assert_eq!(loaded.provider, "claude");
         assert!(loaded.verbose);
     }
+
+    #[test]
+    fn test_clear_messages_preserves_cost() {
+        let mut session = ChatSession::new();
+
+        // Simulate some usage
+        session.add_message("user", "Hello");
+        session.add_message("assistant", "Hi there!");
+        session.input_tokens = 100;
+        session.output_tokens = 50;
+        session.total_cost = 0.0025; // Accumulated cost
+
+        // Clear messages
+        session.clear_messages();
+
+        // Verify messages and tokens are cleared
+        assert!(session.messages.is_empty());
+        assert_eq!(session.input_tokens, 0);
+        assert_eq!(session.output_tokens, 0);
+
+        // Verify cost is PRESERVED (not reset)
+        assert_eq!(session.total_cost, 0.0025);
+    }
+
+    #[test]
+    fn test_clear_messages_accumulates_cost() {
+        let mut session = ChatSession::new();
+
+        // First conversation
+        session.add_message("user", "First question");
+        session.add_message("assistant", "First answer");
+        session.input_tokens = 50;
+        session.output_tokens = 100;
+        session.total_cost = 0.001;
+
+        // Clear and start new conversation
+        session.clear_messages();
+
+        // Second conversation adds more cost
+        session.add_message("user", "Second question");
+        session.add_message("assistant", "Second answer");
+        session.input_tokens = 75;
+        session.output_tokens = 150;
+        session.total_cost += 0.002; // Add to existing cost
+
+        // Total cost should be sum of both conversations
+        assert_eq!(session.total_cost, 0.003);
+        // But tokens should only reflect current context
+        assert_eq!(session.input_tokens, 75);
+        assert_eq!(session.output_tokens, 150);
+    }
 }
