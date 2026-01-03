@@ -96,6 +96,8 @@ impl Default for OllamaConfig {
 pub struct CopilotConfig {
     pub model: String,
     pub max_tokens: usize,
+    /// Timeout in seconds for Device Flow authentication (default: 1800 = 30 minutes)
+    pub auth_timeout_secs: u64,
 }
 
 impl Default for CopilotConfig {
@@ -103,6 +105,7 @@ impl Default for CopilotConfig {
         Self {
             model: "gpt-4o".to_string(),
             max_tokens: 4096,
+            auth_timeout_secs: 1800, // 30 minutes
         }
     }
 }

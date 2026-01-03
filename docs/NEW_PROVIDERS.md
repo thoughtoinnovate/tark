@@ -14,16 +14,16 @@ GitHub Copilot integration with **Device Flow OAuth** authentication.
    - Wait for you to authorize in your browser
    - Save the token automatically to `~/.config/tark/copilot_token.json`
 
-2. **Usage**:
-   ```bash
-   # Using environment variable (optional)
-   export COPILOT_MODEL="gpt-4o"
-   
-   # Or via config.toml
+2. **Configuration** (optional):
+   ```toml
+   # config.toml
    [llm.copilot]
    model = "gpt-4o"
    max_tokens = 4096
+   auth_timeout_secs = 1800  # 30 minutes (default)
    ```
+   
+   **Note**: `auth_timeout_secs` controls how long the auth command waits for browser authorization.
 
 3. **Select provider**:
    ```bash

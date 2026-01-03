@@ -77,6 +77,7 @@ pub struct CopilotProvider {
     token_path: PathBuf,
     model: String,
     max_tokens: usize,
+    auth_timeout_secs: u64,
 }
 
 impl CopilotProvider {
@@ -90,7 +91,13 @@ impl CopilotProvider {
             token_path,
             model: "gpt-4o".to_string(),
             max_tokens: 4096,
+            auth_timeout_secs: 1800, // 30 minutes default
         })
+    }
+
+    pub fn with_auth_timeout(mut self, timeout_secs: u64) -> Self {
+        self.auth_timeout_secs = timeout_secs;
+        self
     }
 
     pub fn with_model(mut self, model: &str) -> Self {
@@ -223,7 +230,15 @@ impl CopilotProvider {
         expires_in: u64,
     ) -> Result<AccessTokenResponse> {
         let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(expires_in);
+        // Use the longer of GitHub's expires_in or our configured timeout
+        let timeout_secs = expires_in.max(self.auth_timeout_secs);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        
+        tracing::info!(
+            "Waiting for GitHub Device Flow authorization (timeout: {}s = {} minutes)",
+            timeout_secs,
+            timeout_secs / 60
+        );
 
         loop {
             // Check timeout
@@ -366,6 +381,7 @@ impl LlmProvider for CopilotProvider {
             token_path: self.token_path.clone(),
             model: self.model.clone(),
             max_tokens: self.max_tokens,
+            auth_timeout_secs: self.auth_timeout_secs,
         };
 
         let copilot_messages = provider.convert_messages(messages);
@@ -416,6 +432,7 @@ impl LlmProvider for CopilotProvider {
             token_path: self.token_path.clone(),
             model: self.model.clone(),
             max_tokens: self.max_tokens,
+            auth_timeout_secs: self.auth_timeout_secs,
         };
 
         let token = provider.ensure_token().await?;
@@ -512,6 +529,7 @@ impl LlmProvider for CopilotProvider {
             token_path: self.token_path.clone(),
             model: self.model.clone(),
             max_tokens: self.max_tokens,
+            auth_timeout_secs: self.auth_timeout_secs,
         };
 
         let system = format!(
