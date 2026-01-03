@@ -1437,11 +1437,29 @@ impl TuiApp {
                 }
             }
             KeyCode::Enter => {
-                // If command dropdown is visible, apply selection and execute
+                // If command dropdown is visible, apply selection
                 if self.state.command_dropdown.is_visible() {
                     if let Some(command) = self.state.command_dropdown.selected_command() {
-                        self.state.input_widget.set_content(command);
+                        self.state.input_widget.set_content(command.clone());
                         self.state.command_dropdown.hide();
+
+                        // Check if the command requires arguments
+                        // If no args needed, auto-execute immediately
+                        let command_name = command
+                            .trim_start_matches('/')
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("");
+                        if let Some(cmd) = self.commands.get_command(command_name) {
+                            if !cmd.requires_args {
+                                // Auto-execute commands that don't need arguments
+                                self.handle_submit();
+                            }
+                            // If requires_args is true, just fill in the command and wait for user to add args
+                        } else {
+                            // Unknown command, still execute to show error
+                            self.handle_submit();
+                        }
                     }
                 } else {
                     // Normal submit behavior
@@ -1768,8 +1786,26 @@ impl TuiApp {
                     .push(ChatMessage::system(usage_text.to_string()));
             }
             CommandResult::OpenUsageDashboard => {
-                // TODO: Open browser
-                self.state.status_message = Some("Opening usage dashboard...".to_string());
+                // Open usage dashboard in browser
+                let url = "http://localhost:8765/usage/dashboard";
+
+                #[cfg(target_os = "macos")]
+                let open_cmd = "open";
+                #[cfg(target_os = "linux")]
+                let open_cmd = "xdg-open";
+                #[cfg(target_os = "windows")]
+                let open_cmd = "start";
+
+                match std::process::Command::new(open_cmd).arg(url).spawn() {
+                    Ok(_) => {
+                        self.state.status_message =
+                            Some(format!("Opening usage dashboard: {}", url));
+                    }
+                    Err(e) => {
+                        self.state.status_message =
+                            Some(format!("Failed to open browser: {}. Visit: {}", e, url));
+                    }
+                }
             }
             CommandResult::ClearHistory => {
                 // Clear UI message list
@@ -3465,8 +3501,9 @@ impl TuiApp {
             } else {
                 // Render messages using the full MessageListWidget for proper
                 // streaming indicators, thinking blocks, and tool calls
-                let message_list_widget =
-                    MessageListWidget::new(&mut self.state.message_list).username(username.clone());
+                let message_list_widget = MessageListWidget::new(&mut self.state.message_list)
+                    .username(username.clone())
+                    .focused(focused == FocusedComponent::Messages);
                 frame.render_widget(message_list_widget, messages_inner);
             }
 
