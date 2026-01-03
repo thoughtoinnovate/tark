@@ -453,6 +453,135 @@ pub async fn run_usage(
     Ok(())
 }
 
+/// Run authentication for LLM providers
+pub async fn run_auth(provider: Option<&str>) -> Result<()> {
+    use colored::Colorize;
+    use std::io::{self, Write};
+
+    println!("{}", "=== Tark Authentication ===".bold().cyan());
+    println!();
+
+    let provider = if let Some(p) = provider {
+        p.to_string()
+    } else {
+        // Interactive provider selection
+        println!("Select a provider to authenticate:");
+        println!();
+        println!("  1. {} - GitHub Copilot (Device Flow)", "copilot".green());
+        println!("  2. {} - OpenAI GPT models", "openai".green());
+        println!("  3. {} - Anthropic Claude", "claude".green());
+        println!("  4. {} - Google Gemini", "gemini".green());
+        println!("  5. {} - OpenRouter (200+ models)", "openrouter".green());
+        println!("  6. {} - Local Ollama", "ollama".green());
+        println!();
+        print!("Enter choice (1-6): ");
+        io::stdout().flush()?;
+
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+
+        match choice.trim() {
+            "1" => "copilot".to_string(),
+            "2" => "openai".to_string(),
+            "3" => "claude".to_string(),
+            "4" => "gemini".to_string(),
+            "5" => "openrouter".to_string(),
+            "6" => "ollama".to_string(),
+            _ => anyhow::bail!("Invalid choice"),
+        }
+    };
+
+    println!();
+    println!("{} {}", "Authenticating with:".bold(), provider.green());
+    println!();
+
+    match provider.as_str() {
+        "copilot" | "github" => {
+            // Use Device Flow OAuth
+            println!("{}", "Using GitHub Device Flow OAuth...".bold());
+            println!();
+
+            use crate::llm::CopilotProvider;
+
+            // Create provider (will trigger Device Flow if needed)
+            let _provider = CopilotProvider::new()?;
+
+            // If we get here, authentication succeeded
+            println!("✅ Successfully authenticated with GitHub Copilot!");
+            println!("Token saved to ~/.config/tark/copilot_token.json");
+        }
+        "openai" | "gpt" => {
+            if std::env::var("OPENAI_API_KEY").is_ok() {
+                println!("✅ OPENAI_API_KEY is already set");
+            } else {
+                println!("{}", "OpenAI API Key Required".bold());
+                println!();
+                println!("Please set your API key:");
+                println!("  export OPENAI_API_KEY=\"your-api-key-here\"");
+                println!();
+                println!("Get your API key at: https://platform.openai.com/api-keys");
+            }
+        }
+        "claude" | "anthropic" => {
+            if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                println!("✅ ANTHROPIC_API_KEY is already set");
+            } else {
+                println!("{}", "Anthropic API Key Required".bold());
+                println!();
+                println!("Please set your API key:");
+                println!("  export ANTHROPIC_API_KEY=\"your-api-key-here\"");
+                println!();
+                println!("Get your API key at: https://console.anthropic.com/settings/keys");
+            }
+        }
+        "gemini" | "google" => {
+            if std::env::var("GEMINI_API_KEY").is_ok() {
+                println!("✅ GEMINI_API_KEY is already set");
+            } else {
+                println!("{}", "Gemini API Key Required".bold());
+                println!();
+                println!("Please set your API key:");
+                println!("  export GEMINI_API_KEY=\"your-api-key-here\"");
+                println!();
+                println!("Get your API key at: https://aistudio.google.com/apikey");
+            }
+        }
+        "openrouter" => {
+            if std::env::var("OPENROUTER_API_KEY").is_ok() {
+                println!("✅ OPENROUTER_API_KEY is already set");
+            } else {
+                println!("{}", "OpenRouter API Key Required".bold());
+                println!();
+                println!("Please set your API key:");
+                println!("  export OPENROUTER_API_KEY=\"your-api-key-here\"");
+                println!();
+                println!("Get your API key at: https://openrouter.ai/keys");
+                println!();
+                println!(
+                    "💡 Tip: OpenRouter provides access to 200+ models, many with free tiers!"
+                );
+            }
+        }
+        "ollama" | "local" => {
+            println!("{}", "Ollama Local Setup".bold());
+            println!();
+            println!("Ollama runs models locally on your machine.");
+            println!();
+            println!("Setup steps:");
+            println!("  1. Install Ollama: https://ollama.ai/download");
+            println!("  2. Start Ollama: ollama serve");
+            println!("  3. Pull a model: ollama pull codellama");
+            println!();
+            println!("No API key needed!");
+        }
+        _ => {
+            anyhow::bail!("Unknown provider: {}", provider);
+        }
+    }
+
+    Ok(())
+}
+
 /// Format large numbers with K/M suffix
 fn format_number(n: u64) -> String {
     if n >= 1_000_000 {

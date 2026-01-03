@@ -134,6 +134,17 @@ impl ProviderInfo {
         match provider_id {
             "openai" => std::env::var("OPENAI_API_KEY").is_ok(),
             "claude" => std::env::var("ANTHROPIC_API_KEY").is_ok(),
+            "copilot" | "github" => {
+                // Copilot is available if token file exists
+                if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "tark") {
+                    let token_path = proj_dirs.config_dir().join("copilot_token.json");
+                    token_path.exists()
+                } else {
+                    false
+                }
+            }
+            "gemini" | "google" => std::env::var("GEMINI_API_KEY").is_ok(),
+            "openrouter" => std::env::var("OPENROUTER_API_KEY").is_ok(),
             "ollama" => {
                 // Ollama is available if OLLAMA_MODEL is set or if we assume local availability
                 // For now, we check if OLLAMA_MODEL or OLLAMA_BASE_URL is set
@@ -148,6 +159,9 @@ impl ProviderInfo {
         match provider_id {
             "openai" => Some("Set OPENAI_API_KEY environment variable".to_string()),
             "claude" => Some("Set ANTHROPIC_API_KEY environment variable".to_string()),
+            "copilot" | "github" => Some("Run 'tark auth copilot' to authenticate".to_string()),
+            "gemini" | "google" => Some("Set GEMINI_API_KEY environment variable".to_string()),
+            "openrouter" => Some("Set OPENROUTER_API_KEY environment variable".to_string()),
             "ollama" => Some("Set OLLAMA_MODEL or ensure Ollama is running locally".to_string()),
             _ => None,
         }
@@ -181,6 +195,48 @@ impl ProviderInfo {
                         None
                     } else {
                         Self::get_provider_hint("claude")
+                    },
+                )
+            },
+            {
+                let available = Self::check_provider_availability("copilot");
+                ProviderInfo::new(
+                    "copilot",
+                    "GitHub Copilot",
+                    "GPT-4o via GitHub Copilot (Device Flow auth)",
+                    available,
+                    if available {
+                        None
+                    } else {
+                        Some("Run 'tark auth copilot' to authenticate".to_string())
+                    },
+                )
+            },
+            {
+                let available = Self::check_provider_availability("gemini");
+                ProviderInfo::new(
+                    "gemini",
+                    "Google Gemini",
+                    "Gemini 2.0 models with long context",
+                    available,
+                    if available {
+                        None
+                    } else {
+                        Self::get_provider_hint("gemini")
+                    },
+                )
+            },
+            {
+                let available = Self::check_provider_availability("openrouter");
+                ProviderInfo::new(
+                    "openrouter",
+                    "OpenRouter",
+                    "Access to 200+ models from various providers",
+                    available,
+                    if available {
+                        None
+                    } else {
+                        Self::get_provider_hint("openrouter")
                     },
                 )
             },

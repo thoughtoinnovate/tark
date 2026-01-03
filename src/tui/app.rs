@@ -2334,6 +2334,27 @@ impl TuiApp {
                             "⚠️"
                         }
                     }
+                    "copilot" => {
+                        if provider.available {
+                            "🐙"
+                        } else {
+                            "⚠️"
+                        }
+                    }
+                    "gemini" => {
+                        if provider.available {
+                            "✨"
+                        } else {
+                            "⚠️"
+                        }
+                    }
+                    "openrouter" => {
+                        if provider.available {
+                            "🔀"
+                        } else {
+                            "⚠️"
+                        }
+                    }
                     "ollama" => {
                         if provider.available {
                             "🏠"
@@ -2415,6 +2436,48 @@ impl TuiApp {
                 PickerItem::new("claude-3-haiku-20240307", "Claude 3 Haiku")
                     .with_description("Fastest, most economical")
                     .with_active(current_model == "claude-3-haiku-20240307"),
+            ],
+            "copilot" | "github" => vec![
+                PickerItem::new("gpt-4o", "GPT-4o")
+                    .with_description("Most capable model via Copilot")
+                    .with_active(current_model == "gpt-4o"),
+                PickerItem::new("gpt-4", "GPT-4")
+                    .with_description("Original GPT-4")
+                    .with_active(current_model == "gpt-4"),
+            ],
+            "gemini" | "google" => vec![
+                PickerItem::new("gemini-2.0-flash-exp", "Gemini 2.0 Flash")
+                    .with_description("Fast and efficient (default)")
+                    .with_active(current_model == "gemini-2.0-flash-exp"),
+                PickerItem::new("gemini-2.0-flash-thinking-exp", "Gemini 2.0 Flash Thinking")
+                    .with_description("With extended thinking")
+                    .with_active(current_model == "gemini-2.0-flash-thinking-exp"),
+                PickerItem::new("gemini-1.5-pro", "Gemini 1.5 Pro")
+                    .with_description("Larger, more capable")
+                    .with_active(current_model == "gemini-1.5-pro"),
+                PickerItem::new("gemini-1.5-flash", "Gemini 1.5 Flash")
+                    .with_description("Fast and lightweight")
+                    .with_active(current_model == "gemini-1.5-flash"),
+            ],
+            "openrouter" => vec![
+                PickerItem::new("anthropic/claude-sonnet-4", "Claude Sonnet 4")
+                    .with_description("Latest Claude via OpenRouter")
+                    .with_active(current_model == "anthropic/claude-sonnet-4"),
+                PickerItem::new("deepseek/deepseek-chat", "DeepSeek Chat")
+                    .with_description("Very affordable, great quality")
+                    .with_active(current_model == "deepseek/deepseek-chat"),
+                PickerItem::new("google/gemini-2.0-flash-exp:free", "Gemini 2.0 (Free)")
+                    .with_description("Free via OpenRouter")
+                    .with_active(current_model == "google/gemini-2.0-flash-exp:free"),
+                PickerItem::new(
+                    "meta-llama/llama-3.1-8b-instruct:free",
+                    "Llama 3.1 8B (Free)",
+                )
+                .with_description("Free open model")
+                .with_active(current_model == "meta-llama/llama-3.1-8b-instruct:free"),
+                PickerItem::new("qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B")
+                    .with_description("Excellent for coding")
+                    .with_active(current_model == "qwen/qwen-2.5-72b-instruct"),
             ],
             "ollama" | "local" => vec![
                 PickerItem::new("llama3.2", "Llama 3.2")
@@ -2500,6 +2563,48 @@ impl TuiApp {
                     .with_description("Fastest, most economical")
                     .with_active(current_model == "claude-3-haiku-20240307"),
             ],
+            "copilot" | "github" => vec![
+                PickerItem::new("gpt-4o", "GPT-4o")
+                    .with_description("Most capable model via Copilot")
+                    .with_active(current_model == "gpt-4o"),
+                PickerItem::new("gpt-4", "GPT-4")
+                    .with_description("Original GPT-4")
+                    .with_active(current_model == "gpt-4"),
+            ],
+            "gemini" | "google" => vec![
+                PickerItem::new("gemini-2.0-flash-exp", "Gemini 2.0 Flash")
+                    .with_description("Fast and efficient (default)")
+                    .with_active(current_model == "gemini-2.0-flash-exp"),
+                PickerItem::new("gemini-2.0-flash-thinking-exp", "Gemini 2.0 Flash Thinking")
+                    .with_description("With extended thinking")
+                    .with_active(current_model == "gemini-2.0-flash-thinking-exp"),
+                PickerItem::new("gemini-1.5-pro", "Gemini 1.5 Pro")
+                    .with_description("Larger, more capable")
+                    .with_active(current_model == "gemini-1.5-pro"),
+                PickerItem::new("gemini-1.5-flash", "Gemini 1.5 Flash")
+                    .with_description("Fast and lightweight")
+                    .with_active(current_model == "gemini-1.5-flash"),
+            ],
+            "openrouter" => vec![
+                PickerItem::new("anthropic/claude-sonnet-4", "Claude Sonnet 4")
+                    .with_description("Latest Claude via OpenRouter")
+                    .with_active(current_model == "anthropic/claude-sonnet-4"),
+                PickerItem::new("deepseek/deepseek-chat", "DeepSeek Chat")
+                    .with_description("Very affordable, great quality")
+                    .with_active(current_model == "deepseek/deepseek-chat"),
+                PickerItem::new("google/gemini-2.0-flash-exp:free", "Gemini 2.0 (Free)")
+                    .with_description("Free via OpenRouter")
+                    .with_active(current_model == "google/gemini-2.0-flash-exp:free"),
+                PickerItem::new(
+                    "meta-llama/llama-3.1-8b-instruct:free",
+                    "Llama 3.1 8B (Free)",
+                )
+                .with_description("Free open model")
+                .with_active(current_model == "meta-llama/llama-3.1-8b-instruct:free"),
+                PickerItem::new("qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B")
+                    .with_description("Excellent for coding")
+                    .with_active(current_model == "qwen/qwen-2.5-72b-instruct"),
+            ],
             "ollama" | "local" => vec![
                 PickerItem::new("llama3.2", "Llama 3.2")
                     .with_description("Meta's latest open model")
@@ -2524,7 +2629,7 @@ impl TuiApp {
         }
     }
 
-    /// Get picker items for model selection for a specific provider (dynamic)
+    /// Get picker items for model selection for a specific provider (dynamic) (dynamic)
     ///
     /// Fetches models dynamically from AgentBridge using list_available_models().
     /// Falls back to hardcoded list if fetching fails.

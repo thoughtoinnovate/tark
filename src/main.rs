@@ -82,6 +82,12 @@ enum Commands {
         col: usize,
     },
 
+    /// Authenticate with LLM providers
+    Auth {
+        /// Provider to authenticate (copilot, openai, claude, gemini, openrouter, ollama)
+        provider: Option<String>,
+    },
+
     /// Show usage statistics and costs
     Usage {
         /// Output format (table, json)
@@ -173,6 +179,9 @@ async fn main() -> Result<()> {
         }
         Commands::Complete { file, line, col } => {
             transport::cli::run_complete(&file, line, col).await?;
+        }
+        Commands::Auth { provider } => {
+            transport::cli::run_auth(provider.as_deref()).await?;
         }
         Commands::Usage {
             format,
