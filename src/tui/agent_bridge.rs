@@ -238,6 +238,9 @@ impl AgentBridge {
             match provider_name.as_str() {
                 "claude" | "anthropic" => config.llm.claude.model.clone(),
                 "openai" | "gpt" => config.llm.openai.model.clone(),
+                "copilot" | "github" => config.llm.copilot.model.clone(),
+                "gemini" | "google" => config.llm.gemini.model.clone(),
+                "openrouter" => config.llm.openrouter.model.clone(),
                 "ollama" | "local" => config.llm.ollama.model.clone(),
                 _ => String::new(),
             }
@@ -392,6 +395,69 @@ impl AgentBridge {
                         "claude-3-5-haiku-20241022".into(),
                         "Claude 3.5 Haiku".into(),
                         "Fast and affordable".into(),
+                    ),
+                ]
+            }
+            "copilot" | "github" => {
+                vec![
+                    (
+                        "gpt-4o".into(),
+                        "GPT-4o".into(),
+                        "Most capable model via Copilot".into(),
+                    ),
+                    ("gpt-4".into(), "GPT-4".into(), "Original GPT-4".into()),
+                ]
+            }
+            "gemini" | "google" => {
+                vec![
+                    (
+                        "gemini-2.0-flash-exp".into(),
+                        "Gemini 2.0 Flash".into(),
+                        "Fast and efficient (default)".into(),
+                    ),
+                    (
+                        "gemini-2.0-flash-thinking-exp".into(),
+                        "Gemini 2.0 Flash Thinking".into(),
+                        "With extended thinking".into(),
+                    ),
+                    (
+                        "gemini-1.5-pro".into(),
+                        "Gemini 1.5 Pro".into(),
+                        "Larger, more capable".into(),
+                    ),
+                    (
+                        "gemini-1.5-flash".into(),
+                        "Gemini 1.5 Flash".into(),
+                        "Fast and lightweight".into(),
+                    ),
+                ]
+            }
+            "openrouter" => {
+                vec![
+                    (
+                        "anthropic/claude-sonnet-4".into(),
+                        "Claude Sonnet 4".into(),
+                        "Latest Claude via OpenRouter".into(),
+                    ),
+                    (
+                        "deepseek/deepseek-chat".into(),
+                        "DeepSeek Chat".into(),
+                        "Very affordable, great quality".into(),
+                    ),
+                    (
+                        "google/gemini-2.0-flash-exp:free".into(),
+                        "Gemini 2.0 (Free)".into(),
+                        "Free via OpenRouter".into(),
+                    ),
+                    (
+                        "meta-llama/llama-3.1-8b-instruct:free".into(),
+                        "Llama 3.1 8B (Free)".into(),
+                        "Free open model".into(),
+                    ),
+                    (
+                        "qwen/qwen-2.5-72b-instruct".into(),
+                        "Qwen 2.5 72B".into(),
+                        "Excellent for coding".into(),
                     ),
                 ]
             }
@@ -995,7 +1061,14 @@ impl AgentBridge {
 
     /// Get available providers
     pub fn available_providers(&self) -> Vec<&'static str> {
-        vec!["openai", "claude", "ollama"]
+        vec![
+            "openai",
+            "claude",
+            "copilot",
+            "gemini",
+            "openrouter",
+            "ollama",
+        ]
     }
 
     /// Get storage reference
