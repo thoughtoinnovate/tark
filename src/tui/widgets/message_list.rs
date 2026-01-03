@@ -1189,23 +1189,22 @@ impl<'a> MessageListWidget<'a> {
         let visible_height = inner.height as usize;
 
         if self.focused && total_lines > visible_height {
-            // Calculate max scroll (how far we can scroll)
-            let max_scroll = total_lines.saturating_sub(visible_height);
-
-            // The scrollbar needs to know:
-            // - content_length: the scrollable range (max_scroll + 1 positions, 0 to max_scroll)
-            // - position: current scroll position (0 at top, max_scroll at bottom)
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("▲"))
                 .end_symbol(Some("▼"))
                 .track_symbol(Some("│"))
                 .thumb_symbol("█");
 
-            // Use max_scroll as content length so position maps correctly
-            // When scroll_offset = 0, thumb at top
-            // When scroll_offset = max_scroll, thumb at bottom
-            let mut scrollbar_state =
-                ScrollbarState::new(max_scroll.max(1)).position(scroll_offset.min(max_scroll));
+            // ScrollbarState expects:
+            // - content_length: total number of lines (for thumb size calculation)
+            // - viewport_content_length: number of visible lines (optional, improves thumb sizing)
+            // - position: current scroll offset (0 = top)
+            //
+            // The thumb size = (viewport / content_length) * track_height
+            // Position maps scroll_offset to thumb position on the track
+            let mut scrollbar_state = ScrollbarState::new(total_lines)
+                .viewport_content_length(visible_height)
+                .position(scroll_offset);
 
             let scrollbar_area = Rect {
                 x: inner.x + inner.width.saturating_sub(1),
