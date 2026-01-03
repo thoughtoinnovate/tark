@@ -108,6 +108,8 @@ pub struct AppState {
     pub spinner_last_update: std::time::Instant,
     /// Pending async request ready for processing (used by async loop)
     pub pending_async_request: Option<AsyncMessageRequest>,
+    /// Flag indicating panel needs update when bridge is restored
+    pub panel_update_pending: bool,
 }
 
 /// State for tab completion
@@ -203,6 +205,7 @@ impl Default for AppState {
             spinner_frame: 0,
             spinner_last_update: std::time::Instant::now(),
             pending_async_request: None,
+            panel_update_pending: false,
         }
     }
 }
@@ -2945,8 +2948,16 @@ impl TuiApp {
                 }
             }
 
-            // Update panel data after message sent
+            // Update panel data after bridge is restored
+            // This ensures cost/token info is displayed correctly
             self.update_panel_from_bridge();
+
+            // If panel update was pending (from Completed event while bridge was taken),
+            // the bridge is now available so the update above should have worked
+            self.state.panel_update_pending = false;
+
+            // Force a render to show the updated panel
+            self.render()?;
         }
 
         Ok(())
@@ -3152,7 +3163,10 @@ impl TuiApp {
                             info.input_tokens + info.output_tokens
                         ));
 
-                        // Update panel data after message received (Requirements 5.3, 5.4, 5.5)
+                        // Mark that panel needs update when bridge is restored
+                        self.state.panel_update_pending = true;
+
+                        // Try to update panel (will succeed if bridge is available)
                         self.update_panel_from_bridge();
 
                         // Auto-scroll to bottom to show the complete response
