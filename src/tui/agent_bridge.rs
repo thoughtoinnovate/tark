@@ -9,6 +9,7 @@
 use crate::agent::{AgentResponse, ChatAgent, ToolCallLog};
 use crate::config::Config;
 use crate::llm;
+use crate::storage::usage::UsageTracker;
 use crate::storage::{ChatSession, ModelPreference, TarkStorage};
 use crate::tools::{AgentMode as ToolAgentMode, ToolRegistry};
 use anyhow::Result;
@@ -208,6 +209,8 @@ pub struct AgentBridge {
     is_processing: Arc<AtomicBool>,
     /// Config
     config: Config,
+    /// Usage tracker for cost/token tracking
+    usage_tracker: Option<UsageTracker>,
 }
 
 impl AgentBridge {
@@ -262,6 +265,9 @@ impl AgentBridge {
             agent.restore_from_session(&current_session);
         }
 
+        // Initialize usage tracker
+        let usage_tracker = UsageTracker::new(&working_dir).ok();
+
         Ok(Self {
             agent,
             working_dir,
@@ -273,6 +279,7 @@ impl AgentBridge {
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             is_processing: Arc::new(AtomicBool::new(false)),
             config,
+            usage_tracker,
         })
     }
 
@@ -452,19 +459,43 @@ impl AgentBridge {
         self.is_processing.load(Ordering::SeqCst)
     }
 
-    /// Get context usage percentage
+    /// Get context usage percentage from the actual conversation context
     pub fn context_usage_percent(&self) -> usize {
-        // This would need to be tracked from the last response
-        // For now, return 0 as a placeholder
-        0
+        self.agent.context_usage_percentage()
+    }
+
+    /// Get estimated tokens in current context
+    pub fn context_tokens(&self) -> usize {
+        self.agent.context_usage_percentage() // This gives us percentage, need actual tokens
     }
 
     /// Get total cost from current session
+    ///
+    /// Queries the usage database for accurate cost tracking
     pub fn total_cost(&self) -> f64 {
+        // First try session cost from storage (most accurate, includes all messages)
+        if let Some(session_stats) = self.get_session_cost_from_storage() {
+            return session_stats;
+        }
+        // Fallback to cached session cost
         self.current_session.total_cost
     }
 
-    /// Get total tokens from current session
+    /// Get session cost from usage storage
+    fn get_session_cost_from_storage(&self) -> Option<f64> {
+        // Query usage tracker if available
+        if let Some(ref tracker) = self.usage_tracker {
+            if let Ok(logs) = tracker.get_session_logs(&self.current_session.id) {
+                if !logs.is_empty() {
+                    let total: f64 = logs.iter().fold(0.0, |acc, l| acc + l.cost_usd);
+                    return Some(total);
+                }
+            }
+        }
+        None
+    }
+
+    /// Get total tokens from current session (cumulative input/output)
     pub fn total_tokens(&self) -> (usize, usize) {
         (
             self.current_session.input_tokens,

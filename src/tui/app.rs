@@ -718,14 +718,17 @@ impl TuiApp {
                 0.0
             };
 
+            let final_usage_percent = if context_usage > 0 {
+                context_usage as f32
+            } else {
+                usage_percent
+            };
+
             self.state.enhanced_panel_data.context = super::widgets::ContextInfo {
                 used_tokens: total_tokens,
                 max_tokens,
-                usage_percent: if context_usage > 0 {
-                    context_usage as f32
-                } else {
-                    usage_percent
-                },
+                usage_percent: final_usage_percent,
+                over_limit: total_tokens > max_tokens || final_usage_percent >= 100.0,
             };
         }
     }
@@ -1769,7 +1772,14 @@ impl TuiApp {
                 self.state.status_message = Some("Opening usage dashboard...".to_string());
             }
             CommandResult::ClearHistory => {
+                // Clear UI message list
                 self.state.message_list.clear();
+                // Clear agent's conversation context and reset session tokens/cost
+                if let Some(ref mut bridge) = self.agent_bridge {
+                    bridge.clear_history();
+                }
+                // Update panel to reflect cleared context (tokens=0, cost=0)
+                self.update_panel_from_bridge();
                 self.state.status_message = Some("Chat history cleared".to_string());
             }
             CommandResult::Compact => {
@@ -4354,6 +4364,7 @@ mod property_tests {
                 used_tokens,
                 max_tokens,
                 usage_percent,
+                over_limit: used_tokens > max_tokens || usage_percent >= 100.0,
             };
             state.update_context_info(context_info);
 

@@ -525,6 +525,7 @@ impl LlmProvider for OpenAiProvider {
             tools: None,
             tool_choice: None,
             stream: None, // Non-streaming
+            stream_options: None,
         };
 
         if let Some(tools) = tools {
@@ -608,6 +609,9 @@ impl LlmProvider for OpenAiProvider {
             tools: None,
             tool_choice: None,
             stream: Some(true), // Enable streaming
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }), // Get usage stats at end
         };
 
         if let Some(tools) = tools {
@@ -801,6 +805,7 @@ impl LlmProvider for OpenAiProvider {
             tools: None,
             tool_choice: None,
             stream: None,
+            stream_options: None,
         };
 
         let response = self.send_request(request).await?;
@@ -854,6 +859,7 @@ impl LlmProvider for OpenAiProvider {
             tools: None,
             tool_choice: None,
             stream: None,
+            stream_options: None,
         };
 
         let response = self.send_request(request).await?;
@@ -903,6 +909,7 @@ Only return the JSON array, no other text."#;
             tools: None,
             tool_choice: None,
             stream: None,
+            stream_options: None,
         };
 
         let response = self.send_request(request).await?;
@@ -958,6 +965,7 @@ Focus on: bugs, security issues, performance problems, and code quality."#;
             tools: None,
             tool_choice: None,
             stream: None,
+            stream_options: None,
         };
 
         let response = self.send_request(request).await?;
@@ -996,6 +1004,15 @@ struct OpenAiRequest {
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+/// Options for streaming responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StreamOptions {
+    /// Include usage statistics in the final chunk
+    include_usage: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

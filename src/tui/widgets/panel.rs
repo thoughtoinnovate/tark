@@ -54,6 +54,8 @@ pub struct ContextInfo {
     pub max_tokens: u32,
     /// Usage percentage (0.0 to 100.0)
     pub usage_percent: f32,
+    /// Whether current usage exceeds model limit (e.g., after switching to smaller model)
+    pub over_limit: bool,
 }
 
 /// A task item displayed in the Tasks section
@@ -1136,6 +1138,7 @@ mod tests {
             used_tokens: 0,
             max_tokens: 128000,
             usage_percent: 0.0,
+            over_limit: false,
         };
         let result = render_progress_bar(&context, None);
 
@@ -1150,6 +1153,7 @@ mod tests {
             used_tokens: 64000,
             max_tokens: 128000,
             usage_percent: 50.0,
+            over_limit: false,
         };
         let result = render_progress_bar(&context, None);
 
@@ -1164,6 +1168,7 @@ mod tests {
             used_tokens: 128000,
             max_tokens: 128000,
             usage_percent: 100.0,
+            over_limit: true,
         };
         let result = render_progress_bar(&context, None);
 
@@ -1178,6 +1183,7 @@ mod tests {
             used_tokens: 108800,
             max_tokens: 128000,
             usage_percent: 85.0,
+            over_limit: false,
         };
         let result = render_progress_bar(&context, None);
 
@@ -1190,6 +1196,7 @@ mod tests {
             used_tokens: 5000,
             max_tokens: 10000,
             usage_percent: 50.0,
+            over_limit: false,
         };
         let config = ProgressBarConfig {
             width: 10,
@@ -1208,6 +1215,7 @@ mod tests {
             used_tokens: 12000,
             max_tokens: 128000,
             usage_percent: 9.375,
+            over_limit: false,
         };
         let result = context.render_progress_bar();
 
@@ -1222,6 +1230,7 @@ mod tests {
             used_tokens: 12000,
             max_tokens: 128000,
             usage_percent: 9.375,
+            over_limit: false,
         };
         assert_eq!(context.format_percent(), "9%");
 
@@ -1229,6 +1238,7 @@ mod tests {
             used_tokens: 64000,
             max_tokens: 128000,
             usage_percent: 50.0,
+            over_limit: false,
         };
         assert_eq!(context2.format_percent(), "50%");
     }
@@ -1240,6 +1250,7 @@ mod tests {
             used_tokens: 150000,
             max_tokens: 128000,
             usage_percent: 117.0, // Over 100%
+            over_limit: true,     // Context exceeds model limit
         };
         let result = render_progress_bar(&context_over, None);
         assert_eq!(result.bar, "[████████████████████]"); // Should be full, not overflow
@@ -1248,9 +1259,23 @@ mod tests {
             used_tokens: 0,
             max_tokens: 128000,
             usage_percent: -10.0, // Negative
+            over_limit: false,
         };
         let result = render_progress_bar(&context_under, None);
         assert_eq!(result.bar, "[░░░░░░░░░░░░░░░░░░░░]"); // Should be empty, not underflow
+    }
+
+    #[test]
+    fn test_context_over_limit_warning() {
+        // Scenario: switched from 200K model to 16K model with 100K tokens in context
+        let context = ContextInfo {
+            used_tokens: 100000,
+            max_tokens: 16000,
+            usage_percent: 625.0, // 100K / 16K = 625%
+            over_limit: true,
+        };
+        assert!(context.over_limit);
+        // When rendered, this should show warning indicator
     }
 }
 
@@ -1361,10 +1386,12 @@ impl<'a> PanelDataProvider<'a> {
             let max = usage.max_tokens_for_model();
             let used = usage.total_tokens();
             let percent = usage.context_usage_percent(max) * 100.0; // Convert to percentage
+            let over_limit = used > max || percent >= 100.0;
             ContextInfo {
                 used_tokens: used,
                 max_tokens: max,
                 usage_percent: percent,
+                over_limit,
             }
         } else {
             ContextInfo::default()
@@ -1789,18 +1816,45 @@ fn render_session_content(session: &SessionInfo, width: u16) -> Vec<Line<'static
 fn render_context_content(context: &ContextInfo, _width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
-    // Progress bar
+    // Progress bar with warning indicator if over limit
     let progress = context.render_progress_bar();
+    let warning = if context.over_limit { "⚠ " } else { "" };
+    let bar_color = if context.over_limit {
+        Color::Red
+    } else {
+        progress.color
+    };
+
     lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(warning.to_string(), Style::default().fg(Color::Yellow)),
         Span::styled(
             format!("{} {}%", progress.bar, context.usage_percent.round() as u32),
-            Style::default().fg(progress.color),
+            Style::default().fg(bar_color),
         ),
         Span::raw(" "),
     ]));
 
-    // Token counts
+    // Token counts with warning message if over limit
+    if context.over_limit {
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "⚠ Context exceeds model limit!",
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(" "),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Auto-summarize on next prompt",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(" "),
+        ]));
+    }
+
     lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled(progress.token_display, Style::default().fg(Color::White)),
@@ -2334,6 +2388,7 @@ mod proptests {
                 used_tokens,
                 max_tokens,
                 usage_percent,
+                over_limit: used_tokens > max_tokens || usage_percent >= 100.0,
             };
 
             let result = render_progress_bar(&context, None);

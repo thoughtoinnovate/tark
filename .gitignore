@@ -34,3 +34,4 @@ coverage/
 *.profraw
 .tark/
 .kiro/
+usage.db
