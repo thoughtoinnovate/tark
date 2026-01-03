@@ -24,6 +24,9 @@ pub struct LlmConfig {
     pub claude: ClaudeConfig,
     pub openai: OpenAiConfig,
     pub ollama: OllamaConfig,
+    pub copilot: CopilotConfig,
+    pub gemini: GeminiConfig,
+    pub openrouter: OpenRouterConfig,
 }
 
 impl Default for LlmConfig {
@@ -33,6 +36,9 @@ impl Default for LlmConfig {
             claude: ClaudeConfig::default(),
             openai: OpenAiConfig::default(),
             ollama: OllamaConfig::default(),
+            copilot: CopilotConfig::default(),
+            gemini: GeminiConfig::default(),
+            openrouter: OpenRouterConfig::default(),
         }
     }
 }
@@ -81,6 +87,58 @@ impl Default for OllamaConfig {
         Self {
             base_url: "http://localhost:11434".to_string(),
             model: "codellama".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CopilotConfig {
+    pub model: String,
+    pub max_tokens: usize,
+}
+
+impl Default for CopilotConfig {
+    fn default() -> Self {
+        Self {
+            model: "gpt-4o".to_string(),
+            max_tokens: 4096,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeminiConfig {
+    pub model: String,
+    pub max_tokens: usize,
+}
+
+impl Default for GeminiConfig {
+    fn default() -> Self {
+        Self {
+            model: "gemini-2.0-flash-exp".to_string(),
+            max_tokens: 8192,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenRouterConfig {
+    pub model: String,
+    pub max_tokens: usize,
+    pub site_url: Option<String>,
+    pub app_name: Option<String>,
+}
+
+impl Default for OpenRouterConfig {
+    fn default() -> Self {
+        Self {
+            model: "anthropic/claude-sonnet-4".to_string(),
+            max_tokens: 4096,
+            site_url: None,
+            app_name: Some("Tark".to_string()),
         }
     }
 }

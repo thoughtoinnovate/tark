@@ -3,15 +3,21 @@
 #![allow(dead_code)]
 
 mod claude;
+mod copilot;
+mod gemini;
 mod models_db;
 mod ollama;
 mod openai;
+mod openrouter;
 mod types;
 
 pub use claude::ClaudeProvider;
+pub use copilot::CopilotProvider;
+pub use gemini::GeminiProvider;
 pub use models_db::{models_db, ModelCapabilities};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
+pub use openrouter::OpenRouterProvider;
 pub use types::*;
 
 use anyhow::Result;
@@ -106,8 +112,11 @@ pub fn create_provider(name: &str) -> Result<Box<dyn LlmProvider>> {
         "claude" | "anthropic" => Ok(Box::new(ClaudeProvider::new()?)),
         "openai" | "gpt" => Ok(Box::new(OpenAiProvider::new()?)),
         "ollama" | "local" => Ok(Box::new(OllamaProvider::new()?)),
+        "copilot" | "github" => Ok(Box::new(CopilotProvider::new()?)),
+        "gemini" | "google" => Ok(Box::new(GeminiProvider::new()?)),
+        "openrouter" => Ok(Box::new(OpenRouterProvider::new()?)),
         _ => anyhow::bail!(
-            "Unknown LLM provider: {}. Supported: claude, openai, ollama",
+            "Unknown LLM provider: {}. Supported: claude, openai, ollama, copilot, gemini, openrouter",
             name
         ),
     }
