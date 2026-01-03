@@ -300,11 +300,11 @@ impl Widget for StatusBarWidget<'_> {
             Style::default().fg(Color::Yellow),
         ));
 
-        // Connection status (right-aligned)
+        // Connection status (right-aligned) - only show when connected
         let connection_icon = if self.status.editor_connected {
             "●"
         } else {
-            "○"
+            ""
         };
         let connection_color = if self.status.editor_connected {
             Color::Green
@@ -314,7 +314,7 @@ impl Widget for StatusBarWidget<'_> {
         let connection_text = if self.status.editor_connected {
             "nvim"
         } else {
-            "standalone"
+            ""
         };
 
         // Thinking mode indicator

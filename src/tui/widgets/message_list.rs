@@ -154,27 +154,24 @@ impl ChatMessage {
     }
 
     /// Calculate the number of lines this message will take
-    pub fn line_count(&self, width: u16) -> usize {
+    /// This must match the rendering logic in render_message_with_blocks
+    pub fn line_count(&self, width: u16, block_state: &CollapsibleBlockState) -> usize {
         if width == 0 {
             return 1;
         }
-        // Header line + content lines
-        let content_width = width.saturating_sub(4) as usize; // Account for padding
-        if content_width == 0 {
-            return 1 + self.content.lines().count();
-        }
 
-        let mut lines = 1; // Header line
-        for line in self.content.lines() {
-            if line.is_empty() {
-                lines += 1;
-            } else {
-                lines += line.len().div_ceil(content_width);
-            }
-        }
-        // Add tool call lines
-        lines += self.tool_calls.len();
-        lines.max(1)
+        // Use the actual rendering function to get accurate line count
+        // This ensures line_count always matches what render_message_with_blocks produces
+        let dummy_username = "User";
+        let rendered_lines = render_message_with_blocks(
+            self,
+            false, // is_selected doesn't affect line count
+            width,
+            block_state,
+            dummy_username,
+        );
+
+        rendered_lines.len()
     }
 }
 
@@ -274,7 +271,10 @@ impl MessageList {
 
     /// Calculate total content height in lines
     fn total_lines(&self, width: u16) -> usize {
-        self.messages.iter().map(|m| m.line_count(width) + 1).sum() // +1 for spacing
+        self.messages
+            .iter()
+            .map(|m| m.line_count(width, &self.block_state))
+            .sum()
     }
 
     /// Get the maximum scroll offset

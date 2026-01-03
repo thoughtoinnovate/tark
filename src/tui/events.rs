@@ -60,6 +60,18 @@ impl EventHandler {
         }
     }
 
+    /// Poll for the next event with a custom timeout
+    ///
+    /// Returns `Some(Event)` if an event occurred, or `None` if the timeout elapsed.
+    pub fn poll_with_timeout(&self, timeout: Duration) -> anyhow::Result<Option<Event>> {
+        if event::poll(timeout)? {
+            let event = event::read()?;
+            Ok(Some(self.convert_event(event)))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Convert a crossterm event to our Event type
     fn convert_event(&self, event: event::Event) -> Event {
         match event {

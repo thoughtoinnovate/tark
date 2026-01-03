@@ -23,12 +23,60 @@ pub trait LlmProvider: Send + Sync {
     /// Get the provider name
     fn name(&self) -> &str;
 
-    /// Send a chat completion request
+    /// Send a chat completion request (non-streaming)
     async fn chat(
         &self,
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse>;
+
+    /// Send a streaming chat completion request
+    ///
+    /// The callback is invoked for each chunk as it arrives from the LLM.
+    /// This enables real-time display of responses in the UI.
+    ///
+    /// Default implementation falls back to non-streaming `chat()` and
+    /// emits a single TextDelta with the complete response.
+    async fn chat_streaming(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+    ) -> Result<LlmResponse> {
+        // Default: fall back to non-streaming and emit complete response
+        let response = self.chat(messages, tools).await?;
+
+        // Emit the response as a single chunk
+        if let Some(text) = response.text() {
+            callback(StreamEvent::TextDelta(text.to_string()));
+        }
+
+        // Emit tool calls if any
+        for tool_call in response.tool_calls() {
+            callback(StreamEvent::ToolCallStart {
+                id: tool_call.id.clone(),
+                name: tool_call.name.clone(),
+            });
+            callback(StreamEvent::ToolCallDelta {
+                id: tool_call.id.clone(),
+                arguments_delta: tool_call.arguments.to_string(),
+            });
+            callback(StreamEvent::ToolCallComplete {
+                id: tool_call.id.clone(),
+            });
+        }
+
+        callback(StreamEvent::Done);
+        Ok(response)
+    }
+
+    /// Check if this provider supports true streaming
+    ///
+    /// Returns true if the provider implements native streaming,
+    /// false if it uses the default fallback implementation.
+    fn supports_streaming(&self) -> bool {
+        false // Default: no native streaming
+    }
 
     /// Fill-in-middle completion for code
     async fn complete_fim(

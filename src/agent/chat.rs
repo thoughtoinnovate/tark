@@ -3,7 +3,10 @@
 #![allow(dead_code)]
 
 use super::ConversationContext;
-use crate::llm::{ContentPart, LlmProvider, LlmResponse, Message, MessageContent, Role};
+use crate::llm::{
+    ContentPart, LlmProvider, LlmResponse, Message, MessageContent, Role, StreamCallback,
+    StreamEvent,
+};
 use crate::tools::{AgentMode, ToolRegistry};
 use crate::transport::update_status;
 use anyhow::Result;
@@ -1075,6 +1078,309 @@ impl ChatAgent {
                         if !result.success && result.output.contains("Unknown tool") {
                             tracing::warn!(
                                 "Tool '{}' not available in {:?} mode - model hallucinated this call",
+                                call.name,
+                                self.mode
+                            );
+                        }
+
+                        let preview = if result.output.len() > 200 {
+                            format!("{}...", &result.output[..200])
+                        } else {
+                            result.output.clone()
+                        };
+                        tool_call_log.push(ToolCallLog {
+                            tool: call.name.clone(),
+                            args: call.arguments.clone(),
+                            result_preview: preview,
+                        });
+
+                        self.context.add_tool_result(&call.id, &result.output);
+                    }
+                }
+            }
+        }
+
+        let last_text = self
+            .context
+            .messages()
+            .last()
+            .and_then(|m| m.content.as_text())
+            .unwrap_or("Done.")
+            .to_string();
+
+        let context_usage_percent = self.context.usage_percentage();
+        Ok(AgentResponse {
+            text: last_text,
+            tool_calls_made: total_tool_calls,
+            tool_call_log,
+            auto_compacted,
+            context_usage_percent,
+            usage: Some(accumulated_usage),
+        })
+    }
+
+    /// Process a user message with streaming callbacks and interrupt checking
+    ///
+    /// This method enables real-time streaming of LLM responses. The callbacks
+    /// are invoked as each chunk of text or thinking content arrives.
+    ///
+    /// # Arguments
+    /// * `user_message` - The user's input message
+    /// * `interrupt_check` - Function called to check if processing should stop
+    /// * `on_text` - Callback for each text chunk from the assistant
+    /// * `on_thinking` - Callback for each thinking/reasoning chunk
+    /// * `on_tool_call` - Callback when a tool call starts (name, args preview)
+    pub async fn chat_streaming<F, T, K, C>(
+        &mut self,
+        user_message: &str,
+        interrupt_check: F,
+        on_text: T,
+        on_thinking: K,
+        on_tool_call: C,
+    ) -> Result<AgentResponse>
+    where
+        F: Fn() -> bool + Send + Sync,
+        T: Fn(String) + Send + Sync + 'static,
+        K: Fn(String) + Send + Sync + 'static,
+        C: Fn(String, String) + Send + Sync + 'static,
+    {
+        // Wrap callbacks in Arc so they can be shared with the streaming callback
+        let on_text = std::sync::Arc::new(on_text);
+        let on_thinking = std::sync::Arc::new(on_thinking);
+
+        // Track if auto-compaction happens
+        let mut auto_compacted = false;
+
+        // Check for interrupt before starting
+        if interrupt_check() {
+            return Ok(AgentResponse {
+                text: "⚠️ *Operation interrupted*".to_string(),
+                tool_calls_made: 0,
+                tool_call_log: vec![],
+                auto_compacted: false,
+                context_usage_percent: self.context.usage_percentage(),
+                usage: None,
+            });
+        }
+
+        // Auto-compact if context is near limit (80%+)
+        if self.context.is_near_limit() {
+            let usage = self.context.usage_percentage();
+            tracing::info!("Context at {}%, triggering auto-compaction...", usage);
+            self.auto_compact().await?;
+            auto_compacted = true;
+        }
+
+        self.context.add_user(user_message);
+
+        let tool_definitions = self.tools.definitions();
+        let mut iterations = 0;
+        let mut total_tool_calls = 0;
+        let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
+        let mut accumulated_usage = crate::llm::TokenUsage::default();
+        let mut accumulated_text = String::new();
+
+        loop {
+            // Check for interrupt at start of each iteration
+            if interrupt_check() {
+                tracing::info!("Agent interrupted during processing");
+                self.context
+                    .add_assistant("⚠️ *Operation interrupted by user*");
+                return Ok(AgentResponse {
+                    text: "⚠️ *Operation interrupted by user*".to_string(),
+                    tool_calls_made: total_tool_calls,
+                    tool_call_log,
+                    auto_compacted,
+                    context_usage_percent: self.context.usage_percentage(),
+                    usage: Some(accumulated_usage),
+                });
+            }
+
+            if iterations >= self.max_iterations {
+                self.context.add_assistant(
+                    "I've reached the maximum number of steps. Here's what I've done so far. Let me know if you'd like me to continue.",
+                );
+                break;
+            }
+
+            // Reset accumulated text for this iteration
+            accumulated_text.clear();
+
+            // Wrap accumulated_text in Arc<Mutex> so we can share it with the callback
+            let accumulated_text_shared = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+
+            // Create streaming callback that IMMEDIATELY forwards events to the UI
+            // This is the key to real-time streaming - events are forwarded as they arrive
+            let on_text_clone = on_text.clone();
+            let on_thinking_clone = on_thinking.clone();
+            let accumulated_clone = accumulated_text_shared.clone();
+
+            let callback: StreamCallback = Box::new(move |event: StreamEvent| {
+                match event {
+                    StreamEvent::TextDelta(text) => {
+                        // Accumulate for context
+                        if let Ok(mut acc) = accumulated_clone.lock() {
+                            acc.push_str(&text);
+                        }
+                        // IMMEDIATELY forward to UI - this is the key fix!
+                        on_text_clone(text);
+                    }
+                    StreamEvent::ThinkingDelta(thinking) => {
+                        // IMMEDIATELY forward thinking to UI
+                        on_thinking_clone(thinking);
+                    }
+                    StreamEvent::ToolCallStart { name, .. } => {
+                        tracing::debug!("Tool call starting: {}", name);
+                    }
+                    StreamEvent::Error(err) => {
+                        tracing::error!("Streaming error: {}", err);
+                    }
+                    _ => {}
+                }
+            });
+
+            // Call LLM with streaming - callbacks fire in real-time during this await
+            let response = self
+                .llm
+                .chat_streaming(self.context.messages(), Some(&tool_definitions), callback)
+                .await;
+
+            // Get accumulated text from shared state
+            if let Ok(acc) = accumulated_text_shared.lock() {
+                accumulated_text = acc.clone();
+            }
+
+            let response = response?;
+
+            // Accumulate usage from this response
+            if let Some(usage) = response.usage() {
+                accumulated_usage.input_tokens += usage.input_tokens;
+                accumulated_usage.output_tokens += usage.output_tokens;
+                accumulated_usage.total_tokens += usage.total_tokens;
+            }
+
+            iterations += 1;
+
+            match response {
+                LlmResponse::Text { text, .. } => {
+                    // Use accumulated_text if available (from streaming), otherwise use final text
+                    let final_text = if accumulated_text.is_empty() {
+                        text
+                    } else {
+                        accumulated_text.clone()
+                    };
+                    self.context.add_assistant(&final_text);
+                    let context_usage_percent = self.context.usage_percentage();
+                    return Ok(AgentResponse {
+                        text: final_text,
+                        tool_calls_made: total_tool_calls,
+                        tool_call_log,
+                        auto_compacted,
+                        context_usage_percent,
+                        usage: Some(accumulated_usage),
+                    });
+                }
+                LlmResponse::ToolCalls { calls, .. } => {
+                    total_tool_calls += calls.len();
+
+                    // First, add the assistant message with tool calls (required for OpenAI)
+                    self.context.add_assistant_tool_calls(&calls);
+
+                    // Execute each tool call and add results
+                    for call in calls.iter() {
+                        // Check for interrupt before each tool
+                        if interrupt_check() {
+                            tracing::info!("Agent interrupted before tool: {}", call.name);
+                            self.context
+                                .add_assistant("⚠️ *Operation interrupted by user*");
+                            return Ok(AgentResponse {
+                                text: "⚠️ *Operation interrupted by user*".to_string(),
+                                tool_calls_made: total_tool_calls,
+                                tool_call_log,
+                                auto_compacted,
+                                context_usage_percent: self.context.usage_percentage(),
+                                usage: Some(accumulated_usage),
+                            });
+                        }
+
+                        // Notify about tool call
+                        let args_preview = serde_json::to_string(&call.arguments)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        on_tool_call(call.name.clone(), args_preview);
+
+                        tracing::info!(
+                            "Executing tool: {} with args: {} (mode: {:?})",
+                            call.name,
+                            call.arguments,
+                            self.mode
+                        );
+
+                        let result = self
+                            .tools
+                            .execute(&call.name, call.arguments.clone())
+                            .await?;
+
+                        if !result.success && result.output.contains("Unknown tool") {
+                            tracing::warn!(
+                                "Tool '{}' not available in {:?} mode - model hallucinated this call",
+                                call.name,
+                                self.mode
+                            );
+                        }
+
+                        let preview = if result.output.len() > 200 {
+                            format!("{}...", &result.output[..200])
+                        } else {
+                            result.output.clone()
+                        };
+                        tool_call_log.push(ToolCallLog {
+                            tool: call.name.clone(),
+                            args: call.arguments.clone(),
+                            result_preview: preview,
+                        });
+
+                        self.context.add_tool_result(&call.id, &result.output);
+                    }
+                }
+                LlmResponse::Mixed {
+                    text, tool_calls, ..
+                } => {
+                    // Handle mixed response with both text and tool calls
+                    if let Some(t) = &text {
+                        // Text was already streamed, just log it
+                        tracing::debug!("Mixed response text: {}", t);
+                    }
+
+                    total_tool_calls += tool_calls.len();
+                    self.context.add_assistant_tool_calls(&tool_calls);
+
+                    for call in &tool_calls {
+                        if interrupt_check() {
+                            tracing::info!("Agent interrupted before tool: {}", call.name);
+                            self.context
+                                .add_assistant("⚠️ *Operation interrupted by user*");
+                            return Ok(AgentResponse {
+                                text: "⚠️ *Operation interrupted by user*".to_string(),
+                                tool_calls_made: total_tool_calls,
+                                tool_call_log,
+                                auto_compacted,
+                                context_usage_percent: self.context.usage_percentage(),
+                                usage: Some(accumulated_usage),
+                            });
+                        }
+
+                        let args_preview = serde_json::to_string(&call.arguments)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        on_tool_call(call.name.clone(), args_preview);
+
+                        let result = self
+                            .tools
+                            .execute(&call.name, call.arguments.clone())
+                            .await?;
+
+                        if !result.success && result.output.contains("Unknown tool") {
+                            tracing::warn!(
+                                "Tool '{}' not available in {:?} mode",
                                 call.name,
                                 self.mode
                             );

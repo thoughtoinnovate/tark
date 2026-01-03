@@ -7,7 +7,7 @@
 
 use super::{
     CodeIssue, CompletionResult, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role,
-    TokenUsage, ToolCall, ToolDefinition,
+    StreamCallback, StreamEvent, StreamingResponseBuilder, TokenUsage, ToolCall, ToolDefinition,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -148,6 +148,7 @@ impl LlmProvider for ClaudeProvider {
             system,
             messages: claude_messages,
             tools: None,
+            stream: None, // Non-streaming
         };
 
         if let Some(tools) = tools {
@@ -204,6 +205,194 @@ impl LlmProvider for ClaudeProvider {
         }
     }
 
+    fn supports_streaming(&self) -> bool {
+        true // Claude supports native streaming
+    }
+
+    async fn chat_streaming(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+    ) -> Result<LlmResponse> {
+        use futures::StreamExt;
+
+        let (system, claude_messages) = self.convert_messages(messages);
+
+        let mut request = ClaudeRequest {
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            system,
+            messages: claude_messages,
+            tools: None,
+            stream: Some(true), // Enable streaming
+        };
+
+        if let Some(tools) = tools {
+            if !tools.is_empty() {
+                request.tools = Some(self.convert_tools(tools));
+            }
+        }
+
+        // Send streaming request
+        let response = self
+            .client
+            .post(ANTHROPIC_API_URL)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send streaming request to Anthropic API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            callback(StreamEvent::Error(format!(
+                "Anthropic API error ({}): {}",
+                status, error_text
+            )));
+            anyhow::bail!("Anthropic API error ({}): {}", status, error_text);
+        }
+
+        // Process SSE stream
+        let mut builder = StreamingResponseBuilder::new();
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut input_tokens: u32 = 0;
+        let mut output_tokens: u32 = 0;
+
+        // Track tool calls by index
+        let mut tool_call_map: std::collections::HashMap<usize, (String, String, String)> =
+            std::collections::HashMap::new(); // index -> (id, name, accumulated_args)
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.context("Error reading stream chunk")?;
+            let chunk_str = String::from_utf8_lossy(&chunk);
+
+            buffer.push_str(&chunk_str);
+
+            // Process complete lines (SSE format)
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() {
+                    continue;
+                }
+
+                // Handle event lines (we track them for context but process data lines)
+                if line.starts_with("event:") {
+                    continue;
+                }
+
+                if let Some(json_str) = line.strip_prefix("data: ") {
+                    // Parse the streaming event
+                    if let Ok(event) = serde_json::from_str::<ClaudeStreamEvent>(json_str) {
+                        match event {
+                            ClaudeStreamEvent::MessageStart { message } => {
+                                // Capture input tokens from message_start
+                                if let Some(usage) = message.usage {
+                                    input_tokens = usage.input_tokens;
+                                }
+                            }
+                            ClaudeStreamEvent::ContentBlockStart {
+                                index,
+                                content_block,
+                            } => {
+                                match content_block {
+                                    ClaudeStreamContentBlock::Text { .. } => {
+                                        // Text block started, nothing to emit yet
+                                    }
+                                    ClaudeStreamContentBlock::ToolUse { id, name } => {
+                                        tool_call_map.insert(
+                                            index,
+                                            (id.clone(), name.clone(), String::new()),
+                                        );
+                                        let event = StreamEvent::ToolCallStart { id, name };
+                                        builder.process(&event);
+                                        callback(event);
+                                    }
+                                    ClaudeStreamContentBlock::Thinking { .. } => {
+                                        // Thinking block started
+                                    }
+                                }
+                            }
+                            ClaudeStreamEvent::ContentBlockDelta { index, delta } => match delta {
+                                ClaudeStreamDelta::TextDelta { text } => {
+                                    if !text.is_empty() {
+                                        let event = StreamEvent::TextDelta(text);
+                                        builder.process(&event);
+                                        callback(event);
+                                    }
+                                }
+                                ClaudeStreamDelta::InputJsonDelta { partial_json } => {
+                                    if let Some((id, _, args)) = tool_call_map.get_mut(&index) {
+                                        args.push_str(&partial_json);
+                                        let event = StreamEvent::ToolCallDelta {
+                                            id: id.clone(),
+                                            arguments_delta: partial_json,
+                                        };
+                                        builder.process(&event);
+                                        callback(event);
+                                    }
+                                }
+                                ClaudeStreamDelta::ThinkingDelta { thinking } => {
+                                    if !thinking.is_empty() {
+                                        let event = StreamEvent::ThinkingDelta(thinking);
+                                        builder.process(&event);
+                                        callback(event);
+                                    }
+                                }
+                            },
+                            ClaudeStreamEvent::ContentBlockStop { index } => {
+                                // Emit ToolCallComplete if this was a tool call block
+                                if let Some((id, _, _)) = tool_call_map.get(&index) {
+                                    let event = StreamEvent::ToolCallComplete { id: id.clone() };
+                                    callback(event);
+                                }
+                            }
+                            ClaudeStreamEvent::MessageDelta { usage, .. } => {
+                                // Capture output tokens
+                                if let Some(u) = usage {
+                                    output_tokens = u.output_tokens;
+                                }
+                            }
+                            ClaudeStreamEvent::MessageStop => {
+                                callback(StreamEvent::Done);
+                            }
+                            ClaudeStreamEvent::Ping => {
+                                // Keepalive, ignore
+                            }
+                            ClaudeStreamEvent::Error { error } => {
+                                let msg = format!("{}: {}", error.error_type, error.message);
+                                callback(StreamEvent::Error(msg.clone()));
+                                anyhow::bail!("Claude streaming error: {}", msg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Set usage in builder
+        if input_tokens > 0 || output_tokens > 0 {
+            builder.usage = Some(TokenUsage {
+                input_tokens,
+                output_tokens,
+                total_tokens: input_tokens + output_tokens,
+            });
+        }
+
+        // Add tool calls to builder
+        for (_, (id, name, args)) in tool_call_map {
+            builder.tool_calls.insert(id, (name, args));
+        }
+
+        Ok(builder.build())
+    }
+
     async fn complete_fim(
         &self,
         prefix: &str,
@@ -228,6 +417,7 @@ impl LlmProvider for ClaudeProvider {
                 content: ClaudeContent::Text(user_content),
             }],
             tools: None,
+            stream: None,
         };
 
         let response = self.send_request(request).await?;
@@ -267,6 +457,7 @@ impl LlmProvider for ClaudeProvider {
                 content: ClaudeContent::Text(user_content),
             }],
             tools: None,
+            stream: None,
         };
 
         let response = self.send_request(request).await?;
@@ -303,6 +494,7 @@ Only return the JSON array, no other text."#;
                 content: ClaudeContent::Text(user_content),
             }],
             tools: None,
+            stream: None,
         };
 
         let response = self.send_request(request).await?;
@@ -348,6 +540,7 @@ Focus on: bugs, security issues, performance problems, and code quality."#;
                 content: ClaudeContent::Text(user_content),
             }],
             tools: None,
+            stream: None,
         };
 
         let response = self.send_request(request).await?;
@@ -385,6 +578,8 @@ struct ClaudeRequest {
     messages: Vec<ClaudeMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ClaudeTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -437,6 +632,86 @@ struct ClaudeResponse {
 struct ClaudeUsage {
     input_tokens: u32,
     output_tokens: u32,
+}
+
+// Streaming response types
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum ClaudeStreamEvent {
+    #[serde(rename = "message_start")]
+    MessageStart { message: ClaudeMessageStart },
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {
+        index: usize,
+        content_block: ClaudeStreamContentBlock,
+    },
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta {
+        index: usize,
+        delta: ClaudeStreamDelta,
+    },
+    #[serde(rename = "content_block_stop")]
+    ContentBlockStop { index: usize },
+    #[serde(rename = "message_delta")]
+    MessageDelta {
+        delta: ClaudeMessageDeltaContent,
+        usage: Option<ClaudeUsage>,
+    },
+    #[serde(rename = "message_stop")]
+    MessageStop,
+    #[serde(rename = "ping")]
+    Ping,
+    #[serde(rename = "error")]
+    Error { error: ClaudeStreamError },
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeMessageStart {
+    #[serde(default)]
+    usage: Option<ClaudeUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum ClaudeStreamContentBlock {
+    #[serde(rename = "text")]
+    Text {
+        #[serde(default)]
+        text: String,
+    },
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[allow(clippy::enum_variant_names)] // Names match API response values
+enum ClaudeStreamDelta {
+    #[serde(rename = "text_delta")]
+    TextDelta { text: String },
+    #[serde(rename = "input_json_delta")]
+    InputJsonDelta { partial_json: String },
+    #[serde(rename = "thinking_delta")]
+    ThinkingDelta { thinking: String },
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeMessageDeltaContent {
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeStreamError {
+    #[serde(rename = "type")]
+    error_type: String,
+    message: String,
 }
 
 #[cfg(test)]

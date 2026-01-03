@@ -26,13 +26,20 @@ use super::config::TuiConfig;
 use super::events::{Event, EventHandler};
 use super::keybindings::{Action, FocusedComponent, InputMode, KeybindingHandler};
 use super::widgets::{
-    AttachmentDropdownState, ChatMessage, EnhancedPanelData, EnhancedPanelWidget, InputWidget,
-    MessageList, PanelSectionState, PanelWidget, Picker, PickerItem, PickerWidget,
+    AttachmentDropdownState, ChatMessage, CommandDropdown, EnhancedPanelData, EnhancedPanelWidget,
+    InputWidget, MessageList, MessageListWidget, PanelSectionState, PanelWidget, Picker,
+    PickerItem, PickerWidget,
 };
 use tokio::sync::mpsc;
 
+/// Spinner animation frames for processing indicator
+const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Interval between spinner frame updates (milliseconds)
+const SPINNER_INTERVAL_MS: u64 = 80;
+
 /// Application state for the TUI
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AppState {
     /// Whether the application should exit
     pub should_quit: bool,
@@ -89,6 +96,18 @@ pub struct AppState {
     pub rate_limit_retry_at: Option<std::time::Instant>,
     /// Message to retry after rate limit expires
     pub rate_limit_pending_message: Option<String>,
+    /// Queue of pending prompts to process sequentially
+    pub prompt_queue: std::collections::VecDeque<String>,
+    /// Command dropdown for slash command intellisense
+    pub command_dropdown: CommandDropdown,
+    /// Flag to auto-scroll to bottom on next render (for streaming updates)
+    pub auto_scroll_pending: bool,
+    /// Spinner animation frame index for processing indicator
+    pub spinner_frame: usize,
+    /// Last time spinner was updated
+    pub spinner_last_update: std::time::Instant,
+    /// Pending async request ready for processing (used by async loop)
+    pub pending_async_request: Option<AsyncMessageRequest>,
 }
 
 /// State for tab completion
@@ -148,7 +167,57 @@ impl CompletionState {
     }
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            should_quit: false,
+            mode: AgentMode::default(),
+            thinking_mode: true, // Enable thinking mode by default to show thinking blocks
+            editor_connected: false,
+            terminal_size: (0, 0),
+            input_mode: InputMode::default(),
+            focused_component: FocusedComponent::default(),
+            message_list: MessageList::default(),
+            input_widget: InputWidget::default(),
+            panel_widget: PanelWidget::default(),
+            panel_section_state: PanelSectionState::default(),
+            enhanced_panel_data: EnhancedPanelData::default(),
+            status_message: None,
+            completion_state: CompletionState::default(),
+            config: TuiConfig::default(),
+            llm_configured: false,
+            llm_error: None,
+            attachment_dropdown_state: AttachmentDropdownState::default(),
+            attachments: Vec::new(),
+            pending_message: None,
+            agent_processing: false,
+            current_tool: None,
+            picker: Picker::default(),
+            active_picker_type: None,
+            model_picker_state: None,
+            rate_limit_retry_at: None,
+            rate_limit_pending_message: None,
+            prompt_queue: std::collections::VecDeque::new(),
+            command_dropdown: CommandDropdown::default(),
+            auto_scroll_pending: false,
+            spinner_frame: 0,
+            spinner_last_update: std::time::Instant::now(),
+            pending_async_request: None,
+        }
+    }
+}
+
 impl AppState {
+    /// Get the actual width of the message area for scroll calculations
+    ///
+    /// The message area is 70% of terminal width (chat column) minus 2 for borders.
+    /// This ensures scroll operations use the correct dimensions.
+    fn get_message_area_width(&self) -> u16 {
+        let terminal_width = self.terminal_size.0;
+        let chat_column_width = (terminal_width as f32 * 0.7) as u16;
+        chat_column_width.saturating_sub(2) // Subtract borders
+    }
+
     /// Create a new application state
     pub fn new() -> Self {
         // Load config from file, falling back to defaults on error
@@ -162,6 +231,7 @@ impl AppState {
             input_mode: InputMode::Insert, // Start in insert mode for immediate typing
             focused_component: FocusedComponent::Input,
             config,
+            spinner_last_update: std::time::Instant::now(),
             ..Default::default()
         }
     }
@@ -193,6 +263,23 @@ impl AppState {
     /// Signal the application to quit
     pub fn quit(&mut self) {
         self.should_quit = true;
+    }
+
+    /// Update spinner animation frame if enough time has elapsed
+    /// Returns true if the spinner was updated (requires re-render)
+    pub fn update_spinner_if_needed(&mut self) -> bool {
+        if !self.agent_processing {
+            return false;
+        }
+
+        let elapsed = self.spinner_last_update.elapsed();
+        if elapsed.as_millis() >= SPINNER_INTERVAL_MS as u128 {
+            self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+            self.spinner_last_update = std::time::Instant::now();
+            true
+        } else {
+            false
+        }
     }
 
     /// Update terminal size
@@ -247,7 +334,7 @@ impl AppState {
 
     /// Handle navigation within the message list
     fn handle_message_navigation(&mut self, action: Action) {
-        let width = self.terminal_size.0;
+        let width = self.get_message_area_width();
         match action {
             Action::LineDown => self.message_list.scroll_down(width),
             Action::LineUp => self.message_list.scroll_up(),
@@ -371,6 +458,15 @@ struct PendingMessageRequest {
     tx: mpsc::Sender<AgentEvent>,
 }
 
+/// Async message request ready for processing
+#[derive(Debug)]
+pub struct AsyncMessageRequest {
+    content: String,
+    attachments: Vec<MessageAttachment>,
+    tx: mpsc::Sender<AgentEvent>,
+    config: super::attachments::AttachmentConfig,
+}
+
 /// Main TUI application
 pub struct TuiApp {
     /// Terminal backend
@@ -396,6 +492,16 @@ pub struct TuiApp {
 }
 
 impl TuiApp {
+    /// Get the actual width of the message area for scroll calculations
+    ///
+    /// The message area is 70% of terminal width (chat column) minus 2 for borders.
+    /// This ensures scroll_to_bottom uses the correct dimensions.
+    fn get_message_area_width(&self) -> u16 {
+        let terminal_width = self.state.terminal_size.0;
+        let chat_column_width = (terminal_width as f32 * 0.7) as u16;
+        chat_column_width.saturating_sub(2) // Subtract borders
+    }
+
     /// Create a new TUI application
     ///
     /// This initializes the terminal in raw mode with alternate screen
@@ -566,6 +672,20 @@ impl TuiApp {
 
             // Update session info (Requirements 5.1, 5.2, 5.8, 5.9)
             // Format: "session_name | model | provider"
+            // Get actual model context limit from models.dev first (before moving strings)
+            let model_name_ref = model_name.as_str();
+            let provider_name_ref = provider_name.as_str();
+
+            // Fetch context limit asynchronously (this will use cache if available)
+            let max_tokens = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    crate::llm::models_db()
+                        .get_context_limit(provider_name_ref, model_name_ref)
+                        .await
+                })
+            });
+
+            // Now update session info
             self.state.enhanced_panel_data.session = super::widgets::SessionInfo {
                 name: if session_name.is_empty() {
                     "New Session".to_string()
@@ -588,7 +708,7 @@ impl TuiApp {
 
             // Update context info (Requirements 5.3, 5.4, 5.5)
             let total_tokens = (input_tokens + output_tokens) as u32;
-            let max_tokens = 128000u32; // Default context window, could be made configurable
+
             let usage_percent = if max_tokens > 0 {
                 (total_tokens as f32 / max_tokens as f32) * 100.0
             } else {
@@ -786,6 +906,49 @@ impl TuiApp {
                         Some(format!("⏳ Rate limited: retry in {} seconds", secs));
                 }
             }
+        }
+    }
+
+    /// Process the next message from the prompt queue
+    ///
+    /// Called after a message completes to automatically process queued messages.
+    /// This removes the message from the queue, adds it to chat history, and
+    /// starts processing it.
+    fn process_next_queued_message(&mut self) {
+        // Check if there are queued messages
+        if let Some(next_message) = self.state.prompt_queue.pop_front() {
+            // Create mpsc channel for AgentEvents
+            let (tx, rx) = mpsc::channel(100);
+            self.agent_event_rx = Some(rx);
+
+            // Mark as processing
+            self.state.agent_processing = true;
+            let queue_remaining = self.state.prompt_queue.len();
+            self.state.status_message = Some(format!(
+                "Processing queued message ({} remaining)...",
+                queue_remaining
+            ));
+
+            // ADD the user message to chat history now that we're processing it
+            self.state
+                .message_list
+                .push(ChatMessage::user(next_message.clone()));
+
+            // Store the pending message for async processing
+            self.state.pending_message = Some(next_message.clone());
+
+            // Queue the request for async processing
+            self.pending_request = Some(PendingMessageRequest {
+                content: next_message,
+                attachments: Vec::new(),
+                tx,
+            });
+
+            // Update panel to show queue status (removes the processed one)
+            self.update_panel_tasks_from_queue();
+        } else {
+            // No more queued messages, clear tasks
+            self.state.enhanced_panel_data.tasks.clear();
         }
     }
 
@@ -1186,7 +1349,15 @@ impl TuiApp {
 
         match key.code {
             KeyCode::Tab => {
-                self.handle_tab_completion(false);
+                // If command dropdown is visible, apply selection
+                if self.state.command_dropdown.is_visible() {
+                    if let Some(command) = self.state.command_dropdown.selected_command() {
+                        self.state.input_widget.set_content(command);
+                        self.state.command_dropdown.hide();
+                    }
+                } else {
+                    self.handle_tab_completion(false);
+                }
             }
             KeyCode::BackTab => {
                 self.handle_tab_completion(true);
@@ -1202,13 +1373,18 @@ impl TuiApp {
                     }
                 } else {
                     self.state.input_widget.insert_char(c);
+                    // Update command dropdown as user types
+                    self.update_command_dropdown();
                 }
             }
             KeyCode::Backspace => {
                 self.state.input_widget.delete_char_before();
+                // Update command dropdown after deletion
+                self.update_command_dropdown();
             }
             KeyCode::Delete => {
                 self.state.input_widget.delete_char_at();
+                self.update_command_dropdown();
             }
             KeyCode::Left => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1231,12 +1407,40 @@ impl TuiApp {
                 self.state.input_widget.move_cursor_to_end();
             }
             KeyCode::Up => {
-                // Navigate to previous history entry (Requirements 14.1, 14.4)
-                self.navigate_history_previous();
+                // If command dropdown is visible, navigate up in dropdown
+                if self.state.command_dropdown.is_visible() {
+                    self.state.command_dropdown.select_previous();
+                } else {
+                    // Navigate to previous history entry (Requirements 14.1, 14.4)
+                    self.navigate_history_previous();
+                }
             }
             KeyCode::Down => {
-                // Navigate to next history entry (Requirements 14.2, 14.4)
-                self.navigate_history_next();
+                // If command dropdown is visible, navigate down in dropdown
+                if self.state.command_dropdown.is_visible() {
+                    self.state.command_dropdown.select_next();
+                } else {
+                    // Navigate to next history entry (Requirements 14.2, 14.4)
+                    self.navigate_history_next();
+                }
+            }
+            KeyCode::Esc => {
+                // Hide command dropdown on Esc
+                if self.state.command_dropdown.is_visible() {
+                    self.state.command_dropdown.hide();
+                }
+            }
+            KeyCode::Enter => {
+                // If command dropdown is visible, apply selection and execute
+                if self.state.command_dropdown.is_visible() {
+                    if let Some(command) = self.state.command_dropdown.selected_command() {
+                        self.state.input_widget.set_content(command);
+                        self.state.command_dropdown.hide();
+                    }
+                } else {
+                    // Normal submit behavior
+                    self.handle_submit();
+                }
             }
             _ => {}
         }
@@ -1278,6 +1482,54 @@ impl TuiApp {
         }
     }
 
+    /// Update command dropdown based on current input
+    fn update_command_dropdown(&mut self) {
+        let content = self.state.input_widget.content();
+
+        // Only show dropdown if input starts with /
+        if !content.starts_with('/') {
+            self.state.command_dropdown.hide();
+            return;
+        }
+
+        // Get filter (text after /)
+        let filter = content.trim_start_matches('/');
+        self.state.command_dropdown.set_filter(filter);
+
+        // Get matching commands
+        use super::widgets::CommandDropdownItem;
+        let mut items: Vec<CommandDropdownItem> = self
+            .commands
+            .commands()
+            .filter(|cmd| {
+                if filter.is_empty() {
+                    true
+                } else {
+                    cmd.name.starts_with(filter) || cmd.name.contains(filter)
+                }
+            })
+            .map(CommandDropdownItem::from_command)
+            .collect();
+
+        // Sort by relevance (starts_with first, then contains)
+        items.sort_by(|a, b| {
+            let a_starts = a.name.starts_with(filter);
+            let b_starts = b.name.starts_with(filter);
+            match (a_starts, b_starts) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.cmp(&b.name),
+            }
+        });
+
+        if items.is_empty() {
+            self.state.command_dropdown.hide();
+        } else {
+            self.state.command_dropdown.set_items(items);
+            self.state.command_dropdown.show();
+        }
+    }
+
     /// Navigate to the previous (older) prompt in history
     ///
     /// Preserves the current unsent input when navigating away.
@@ -1305,6 +1557,9 @@ impl TuiApp {
 
     /// Handle submit action
     fn handle_submit(&mut self) {
+        // Hide command dropdown if visible
+        self.state.command_dropdown.hide();
+
         let content = self.state.input_widget.submit();
         if content.trim().is_empty() && self.state.attachments.is_empty() {
             return;
@@ -1327,8 +1582,28 @@ impl TuiApp {
             self.handle_command(&content);
         } else {
             // Regular message - add to the list with detected username (Requirements 2.2)
+            // FIRST check if agent is already processing - if so, queue the message
+            // Note: agent_bridge may be temporarily None during processing (taken by spawn_blocking)
+            // so we check agent_processing flag instead
+            if self.state.agent_processing {
+                // Queue the message - DON'T add to chat yet
+                self.state.prompt_queue.push_back(content.clone());
+                let queue_pos = self.state.prompt_queue.len();
+                self.state.status_message =
+                    Some(format!("Message queued (position {})", queue_pos));
+
+                // Update panel to show queued task
+                self.update_panel_tasks_from_queue();
+                return;
+            }
+
+            // Not processing - add user message to chat
             let user_msg = ChatMessage::user(content.clone());
             self.state.message_list.push(user_msg);
+
+            // Auto-scroll to bottom to show the new message
+            let width = self.get_message_area_width();
+            self.state.message_list.scroll_to_bottom(width);
 
             // Check if LLM is configured
             if !self.state.llm_configured {
@@ -1341,12 +1616,6 @@ impl TuiApp {
                     error_msg
                 )));
             } else if self.agent_bridge.is_some() {
-                // Check if already processing
-                if self.state.agent_processing {
-                    self.state.status_message = Some("Already processing a message...".to_string());
-                    return;
-                }
-
                 // Create mpsc channel for AgentEvents (Requirements 1.1, 1.2)
                 let (tx, rx) = mpsc::channel(100);
                 self.agent_event_rx = Some(rx);
@@ -1384,6 +1653,52 @@ impl TuiApp {
                     "⚠️ Agent not initialized. Please restart the application.".to_string(),
                 ));
             }
+        }
+    }
+
+    /// Update panel tasks from the prompt queue
+    fn update_panel_tasks_from_queue(&mut self) {
+        let mut tasks: Vec<super::widgets::TaskItem> = self
+            .state
+            .prompt_queue
+            .iter()
+            .enumerate()
+            .map(|(i, prompt)| {
+                let desc = if prompt.len() > 40 {
+                    format!("{}. {}...", i + 1, &prompt[..37])
+                } else {
+                    format!("{}. {}", i + 1, prompt)
+                };
+                super::widgets::TaskItem {
+                    description: desc,
+                    status: super::widgets::TaskStatus::Pending,
+                }
+            })
+            .collect();
+
+        // Add current processing task at the top if processing
+        if self.state.agent_processing {
+            if let Some(ref pending) = self.state.pending_message {
+                let desc = if pending.len() > 40 {
+                    format!("⏳ {}...", &pending[..37])
+                } else {
+                    format!("⏳ {}", pending)
+                };
+                tasks.insert(
+                    0,
+                    super::widgets::TaskItem {
+                        description: desc,
+                        status: super::widgets::TaskStatus::Running,
+                    },
+                );
+            }
+        }
+
+        self.state.enhanced_panel_data.tasks = tasks.clone();
+
+        // Ensure tasks section is expanded when tasks are added
+        if !tasks.is_empty() {
+            self.state.panel_section_state.tasks_expanded = true;
         }
     }
 
@@ -2160,6 +2475,43 @@ impl TuiApp {
         }
     }
 
+    /// Get picker items for model selection for a specific provider (dynamic)
+    ///
+    /// Fetches models dynamically from AgentBridge using list_available_models().
+    /// Falls back to hardcoded list if fetching fails.
+    ///
+    /// Requirements: 1.3, 1.4, 4.1
+    fn get_model_picker_items_for_provider_dynamic(&self, provider_id: &str) -> Vec<PickerItem> {
+        let current_model = self
+            .agent_bridge
+            .as_ref()
+            .map(|b| b.model_name().to_string())
+            .unwrap_or_default();
+
+        // Try to fetch models dynamically from AgentBridge
+        if let Some(ref bridge) = self.agent_bridge {
+            // Use block_in_place to call async function in sync context
+            let models_result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(bridge.list_available_models())
+            });
+
+            if !models_result.is_empty() {
+                // Successfully fetched models dynamically
+                return models_result
+                    .into_iter()
+                    .map(|(model_id, display_name, description)| {
+                        PickerItem::new(&model_id, &display_name)
+                            .with_description(description)
+                            .with_active(current_model == model_id)
+                    })
+                    .collect();
+            }
+        }
+
+        // Fall back to hardcoded list if fetch failed
+        self.get_model_picker_items_for_provider(provider_id)
+    }
+
     /// Handle key events when picker is visible
     ///
     /// Handles the two-step model picker flow (provider → model selection).
@@ -2171,6 +2523,13 @@ impl TuiApp {
                 self.state.picker.cancel();
                 self.state.active_picker_type = None;
                 self.state.model_picker_state = None;
+            }
+            KeyCode::Char('d') if self.state.active_picker_type == Some(PickerType::Session) => {
+                // Delete selected session (only for session picker)
+                if let Some(session_id) = self.state.picker.selected_id() {
+                    let session_id = session_id.to_string();
+                    self.handle_session_deletion(&session_id);
+                }
             }
             KeyCode::Enter => {
                 // Check if selected item is disabled before confirming
@@ -2243,7 +2602,7 @@ impl TuiApp {
 
                     // Show model picker for the selected provider
                     self.state.picker.set_title("Select Model");
-                    let items = self.get_model_picker_items_for_provider(selected_id);
+                    let items = self.get_model_picker_items_for_provider_dynamic(selected_id);
                     self.state.picker.set_items(items);
                     self.state.active_picker_type = Some(PickerType::Model);
                     self.state.picker.show();
@@ -2359,6 +2718,26 @@ impl TuiApp {
         }
     }
 
+    /// Handle session deletion from picker
+    ///
+    /// Deletes the selected session after confirmation.
+    fn handle_session_deletion(&mut self, session_id: &str) {
+        if let Some(ref mut bridge) = self.agent_bridge {
+            match bridge.delete_session(session_id) {
+                Ok(()) => {
+                    self.state.status_message = Some("Session deleted successfully".to_string());
+
+                    // Refresh the session picker to remove deleted session
+                    let items = self.get_session_picker_items();
+                    self.state.picker.set_items(items);
+                }
+                Err(e) => {
+                    self.state.status_message = Some(format!("Cannot delete session: {}", e));
+                }
+            }
+        }
+    }
+
     /// Handle provider switch from picker
     ///
     /// Requirements: 12.3, 12.5
@@ -2404,9 +2783,8 @@ impl TuiApp {
                 self.state.message_list.push(msg);
             }
 
-            // Scroll to bottom to show latest messages
-            let width = self.state.terminal_size.0;
-            self.state.message_list.scroll_to_bottom(width);
+            // Scroll to bottom will be done after initial render with correct dimensions
+            // to ensure accurate scroll calculation based on actual message area size
         }
     }
 
@@ -2417,21 +2795,44 @@ impl TuiApp {
         // Initial render
         self.render()?;
 
+        // Scroll to bottom after initial render to ensure messages are visible
+        // Use the actual message area width for accurate scroll calculation
+        if !self.state.message_list.messages().is_empty() {
+            let width = self.get_message_area_width();
+            self.state.message_list.scroll_to_bottom(width);
+        }
+
         while !self.state.should_quit {
-            // Process any pending async work
-            self.process_pending_async().await;
+            // Process any pending message queuing
+            self.process_pending_async();
+
+            // Start async LLM work if there's a pending request
+            if let Some(request) = self.state.pending_async_request.take() {
+                // Run LLM work while still polling events and rendering
+                self.run_llm_with_ui_updates(request).await?;
+            }
 
             // Poll for agent events (non-blocking)
             let agent_events_processed = self.poll_agent_events();
 
+            // Update spinner if processing
+            let needs_spinner_update = self.state.update_spinner_if_needed();
+
+            // Use non-blocking poll with short timeout during processing
+            let poll_timeout = if self.state.agent_processing {
+                std::time::Duration::from_millis(50) // Fast refresh during processing
+            } else {
+                std::time::Duration::from_millis(100) // Normal refresh otherwise
+            };
+
             // Poll for terminal events
-            if let Some(event) = self.events.poll()? {
+            if let Some(event) = self.events.poll_with_timeout(poll_timeout)? {
                 let needs_redraw = self.handle_event(event)?;
                 if needs_redraw {
                     self.render()?;
                 }
-            } else if agent_events_processed {
-                // Redraw if we processed agent events
+            } else if agent_events_processed || needs_spinner_update {
+                // Re-render for agent updates or spinner animation
                 self.render()?;
             }
         }
@@ -2441,54 +2842,114 @@ impl TuiApp {
 
     /// Process any pending async work (message sending)
     ///
-    /// This is called in the main event loop to handle async operations
-    /// without blocking the runtime.
-    async fn process_pending_async(&mut self) {
+    /// This method stages LLM requests for async processing.
+    /// The actual work is done by spawn_async_llm_work.
+    fn process_pending_async(&mut self) {
         // Take the pending request if any
         if let Some(request) = self.pending_request.take() {
-            if let Some(ref mut bridge) = self.agent_bridge {
-                let has_attachments = !request.attachments.is_empty();
+            // Update status - the actual response comes through the channel
+            self.state.status_message = Some("Sending to LLM...".to_string());
 
-                let result = if has_attachments {
-                    // Send with attachments (Requirements 10.1, 10.2, 10.5)
-                    let config = self.state.config.to_attachment_config();
-                    bridge
-                        .send_message_with_attachments(
-                            &request.content,
-                            request.attachments,
-                            request.tx,
-                            &config,
-                        )
-                        .await
-                } else {
-                    // Send without attachments
-                    bridge
-                        .send_message_streaming(&request.content, request.tx)
-                        .await
-                };
+            // Store the request in a shared state for async processing
+            self.state.pending_async_request = Some(AsyncMessageRequest {
+                content: request.content,
+                attachments: request.attachments,
+                tx: request.tx,
+                config: self.state.config.to_attachment_config(),
+            });
+        }
+    }
 
-                match result {
-                    Ok(()) => {
-                        // Message sent successfully, events will come through the channel
-                        self.state.status_message =
-                            Some("Message sent, waiting for response...".to_string());
+    /// Run LLM work while continuously updating the UI
+    ///
+    /// This spawns the LLM work and polls for events/input while it's running,
+    /// enabling real-time streaming display and responsive input.
+    async fn run_llm_with_ui_updates(
+        &mut self,
+        request: AsyncMessageRequest,
+    ) -> anyhow::Result<()> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Flag to track if LLM work is done
+        let done_flag = Arc::new(AtomicBool::new(false));
+        let done_flag_clone = done_flag.clone();
+
+        // Take the bridge temporarily to use in spawned task
+        // We need to use block_in_place since AgentBridge isn't Send
+        let bridge = self.agent_bridge.take();
+
+        if let Some(mut bridge) = bridge {
+            let has_attachments = !request.attachments.is_empty();
+            let tx = request.tx.clone();
+
+            // Spawn the LLM work in a blocking task
+            let handle = tokio::task::spawn_blocking(move || {
+                let rt = tokio::runtime::Handle::current();
+                let result = rt.block_on(async {
+                    if has_attachments {
+                        bridge
+                            .send_message_with_attachments(
+                                &request.content,
+                                request.attachments,
+                                tx.clone(),
+                                &request.config,
+                            )
+                            .await
+                    } else {
+                        bridge
+                            .send_message_streaming(&request.content, tx.clone())
+                            .await
                     }
-                    Err(e) => {
-                        self.state.message_list.push(ChatMessage::system(format!(
-                            "⚠️ Error sending message: {}",
-                            e
-                        )));
-                        self.state.agent_processing = false;
+                });
+                done_flag_clone.store(true, Ordering::SeqCst);
+                (bridge, result, tx)
+            });
+
+            // Poll events and render while LLM is working
+            while !done_flag.load(Ordering::SeqCst) {
+                // Poll for agent events (streaming chunks)
+                let events_processed = self.poll_agent_events();
+
+                // Update spinner
+                let spinner_updated = self.state.update_spinner_if_needed();
+
+                // Poll for terminal events (short timeout to stay responsive)
+                if let Some(event) = self
+                    .events
+                    .poll_with_timeout(std::time::Duration::from_millis(30))?
+                {
+                    let needs_redraw = self.handle_event(event)?;
+                    if needs_redraw {
+                        self.render()?;
                     }
+                } else if events_processed || spinner_updated {
+                    self.render()?;
                 }
 
-                // Update panel data after message sent
-                self.update_panel_from_bridge();
+                // Small yield to let the spawned task make progress
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
 
-            // Clear pending message state
-            self.state.pending_message = None;
+            // Get the result and restore the bridge
+            let (bridge, result, tx) = handle.await.expect("LLM task panicked");
+            self.agent_bridge = Some(bridge);
+
+            match result {
+                Ok(()) => {
+                    // Message sent successfully
+                }
+                Err(e) => {
+                    let _ = tx.send(AgentEvent::Error(e.to_string())).await;
+                    self.state.agent_processing = false;
+                }
+            }
+
+            // Update panel data after message sent
+            self.update_panel_from_bridge();
         }
+
+        Ok(())
     }
 
     /// Poll for agent events and update UI accordingly
@@ -2534,6 +2995,9 @@ impl TuiApp {
                                 && last_msg.is_streaming
                             {
                                 last_msg.content.push_str(&chunk);
+
+                                // Request auto-scroll on next render (after visible_height is updated)
+                                self.state.auto_scroll_pending = true;
                             }
                         }
                     }
@@ -2633,8 +3097,19 @@ impl TuiApp {
                             if last_msg.role == super::widgets::Role::Assistant
                                 && last_msg.is_streaming
                             {
+                                // Save thinking content before overwriting
+                                let thinking_content = last_msg.thinking_content.clone();
+
                                 // Update the streaming message with final content
-                                last_msg.content = info.text.clone();
+                                // If we have thinking content, wrap it in tags for collapsible rendering
+                                if !thinking_content.is_empty() && self.state.thinking_mode {
+                                    last_msg.content = format!(
+                                        "<thinking>\n{}\n</thinking>\n\n{}",
+                                        thinking_content, info.text
+                                    );
+                                } else {
+                                    last_msg.content = info.text.clone();
+                                }
                                 last_msg.is_streaming = false;
 
                                 // Update tool call info from the response if we have detailed logs
@@ -2681,8 +3156,11 @@ impl TuiApp {
                         self.update_panel_from_bridge();
 
                         // Auto-scroll to bottom to show the complete response
-                        let width = self.state.terminal_size.0;
+                        let width = self.get_message_area_width();
                         self.state.message_list.scroll_to_bottom(width);
+
+                        // Process next queued message if any
+                        self.process_next_queued_message();
                     }
                     AgentEvent::Error(error) => {
                         // Handle error with user-friendly message and suggestions (Requirements 7.1, 7.6)
@@ -2710,6 +3188,10 @@ impl TuiApp {
                         }
                         self.state.agent_processing = false;
                         self.state.status_message = Some("Interrupted".to_string());
+
+                        // Clear the queue on interrupt (user wants to stop)
+                        self.state.prompt_queue.clear();
+                        self.state.enhanced_panel_data.tasks.clear();
                     }
                     AgentEvent::ContextCompacted {
                         old_tokens,
@@ -2794,7 +3276,9 @@ impl TuiApp {
             }
 
             // Put the receiver back if we're still processing
-            if self.state.agent_processing {
+            // BUT: only if it wasn't replaced by process_next_queued_message
+            // (which creates a new channel for the next request)
+            if self.state.agent_processing && self.agent_event_rx.is_none() {
                 self.agent_event_rx = Some(rx);
             }
         }
@@ -2825,6 +3309,8 @@ impl TuiApp {
         let llm_error = self.state.llm_error.clone();
         // Current tool being executed (Requirement 4.6)
         let current_tool = self.state.current_tool.clone();
+        // Whether agent is processing (for loading indicator)
+        let agent_processing = self.state.agent_processing;
 
         // Clone input widget for rendering (it implements Clone)
         let input_widget = self.state.input_widget.clone();
@@ -2836,15 +3322,11 @@ impl TuiApp {
         // Clone username for rendering (Requirements 2.2, 2.3)
         let username = self.username.clone();
 
-        // Collect message data for rendering
-        let messages_data: Vec<(super::widgets::Role, String)> = self
-            .state
-            .message_list
-            .messages()
-            .iter()
-            .map(|msg| (msg.role, msg.content.clone()))
-            .collect();
-        let messages_empty = messages_data.is_empty();
+        // Check if message list is empty for rendering decision
+        let messages_empty = self.state.message_list.is_empty();
+
+        // Check if auto-scroll is pending (need to check before draw closure)
+        let auto_scroll_pending = self.state.auto_scroll_pending;
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -2884,13 +3366,21 @@ impl TuiApp {
                 .title(" 🤖 Tark ")
                 .borders(Borders::ALL)
                 .border_style(if focused == FocusedComponent::Messages {
-                    Style::default().fg(Color::Cyan)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 });
 
             let messages_inner = messages_block.inner(chat_chunks[0]);
             frame.render_widget(messages_block, chat_chunks[0]);
+
+            // Update message list visible height for accurate scroll calculations
+            // This must be set before any scroll operations
+            self.state
+                .message_list
+                .set_visible_height(messages_inner.height);
 
             // Render message content
             if messages_empty {
@@ -2949,47 +3439,11 @@ impl TuiApp {
                 let welcome = Paragraph::new(welcome_text);
                 frame.render_widget(welcome, messages_inner);
             } else {
-                // Render messages from the list
-                let messages: Vec<ratatui::text::Line> = messages_data
-                    .iter()
-                    .flat_map(|(role, content)| {
-                        // Use detected username for user messages, "Tark" for assistant (Requirements 2.2, 2.3, 2.4)
-                        let (role_style, role_icon) = match role {
-                            super::widgets::Role::User => (
-                                Style::default().fg(Color::Green),
-                                format!("👤 {}", username),
-                            ),
-                            super::widgets::Role::Assistant => {
-                                (Style::default().fg(Color::Cyan), "🤖 Tark".to_string())
-                            }
-                            super::widgets::Role::System => {
-                                (Style::default().fg(Color::Yellow), "⚙ System".to_string())
-                            }
-                            super::widgets::Role::Tool => {
-                                (Style::default().fg(Color::Magenta), "🔧 Tool".to_string())
-                            }
-                        };
-
-                        let mut lines =
-                            vec![ratatui::text::Line::from(ratatui::text::Span::styled(
-                                role_icon,
-                                role_style.add_modifier(Modifier::BOLD),
-                            ))];
-
-                        // Add message content lines
-                        for line in content.lines() {
-                            lines.push(ratatui::text::Line::from(format!("  {}", line)));
-                        }
-
-                        // Add spacing between messages
-                        lines.push(ratatui::text::Line::from(""));
-
-                        lines
-                    })
-                    .collect();
-
-                let messages_paragraph = Paragraph::new(messages);
-                frame.render_widget(messages_paragraph, messages_inner);
+                // Render messages using the full MessageListWidget for proper
+                // streaming indicators, thinking blocks, and tool calls
+                let message_list_widget =
+                    MessageListWidget::new(&mut self.state.message_list).username(username.clone());
+                frame.render_widget(message_list_widget, messages_inner);
             }
 
             // Panel area (right side, full height - Requirements 2.1, 2.2, 9.3, 9.4)
@@ -2997,7 +3451,9 @@ impl TuiApp {
                 .title(" Panel ")
                 .borders(Borders::ALL)
                 .border_style(if focused == FocusedComponent::Panel {
-                    Style::default().fg(Color::Magenta)
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 });
@@ -3022,7 +3478,9 @@ impl TuiApp {
                 .title(format!(" [{}]{} ", mode_indicator.0, pending_indicator))
                 .borders(Borders::ALL)
                 .border_style(if focused == FocusedComponent::Input {
-                    Style::default().fg(mode_indicator.1)
+                    Style::default()
+                        .fg(mode_indicator.1)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 });
@@ -3039,9 +3497,9 @@ impl TuiApp {
             };
             let thinking_str = if thinking_mode { " 🧠" } else { "" };
             let connection_str = if editor_connected {
-                ("◉ Connected", Color::Green)
+                ("◉ nvim", Color::Green)
             } else {
-                ("○ Standalone", Color::DarkGray)
+                ("", Color::DarkGray)
             };
             let llm_str = if llm_configured {
                 ("● LLM", Color::Green)
@@ -3049,24 +3507,46 @@ impl TuiApp {
                 ("○ No LLM", Color::Red)
             };
 
-            let mut status_spans = vec![
-                ratatui::text::Span::styled(
-                    format!(" {} ", mode_str.0),
-                    Style::default().fg(mode_str.1),
-                ),
-                ratatui::text::Span::raw("│"),
-                ratatui::text::Span::styled(
+            let mut status_spans = vec![ratatui::text::Span::styled(
+                format!(" {} ", mode_str.0),
+                Style::default().fg(mode_str.1),
+            )];
+
+            // Only show connection status if connected
+            if editor_connected {
+                status_spans.push(ratatui::text::Span::raw("│"));
+                status_spans.push(ratatui::text::Span::styled(
                     format!(" {} ", connection_str.0),
                     Style::default().fg(connection_str.1),
-                ),
-                ratatui::text::Span::raw("│"),
-                ratatui::text::Span::styled(
-                    format!(" {} ", llm_str.0),
-                    Style::default().fg(llm_str.1),
-                ),
-                ratatui::text::Span::raw("│"),
-                ratatui::text::Span::styled(thinking_str, Style::default().fg(Color::Magenta)),
-            ];
+                ));
+            }
+
+            status_spans.push(ratatui::text::Span::raw("│"));
+            status_spans.push(ratatui::text::Span::styled(
+                format!(" {} ", llm_str.0),
+                Style::default().fg(llm_str.1),
+            ));
+
+            if !thinking_str.is_empty() {
+                status_spans.push(ratatui::text::Span::raw("│"));
+                status_spans.push(ratatui::text::Span::styled(
+                    thinking_str,
+                    Style::default().fg(Color::Magenta),
+                ));
+            }
+
+            // Show loading spinner when agent is processing
+            if agent_processing {
+                // Use the stateful spinner frame for smooth animation
+                let spinner_char = SPINNER_FRAMES[self.state.spinner_frame % SPINNER_FRAMES.len()];
+                status_spans.push(ratatui::text::Span::raw("│"));
+                status_spans.push(ratatui::text::Span::styled(
+                    format!(" {} Processing... ", spinner_char),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
 
             // Show current tool being executed (Requirement 4.6)
             if let Some(ref tool) = current_tool {
@@ -3094,7 +3574,24 @@ impl TuiApp {
                 let picker_widget = PickerWidget::new(&self.state.picker);
                 frame.render_widget(picker_widget, area);
             }
+
+            // Render command dropdown overlay if visible (above input area)
+            if self.state.command_dropdown.is_visible() {
+                use super::widgets::CommandDropdownWidget;
+                let cursor_area = chat_chunks[2]; // Input area
+                let dropdown_widget =
+                    CommandDropdownWidget::new(&self.state.command_dropdown, cursor_area);
+                frame.render_widget(dropdown_widget, area);
+            }
         })?;
+
+        // Perform pending auto-scroll after render (when visible_height is updated)
+        if auto_scroll_pending {
+            let width = self.get_message_area_width();
+            self.state.message_list.scroll_to_bottom(width);
+            self.state.auto_scroll_pending = false;
+        }
+
         Ok(())
     }
 
@@ -3120,7 +3617,7 @@ mod tests {
         let state = AppState::new();
         assert!(!state.should_quit);
         assert_eq!(state.mode, AgentMode::Build);
-        assert!(!state.thinking_mode);
+        assert!(state.thinking_mode); // Thinking mode enabled by default
         assert!(!state.editor_connected);
         assert_eq!(state.input_mode, InputMode::Insert); // Start in insert mode
         assert_eq!(state.focused_component, FocusedComponent::Input);

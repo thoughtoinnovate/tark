@@ -257,11 +257,12 @@ impl KeybindingHandler {
 
             // Focus management
             (KeyCode::Tab, KeyModifiers::NONE) => Some(Action::FocusNext),
+            // Shift+Tab cycles through agent modes (Build → Plan → Review)
             (KeyCode::BackTab, KeyModifiers::SHIFT) | (KeyCode::Tab, KeyModifiers::SHIFT) => {
-                Some(Action::FocusPrevious)
+                Some(Action::CycleModeNext)
             }
 
-            // Mode cycling (Ctrl+Tab and Ctrl+Shift+Tab)
+            // Mode cycling (Ctrl+Tab for next, Ctrl+Shift+Tab for previous)
             // Requirements: 13.1 - WHEN the user presses Ctrl+Tab, THE TUI SHALL cycle to the next agent mode
             (KeyCode::Tab, KeyModifiers::CONTROL) => Some(Action::CycleModeNext),
             // Requirements: 13.2 - WHEN the user presses Ctrl+Shift+Tab, THE TUI SHALL cycle to the previous agent mode
@@ -303,7 +304,12 @@ impl KeybindingHandler {
             // Requirements: 11.1 - WHEN the user presses Ctrl+V or Cmd+V, THE TUI SHALL check the clipboard for content
             (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Action::Paste),
 
-            // Mode cycling (Ctrl+Tab and Ctrl+Shift+Tab)
+            // Shift+Tab cycles through agent modes (Build → Plan → Review)
+            (KeyCode::BackTab, KeyModifiers::SHIFT) | (KeyCode::Tab, KeyModifiers::SHIFT) => {
+                Some(Action::CycleModeNext)
+            }
+
+            // Mode cycling (Ctrl+Tab for next, Ctrl+Shift+Tab for previous)
             // Requirements: 13.1 - WHEN the user presses Ctrl+Tab, THE TUI SHALL cycle to the next agent mode
             (KeyCode::Tab, KeyModifiers::CONTROL) => Some(Action::CycleModeNext),
             // Requirements: 13.2 - WHEN the user presses Ctrl+Shift+Tab, THE TUI SHALL cycle to the previous agent mode
@@ -467,10 +473,10 @@ mod tests {
         let action = handler.handle_normal_mode(make_key_event(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(action, Some(Action::FocusNext));
 
-        // Shift-Tab for focus previous
+        // Shift-Tab for cycling modes (changed from focus previous)
         let action =
             handler.handle_normal_mode(make_key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(action, Some(Action::FocusPrevious));
+        assert_eq!(action, Some(Action::CycleModeNext));
     }
 
     #[test]

@@ -288,10 +288,29 @@ impl AgentBridge {
 
     /// List available models for the current provider
     /// Returns a list of (model_id, display_name, description) tuples
+    /// Uses models.dev API for dynamic model listing with fallback to hardcoded list
     pub async fn list_available_models(&self) -> Vec<(String, String, String)> {
+        // Try to fetch from models.dev first
+        let models_db = crate::llm::models_db();
+        if let Ok(models) = models_db.list_models(&self.provider_name).await {
+            if !models.is_empty() {
+                let mut result: Vec<(String, String, String)> = models
+                    .into_iter()
+                    .map(|m| {
+                        let desc = m.capability_summary();
+                        (m.id, m.name, desc)
+                    })
+                    .collect();
+                // Sort by model name
+                result.sort_by(|a, b| a.1.cmp(&b.1));
+                return result;
+            }
+        }
+
+        // Fallback to provider-specific API or hardcoded list
         match self.provider_name.as_str() {
             "openai" | "gpt" => {
-                // Try to fetch from API
+                // Try to fetch from OpenAI API
                 if let Ok(provider) = crate::llm::OpenAiProvider::new() {
                     if let Ok(models) = provider.list_models().await {
                         let mut result: Vec<(String, String, String)> = models
@@ -370,6 +389,7 @@ impl AgentBridge {
                 ]
             }
             "ollama" | "local" => {
+                // Fallback to hardcoded list (Ollama API doesn't have list_models)
                 vec![
                     (
                         "llama3.2".into(),
@@ -514,7 +534,10 @@ impl AgentBridge {
         }
     }
 
-    /// Send a message with event streaming
+    /// Send a message with real-time streaming
+    ///
+    /// Uses the LLM's native streaming API to emit TextChunk and ThinkingChunk
+    /// events as they arrive, enabling real-time display in the TUI.
     pub async fn send_message_streaming(
         &mut self,
         message: &str,
@@ -539,10 +562,33 @@ impl AgentBridge {
         let interrupt_flag = self.interrupt_flag.clone();
         let interrupt_check = move || interrupt_flag.load(Ordering::SeqCst);
 
-        // Send to agent
+        // Clone event_tx for use in callbacks
+        let text_tx = event_tx.clone();
+        let thinking_tx = event_tx.clone();
+        let tool_tx = event_tx.clone();
+
+        // Create streaming callbacks
+        let on_text = move |chunk: String| {
+            let _ = text_tx.try_send(AgentEvent::TextChunk(chunk));
+        };
+
+        let on_thinking = move |chunk: String| {
+            let _ = thinking_tx.try_send(AgentEvent::ThinkingChunk(chunk));
+        };
+
+        let on_tool_call = move |name: String, args: String| {
+            let args_value: serde_json::Value =
+                serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+            let _ = tool_tx.try_send(AgentEvent::ToolCallStarted {
+                tool: name,
+                args: args_value,
+            });
+        };
+
+        // Send to agent with streaming callbacks
         let result = self
             .agent
-            .chat_with_interrupt(message, interrupt_check)
+            .chat_streaming(message, interrupt_check, on_text, on_thinking, on_tool_call)
             .await;
 
         // Clear processing flag
@@ -558,10 +604,21 @@ impl AgentBridge {
                     self.current_session
                         .add_message("assistant", &response.text);
 
-                    // Update token counts
+                    // Update token counts and calculate cost
                     if let Some(usage) = &response.usage {
                         self.current_session.input_tokens += usage.input_tokens as usize;
                         self.current_session.output_tokens += usage.output_tokens as usize;
+
+                        // Calculate cost using models.dev database
+                        let cost = crate::llm::models_db()
+                            .calculate_cost(
+                                &self.provider_name,
+                                &self.model_name,
+                                usage.input_tokens,
+                                usage.output_tokens,
+                            )
+                            .await;
+                        self.current_session.total_cost += cost;
                     }
 
                     // Send completed event

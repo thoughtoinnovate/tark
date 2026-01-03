@@ -4,6 +4,7 @@
 
 mod attachment_bar;
 pub mod collapsible;
+mod command_dropdown;
 mod input;
 mod message_list;
 pub mod panel;
@@ -17,8 +18,9 @@ pub use collapsible::{
     BlockType, CollapsibleBlock, CollapsibleBlockState, ContentSegment, ParsedMessageContent,
     ToolCallInfo,
 };
+pub use command_dropdown::{CommandDropdown, CommandDropdownItem, CommandDropdownWidget};
 pub use input::{InputWidget, InputWidgetRenderer};
-pub use message_list::{ChatMessage, MessageList, Role};
+pub use message_list::{ChatMessage, MessageList, MessageListWidget, Role};
 pub use panel::{
     ContextInfo, EnhancedPanelData, EnhancedPanelSection, EnhancedPanelWidget, FileItem,
     NotificationLevel, PanelDataProvider, PanelSection, PanelSectionState, PanelWidget,

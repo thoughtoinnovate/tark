@@ -283,3 +283,111 @@ pub struct CompletionResult {
     pub text: String,
     pub usage: Option<TokenUsage>,
 }
+
+// ============================================================================
+// Streaming Types
+// ============================================================================
+
+/// Events emitted during streaming responses
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// Regular text chunk from the assistant
+    TextDelta(String),
+    /// Thinking/reasoning content (e.g., Claude extended thinking)
+    ThinkingDelta(String),
+    /// Tool call started
+    ToolCallStart { id: String, name: String },
+    /// Tool call arguments chunk (arguments come incrementally)
+    ToolCallDelta { id: String, arguments_delta: String },
+    /// Tool call completed (all arguments received)
+    ToolCallComplete { id: String },
+    /// Stream completed successfully
+    Done,
+    /// Error during streaming
+    Error(String),
+}
+
+/// Callback type for streaming events
+///
+/// This is called for each chunk as it arrives from the LLM.
+/// Implementations should be fast and non-blocking.
+pub type StreamCallback = Box<dyn Fn(StreamEvent) + Send + Sync>;
+
+/// Builder for accumulating streaming response
+#[derive(Debug, Default)]
+pub struct StreamingResponseBuilder {
+    /// Accumulated text content
+    pub text: String,
+    /// Accumulated thinking content
+    pub thinking: String,
+    /// Tool calls being built (id -> (name, accumulated_args))
+    pub tool_calls: std::collections::HashMap<String, (String, String)>,
+    /// Token usage (if provided at end)
+    pub usage: Option<TokenUsage>,
+}
+
+impl StreamingResponseBuilder {
+    /// Create a new builder
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Process a stream event and accumulate content
+    pub fn process(&mut self, event: &StreamEvent) {
+        match event {
+            StreamEvent::TextDelta(text) => {
+                self.text.push_str(text);
+            }
+            StreamEvent::ThinkingDelta(text) => {
+                self.thinking.push_str(text);
+            }
+            StreamEvent::ToolCallStart { id, name } => {
+                self.tool_calls
+                    .insert(id.clone(), (name.clone(), String::new()));
+            }
+            StreamEvent::ToolCallDelta {
+                id,
+                arguments_delta,
+            } => {
+                if let Some((_, args)) = self.tool_calls.get_mut(id) {
+                    args.push_str(arguments_delta);
+                }
+            }
+            StreamEvent::ToolCallComplete { .. } | StreamEvent::Done | StreamEvent::Error(_) => {}
+        }
+    }
+
+    /// Build the final LlmResponse
+    pub fn build(self) -> LlmResponse {
+        let tool_calls: Vec<ToolCall> = self
+            .tool_calls
+            .into_iter()
+            .map(|(id, (name, args))| {
+                let arguments = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+                ToolCall {
+                    id,
+                    name,
+                    arguments,
+                }
+            })
+            .collect();
+
+        if tool_calls.is_empty() {
+            LlmResponse::Text {
+                text: self.text,
+                usage: self.usage,
+            }
+        } else if self.text.is_empty() {
+            LlmResponse::ToolCalls {
+                calls: tool_calls,
+                usage: self.usage,
+            }
+        } else {
+            LlmResponse::Mixed {
+                text: Some(self.text),
+                tool_calls,
+                usage: self.usage,
+            }
+        }
+    }
+}

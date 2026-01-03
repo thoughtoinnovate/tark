@@ -4,7 +4,7 @@
 
 use super::{
     CodeIssue, CompletionResult, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role,
-    TokenUsage, ToolCall, ToolDefinition,
+    StreamCallback, StreamEvent, StreamingResponseBuilder, TokenUsage, ToolCall, ToolDefinition,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -193,6 +193,132 @@ impl LlmProvider for OllamaProvider {
             text: response.message.content,
             usage: None, // Ollama doesn't provide usage info
         })
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true // Ollama supports native streaming
+    }
+
+    async fn chat_streaming(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+    ) -> Result<LlmResponse> {
+        use futures::StreamExt;
+
+        let ollama_messages = self.convert_messages(messages);
+
+        // Handle tools via prompting (same as non-streaming)
+        let (messages_to_send, has_tools) = if let Some(tools) = tools {
+            if !tools.is_empty() {
+                let tool_desc = tools
+                    .iter()
+                    .map(|t| format!("- {}: {}", t.name, t.description))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let mut modified_messages = ollama_messages.clone();
+
+                if let Some(sys_msg) = modified_messages.iter_mut().find(|m| m.role == "system") {
+                    sys_msg.content = format!(
+                        "{}\n\nYou have access to these tools:\n{}\n\nTo use a tool, respond with JSON: {{\"tool\": \"name\", \"args\": {{...}}}}",
+                        sys_msg.content, tool_desc
+                    );
+                } else {
+                    modified_messages.insert(0, OllamaMessage {
+                        role: "system".to_string(),
+                        content: format!(
+                            "You have access to these tools:\n{}\n\nTo use a tool, respond with JSON: {{\"tool\": \"name\", \"args\": {{...}}}}",
+                            tool_desc
+                        ),
+                    });
+                }
+
+                (modified_messages, true)
+            } else {
+                (ollama_messages, false)
+            }
+        } else {
+            (ollama_messages, false)
+        };
+
+        let request = OllamaRequest {
+            model: self.model.clone(),
+            messages: messages_to_send,
+            stream: true, // Enable streaming
+        };
+
+        let url = format!("{}/api/chat", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send streaming request to Ollama")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            callback(StreamEvent::Error(format!(
+                "Ollama API error ({}): {}",
+                status, error_text
+            )));
+            anyhow::bail!("Ollama API error ({}): {}", status, error_text);
+        }
+
+        // Process newline-delimited JSON stream
+        let mut builder = StreamingResponseBuilder::new();
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.context("Error reading stream chunk")?;
+            let chunk_str = String::from_utf8_lossy(&chunk);
+
+            buffer.push_str(&chunk_str);
+
+            // Process complete lines (newline-delimited JSON)
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() {
+                    continue;
+                }
+
+                // Parse the JSON chunk
+                if let Ok(chunk) = serde_json::from_str::<OllamaStreamChunk>(&line) {
+                    if chunk.done {
+                        callback(StreamEvent::Done);
+                        continue;
+                    }
+
+                    if let Some(message) = chunk.message {
+                        if !message.content.is_empty() {
+                            let event = StreamEvent::TextDelta(message.content);
+                            builder.process(&event);
+                            callback(event);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try to parse tool call from accumulated text (if tools were provided)
+        let final_text = builder.text.clone();
+        if has_tools {
+            if let Some(tool_call) = self.parse_tool_call(&final_text) {
+                return Ok(LlmResponse::ToolCalls {
+                    calls: vec![tool_call],
+                    usage: None,
+                });
+            }
+        }
+
+        Ok(builder.build())
     }
 
     async fn complete_fim(
@@ -413,4 +539,13 @@ struct OllamaGenerateRequest {
 #[derive(Debug, Deserialize)]
 struct OllamaGenerateResponse {
     response: String,
+}
+
+// Streaming response type
+#[derive(Debug, Deserialize)]
+struct OllamaStreamChunk {
+    #[serde(default)]
+    message: Option<OllamaMessage>,
+    #[serde(default)]
+    done: bool,
 }
