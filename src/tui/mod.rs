@@ -15,6 +15,7 @@ pub mod config;
 pub mod editor_bridge;
 mod events;
 pub mod keybindings;
+pub mod osc52;
 pub mod plan_manager;
 pub mod prompt_history;
 pub mod usage_manager;

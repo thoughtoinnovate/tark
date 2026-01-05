@@ -3,6 +3,10 @@
 //! Provides clipboard access for paste operations, detecting content type
 //! (image, file path, text) and handling appropriately.
 //!
+//! Supports two clipboard backends:
+//! 1. `arboard` - Native clipboard access (requires display server)
+//! 2. `OSC 52` - Terminal escape sequences (works over SSH)
+//!
 //! Requirements: 11.1
 
 #![allow(dead_code)]
@@ -14,6 +18,7 @@ use arboard::Clipboard;
 use super::attachments::{
     Attachment, AttachmentContent, AttachmentError, AttachmentType, ImageFormat,
 };
+use super::osc52::Osc52Clipboard;
 
 /// Content retrieved from the clipboard
 #[derive(Debug, Clone)]
@@ -163,6 +168,67 @@ impl ClipboardHandler {
             AttachmentContent::Base64(encoded),
         )
     }
+}
+
+/// Try to get clipboard content using multiple backends
+///
+/// This function tries native clipboard (arboard) first, then falls back
+/// to OSC 52 for text content. This allows clipboard to work over SSH.
+///
+/// Returns:
+/// - ClipboardContent::Image if image found (arboard only, OSC 52 doesn't support images well)
+/// - ClipboardContent::FilePath if text looks like a file path
+/// - ClipboardContent::Text for plain text
+/// - ClipboardContent::Empty if nothing found
+pub fn get_clipboard_with_fallback() -> Result<ClipboardContent, AttachmentError> {
+    // Try native clipboard first (arboard)
+    if let Ok(mut handler) = ClipboardHandler::new() {
+        if let Ok(content) = handler.get_content() {
+            match &content {
+                ClipboardContent::Empty => {
+                    // Fall through to OSC 52
+                }
+                _ => return Ok(content),
+            }
+        }
+    }
+
+    // Fallback to OSC 52 for text (works over SSH)
+    // Note: OSC 52 read support is limited, so this may not work
+    // on all terminals. The /attach command is a more reliable alternative.
+    tracing::debug!("Trying OSC 52 clipboard fallback");
+
+    match Osc52Clipboard::read_text(std::time::Duration::from_millis(500)) {
+        Ok(Some(text)) => {
+            if is_file_path(&text) {
+                Ok(ClipboardContent::FilePath(text))
+            } else {
+                Ok(ClipboardContent::Text(text))
+            }
+        }
+        Ok(None) => Ok(ClipboardContent::Empty),
+        Err(e) => {
+            tracing::debug!("OSC 52 read failed: {}", e);
+            Ok(ClipboardContent::Empty)
+        }
+    }
+}
+
+/// Copy text to clipboard using the best available method
+///
+/// Tries arboard first, falls back to OSC 52.
+/// OSC 52 write is more widely supported than read.
+pub fn copy_to_clipboard(text: &str) -> Result<(), AttachmentError> {
+    // Try native clipboard first
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        if clipboard.set_text(text).is_ok() {
+            return Ok(());
+        }
+    }
+
+    // Fallback to OSC 52 (works over SSH if terminal supports it)
+    Osc52Clipboard::write_text(text)
+        .map_err(|e| AttachmentError::ClipboardError(format!("OSC 52 write failed: {}", e)))
 }
 
 /// Check if a string looks like a file path

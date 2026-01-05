@@ -1929,12 +1929,52 @@ impl TuiApp {
                 self.handle_interrupt_with_quit(false);
             }
             CommandResult::AttachFile(path) => {
-                // TODO: Implement file attachment with AttachmentManager
-                self.state.status_message = Some(format!("Attaching file: {}", path));
+                // Implement file attachment with AttachmentManager
+                if path.is_empty() {
+                    self.state.status_message = Some("Usage: /attach <file_path>".to_string());
+                } else {
+                    match super::attachments::resolve_file_path(&path) {
+                        Ok(resolved_path) => {
+                            let config = self.state.config.to_attachment_config();
+                            let mut manager = super::attachments::AttachmentManager::new(config);
+
+                            // Transfer existing attachments to manager for limit checking
+                            for attachment in self.state.attachments.drain(..) {
+                                let _ = manager.add(attachment);
+                            }
+
+                            match manager.attach_file(&resolved_path) {
+                                Ok(attachment) => {
+                                    let filename = attachment.filename.clone();
+                                    let file_type = match &attachment.file_type {
+                                        super::attachments::AttachmentType::Image { .. } => "📷",
+                                        super::attachments::AttachmentType::Text { .. } => "📝",
+                                        super::attachments::AttachmentType::Document { .. } => "📄",
+                                        super::attachments::AttachmentType::Data { .. } => "📊",
+                                    };
+                                    // Transfer all attachments back
+                                    self.state.attachments = manager.take_all();
+                                    self.state.status_message =
+                                        Some(format!("{} Attached: {}", file_type, filename));
+                                }
+                                Err(e) => {
+                                    // Restore attachments
+                                    self.state.attachments = manager.take_all();
+                                    self.state.status_message =
+                                        Some(format!("❌ Cannot attach: {}", e));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.state.status_message = Some(format!("❌ File not found: {}", e));
+                        }
+                    }
+                }
             }
             CommandResult::ClearAttachments => {
-                // TODO: Implement clearing attachments with AttachmentManager
-                self.state.status_message = Some("Attachments cleared".to_string());
+                let count = self.state.attachments.len();
+                self.state.attachments.clear();
+                self.state.status_message = Some(format!("Cleared {} attachment(s)", count));
             }
             CommandResult::Error(msg) => {
                 self.state
@@ -2125,24 +2165,23 @@ impl TuiApp {
     /// - File paths: attach the file (Requirements 11.3)
     /// - Text: paste into input field (Requirements 11.4)
     ///
+    /// Uses multiple clipboard backends:
+    /// 1. Native clipboard (arboard) - works with display server
+    /// 2. OSC 52 fallback - works over SSH with supported terminals
+    ///
     /// Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7
     fn handle_clipboard_paste(&mut self) {
-        use super::clipboard::{ClipboardContent, ClipboardHandler};
+        use super::clipboard::{get_clipboard_with_fallback, ClipboardContent, ClipboardHandler};
 
-        // Try to create clipboard handler
-        let mut handler = match ClipboardHandler::new() {
-            Ok(h) => h,
-            Err(e) => {
-                self.state.status_message = Some(format!("Clipboard error: {}", e));
-                return;
-            }
-        };
-
-        // Get clipboard content
-        let content = match handler.get_content() {
+        // Try to get clipboard content with fallback to OSC 52
+        let content = match get_clipboard_with_fallback() {
             Ok(c) => c,
             Err(e) => {
-                self.state.status_message = Some(format!("Clipboard error: {}", e));
+                // Provide helpful error message for SSH users
+                self.state.status_message = Some(format!(
+                    "Clipboard error: {}. Try /attach <file> instead.",
+                    e
+                ));
                 return;
             }
         };
@@ -2221,7 +2260,10 @@ impl TuiApp {
                 // Don't show status message for text paste - it's the expected behavior
             }
             ClipboardContent::Empty => {
-                self.state.status_message = Some("Clipboard is empty".to_string());
+                // Provide helpful message - clipboard might not work over SSH
+                self.state.status_message = Some(
+                    "Clipboard empty or unavailable. Use /attach <file> for files.".to_string(),
+                );
             }
         }
     }
