@@ -250,6 +250,11 @@ impl PanelSectionState {
         self.cost_breakdown_expanded = true;
     }
 
+    /// Toggle the cost breakdown accordion
+    pub fn toggle_cost_breakdown(&mut self) {
+        self.cost_breakdown_expanded = !self.cost_breakdown_expanded;
+    }
+
     /// Mark a section as having unread activity
     pub fn mark_unread(&mut self, section: EnhancedPanelSection) {
         match section {

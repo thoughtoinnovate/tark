@@ -1381,28 +1381,37 @@ impl TuiApp {
         }
 
         // Estimate section positions (this is approximate)
-        // Session header is at row ~1-2
+        // Session header is at row ~1
+        // Cost line is at row ~4 (when session expanded, shows 💰)
         // Context header is at row ~5-6 (if session expanded)
         // Tasks header is at row ~9-10 (if context expanded)
         // Files header is at row ~13+ (depends on tasks count)
 
-        // For now, just toggle the focused section on any click
-        if row < 5 {
+        // Check for cost line click (around row 4-5 when session is expanded)
+        // The cost line shows "💰 $X.XXXX ▶" - clicking it toggles the breakdown
+        if (row == 4 || row == 5) && self.state.panel_section_state.session_expanded {
+            self.state.panel_section_state.toggle_cost_breakdown();
+            return;
+        }
+
+        // For other clicks, toggle the focused section
+        if row <= 2 {
             self.state.panel_section_state.focused_section =
                 super::widgets::EnhancedPanelSection::Session;
+            self.state.panel_section_state.toggle_focused();
         } else if row < 9 {
             self.state.panel_section_state.focused_section =
                 super::widgets::EnhancedPanelSection::Context;
+            self.state.panel_section_state.toggle_focused();
         } else if row < 15 {
             self.state.panel_section_state.focused_section =
                 super::widgets::EnhancedPanelSection::Tasks;
+            self.state.panel_section_state.toggle_focused();
         } else {
             self.state.panel_section_state.focused_section =
                 super::widgets::EnhancedPanelSection::Files;
+            self.state.panel_section_state.toggle_focused();
         }
-
-        // Toggle the section that was clicked
-        self.state.panel_section_state.toggle_focused();
     }
 
     /// Handle an action from the keybinding handler
