@@ -34,6 +34,17 @@ struct CopilotToken {
     expires_at: u64, // Unix timestamp
 }
 
+/// Guard to ensure the pending auth file is cleaned up on success or failure
+struct AuthFileGuard {
+    path: PathBuf,
+}
+
+impl Drop for AuthFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 impl CopilotToken {
     /// Extract SKU from token string (free_limited_copilot, copilot_enterprise, etc.)
     fn get_sku(&self) -> Option<String> {
@@ -217,6 +228,9 @@ impl CopilotProvider {
         // Step 1: Request device code
         let device_response = self.request_device_code().await?;
 
+        // Track auth file path so we can clean it up on success or failure
+        let mut auth_file_path: Option<PathBuf> = None;
+
         // Step 2: Write auth info to file for TUI to pick up
         // TUI checks this file and shows auth dialog
         if let Some(home) = dirs::home_dir() {
@@ -229,8 +243,14 @@ impl CopilotProvider {
                 let _ = writeln!(f, "Enter code: {}", device_response.user_code);
                 let _ = f.flush();
             }
+            auth_file_path = Some(auth_file);
         }
-        
+
+        // Ensure the file is cleaned up no matter what happens
+        let _auth_guard = auth_file_path
+            .as_ref()
+            .map(|path| AuthFileGuard { path: path.clone() });
+
         tracing::info!(
             "GitHub Copilot auth: visit {} and enter code {}",
             device_response.verification_uri,
@@ -249,10 +269,9 @@ impl CopilotProvider {
         tracing::info!("✅ Successfully authenticated with GitHub!\n");
         tracing::info!("📝 Exchanging for Copilot token...");
 
-        // Clean up auth pending file
-        if let Some(home) = dirs::home_dir() {
-            let auth_file = home.join(".tark").join("copilot_auth_pending.txt");
-            let _ = std::fs::remove_file(auth_file);
+        // Clean up auth pending file (guard will also run on drop)
+        if let Some(path) = auth_file_path.as_ref() {
+            let _ = std::fs::remove_file(path);
         }
 
         // Step 4: Exchange OAuth token for Copilot token

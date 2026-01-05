@@ -1157,9 +1157,11 @@ impl TuiApp {
                 // Check for rate limit retry (Requirements 7.4)
                 self.check_rate_limit_retry();
 
-                // Check for Copilot auth pending file
+                // Check for Copilot auth pending file and detect visibility changes
+                let was_visible = self.state.auth_dialog.is_visible();
                 self.check_copilot_auth_pending();
-                Ok(false)
+                let visibility_changed = was_visible != self.state.auth_dialog.is_visible();
+                Ok(visibility_changed)
             }
         }
     }
@@ -3394,9 +3396,17 @@ impl TuiApp {
             } else {
                 // No terminal event - check for periodic tasks
                 self.check_rate_limit_retry();
-                self.check_copilot_auth_pending();
 
-                if agent_events_processed || needs_spinner_update || self.state.auth_dialog.is_visible() {
+                // Track auth dialog visibility changes to force redraw when it opens/closes
+                let auth_visible_before = self.state.auth_dialog.is_visible();
+                self.check_copilot_auth_pending();
+                let auth_visibility_changed = auth_visible_before != self.state.auth_dialog.is_visible();
+
+                if agent_events_processed
+                    || needs_spinner_update
+                    || auth_visibility_changed
+                    || self.state.auth_dialog.is_visible()
+                {
                     // Re-render for agent updates, spinner animation, or auth dialog
                     self.render()?;
                 }
