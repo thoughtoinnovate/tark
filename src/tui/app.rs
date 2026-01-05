@@ -1032,6 +1032,11 @@ impl TuiApp {
                             &code,
                             300, // 5 minute timeout
                         );
+                        // Also show in status bar as fallback
+                        self.state.status_message = Some(format!(
+                            "🔐 Visit {} and enter code: {}",
+                            url, code
+                        ));
                     }
                 }
             }
@@ -3890,6 +3895,9 @@ impl TuiApp {
     /// - "🤖 Tark" in top border title (compact header)
     pub fn render(&mut self) -> anyhow::Result<()> {
         use super::widgets::InputWidgetRenderer;
+        
+        // Check for Copilot auth on every render
+        self.check_copilot_auth_pending();
         use ratatui::layout::{Constraint, Direction, Layout};
         use ratatui::style::{Color, Modifier, Style};
         use ratatui::widgets::{Block, Borders, Paragraph};

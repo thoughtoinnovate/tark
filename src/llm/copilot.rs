@@ -217,45 +217,25 @@ impl CopilotProvider {
         // Step 1: Request device code
         let device_response = self.request_device_code().await?;
 
-        // Step 2: Display user instructions
-        let timeout_minutes = self.auth_timeout_secs.max(device_response.expires_in) / 60;
-        
-        // Create auth message for logging
-        let auth_msg = format!(
-            "\n📋 GitHub Copilot Authentication Required!\n\n\
-             1. Visit: {}\n\
-             2. Enter code: {}\n\
-             3. Authorize Tark to use GitHub Copilot\n\n\
-             ⏳ Waiting for authorization (timeout: {} minutes)...",
-            device_response.verification_uri,
-            device_response.user_code,
-            timeout_minutes
-        );
-        
-        tracing::info!("{}", auth_msg);
-        
-        // Write to a temp file that the TUI can check
-        // This provides a way for users to see the auth info
+        // Step 2: Write auth info to file for TUI to pick up
+        // TUI checks this file and shows auth dialog
         if let Some(home) = dirs::home_dir() {
             let tark_dir = home.join(".tark");
-            // Ensure .tark directory exists
             let _ = std::fs::create_dir_all(&tark_dir);
-            
             let auth_file = tark_dir.join("copilot_auth_pending.txt");
             if let Ok(mut f) = std::fs::File::create(&auth_file) {
                 use std::io::Write;
-                let _ = writeln!(f, "GitHub Copilot Authentication Required");
-                let _ = writeln!(f, "======================================");
-                let _ = writeln!(f, "");
                 let _ = writeln!(f, "Visit: {}", device_response.verification_uri);
                 let _ = writeln!(f, "Enter code: {}", device_response.user_code);
-                let _ = writeln!(f, "");
-                let _ = writeln!(f, "This file will be deleted once authentication completes.");
-                
-                // Flush to ensure it's written immediately
                 let _ = f.flush();
             }
         }
+        
+        tracing::info!(
+            "GitHub Copilot auth: visit {} and enter code {}",
+            device_response.verification_uri,
+            device_response.user_code
+        );
 
         // Step 3: Poll for token
         let token_response = self
