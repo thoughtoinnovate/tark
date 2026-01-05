@@ -6,8 +6,9 @@
 #![allow(dead_code)]
 
 use super::{
-    CodeIssue, CompletionResult, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role,
-    StreamCallback, StreamEvent, StreamingResponseBuilder, TokenUsage, ToolDefinition,
+    CodeIssue, CompletionResult, ContentPart, LlmProvider, LlmResponse, Message, MessageContent,
+    RefactoringSuggestion, Role, StreamCallback, StreamEvent, StreamingResponseBuilder, TokenUsage,
+    ToolDefinition,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -399,7 +400,7 @@ impl CopilotProvider {
     }
 
     /// Convert our messages to OpenAI format (Copilot uses OpenAI-compatible API)
-    fn convert_messages(&self, messages: &[Message]) -> Vec<OpenAiMessage> {
+    fn convert_messages(&self, messages: &[Message]) -> Vec<CopilotMessage> {
         messages
             .iter()
             .filter_map(|msg| {
@@ -407,15 +408,87 @@ impl CopilotProvider {
                     Role::System => "system",
                     Role::User => "user",
                     Role::Assistant => "assistant",
-                    Role::Tool => return None, // Copilot doesn't support tool role directly
+                    Role::Tool => "tool",
                 };
 
-                let content = msg.content.as_text()?.to_string();
+                // Handle different message content types
+                match &msg.content {
+                    MessageContent::Text(text) => Some(CopilotMessage {
+                        role: role.to_string(),
+                        content: Some(text.clone()),
+                        tool_calls: None,
+                        tool_call_id: msg.tool_call_id.clone(),
+                    }),
+                    MessageContent::Parts(parts) => {
+                        // Check if this is an assistant message with tool calls
+                        let tool_calls: Vec<CopilotToolCall> = parts
+                            .iter()
+                            .filter_map(|p| {
+                                if let ContentPart::ToolUse { id, name, input } = p {
+                                    Some(CopilotToolCall {
+                                        id: id.clone(),
+                                        call_type: "function".to_string(),
+                                        function: CopilotFunctionCall {
+                                            name: name.clone(),
+                                            arguments: serde_json::to_string(input)
+                                                .unwrap_or_default(),
+                                        },
+                                    })
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
 
-                Some(OpenAiMessage {
-                    role: role.to_string(),
-                    content,
-                })
+                        if !tool_calls.is_empty() && msg.role == Role::Assistant {
+                            // Assistant message with tool calls - no content
+                            Some(CopilotMessage {
+                                role: role.to_string(),
+                                content: None,
+                                tool_calls: Some(tool_calls),
+                                tool_call_id: None,
+                            })
+                        } else {
+                            // Extract text from parts
+                            let text: String = parts
+                                .iter()
+                                .filter_map(|p| {
+                                    if let ContentPart::Text { text } = p {
+                                        Some(text.as_str())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("");
+
+                            if text.is_empty() {
+                                None
+                            } else {
+                                Some(CopilotMessage {
+                                    role: role.to_string(),
+                                    content: Some(text),
+                                    tool_calls: None,
+                                    tool_call_id: msg.tool_call_id.clone(),
+                                })
+                            }
+                        }
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn convert_tools(&self, tools: &[ToolDefinition]) -> Vec<CopilotTool> {
+        tools
+            .iter()
+            .map(|t| CopilotTool {
+                tool_type: "function".to_string(),
+                function: CopilotFunction {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: t.parameters.clone(),
+                },
             })
             .collect()
     }
@@ -459,9 +532,8 @@ impl LlmProvider for CopilotProvider {
     async fn chat(
         &self,
         messages: &[Message],
-        _tools: Option<&[ToolDefinition]>,
+        tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse> {
-        // Note: Copilot API doesn't support tools in the same way, so we ignore them
         let mut provider = Self {
             client: self.client.clone(),
             token: self.token.clone(),
@@ -473,12 +545,22 @@ impl LlmProvider for CopilotProvider {
 
         let copilot_messages = provider.convert_messages(messages);
 
-        let request = CopilotRequest {
+        let mut request = CopilotRequest {
             model: provider.model.clone(),
             max_tokens: Some(provider.max_tokens),
             messages: copilot_messages,
             stream: None,
+            tools: None,
+            tool_choice: None,
         };
+
+        // Add tools if provided
+        if let Some(tools) = tools {
+            if !tools.is_empty() {
+                request.tools = Some(provider.convert_tools(tools));
+                request.tool_choice = Some("auto".to_string());
+            }
+        }
 
         let response = provider.send_request(request).await?;
 
@@ -489,8 +571,25 @@ impl LlmProvider for CopilotProvider {
         });
 
         if let Some(choice) = response.choices.first() {
+            // Check if the response contains tool calls
+            if let Some(ref tool_calls) = choice.message.tool_calls {
+                if !tool_calls.is_empty() {
+                    let calls: Vec<super::types::ToolCall> = tool_calls
+                        .iter()
+                        .map(|tc| super::types::ToolCall {
+                            id: tc.id.clone(),
+                            name: tc.function.name.clone(),
+                            arguments: serde_json::from_str(&tc.function.arguments)
+                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                        })
+                        .collect();
+
+                    return Ok(LlmResponse::ToolCalls { calls, usage });
+                }
+            }
+
             Ok(LlmResponse::Text {
-                text: choice.message.content.clone(),
+                text: choice.message.content.clone().unwrap_or_default(),
                 usage,
             })
         } else {
@@ -508,10 +607,11 @@ impl LlmProvider for CopilotProvider {
     async fn chat_streaming(
         &self,
         messages: &[Message],
-        _tools: Option<&[ToolDefinition]>,
+        tools: Option<&[ToolDefinition]>,
         callback: StreamCallback,
     ) -> Result<LlmResponse> {
         use futures::StreamExt;
+        use std::collections::HashMap;
 
         let mut provider = Self {
             client: self.client.clone(),
@@ -525,12 +625,22 @@ impl LlmProvider for CopilotProvider {
         let token = provider.ensure_token().await?;
         let copilot_messages = provider.convert_messages(messages);
 
-        let request = CopilotRequest {
+        let mut request = CopilotRequest {
             model: provider.model.clone(),
             max_tokens: Some(provider.max_tokens),
             messages: copilot_messages,
             stream: Some(true),
+            tools: None,
+            tool_choice: None,
         };
+
+        // Add tools if provided
+        if let Some(tools) = tools {
+            if !tools.is_empty() {
+                request.tools = Some(provider.convert_tools(tools));
+                request.tool_choice = Some("auto".to_string());
+            }
+        }
 
         let response = provider
             .client
@@ -560,6 +670,9 @@ impl LlmProvider for CopilotProvider {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
 
+        // Track tool calls being built up from streaming chunks
+        let mut tool_call_builders: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (id, name, arguments)
+
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.context("Error reading stream chunk")?;
             let chunk_str = String::from_utf8_lossy(&chunk);
@@ -582,11 +695,33 @@ impl LlmProvider for CopilotProvider {
 
                     if let Ok(chunk) = serde_json::from_str::<CopilotStreamChunk>(json_str) {
                         if let Some(choice) = chunk.choices.first() {
+                            // Handle text content
                             if let Some(content) = &choice.delta.content {
                                 if !content.is_empty() {
                                     let event = StreamEvent::TextDelta(content.clone());
                                     builder.process(&event);
                                     callback(event);
+                                }
+                            }
+
+                            // Handle tool calls (streaming)
+                            if let Some(ref tool_calls) = choice.delta.tool_calls {
+                                for tc in tool_calls {
+                                    let entry = tool_call_builders
+                                        .entry(tc.index)
+                                        .or_insert_with(|| (String::new(), String::new(), String::new()));
+
+                                    if let Some(ref id) = tc.id {
+                                        entry.0 = id.clone();
+                                    }
+                                    if let Some(ref func) = tc.function {
+                                        if let Some(ref name) = func.name {
+                                            entry.1 = name.clone();
+                                        }
+                                        if let Some(ref args) = func.arguments {
+                                            entry.2.push_str(args);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -601,6 +736,40 @@ impl LlmProvider for CopilotProvider {
                     }
                 }
             }
+        }
+
+        // If we have tool calls, return them
+        if !tool_call_builders.is_empty() {
+            let mut calls: Vec<super::types::ToolCall> = tool_call_builders
+                .into_iter()
+                .map(|(_, (id, name, arguments))| super::types::ToolCall {
+                    id,
+                    name,
+                    arguments: serde_json::from_str(&arguments)
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                })
+                .collect();
+            calls.sort_by(|a, b| a.id.cmp(&b.id));
+
+            // Emit tool call events
+            for call in &calls {
+                callback(StreamEvent::ToolCallStart {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                });
+                callback(StreamEvent::ToolCallDelta {
+                    id: call.id.clone(),
+                    arguments_delta: serde_json::to_string(&call.arguments).unwrap_or_default(),
+                });
+                callback(StreamEvent::ToolCallComplete {
+                    id: call.id.clone(),
+                });
+            }
+
+            return Ok(LlmResponse::ToolCalls {
+                calls,
+                usage: builder.usage,
+            });
         }
 
         Ok(builder.build())
@@ -632,22 +801,28 @@ impl LlmProvider for CopilotProvider {
             model: provider.model.clone(),
             max_tokens: Some(256),
             messages: vec![
-                OpenAiMessage {
+                CopilotMessage {
                     role: "system".to_string(),
-                    content: system,
+                    content: Some(system),
+                    tool_calls: None,
+                    tool_call_id: None,
                 },
-                OpenAiMessage {
+                CopilotMessage {
                     role: "user".to_string(),
-                    content: user_content,
+                    content: Some(user_content),
+                    tool_calls: None,
+                    tool_call_id: None,
                 },
             ],
             stream: None,
+            tools: None,
+            tool_choice: None,
         };
 
         let response = provider.send_request(request).await?;
 
         let text = if let Some(choice) = response.choices.first() {
-            choice.message.content.trim().to_string()
+            choice.message.content.clone().unwrap_or_default().trim().to_string()
         } else {
             String::new()
         };
@@ -726,17 +901,54 @@ impl LlmProvider for CopilotProvider {
 #[derive(Debug, Serialize)]
 struct CopilotRequest {
     model: String,
-    messages: Vec<OpenAiMessage>,
+    messages: Vec<CopilotMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<CopilotTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct OpenAiMessage {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CopilotMessage {
     role: String,
-    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<CopilotToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CopilotToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: CopilotFunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CopilotFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CopilotTool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: CopilotFunction,
+}
+
+#[derive(Debug, Serialize)]
+struct CopilotFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -747,7 +959,7 @@ struct CopilotResponse {
 
 #[derive(Debug, Deserialize)]
 struct CopilotChoice {
-    message: OpenAiMessage,
+    message: CopilotMessage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -773,6 +985,28 @@ struct CopilotStreamChoice {
 struct CopilotStreamDelta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<CopilotStreamToolCall>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct CopilotStreamToolCall {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(rename = "type", default)]
+    call_type: Option<String>,
+    #[serde(default)]
+    function: Option<CopilotStreamFunctionCall>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct CopilotStreamFunctionCall {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[cfg(test)]
