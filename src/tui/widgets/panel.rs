@@ -129,6 +129,8 @@ pub struct PanelSectionState {
     pub tasks_expanded: bool,
     /// Whether the Files section is expanded
     pub files_expanded: bool,
+    /// Scroll offset for the Session section (for cost breakdown)
+    pub session_scroll: usize,
     /// Scroll offset for the Tasks section
     pub tasks_scroll: usize,
     /// Scroll offset for the Files section
@@ -161,6 +163,7 @@ impl PanelSectionState {
             context_expanded: true,
             tasks_expanded: true,
             files_expanded: true,
+            session_scroll: 0,
             tasks_scroll: 0,
             files_scroll: 0,
             focused_section: EnhancedPanelSection::Session,
@@ -203,8 +206,13 @@ impl PanelSectionState {
     }
 
     /// Scroll down in the focused scrollable section
-    pub fn scroll_down(&mut self, max_tasks: usize, max_files: usize) {
+    pub fn scroll_down(&mut self, max_session: usize, max_tasks: usize, max_files: usize) {
         match self.focused_section {
+            EnhancedPanelSection::Session if self.session_expanded => {
+                if self.session_scroll < max_session.saturating_sub(1) {
+                    self.session_scroll += 1;
+                }
+            }
             EnhancedPanelSection::Tasks if self.tasks_expanded => {
                 if self.tasks_scroll < max_tasks.saturating_sub(1) {
                     self.tasks_scroll += 1;
@@ -222,6 +230,9 @@ impl PanelSectionState {
     /// Scroll up in the focused scrollable section
     pub fn scroll_up(&mut self) {
         match self.focused_section {
+            EnhancedPanelSection::Session if self.session_expanded => {
+                self.session_scroll = self.session_scroll.saturating_sub(1);
+            }
             EnhancedPanelSection::Tasks if self.tasks_expanded => {
                 self.tasks_scroll = self.tasks_scroll.saturating_sub(1);
             }
@@ -1107,9 +1118,9 @@ mod tests {
         state.focused_section = EnhancedPanelSection::Tasks;
 
         // Scroll down
-        state.scroll_down(10, 5);
+        state.scroll_down(10, 10, 5);
         assert_eq!(state.tasks_scroll, 1);
-        state.scroll_down(10, 5);
+        state.scroll_down(10, 10, 5);
         assert_eq!(state.tasks_scroll, 2);
 
         // Scroll up
@@ -1122,7 +1133,7 @@ mod tests {
 
         // Focus on Files section
         state.focused_section = EnhancedPanelSection::Files;
-        state.scroll_down(10, 5);
+        state.scroll_down(10, 10, 5);
         assert_eq!(state.files_scroll, 1);
         state.scroll_up();
         assert_eq!(state.files_scroll, 0);
@@ -1135,14 +1146,14 @@ mod tests {
 
         // Try to scroll beyond max
         for _ in 0..20 {
-            state.scroll_down(5, 3);
+            state.scroll_down(5, 5, 3);
         }
         assert_eq!(state.tasks_scroll, 4); // max_tasks - 1 = 5 - 1 = 4
 
         // Scroll when collapsed should not change offset
         state.tasks_expanded = false;
         let prev_scroll = state.tasks_scroll;
-        state.scroll_down(10, 5);
+        state.scroll_down(10, 10, 5);
         assert_eq!(state.tasks_scroll, prev_scroll);
     }
 
@@ -1841,13 +1852,17 @@ fn render_section_footer(width: u16) -> Line<'static> {
     ))
 }
 
-/// Render the Session section content
+/// Maximum visible height for Session section content (excluding header/footer)
+const SESSION_MAX_VISIBLE_HEIGHT: usize = 6;
+
+/// Render the Session section content with scroll support
 fn render_session_content(
     session: &SessionInfo,
     width: u16,
     cost_breakdown_expanded: bool,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+    scroll_offset: usize,
+) -> (Vec<Line<'static>>, usize) {
+    let mut all_lines = Vec::new();
     let content_width = (width as usize).saturating_sub(4); // Account for borders
 
     // Helper to truncate text if needed
@@ -1865,7 +1880,7 @@ fn render_session_content(
     } else {
         session.name.clone()
     };
-    lines.push(Line::from(vec![
+    all_lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled("📛 ", Style::default()),
         Span::styled(truncate(&name_display), Style::default().fg(Color::Cyan)),
@@ -1877,7 +1892,7 @@ fn render_session_content(
     } else {
         session.model.clone()
     };
-    lines.push(Line::from(vec![
+    all_lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled("🤖 ", Style::default()),
         Span::styled(
@@ -1892,7 +1907,7 @@ fn render_session_content(
     } else {
         session.provider.clone()
     };
-    lines.push(Line::from(vec![
+    all_lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled("🏢 ", Style::default()),
         Span::styled(
@@ -1907,41 +1922,94 @@ fn render_session_content(
     } else {
         "▶"
     };
-    lines.push(Line::from(vec![
+    let breakdown_count = session.cost_breakdown.len();
+    let cost_hint = if breakdown_count > 0 && !cost_breakdown_expanded {
+        format!(" ({} models)", breakdown_count)
+    } else {
+        String::new()
+    };
+    all_lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled("💰 ", Style::default()),
         Span::styled(
-            format!("${:.4} {}", session.cost, cost_indicator),
+            format!("${:.4} {}{}", session.cost, cost_indicator, cost_hint),
             Style::default().fg(Color::Yellow),
         ),
     ]));
 
     // Show cost breakdown if expanded
-    if cost_breakdown_expanded && !session.cost_breakdown.is_empty() {
-        for entry in &session.cost_breakdown {
-            let breakdown_text =
-                format!("  ├ {}/{}: ${:.4}", entry.provider, entry.model, entry.cost);
-            lines.push(Line::from(vec![
+    if cost_breakdown_expanded {
+        if session.cost_breakdown.is_empty() {
+            all_lines.push(Line::from(vec![
                 Span::styled("│ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    truncate(&breakdown_text),
+                    "  └ No usage data yet",
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
+        } else {
+            for (i, entry) in session.cost_breakdown.iter().enumerate() {
+                let is_last = i == session.cost_breakdown.len() - 1;
+                let prefix = if is_last { "└" } else { "├" };
+                let breakdown_text = format!(
+                    "  {} {}/{}: ${:.4}",
+                    prefix, entry.provider, entry.model, entry.cost
+                );
+                all_lines.push(Line::from(vec![
+                    Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        truncate(&breakdown_text),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
         }
     }
 
     // LSP languages (if any)
     if !session.lsp_languages.is_empty() {
         let lsp_str = session.lsp_languages.join(", ");
-        lines.push(Line::from(vec![
+        all_lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
             Span::styled("🔧 ", Style::default()),
             Span::styled(truncate(&lsp_str), Style::default().fg(Color::Green)),
         ]));
     }
 
-    lines
+    let total_lines = all_lines.len();
+
+    // Apply scroll and limit to fixed height
+    let needs_scrollbar = total_lines > SESSION_MAX_VISIBLE_HEIGHT;
+    let scrollbar = if needs_scrollbar {
+        render_scrollbar(
+            scroll_offset,
+            SESSION_MAX_VISIBLE_HEIGHT,
+            total_lines,
+            SESSION_MAX_VISIBLE_HEIGHT,
+        )
+    } else {
+        vec![]
+    };
+
+    // Get visible lines with scroll offset
+    let visible_lines: Vec<Line<'static>> = all_lines
+        .into_iter()
+        .skip(scroll_offset)
+        .take(SESSION_MAX_VISIBLE_HEIGHT)
+        .enumerate()
+        .map(|(i, mut line)| {
+            // Add scrollbar indicator on the right if needed
+            if needs_scrollbar && i < scrollbar.len() {
+                line.spans.push(Span::styled(
+                    format!(" {}", scrollbar[i]),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            line
+        })
+        .collect();
+
+    (visible_lines, total_lines)
 }
 
 /// Render the Context section content
@@ -2139,15 +2207,9 @@ pub fn render_enhanced_panel(
     let width = area.width;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Calculate available height for scrollable sections
-    // Each section needs: 1 header + content + 1 footer (when expanded)
-    // When collapsed: just 1 header line
+    // Session section uses fixed max height
     let session_height = if state.session_expanded {
-        3 + if data.session.lsp_languages.is_empty() {
-            0
-        } else {
-            1
-        }
+        SESSION_MAX_VISIBLE_HEIGHT + 2 // +2 for header/footer
     } else {
         1
     };
@@ -2178,11 +2240,13 @@ pub fn render_enhanced_panel(
     ));
 
     if state.session_expanded {
-        lines.extend(render_session_content(
+        let (session_lines, _total) = render_session_content(
             &data.session,
             width,
             state.cost_breakdown_expanded,
-        ));
+            state.session_scroll,
+        );
+        lines.extend(session_lines);
         lines.push(render_section_footer(width));
     }
 
@@ -2315,7 +2379,8 @@ mod proptests {
                 context_expanded: initial_context,
                 tasks_expanded: initial_tasks,
                 files_expanded: initial_files,
-                tasks_scroll: 0,
+                session_scroll: 0,
+            tasks_scroll: 0,
                 files_scroll: 0,
                 focused_section: section,
                 cost_breakdown_expanded: false,
@@ -2352,7 +2417,7 @@ mod proptests {
             state.focused_section = EnhancedPanelSection::Tasks;
             for scroll_down in &scroll_ops {
                 if *scroll_down {
-                    state.scroll_down(max_tasks, max_files);
+                    state.scroll_down(10, max_tasks, max_files);
                 } else {
                     state.scroll_up();
                 }
@@ -2367,7 +2432,7 @@ mod proptests {
             state.files_scroll = 0; // Reset
             for scroll_down in &scroll_ops {
                 if *scroll_down {
-                    state.scroll_down(max_tasks, max_files);
+                    state.scroll_down(10, max_tasks, max_files);
                 } else {
                     state.scroll_up();
                 }

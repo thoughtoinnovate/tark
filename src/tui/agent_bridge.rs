@@ -697,10 +697,40 @@ impl AgentBridge {
                 self.current_session
                     .add_message("assistant", &response.text);
 
-                // Update token counts
+                // Update token counts and log usage
                 if let Some(usage) = &response.usage {
                     self.current_session.input_tokens += usage.input_tokens as usize;
                     self.current_session.output_tokens += usage.output_tokens as usize;
+
+                    // Calculate cost and log usage
+                    let cost = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            crate::llm::models_db()
+                                .calculate_cost(
+                                    &self.provider_name,
+                                    &self.model_name,
+                                    usage.input_tokens,
+                                    usage.output_tokens,
+                                )
+                                .await
+                        })
+                    });
+                    self.current_session.total_cost += cost;
+
+                    // Log usage to tracker for cost breakdown display
+                    if let Some(ref tracker) = self.usage_tracker {
+                        let _ = tracker.log_usage(crate::storage::usage::UsageLog {
+                            session_id: self.current_session.id.clone(),
+                            provider: self.provider_name.clone(),
+                            model: self.model_name.clone(),
+                            mode: format!("{:?}", self.agent.mode()),
+                            input_tokens: usage.input_tokens,
+                            output_tokens: usage.output_tokens,
+                            cost_usd: cost,
+                            request_type: "chat".to_string(),
+                            estimated: false,
+                        });
+                    }
                 }
 
                 // Save session
@@ -801,6 +831,21 @@ impl AgentBridge {
                             )
                             .await;
                         self.current_session.total_cost += cost;
+
+                        // Log usage to tracker for cost breakdown display
+                        if let Some(ref tracker) = self.usage_tracker {
+                            let _ = tracker.log_usage(crate::storage::usage::UsageLog {
+                                session_id: self.current_session.id.clone(),
+                                provider: self.provider_name.clone(),
+                                model: self.model_name.clone(),
+                                mode: format!("{:?}", self.agent.mode()),
+                                input_tokens: usage.input_tokens,
+                                output_tokens: usage.output_tokens,
+                                cost_usd: cost,
+                                request_type: "chat".to_string(),
+                                estimated: false,
+                            });
+                        }
                     }
 
                     // Send completed event

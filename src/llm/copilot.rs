@@ -45,7 +45,6 @@ impl Drop for AuthFileGuard {
     }
 }
 
-
 impl CopilotToken {
     /// Extract SKU from token string (free_limited_copilot, copilot_enterprise, etc.)
     fn get_sku(&self) -> Option<String> {
@@ -205,7 +204,6 @@ impl CopilotProvider {
 
     /// Ensure we have a valid token, initiating Device Flow if needed
     pub async fn ensure_token(&mut self) -> Result<String> {
-
         // Check if we have a token and it's not expired
         if let Some(ref token) = self.token {
             if !token.is_expired() {
@@ -233,7 +231,6 @@ impl CopilotProvider {
         Self::save_token(&self.token_path, &new_token)?;
         self.token = Some(new_token.clone());
 
-
         Ok(new_token.access_token)
     }
 
@@ -258,7 +255,6 @@ impl CopilotProvider {
                 let _ = f.flush();
             }
             auth_file_path = Some(auth_file);
-
         }
 
         // Ensure the file is cleaned up no matter what happens
@@ -745,7 +741,7 @@ impl LlmProvider for CopilotProvider {
             // the server is silent, while still enforcing an overall 60s no-data timeout.
             let chunk_result = match timeout(INTERRUPT_POLL_INTERVAL, stream.next()).await {
                 Ok(Some(res)) => res,
-                Ok(None) => break, // Stream ended
+                Ok(None) => break,  // Stream ended
                 Err(_) => continue, // Poll interval elapsed - re-check interrupt/timeout
             };
 

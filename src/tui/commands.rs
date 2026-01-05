@@ -28,6 +28,8 @@ pub enum CommandResult {
     ShowCost,
     /// Show usage information
     ShowUsage,
+    /// Show total (all-time) usage information
+    ShowUsageTotal,
     /// Open usage dashboard in browser
     OpenUsageDashboard,
     /// Clear chat history
@@ -554,6 +556,15 @@ impl CommandHandler {
         });
 
         self.register(Command {
+            name: "usage-total".to_string(),
+            description: "Show total (all-time) usage statistics".to_string(),
+            usage: "/usage-total".to_string(),
+            category: CommandCategory::Utility,
+            requires_args: false,
+            requires_editor: false,
+        });
+
+        self.register(Command {
             name: "usage-open".to_string(),
             description: "Open usage dashboard in browser".to_string(),
             usage: "/usage-open".to_string(),
@@ -796,6 +807,7 @@ impl CommandHandler {
             "cost" => CommandResult::ShowCost,
             "compact" => CommandResult::Compact,
             "usage" => CommandResult::ShowUsage,
+            "usage-total" => CommandResult::ShowUsageTotal,
             "usage-open" => CommandResult::OpenUsageDashboard,
 
             // Attachment commands
@@ -1192,6 +1204,10 @@ mod tests {
         assert_eq!(handler.execute("/s"), CommandResult::ShowStats);
         assert_eq!(handler.execute("/cost"), CommandResult::ShowCost);
         assert_eq!(handler.execute("/usage"), CommandResult::ShowUsage);
+        assert_eq!(
+            handler.execute("/usage-total"),
+            CommandResult::ShowUsageTotal
+        );
         assert_eq!(
             handler.execute("/usage-open"),
             CommandResult::OpenUsageDashboard

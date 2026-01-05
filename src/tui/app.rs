@@ -370,9 +370,24 @@ impl AppState {
     /// Uses the enhanced panel section state for accordion-style navigation
     /// with scroll support for Tasks and Files sections.
     fn handle_panel_navigation(&mut self, action: Action) {
+        // Calculate max scroll for each scrollable section
+        // Session: 4 base lines + cost breakdown entries + LSP line
+        let max_session = 4
+            + self.enhanced_panel_data.session.cost_breakdown.len()
+            + if self.enhanced_panel_data.session.lsp_languages.is_empty() {
+                0
+            } else {
+                1
+            }
+            + if self.panel_section_state.cost_breakdown_expanded
+                && self.enhanced_panel_data.session.cost_breakdown.is_empty()
+            {
+                1
+            } else {
+                0
+            };
         let max_tasks = self.enhanced_panel_data.tasks.len();
         let max_files = self.enhanced_panel_data.files.len();
-
         match action {
             Action::LineDown => {
                 // If in a scrollable section (Tasks/Files) and expanded, scroll down
@@ -380,13 +395,15 @@ impl AppState {
                 let section = self.panel_section_state.focused_section;
                 let is_scrollable = matches!(
                     section,
-                    super::widgets::EnhancedPanelSection::Tasks
+                    super::widgets::EnhancedPanelSection::Session
+                        | super::widgets::EnhancedPanelSection::Tasks
                         | super::widgets::EnhancedPanelSection::Files
                 );
                 let is_expanded = self.panel_section_state.is_expanded(section);
 
                 if is_scrollable && is_expanded {
-                    self.panel_section_state.scroll_down(max_tasks, max_files);
+                    self.panel_section_state
+                        .scroll_down(max_session, max_tasks, max_files);
                 } else {
                     self.panel_section_state.focus_next();
                 }
@@ -397,7 +414,8 @@ impl AppState {
                 let section = self.panel_section_state.focused_section;
                 let is_scrollable = matches!(
                     section,
-                    super::widgets::EnhancedPanelSection::Tasks
+                    super::widgets::EnhancedPanelSection::Session
+                        | super::widgets::EnhancedPanelSection::Tasks
                         | super::widgets::EnhancedPanelSection::Files
                 );
                 let is_expanded = self.panel_section_state.is_expanded(section);
@@ -411,6 +429,7 @@ impl AppState {
             Action::GoToTop => {
                 self.panel_section_state.focused_section =
                     super::widgets::EnhancedPanelSection::Session;
+                self.panel_section_state.session_scroll = 0;
                 self.panel_section_state.tasks_scroll = 0;
                 self.panel_section_state.files_scroll = 0;
             }
@@ -1001,8 +1020,6 @@ impl TuiApp {
         }
     }
 
-
-
     /// Cancel Copilot authentication by deleting the pending file
     fn cancel_copilot_auth(&mut self) {
         if let Some(home) = dirs::home_dir() {
@@ -1038,9 +1055,7 @@ impl TuiApp {
                         if !url.is_empty() && !code.is_empty() {
                             // Show auth dialog
                             self.state.auth_dialog.show_copilot_auth(
-                                &url,
-                                &code,
-                                300, // 5 minute timeout
+                                &url, &code, 300, // 5 minute timeout
                             );
                         }
                     }
@@ -1176,7 +1191,8 @@ impl TuiApp {
                     // Cancel auth - hide dialog and delete pending file
                     self.state.auth_dialog.hide();
                     self.cancel_copilot_auth();
-                    self.state.status_message = Some("Auth cancelled. You can select a different model.".to_string());
+                    self.state.status_message =
+                        Some("Auth cancelled. You can select a different model.".to_string());
                     return Ok(true);
                 }
                 KeyCode::Char('c') | KeyCode::Char('C') => {
@@ -1202,8 +1218,11 @@ impl TuiApp {
                         #[cfg(target_os = "linux")]
                         let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
                         #[cfg(target_os = "windows")]
-                        let _ = std::process::Command::new("cmd").args(["/c", "start", &url]).spawn();
-                        self.state.status_message = Some("📋 Code copied! Opening browser...".to_string());
+                        let _ = std::process::Command::new("cmd")
+                            .args(["/c", "start", &url])
+                            .spawn();
+                        self.state.status_message =
+                            Some("📋 Code copied! Opening browser...".to_string());
                     }
                     return Ok(true);
                 }
@@ -1275,11 +1294,26 @@ impl TuiApp {
                         self.state.message_list.scroll_down(width);
                     }
                     FocusedComponent::Panel => {
+                        let max_session = 4
+                            + self.state.enhanced_panel_data.session.cost_breakdown.len()
+                            + if self
+                                .state
+                                .enhanced_panel_data
+                                .session
+                                .lsp_languages
+                                .is_empty()
+                            {
+                                0
+                            } else {
+                                1
+                            };
                         let max_tasks = self.state.enhanced_panel_data.tasks.len();
                         let max_files = self.state.enhanced_panel_data.files.len();
-                        self.state
-                            .panel_section_state
-                            .scroll_down(max_tasks, max_files);
+                        self.state.panel_section_state.scroll_down(
+                            max_session,
+                            max_tasks,
+                            max_files,
+                        );
                     }
                     _ => {}
                 }
@@ -1420,6 +1454,15 @@ impl TuiApp {
             Action::Quit => {
                 self.state.quit();
                 Ok(false)
+            }
+            Action::ToggleCostBreakdown => {
+                // Toggle cost breakdown display
+                self.state.status_message = Some("Cost breakdown: Not implemented".to_string());
+                Ok(true)
+            }
+            Action::InterruptNoQuit => {
+                self.handle_interrupt_with_quit(false);
+                Ok(true)
             }
             Action::EnterInsertMode => {
                 self.state.set_input_mode(InputMode::Insert);
@@ -2088,34 +2131,133 @@ impl TuiApp {
                 self.state.status_message = Some("Cost: Not yet implemented".to_string());
             }
             CommandResult::ShowUsage => {
-                // Display usage information as a system message
-                // TODO: Integrate with UsageManager when available
-                let usage_text = "=== Usage Statistics ===\n\
-                    Current session: 0 tokens, $0.0000\n\
-                    Use /usage-open to view detailed dashboard";
-                self.state
-                    .message_list
-                    .push(ChatMessage::system(usage_text.to_string()));
+                // Display current session usage information as a system message
+                if let Some(ref bridge) = self.agent_bridge {
+                    let (input_tokens, output_tokens) = bridge.total_tokens();
+                    let total_tokens = input_tokens + output_tokens;
+                    let cost = bridge.total_cost();
+
+                    let mut usage_text = String::new();
+                    usage_text.push_str("=== Usage (Current Session) ===\n");
+                    usage_text.push_str(&format!("Input tokens: {}\n", input_tokens));
+                    usage_text.push_str(&format!("Output tokens: {}\n", output_tokens));
+                    usage_text.push_str(&format!("Total tokens: {}\n", total_tokens));
+                    usage_text.push_str(&format!("Cost: ${:.4}\n", cost));
+
+                    let breakdown = bridge.get_cost_breakdown();
+                    if !breakdown.is_empty() {
+                        usage_text.push_str("\nCost breakdown (top models):\n");
+                        for entry in breakdown.iter().take(5) {
+                            usage_text.push_str(&format!(
+                                "- {}/{}: ${:.4}\n",
+                                entry.provider, entry.model, entry.cost
+                            ));
+                        }
+                    }
+
+                    usage_text.push_str("\nUse /usage-total for all-time totals.\n");
+                    usage_text.push_str("Use /usage-open to view the dashboard.\n");
+
+                    self.state
+                        .message_list
+                        .push(ChatMessage::system(usage_text));
+                } else {
+                    self.state.message_list.push(ChatMessage::system(
+                        "Usage is unavailable (agent not initialized).".to_string(),
+                    ));
+                }
+            }
+            CommandResult::ShowUsageTotal => {
+                // Display all-time usage totals as a system message
+                if let Some(ref bridge) = self.agent_bridge {
+                    match crate::storage::usage::UsageTracker::new(bridge.working_dir()) {
+                        Ok(tracker) => match tracker.get_summary() {
+                            Ok(summary) => {
+                                let mut usage_text = String::new();
+                                usage_text.push_str("=== Usage (All-Time Totals) ===\n");
+                                usage_text
+                                    .push_str(&format!("Total cost: ${:.4}\n", summary.total_cost));
+                                usage_text
+                                    .push_str(&format!("Total tokens: {}\n", summary.total_tokens));
+                                usage_text
+                                    .push_str(&format!("Sessions: {}\n", summary.session_count));
+                                usage_text.push_str(&format!("Requests: {}\n", summary.log_count));
+                                usage_text.push_str(&format!(
+                                    "Database size: {}\n",
+                                    summary.db_size_human
+                                ));
+                                usage_text.push_str("\nUse /usage for current session stats.\n");
+                                usage_text.push_str("Use /usage-open to view the dashboard.\n");
+
+                                self.state
+                                    .message_list
+                                    .push(ChatMessage::system(usage_text));
+                            }
+                            Err(e) => {
+                                self.state.message_list.push(ChatMessage::system(format!(
+                                    "Failed to load usage totals: {}",
+                                    e
+                                )));
+                            }
+                        },
+                        Err(e) => {
+                            self.state.message_list.push(ChatMessage::system(format!(
+                                "Failed to initialize usage tracker: {}",
+                                e
+                            )));
+                        }
+                    }
+                } else {
+                    self.state.message_list.push(ChatMessage::system(
+                        "Usage totals are unavailable (agent not initialized).".to_string(),
+                    ));
+                }
             }
             CommandResult::OpenUsageDashboard => {
                 // Open usage dashboard in browser
-                let url = "http://localhost:8765/usage/dashboard";
+                let port = (|| {
+                    let port_file = dirs::data_dir()?.join("tark").join("server.port");
+                    let contents = std::fs::read_to_string(port_file).ok()?;
+                    contents.trim().parse::<u16>().ok()
+                })()
+                .unwrap_or(8765);
+
+                let url = format!("http://localhost:{}/usage", port);
 
                 #[cfg(target_os = "macos")]
                 let open_cmd = "open";
                 #[cfg(target_os = "linux")]
                 let open_cmd = "xdg-open";
-                #[cfg(target_os = "windows")]
-                let open_cmd = "start";
 
-                match std::process::Command::new(open_cmd).arg(url).spawn() {
-                    Ok(_) => {
-                        self.state.status_message =
-                            Some(format!("Opening usage dashboard: {}", url));
+                #[cfg(target_os = "windows")]
+                {
+                    // "start" is a cmd.exe built-in, so we must invoke it via cmd.
+                    match std::process::Command::new("cmd")
+                        .args(["/C", "start", "", &url])
+                        .spawn()
+                    {
+                        Ok(_) => {
+                            self.state.status_message =
+                                Some(format!("Opening usage dashboard: {}", url));
+                        }
+                        Err(e) => {
+                            self.state.status_message =
+                                Some(format!("Failed to open browser: {}. Visit: {}", e, url));
+                        }
                     }
-                    Err(e) => {
-                        self.state.status_message =
-                            Some(format!("Failed to open browser: {}. Visit: {}", e, url));
+                }
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    match std::process::Command::new(open_cmd).arg(&url).spawn() {
+                        Ok(_) => {
+                            self.state.status_message =
+                                Some(format!("Opening usage dashboard: {}", url));
+                        }
+                        Err(e) => {
+                            self.state.status_message =
+                                Some(format!("Failed to open browser: {}. Visit: {}", e, url));
+                        }
                     }
                 }
             }
@@ -3411,7 +3553,8 @@ impl TuiApp {
                 // Track auth dialog visibility changes to force redraw when it opens/closes
                 let auth_visible_before = self.state.auth_dialog.is_visible();
                 self.check_copilot_auth_pending();
-                let auth_visibility_changed = auth_visible_before != self.state.auth_dialog.is_visible();
+                let auth_visibility_changed =
+                    auth_visible_before != self.state.auth_dialog.is_visible();
 
                 if agent_events_processed
                     || needs_spinner_update

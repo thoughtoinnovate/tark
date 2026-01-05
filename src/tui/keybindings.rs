@@ -322,9 +322,7 @@ impl KeybindingHandler {
     pub fn handle_insert_mode(&mut self, key: KeyEvent) -> Option<Action> {
         match (key.code, key.modifiers) {
             // Exit insert mode
-            (KeyCode::Esc, KeyModifiers::NONE) => {
-                Some(self.handle_escape(Action::ExitInsertMode))
-            }
+            (KeyCode::Esc, KeyModifiers::NONE) => Some(self.handle_escape(Action::ExitInsertMode)),
 
             // Interrupt current operation (Ctrl+C during streaming)
             // Requirements: 8.1 - WHEN the user presses Ctrl+C during streaming, THE TUI SHALL stop the current response
@@ -542,15 +540,24 @@ mod tests {
         let mut handler = KeybindingHandler::new();
 
         // First Esc behaves normally
-        let action = handler.handle_key(make_key_event(KeyCode::Esc, KeyModifiers::NONE), InputMode::Insert);
+        let action = handler.handle_key(
+            make_key_event(KeyCode::Esc, KeyModifiers::NONE),
+            InputMode::Insert,
+        );
         assert_eq!(action, Some(Action::ExitInsertMode));
 
         // Second Esc within the window triggers interrupt (without quit semantics)
-        let action = handler.handle_key(make_key_event(KeyCode::Esc, KeyModifiers::NONE), InputMode::Normal);
+        let action = handler.handle_key(
+            make_key_event(KeyCode::Esc, KeyModifiers::NONE),
+            InputMode::Normal,
+        );
         assert_eq!(action, Some(Action::InterruptNoQuit));
 
         // After triggering, timer resets - next Esc is normal again
-        let action = handler.handle_key(make_key_event(KeyCode::Esc, KeyModifiers::NONE), InputMode::Normal);
+        let action = handler.handle_key(
+            make_key_event(KeyCode::Esc, KeyModifiers::NONE),
+            InputMode::Normal,
+        );
         assert_eq!(action, Some(Action::Cancel));
     }
 
@@ -558,11 +565,20 @@ mod tests {
     fn test_double_esc_requires_consecutive_presses() {
         let mut handler = KeybindingHandler::new();
 
-        let _ = handler.handle_key(make_key_event(KeyCode::Esc, KeyModifiers::NONE), InputMode::Normal);
+        let _ = handler.handle_key(
+            make_key_event(KeyCode::Esc, KeyModifiers::NONE),
+            InputMode::Normal,
+        );
         // Any non-Esc key resets the timer
-        let _ = handler.handle_key(make_key_event(KeyCode::Char('x'), KeyModifiers::NONE), InputMode::Normal);
+        let _ = handler.handle_key(
+            make_key_event(KeyCode::Char('x'), KeyModifiers::NONE),
+            InputMode::Normal,
+        );
 
-        let action = handler.handle_key(make_key_event(KeyCode::Esc, KeyModifiers::NONE), InputMode::Normal);
+        let action = handler.handle_key(
+            make_key_event(KeyCode::Esc, KeyModifiers::NONE),
+            InputMode::Normal,
+        );
         assert_eq!(action, Some(Action::Cancel));
     }
 

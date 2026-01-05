@@ -374,7 +374,7 @@ impl LlmProvider for OpenRouterProvider {
             // the server is silent, while still enforcing an overall 60s no-data timeout.
             let chunk_result = match timeout(INTERRUPT_POLL_INTERVAL, stream.next()).await {
                 Ok(Some(res)) => res,
-                Ok(None) => break, // Stream ended
+                Ok(None) => break,  // Stream ended
                 Err(_) => continue, // Poll interval elapsed - re-check interrupt/timeout
             };
 

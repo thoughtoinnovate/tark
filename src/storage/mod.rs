@@ -1282,6 +1282,9 @@ pub struct ChatSession {
 
 impl ChatSession {
     /// Create a new session
+    ///
+    /// Creates a session with empty provider/model - these will be determined
+    /// by the config defaults or user selection when the session is used.
     pub fn new() -> Self {
         let now = Utc::now();
         let id = format!("session_{}", now.format("%Y%m%d_%H%M%S_%3f"));
@@ -1290,7 +1293,7 @@ impl ChatSession {
             name: String::new(), // Will be set from first prompt
             created_at: now,
             updated_at: now,
-            provider: "ollama".to_string(),
+            provider: String::new(), // Determined by config/user selection
             model: String::new(),
             mode: "build".to_string(),
             window_style: "sidepane".to_string(),
