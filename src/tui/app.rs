@@ -313,6 +313,11 @@ impl AppState {
         // Update widget focus states
         self.input_widget
             .set_focused(component == FocusedComponent::Input);
+        // Switch to Normal mode when focusing Panel or Messages
+        // (Enter and j/k work in Normal mode for navigation)
+        if component == FocusedComponent::Panel || component == FocusedComponent::Messages {
+            self.input_mode = InputMode::Normal;
+        }
     }
 
     /// Cycle focus to the next component
@@ -772,14 +777,12 @@ impl TuiApp {
     ///
     /// Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.8, 5.9
     pub fn update_panel_from_bridge(&mut self) {
-        if let Some(ref bridge) = self.agent_bridge {
+        if let Some(ref mut bridge) = self.agent_bridge {
             // Get session info from bridge
             let session_name = bridge.session_name().to_string();
             let model_name = bridge.model_name().to_string();
             let provider_name = bridge.provider_name().to_string();
             let total_cost = bridge.total_cost();
-            let (input_tokens, output_tokens) = bridge.total_tokens();
-            let context_usage = bridge.context_usage_percent();
 
             // Update session info (Requirements 5.1, 5.2, 5.8, 5.9)
             // Format: "session_name | model | provider"
@@ -795,6 +798,10 @@ impl TuiApp {
                         .await
                 })
             });
+
+            // Sync the agent's context limit with the model's actual limit
+            // This ensures auto-compaction triggers at the right threshold
+            bridge.set_max_context_tokens(max_tokens as usize);
 
             // Now update session info
             self.state.enhanced_panel_data.session = super::widgets::SessionInfo {
@@ -819,14 +826,17 @@ impl TuiApp {
             };
 
             // Update context info (Requirements 5.3, 5.4, 5.5)
-            let total_tokens = (input_tokens + output_tokens) as u32;
+            // Use actual context tokens (conversation size) not cumulative API usage
+            let context_tokens = bridge.context_tokens() as u32;
+            let context_usage = bridge.context_usage_percent();
 
             let usage_percent = if max_tokens > 0 {
-                (total_tokens as f32 / max_tokens as f32) * 100.0
+                (context_tokens as f32 / max_tokens as f32) * 100.0
             } else {
                 0.0
             };
 
+            // Use the agent's context usage percentage if available (more accurate)
             let final_usage_percent = if context_usage > 0 {
                 context_usage as f32
             } else {
@@ -834,10 +844,10 @@ impl TuiApp {
             };
 
             self.state.enhanced_panel_data.context = super::widgets::ContextInfo {
-                used_tokens: total_tokens,
+                used_tokens: context_tokens,
                 max_tokens,
                 usage_percent: final_usage_percent,
-                over_limit: total_tokens > max_tokens || final_usage_percent >= 100.0,
+                over_limit: context_tokens > max_tokens || final_usage_percent >= 100.0,
             };
         }
     }

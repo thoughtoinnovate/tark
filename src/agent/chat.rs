@@ -353,6 +353,16 @@ impl ChatAgent {
         self.context.usage_percentage()
     }
 
+    /// Get estimated tokens in current context
+    pub fn estimated_context_tokens(&self) -> usize {
+        self.context.estimate_total_tokens()
+    }
+
+    /// Get the max context tokens for the current model
+    pub fn max_context_tokens(&self) -> usize {
+        self.context.max_context_tokens()
+    }
+
     /// Check if context is near limit (80%+)
     pub fn is_context_near_limit(&self) -> bool {
         self.context.is_near_limit()

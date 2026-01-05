@@ -574,9 +574,19 @@ impl AgentBridge {
         self.agent.context_usage_percentage()
     }
 
-    /// Get estimated tokens in current context
+    /// Get estimated tokens in current context (actual conversation size)
     pub fn context_tokens(&self) -> usize {
-        self.agent.context_usage_percentage() // This gives us percentage, need actual tokens
+        self.agent.estimated_context_tokens()
+    }
+
+    /// Get max context tokens for the current model
+    pub fn max_context_tokens(&self) -> usize {
+        self.agent.max_context_tokens()
+    }
+
+    /// Update max context tokens (when switching models)
+    pub fn set_max_context_tokens(&mut self, max: usize) {
+        self.agent.set_max_context_tokens(max);
     }
 
     /// Get total cost from current session
@@ -612,37 +622,48 @@ impl AgentBridge {
         // Query usage tracker if available
         if let Some(ref tracker) = self.usage_tracker {
             if let Ok(logs) = tracker.get_session_logs(&self.current_session.id) {
-                // Aggregate costs by (provider, model)
-                let mut breakdown: HashMap<(String, String), f64> = HashMap::new();
+                if !logs.is_empty() {
+                    // Aggregate costs by (provider, model)
+                    let mut breakdown: HashMap<(String, String), f64> = HashMap::new();
 
-                for log in logs {
-                    let key = (log.provider.clone(), log.model.clone());
-                    *breakdown.entry(key).or_insert(0.0) += log.cost_usd;
+                    for log in logs {
+                        let key = (log.provider.clone(), log.model.clone());
+                        *breakdown.entry(key).or_insert(0.0) += log.cost_usd;
+                    }
+
+                    // Convert to Vec and sort by cost (highest first)
+                    let mut entries: Vec<crate::tui::widgets::CostBreakdownEntry> = breakdown
+                        .into_iter()
+                        .map(
+                            |((provider, model), cost)| crate::tui::widgets::CostBreakdownEntry {
+                                provider,
+                                model,
+                                cost,
+                            },
+                        )
+                        .collect();
+
+                    entries.sort_by(|a, b| {
+                        b.cost
+                            .partial_cmp(&a.cost)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    return entries;
                 }
-
-                // Convert to Vec and sort by cost (highest first)
-                let mut entries: Vec<crate::tui::widgets::CostBreakdownEntry> = breakdown
-                    .into_iter()
-                    .map(
-                        |((provider, model), cost)| crate::tui::widgets::CostBreakdownEntry {
-                            provider,
-                            model,
-                            cost,
-                        },
-                    )
-                    .collect();
-
-                entries.sort_by(|a, b| {
-                    b.cost
-                        .partial_cmp(&a.cost)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-
-                return entries;
             }
         }
 
-        // Return empty if no usage tracker or no logs
+        // Fallback: if we have session cost but no logs, show current provider/model
+        if self.current_session.total_cost > 0.0 {
+            return vec![crate::tui::widgets::CostBreakdownEntry {
+                provider: self.provider_name.clone(),
+                model: self.model_name.clone(),
+                cost: self.current_session.total_cost,
+            }];
+        }
+
+        // Return empty if no cost data at all
         Vec::new()
     }
 

@@ -616,17 +616,31 @@ Standard Only (filtered):
 25. [ ] Show thinking cost estimates in model descriptions
 26. [ ] Show per-model override indicator if configured
 
-### Phase 5: Thinking Block UI Enhancement
-27. [ ] Add `max_visible_lines` config to ThinkingBlock (default: 6)
-28. [ ] Add `scroll_offset` state for internal scrolling
-29. [ ] Add scroll indicators (↑ more above / ↓ more below)
-30. [ ] Add keyboard navigation (j/k or ↑/↓) when block is focused
-31. [ ] Show line count and scroll position in header
-32. [ ] Ensure fixed height doesn't pollute conversation
+### Phase 5: Fix `/thinking` Toggle to Actually Enable Thinking
+27. [ ] Make `/thinking` toggle actually pass `ThinkingSettings` to providers
+28. [ ] When thinking is OFF: don't send thinking params to API (save tokens/cost)
+29. [ ] When thinking is ON: send resolved `ThinkingSettings` to provider
+30. [ ] Show thinking cost estimate when enabling: "Thinking enabled (~$0.15/request)"
+31. [ ] Update status bar to show thinking state: 🧠 ON/OFF
 
-### Phase 6: Commands
-33. [ ] Enhance `/thinking` command with subcommands:
-    - `/thinking` - Toggle on/off
+### Phase 6: Thinking Block UI Enhancement  
+32. [ ] Add `max_visible_lines` config to ThinkingBlock (default: 6)
+33. [ ] Add `scroll_offset` state for internal scrolling
+34. [ ] Add scroll indicators (↑ more above / ↓ more below)
+35. [ ] Add keyboard navigation (j/k or ↑/↓) when block is focused
+36. [ ] Show line count and scroll position in header
+37. [ ] Ensure fixed height doesn't pollute conversation
+
+### Phase 7: Markdown Rendering in Thinking Blocks
+38. [ ] Parse thinking content as markdown
+39. [ ] Render **bold**, *italic*, `code`, lists properly
+40. [ ] Word-wrap long lines to fit block width
+41. [ ] Preserve code blocks with syntax highlighting
+42. [ ] Handle numbered/bullet lists with proper indentation
+
+### Phase 8: Commands
+43. [ ] Enhance `/thinking` command with subcommands:
+    - `/thinking` - Toggle on/off (actually enables/disables API thinking)
     - `/thinking budget <N>` - Set session budget override
     - `/thinking effort <low|medium|high>` - Set session effort override
     - `/thinking cost` - Show estimated cost for current model
@@ -813,5 +827,191 @@ When a thinking block is focused (click or Tab to focus):
 enabled = true
 max_visible_lines = 6    # Height of thinking block (default: 6)
 auto_collapse = false    # Collapse after response complete
+```
+
+---
+
+## Fix: `/thinking` Must Actually Enable Thinking
+
+### Current Problem
+
+```
+/thinking toggle
+    ↓
+self.state.thinking_mode = true  (only controls DISPLAY)
+    ↓
+Provider ALWAYS sends thinking params (if model supports it)
+    ↓
+User pays for thinking even when toggle is OFF!
+```
+
+### Fixed Flow
+
+```
+/thinking toggle
+    ↓
+self.state.thinking_enabled = true
+    ↓
+ThinkingSettings::resolve() checks thinking_enabled
+    ↓
+If OFF: Provider sends NO thinking params (saves money!)
+If ON:  Provider sends resolved ThinkingSettings
+    ↓
+Thinking content displayed in UI
+```
+
+### Code Change in `app.rs`
+
+```rust
+// When sending message to agent
+async fn send_message(&mut self, content: String) {
+    // Resolve thinking settings based on toggle state
+    let thinking_settings = if self.state.thinking_enabled {
+        Some(ThinkingSettings::resolve(
+            &self.provider_name,
+            &self.model_name,
+            &self.config.thinking,
+        ).await)
+    } else {
+        None  // Don't request thinking at all
+    };
+
+    // Pass to agent bridge
+    self.agent_bridge.send_message(content, thinking_settings).await;
+}
+```
+
+### Code Change in Providers
+
+```rust
+// In claude.rs
+async fn chat(
+    &self,
+    messages: &[Message],
+    tools: Option<&[ToolDefinition]>,
+    thinking: Option<&ThinkingSettings>,  // NEW parameter
+) -> Result<LlmResponse> {
+    let mut request = ClaudeRequest {
+        model: self.model.clone(),
+        max_tokens: self.max_tokens,
+        // Only add thinking config if settings provided AND enabled
+        thinking: thinking.and_then(|t| {
+            if t.enabled {
+                Some(ThinkingConfig {
+                    thinking_type: "enabled".to_string(),
+                    budget_tokens: t.budget_tokens.unwrap_or(10_000),
+                })
+            } else {
+                None
+            }
+        }),
+        // ...
+    };
+}
+```
+
+---
+
+## Markdown Rendering in Thinking Blocks
+
+### Current: Plain Text
+
+```
+╭── 🧠 Thinking ──────────────────────────────────╮
+│ Let's analyze this step by step...              │
+│ 1. **First point**: The user wants X            │
+│ 2. **Second point**: We need to consider Y      │
+│ - Option A: Do this                             │
+│ - Option B: Do that                             │
+│ ```rust                                         │
+│ fn example() { }                                │
+│ ```                                             │
+╰─────────────────────────────────────────────────╯
+```
+
+### Fixed: Rendered Markdown
+
+```
+╭── 🧠 Thinking ──────────────────────────────────╮
+│ Let's analyze this step by step...              │
+│ 1. First point: The user wants X                │  ← bold rendered
+│ 2. Second point: We need to consider Y          │
+│   • Option A: Do this                           │  ← bullets
+│   • Option B: Do that                           │
+│ ┌────────────────────────────────────────┐      │
+│ │ fn example() { }                       │      │  ← code block
+│ └────────────────────────────────────────┘      │
+╰─────────────────────────────────────────────────╯
+```
+
+### Implementation
+
+```rust
+impl ThinkingBlock {
+    /// Render content with markdown formatting
+    fn render_markdown_line(&self, line: &str, width: usize) -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        
+        // Parse inline markdown
+        let mut chars = line.chars().peekable();
+        let mut current = String::new();
+        let mut in_bold = false;
+        let mut in_italic = false;
+        let mut in_code = false;
+        
+        while let Some(c) = chars.next() {
+            match c {
+                '*' if chars.peek() == Some(&'*') => {
+                    // Toggle bold
+                    chars.next();
+                    if !current.is_empty() {
+                        spans.push(self.styled_span(&current, in_bold, in_italic, in_code));
+                        current.clear();
+                    }
+                    in_bold = !in_bold;
+                }
+                '*' => {
+                    // Toggle italic
+                    if !current.is_empty() {
+                        spans.push(self.styled_span(&current, in_bold, in_italic, in_code));
+                        current.clear();
+                    }
+                    in_italic = !in_italic;
+                }
+                '`' => {
+                    // Toggle inline code
+                    if !current.is_empty() {
+                        spans.push(self.styled_span(&current, in_bold, in_italic, in_code));
+                        current.clear();
+                    }
+                    in_code = !in_code;
+                }
+                _ => current.push(c),
+            }
+        }
+        
+        if !current.is_empty() {
+            spans.push(self.styled_span(&current, in_bold, in_italic, in_code));
+        }
+        
+        spans
+    }
+
+    fn styled_span(&self, text: &str, bold: bool, italic: bool, code: bool) -> Span<'static> {
+        let mut style = Style::default().fg(Color::Magenta);
+        
+        if bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if italic {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if code {
+            style = style.fg(Color::Yellow).bg(Color::DarkGray);
+        }
+        
+        Span::styled(text.to_string(), style)
+    }
+}
 ```
 
