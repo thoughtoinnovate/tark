@@ -1001,6 +1001,43 @@ impl TuiApp {
         }
     }
 
+    /// Check for Copilot authentication pending file and show in auth dialog
+    fn check_copilot_auth_pending(&mut self) {
+        // Only check if agent is processing and auth dialog is not already visible
+        if !self.state.agent_processing || self.state.auth_dialog.is_visible() {
+            return;
+        }
+        
+        // Check for auth pending file
+        if let Some(home) = dirs::home_dir() {
+            let auth_file = home.join(".tark").join("copilot_auth_pending.txt");
+            if auth_file.exists() {
+                // Read the auth info
+                if let Ok(content) = std::fs::read_to_string(&auth_file) {
+                    // Parse URL and code from the file
+                    let mut url = String::new();
+                    let mut code = String::new();
+                    for line in content.lines() {
+                        if line.starts_with("Visit: ") {
+                            url = line.strip_prefix("Visit: ").unwrap_or("").to_string();
+                        } else if line.starts_with("Enter code: ") {
+                            code = line.strip_prefix("Enter code: ").unwrap_or("").to_string();
+                        }
+                    }
+                    
+                    if !url.is_empty() && !code.is_empty() {
+                        // Show auth dialog
+                        self.state.auth_dialog.show_copilot_auth(
+                            &url,
+                            &code,
+                            300, // 5 minute timeout
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Process the next message from the prompt queue
     ///
     /// Called after a message completes to automatically process queued messages.
@@ -1106,6 +1143,9 @@ impl TuiApp {
             Event::Tick => {
                 // Check for rate limit retry (Requirements 7.4)
                 self.check_rate_limit_retry();
+                
+                // Check for Copilot auth pending file
+                self.check_copilot_auth_pending();
                 Ok(false)
             }
         }
