@@ -3655,6 +3655,13 @@ impl TuiApp {
                         self.state.status_message =
                             Some(format!("🔐 {} authentication required", provider));
 
+                        // Show the authentication dialog
+                        self.state.auth_dialog.show_copilot_auth(
+                            &verification_url,
+                            &user_code,
+                            timeout_secs,
+                        );
+
                         // Add a system message with auth instructions
                         self.state.message_list.push(ChatMessage::system(format!(
                             "🔐 **Authentication Required for {}**\n\n\
@@ -5419,7 +5426,7 @@ mod model_selection_integration_tests {
             provider: "openai".to_string(),
             cost: 0.0,
             lsp_languages: vec![],
-                cost_breakdown: Vec::new(),
+            cost_breakdown: Vec::new(),
         };
         state.update_session_info(session_info);
 
