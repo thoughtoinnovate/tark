@@ -1567,11 +1567,7 @@ impl TuiApp {
                 // Enter in Panel drills into the focused section (then j/k scroll inside).
                 // In Messages it toggles collapsible blocks.
                 if self.state.focused_component == FocusedComponent::Panel {
-                    let before = format!("{:?}", self.state.panel_section_state.nav_mode);
                     self.state.panel_section_state.enter();
-                    let after = format!("{:?}", self.state.panel_section_state.nav_mode);
-                    self.state.status_message =
-                        Some(format!("Panel Enter: {} -> {}", before, after));
                 } else {
                     self.handle_toggle_block();
                 }
