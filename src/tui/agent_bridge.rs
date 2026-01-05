@@ -399,14 +399,25 @@ impl AgentBridge {
                 ]
             }
             "copilot" | "github" => {
-                vec![
-                    (
+                // Try to get available models from provider based on subscription
+                if let Ok(provider) = crate::llm::CopilotProvider::new() {
+                    let models = provider.available_models();
+                    models
+                        .into_iter()
+                        .map(|model_id| {
+                            let display = format_model_display(&model_id);
+                            let desc = format_model_description(&model_id);
+                            (model_id, display, desc)
+                        })
+                        .collect()
+                } else {
+                    // Fallback if provider creation fails
+                    vec![(
                         "gpt-4o".into(),
                         "GPT-4o".into(),
                         "Most capable model via Copilot".into(),
-                    ),
-                    ("gpt-4".into(), "GPT-4".into(), "Original GPT-4".into()),
-                ]
+                    )]
+                }
             }
             "gemini" | "google" => {
                 vec![

@@ -33,6 +33,42 @@ struct CopilotToken {
     expires_at: u64, // Unix timestamp
 }
 
+impl CopilotToken {
+    /// Extract SKU from token string (free_limited_copilot, copilot_enterprise, etc.)
+    fn get_sku(&self) -> Option<String> {
+        self.access_token
+            .split(';')
+            .find(|part| part.starts_with("sku="))
+            .and_then(|part| part.strip_prefix("sku="))
+            .map(|s| s.to_string())
+    }
+
+    /// Get available models based on subscription tier
+    pub fn available_models(&self) -> Vec<String> {
+        let sku = self.get_sku().unwrap_or_default();
+
+        match sku.as_str() {
+            "free_limited_copilot" => {
+                // Free tier typically has access to GPT-4o mini or limited GPT-4o
+                vec!["gpt-4o".to_string()]
+            }
+            "copilot_enterprise" | "copilot_business" => {
+                // Paid tiers have access to more models
+                vec![
+                    "gpt-4o".to_string(),
+                    "gpt-4".to_string(),
+                    "claude-3.5-sonnet".to_string(), // If enabled
+                    "o1".to_string(),                // If enabled
+                ]
+            }
+            _ => {
+                // Default fallback
+                vec!["gpt-4o".to_string()]
+            }
+        }
+    }
+}
+
 /// Copilot token response from GitHub API
 #[derive(Debug, Deserialize)]
 struct CopilotTokenResponse {
@@ -102,6 +138,15 @@ impl CopilotProvider {
             max_tokens: 4096,
             auth_timeout_secs: 1800, // 30 minutes default
         })
+    }
+
+    /// Get available models based on user's subscription
+    pub fn available_models(&self) -> Vec<String> {
+        if let Some(ref token) = self.token {
+            token.available_models()
+        } else {
+            vec!["gpt-4o".to_string()]
+        }
     }
 
     pub fn with_auth_timeout(mut self, timeout_secs: u64) -> Self {

@@ -37,7 +37,20 @@ GitHub Copilot integration with **Device Flow OAuth** authentication.
 - ✅ Token caching and auto-refresh
 - ✅ Streaming support
 - ✅ OpenAI-compatible API
+- ✅ Subscription-aware model listing (shows only models you have access to)
 - ⚠️ Tool calling not fully supported (Copilot limitation)
+
+### Subscription Tiers
+
+GitHub Copilot automatically detects your subscription tier from the token:
+
+| Tier | Models Available |
+|------|------------------|
+| **Free** | GPT-4o (limited usage) |
+| **Individual/Business** | GPT-4o, GPT-4 |
+| **Enterprise** | GPT-4o, GPT-4, Claude 3.5 Sonnet (if enabled), O1 (if enabled) |
+
+The model picker shows only the models available in your subscription.
 
 ---
 
