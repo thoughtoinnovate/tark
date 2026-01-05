@@ -222,6 +222,8 @@ pub struct AgentBridge {
     config: Config,
     /// Usage tracker for cost/token tracking
     usage_tracker: Option<UsageTracker>,
+    /// In-memory usage log for current session (fallback when SQLite fails)
+    session_usage: Vec<(String, String, f64)>, // (provider, model, cost)
 }
 
 impl AgentBridge {
@@ -311,6 +313,7 @@ impl AgentBridge {
             is_processing: Arc::new(AtomicBool::new(false)),
             config,
             usage_tracker,
+            session_usage: Vec::new(),
         })
     }
 
@@ -619,7 +622,7 @@ impl AgentBridge {
     pub fn get_cost_breakdown(&self) -> Vec<crate::tui::widgets::CostBreakdownEntry> {
         use std::collections::HashMap;
 
-        // Query usage tracker if available
+        // First try SQLite tracker
         if let Some(ref tracker) = self.usage_tracker {
             if let Ok(logs) = tracker.get_session_logs(&self.current_session.id) {
                 if !logs.is_empty() {
@@ -654,13 +657,32 @@ impl AgentBridge {
             }
         }
 
-        // Fallback: if we have session cost but no logs, show current provider/model
-        if self.current_session.total_cost > 0.0 {
-            return vec![crate::tui::widgets::CostBreakdownEntry {
-                provider: self.provider_name.clone(),
-                model: self.model_name.clone(),
-                cost: self.current_session.total_cost,
-            }];
+        // Fallback: use in-memory session usage
+        if !self.session_usage.is_empty() {
+            let mut breakdown: HashMap<(String, String), f64> = HashMap::new();
+            for (provider, model, cost) in &self.session_usage {
+                let key = (provider.clone(), model.clone());
+                *breakdown.entry(key).or_insert(0.0) += cost;
+            }
+
+            let mut entries: Vec<crate::tui::widgets::CostBreakdownEntry> = breakdown
+                .into_iter()
+                .map(
+                    |((provider, model), cost)| crate::tui::widgets::CostBreakdownEntry {
+                        provider,
+                        model,
+                        cost,
+                    },
+                )
+                .collect();
+
+            entries.sort_by(|a, b| {
+                b.cost
+                    .partial_cmp(&a.cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            return entries;
         }
 
         // Return empty if no cost data at all
@@ -752,6 +774,12 @@ impl AgentBridge {
                             estimated: false,
                         });
                     }
+                    // Also store in-memory for fallback
+                    self.session_usage.push((
+                        self.provider_name.clone(),
+                        self.model_name.clone(),
+                        cost,
+                    ));
                 }
 
                 // Save session
@@ -867,6 +895,12 @@ impl AgentBridge {
                                 estimated: false,
                             });
                         }
+                        // Also store in-memory for fallback
+                        self.session_usage.push((
+                            self.provider_name.clone(),
+                            self.model_name.clone(),
+                            cost,
+                        ));
                     }
 
                     // Send completed event

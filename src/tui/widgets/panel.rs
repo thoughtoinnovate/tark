@@ -1225,6 +1225,27 @@ mod tests {
     }
 
     #[test]
+    fn test_panel_enter_and_back() {
+        let mut state = PanelSectionState::new();
+
+        // Initial state should be Sections mode
+        assert_eq!(state.nav_mode, PanelNavMode::Sections);
+        assert_eq!(state.focused_section, EnhancedPanelSection::Session);
+        assert!(!state.cost_breakdown_expanded);
+
+        // Call enter() - should drill into Session and expand cost breakdown
+        state.enter();
+
+        assert_eq!(state.nav_mode, PanelNavMode::SessionCost);
+        assert!(state.cost_breakdown_expanded);
+        assert!(state.session_expanded);
+
+        // Call back() - should return to Sections
+        state.back();
+        assert_eq!(state.nav_mode, PanelNavMode::Sections);
+    }
+
+    #[test]
     fn test_panel_section_state_scroll_bounds() {
         let mut state = PanelSectionState::new();
         state.focused_section = EnhancedPanelSection::Tasks;
