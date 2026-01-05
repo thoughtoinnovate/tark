@@ -24,8 +24,8 @@ pub use input::{InputWidget, InputWidgetRenderer};
 pub use message_list::{ChatMessage, MessageList, MessageListWidget, Role};
 pub use panel::{
     ContextInfo, CostBreakdownEntry, EnhancedPanelData, EnhancedPanelSection, EnhancedPanelWidget,
-    FileItem, NotificationLevel, PanelDataProvider, PanelSection, PanelSectionState, PanelWidget,
-    SectionItem, SessionInfo, TaskItem, TaskStatus,
+    FileItem, NotificationLevel, PanelDataProvider, PanelNavMode, PanelSection, PanelSectionState,
+    PanelWidget, SectionItem, SessionInfo, TaskItem, TaskStatus,
 };
 pub use picker::{Picker, PickerItem, PickerWidget};
 pub use status_bar::StatusBar;

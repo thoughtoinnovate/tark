@@ -202,7 +202,7 @@ impl ToolBlock {
                     }
                     "shell" | "execute" => {
                         if let Some(cmd) = map.get("command").and_then(|v| v.as_str()) {
-                            return format!("$ {}", cmd);
+                            return format!("shell> {}", cmd);
                         }
                     }
                     "list_files" | "ls" => {
@@ -566,7 +566,7 @@ mod tests {
     fn test_tool_block_format_args_shell() {
         let args = serde_json::json!({"command": "ls -la"});
         let formatted = ToolBlock::format_args(&args, "shell");
-        assert!(formatted.contains("$"));
+        assert!(formatted.contains("shell>"));
         assert!(formatted.contains("ls -la"));
     }
 

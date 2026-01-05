@@ -506,6 +506,17 @@ fn render_message(
     let header = format!("{} {} [{}]", message.role.icon(), display_name, timestamp);
     lines.push(Line::from(Span::styled(header, header_style)));
 
+    // Tool calls (if any) - show before content/output
+    for tool_call in &message.tool_calls {
+        let tool_style = Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::ITALIC);
+        lines.push(Line::from(Span::styled(
+            format!("  [tool: {}]", tool_call.clone()),
+            tool_style,
+        )));
+    }
+
     // Content lines
     let content_style = if is_selected {
         Style::default().add_modifier(Modifier::REVERSED)
@@ -517,17 +528,6 @@ fn render_message(
     let content = message.content.clone();
     let content_lines = format_content_owned(content, content_style);
     lines.extend(content_lines);
-
-    // Tool calls (if any)
-    for tool_call in &message.tool_calls {
-        let tool_style = Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::ITALIC);
-        lines.push(Line::from(Span::styled(
-            format!("  [tool: {}]", tool_call.clone()),
-            tool_style,
-        )));
-    }
 
     // Streaming indicator
     if message.is_streaming {

@@ -370,83 +370,87 @@ impl AppState {
     /// Uses the enhanced panel section state for accordion-style navigation
     /// with scroll support for Tasks and Files sections.
     fn handle_panel_navigation(&mut self, action: Action) {
-        // Calculate max scroll for each scrollable section
-        // Session: 4 base lines + cost breakdown entries + LSP line
-        let max_session = 4
-            + self.enhanced_panel_data.session.cost_breakdown.len()
-            + if self.enhanced_panel_data.session.lsp_languages.is_empty() {
-                0
-            } else {
+        // Calculate max scroll for each drill-down list (not the whole Session section)
+        let max_session_cost = if self.panel_section_state.cost_breakdown_expanded {
+            if self.enhanced_panel_data.session.cost_breakdown.is_empty() {
                 1
+            } else {
+                self.enhanced_panel_data.session.cost_breakdown.len()
             }
-            + if self.panel_section_state.cost_breakdown_expanded
-                && self.enhanced_panel_data.session.cost_breakdown.is_empty()
-            {
-                1
-            } else {
-                0
-            };
+        } else {
+            0
+        };
         let max_tasks = self.enhanced_panel_data.tasks.len();
         let max_files = self.enhanced_panel_data.files.len();
+
         match action {
             Action::LineDown => {
-                // If in a scrollable section (Tasks/Files) and expanded, scroll down
-                // Otherwise, move to next section
-                let section = self.panel_section_state.focused_section;
-                let is_scrollable = matches!(
-                    section,
-                    super::widgets::EnhancedPanelSection::Session
-                        | super::widgets::EnhancedPanelSection::Tasks
-                        | super::widgets::EnhancedPanelSection::Files
-                );
-                let is_expanded = self.panel_section_state.is_expanded(section);
-
-                if is_scrollable && is_expanded {
-                    self.panel_section_state
-                        .scroll_down(max_session, max_tasks, max_files);
-                } else {
+                if self.panel_section_state.nav_mode == super::widgets::PanelNavMode::Sections {
                     self.panel_section_state.focus_next();
+                } else {
+                    self.panel_section_state
+                        .scroll_down(max_session_cost, max_tasks, max_files);
                 }
             }
             Action::LineUp => {
-                // If in a scrollable section (Tasks/Files) and expanded, scroll up
-                // Otherwise, move to previous section
-                let section = self.panel_section_state.focused_section;
-                let is_scrollable = matches!(
-                    section,
-                    super::widgets::EnhancedPanelSection::Session
-                        | super::widgets::EnhancedPanelSection::Tasks
-                        | super::widgets::EnhancedPanelSection::Files
-                );
-                let is_expanded = self.panel_section_state.is_expanded(section);
-
-                if is_scrollable && is_expanded {
-                    self.panel_section_state.scroll_up();
-                } else {
+                if self.panel_section_state.nav_mode == super::widgets::PanelNavMode::Sections {
                     self.panel_section_state.focus_prev();
+                } else {
+                    self.panel_section_state.scroll_up();
                 }
             }
             Action::GoToTop => {
-                self.panel_section_state.focused_section =
-                    super::widgets::EnhancedPanelSection::Session;
-                self.panel_section_state.session_scroll = 0;
-                self.panel_section_state.tasks_scroll = 0;
-                self.panel_section_state.files_scroll = 0;
+                if self.panel_section_state.nav_mode == super::widgets::PanelNavMode::Sections {
+                    self.panel_section_state.focused_section =
+                        super::widgets::EnhancedPanelSection::Session;
+                } else {
+                    self.panel_section_state.session_scroll = 0;
+                    self.panel_section_state.tasks_scroll = 0;
+                    self.panel_section_state.files_scroll = 0;
+                }
             }
             Action::GoToBottom => {
-                self.panel_section_state.focused_section =
-                    super::widgets::EnhancedPanelSection::Files;
+                if self.panel_section_state.nav_mode == super::widgets::PanelNavMode::Sections {
+                    self.panel_section_state.focused_section =
+                        super::widgets::EnhancedPanelSection::Files;
+                } else {
+                    match self.panel_section_state.nav_mode {
+                        super::widgets::PanelNavMode::SessionCost => {
+                            self.panel_section_state.session_scroll =
+                                max_session_cost.saturating_sub(1);
+                        }
+                        super::widgets::PanelNavMode::TasksItems => {
+                            self.panel_section_state.tasks_scroll = max_tasks.saturating_sub(1);
+                        }
+                        super::widgets::PanelNavMode::FilesItems => {
+                            self.panel_section_state.files_scroll = max_files.saturating_sub(1);
+                        }
+                        super::widgets::PanelNavMode::Sections => {}
+                    }
+                }
             }
             Action::ExpandSection => {
+                if self.panel_section_state.nav_mode != super::widgets::PanelNavMode::Sections {
+                    self.panel_section_state.back();
+                }
                 let section = self.panel_section_state.focused_section;
                 self.panel_section_state.set_expanded(section, true);
             }
             Action::CollapseSection => {
+                if self.panel_section_state.nav_mode != super::widgets::PanelNavMode::Sections {
+                    self.panel_section_state.back();
+                }
                 let section = self.panel_section_state.focused_section;
                 self.panel_section_state.set_expanded(section, false);
             }
             Action::ToggleSection => {
+                if self.panel_section_state.nav_mode != super::widgets::PanelNavMode::Sections {
+                    self.panel_section_state.back();
+                }
                 self.panel_section_state.toggle_focused();
+            }
+            Action::PanelBack => {
+                self.panel_section_state.back();
             }
             _ => {}
         }
@@ -1550,9 +1554,10 @@ impl TuiApp {
             }
             // Collapsible block and attachment actions (Task 11)
             Action::ToggleBlock => {
-                // If Panel is focused, toggle the current section instead
+                // Enter in Panel drills into the focused section (then j/k scroll inside).
+                // In Messages it toggles collapsible blocks.
                 if self.state.focused_component == FocusedComponent::Panel {
-                    self.state.panel_section_state.toggle_focused();
+                    self.state.panel_section_state.enter();
                 } else {
                     self.handle_toggle_block();
                 }
@@ -1596,6 +1601,13 @@ impl TuiApp {
                 // Handle mode cycling backward (Ctrl+Shift+Tab)
                 // Requirements: 13.2, 13.4, 13.5, 13.6
                 self.handle_cycle_mode_prev();
+                Ok(true)
+            }
+            Action::PanelBack => {
+                // Go back to section navigation in panel
+                if self.state.focused_component == FocusedComponent::Panel {
+                    self.state.panel_section_state.back();
+                }
                 Ok(true)
             }
         }
@@ -3797,11 +3809,20 @@ impl TuiApp {
                                         t.tool == tool && t.result_preview == "⏳ Running..."
                                     })
                                 {
+                                    let mut final_preview = result_preview.clone();
+                                    if tool == "shell" || tool == "execute" {
+                                        if let Some(cmd) =
+                                            tool_info.args.get("command").and_then(|v| v.as_str())
+                                        {
+                                            final_preview =
+                                                format!("shell> {}\n{}", cmd, final_preview);
+                                        }
+                                    }
                                     // Truncate result preview if too long
-                                    tool_info.result_preview = if result_preview.len() > 500 {
-                                        format!("{}...", &result_preview[..497])
+                                    tool_info.result_preview = if final_preview.len() > 500 {
+                                        format!("{}...", &final_preview[..497])
                                     } else {
-                                        result_preview
+                                        final_preview
                                     };
                                 }
                             }
@@ -3824,7 +3845,16 @@ impl TuiApp {
                                 {
                                     // Set error message (will be displayed in red)
                                     tool_info.error = Some(error.clone());
-                                    tool_info.result_preview = format!("Error: {}", error);
+                                    let mut final_error = format!("Error: {}", error);
+                                    if tool == "shell" || tool == "execute" {
+                                        if let Some(cmd) =
+                                            tool_info.args.get("command").and_then(|v| v.as_str())
+                                        {
+                                            final_error =
+                                                format!("shell> {}\n{}", cmd, final_error);
+                                        }
+                                    }
+                                    tool_info.result_preview = final_error;
                                 }
                             }
                         }

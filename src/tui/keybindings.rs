@@ -50,6 +50,8 @@ pub enum Action {
     ToggleSection,
     /// Toggle cost breakdown in Session section (c)
     ToggleCostBreakdown,
+    /// Go back to parent panel navigation level (`-`)
+    PanelBack,
 
     // Collapsible block actions
     /// Toggle collapsible block under cursor (Enter in messages)
@@ -259,6 +261,8 @@ impl KeybindingHandler {
             (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, KeyModifiers::NONE) => {
                 Some(Action::LineUp)
             }
+            // Panel: go back to parent level (`-`)
+            (KeyCode::Char('-'), KeyModifiers::NONE) => Some(Action::PanelBack),
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Action::HalfPageDown),
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Action::HalfPageUp),
             (KeyCode::Char('G'), KeyModifiers::SHIFT) => Some(Action::GoToBottom),

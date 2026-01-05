@@ -118,6 +118,21 @@ pub enum EnhancedPanelSection {
     Files,
 }
 
+/// Navigation depth within the Panel.
+///
+/// - `Sections`: focus moves between section headers (Session/Context/Tasks/Files)
+/// - `SessionCost`: focus is inside the Session cost breakdown list
+/// - `TasksItems`: focus is inside the Tasks list
+/// - `FilesItems`: focus is inside the Modified Files list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelNavMode {
+    #[default]
+    Sections,
+    SessionCost,
+    TasksItems,
+    FilesItems,
+}
+
 /// State for panel sections with accordion behavior and scroll support
 #[derive(Debug, Clone)]
 pub struct PanelSectionState {
@@ -135,6 +150,8 @@ pub struct PanelSectionState {
     pub tasks_scroll: usize,
     /// Scroll offset for the Files section
     pub files_scroll: usize,
+    /// Current navigation depth within the panel
+    pub nav_mode: PanelNavMode,
     /// Currently focused section (for keyboard navigation)
     pub focused_section: EnhancedPanelSection,
     /// Whether the cost breakdown accordion is expanded
@@ -166,6 +183,7 @@ impl PanelSectionState {
             session_scroll: 0,
             tasks_scroll: 0,
             files_scroll: 0,
+            nav_mode: PanelNavMode::Sections,
             focused_section: EnhancedPanelSection::Session,
             cost_breakdown_expanded: false,
             session_has_unread: false,
@@ -175,6 +193,45 @@ impl PanelSectionState {
         }
     }
 
+    /// Drill into the focused section (Enter).
+    ///
+    /// When drilling into a section that supports item navigation, subsequent `j/k`
+    /// will navigate/scroll that section's items. Use `-` to go back to section headers.
+    pub fn enter(&mut self) {
+        if self.nav_mode != PanelNavMode::Sections {
+            return;
+        }
+
+        match self.focused_section {
+            EnhancedPanelSection::Session => {
+                // Ensure Session is expanded
+                self.session_expanded = true;
+                // Ensure cost breakdown list is visible when drilling in
+                if !self.cost_breakdown_expanded {
+                    self.cost_breakdown_expanded = true;
+                }
+                self.nav_mode = PanelNavMode::SessionCost;
+            }
+            EnhancedPanelSection::Tasks => {
+                self.tasks_expanded = true;
+                self.nav_mode = PanelNavMode::TasksItems;
+            }
+            EnhancedPanelSection::Files => {
+                self.files_expanded = true;
+                self.nav_mode = PanelNavMode::FilesItems;
+            }
+            EnhancedPanelSection::Context => {
+                // Context has no inner item list today; keep it expanded but stay at sections.
+                self.context_expanded = true;
+            }
+        }
+    }
+
+    /// Go back to the parent navigation level (`-`).
+    pub fn back(&mut self) {
+        self.nav_mode = PanelNavMode::Sections;
+    }
+
     /// Toggle the focused section's expanded state
     pub fn toggle_focused(&mut self) {
         match self.focused_section {
@@ -182,6 +239,14 @@ impl PanelSectionState {
             EnhancedPanelSection::Context => self.context_expanded = !self.context_expanded,
             EnhancedPanelSection::Tasks => self.tasks_expanded = !self.tasks_expanded,
             EnhancedPanelSection::Files => self.files_expanded = !self.files_expanded,
+        }
+
+        // If collapsing the currently focused section, reset drill-down state.
+        if !self.is_expanded(self.focused_section) {
+            self.nav_mode = PanelNavMode::Sections;
+            self.session_scroll = 0;
+            self.tasks_scroll = 0;
+            self.files_scroll = 0;
         }
     }
 
@@ -207,18 +272,26 @@ impl PanelSectionState {
 
     /// Scroll down in the focused scrollable section
     pub fn scroll_down(&mut self, max_session: usize, max_tasks: usize, max_files: usize) {
-        match self.focused_section {
-            EnhancedPanelSection::Session if self.session_expanded => {
+        match self.nav_mode {
+            PanelNavMode::SessionCost
+                if self.focused_section == EnhancedPanelSection::Session
+                    && self.session_expanded
+                    && self.cost_breakdown_expanded =>
+            {
                 if self.session_scroll < max_session.saturating_sub(1) {
                     self.session_scroll += 1;
                 }
             }
-            EnhancedPanelSection::Tasks if self.tasks_expanded => {
+            PanelNavMode::TasksItems
+                if self.focused_section == EnhancedPanelSection::Tasks && self.tasks_expanded =>
+            {
                 if self.tasks_scroll < max_tasks.saturating_sub(1) {
                     self.tasks_scroll += 1;
                 }
             }
-            EnhancedPanelSection::Files if self.files_expanded => {
+            PanelNavMode::FilesItems
+                if self.focused_section == EnhancedPanelSection::Files && self.files_expanded =>
+            {
                 if self.files_scroll < max_files.saturating_sub(1) {
                     self.files_scroll += 1;
                 }
@@ -229,14 +302,22 @@ impl PanelSectionState {
 
     /// Scroll up in the focused scrollable section
     pub fn scroll_up(&mut self) {
-        match self.focused_section {
-            EnhancedPanelSection::Session if self.session_expanded => {
+        match self.nav_mode {
+            PanelNavMode::SessionCost
+                if self.focused_section == EnhancedPanelSection::Session
+                    && self.session_expanded
+                    && self.cost_breakdown_expanded =>
+            {
                 self.session_scroll = self.session_scroll.saturating_sub(1);
             }
-            EnhancedPanelSection::Tasks if self.tasks_expanded => {
+            PanelNavMode::TasksItems
+                if self.focused_section == EnhancedPanelSection::Tasks && self.tasks_expanded =>
+            {
                 self.tasks_scroll = self.tasks_scroll.saturating_sub(1);
             }
-            EnhancedPanelSection::Files if self.files_expanded => {
+            PanelNavMode::FilesItems
+                if self.focused_section == EnhancedPanelSection::Files && self.files_expanded =>
+            {
                 self.files_scroll = self.files_scroll.saturating_sub(1);
             }
             _ => {}
@@ -250,6 +331,7 @@ impl PanelSectionState {
         self.tasks_expanded = false;
         self.files_expanded = false;
         self.cost_breakdown_expanded = false;
+        self.nav_mode = PanelNavMode::Sections;
     }
 
     /// Expand all sections
@@ -259,6 +341,7 @@ impl PanelSectionState {
         self.tasks_expanded = true;
         self.files_expanded = true;
         self.cost_breakdown_expanded = true;
+        self.nav_mode = PanelNavMode::Sections;
     }
 
     /// Toggle the cost breakdown accordion
@@ -1114,8 +1197,9 @@ mod tests {
     fn test_panel_section_state_scroll() {
         let mut state = PanelSectionState::new();
 
-        // Focus on Tasks section
+        // Focus on Tasks section and enter item mode
         state.focused_section = EnhancedPanelSection::Tasks;
+        state.nav_mode = PanelNavMode::TasksItems;
 
         // Scroll down
         state.scroll_down(10, 10, 5);
@@ -1131,8 +1215,9 @@ mod tests {
         state.scroll_up(); // Should not go negative
         assert_eq!(state.tasks_scroll, 0);
 
-        // Focus on Files section
+        // Focus on Files section and enter item mode
         state.focused_section = EnhancedPanelSection::Files;
+        state.nav_mode = PanelNavMode::FilesItems;
         state.scroll_down(10, 10, 5);
         assert_eq!(state.files_scroll, 1);
         state.scroll_up();
@@ -1143,6 +1228,7 @@ mod tests {
     fn test_panel_section_state_scroll_bounds() {
         let mut state = PanelSectionState::new();
         state.focused_section = EnhancedPanelSection::Tasks;
+        state.nav_mode = PanelNavMode::TasksItems;
 
         // Try to scroll beyond max
         for _ in 0..20 {
@@ -1862,7 +1948,6 @@ fn render_session_content(
     cost_breakdown_expanded: bool,
     scroll_offset: usize,
 ) -> (Vec<Line<'static>>, usize) {
-    let mut all_lines = Vec::new();
     let content_width = (width as usize).saturating_sub(4); // Account for borders
 
     // Helper to truncate text if needed
@@ -1874,13 +1959,16 @@ fn render_session_content(
         }
     };
 
+    // Pinned lines (always visible)
+    let mut pinned_lines: Vec<Line<'static>> = Vec::new();
+
     // Session name line
     let name_display = if session.name.is_empty() {
         "New Session".to_string()
     } else {
         session.name.clone()
     };
-    all_lines.push(Line::from(vec![
+    pinned_lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled("📛 ", Style::default()),
         Span::styled(truncate(&name_display), Style::default().fg(Color::Cyan)),
@@ -1892,7 +1980,7 @@ fn render_session_content(
     } else {
         session.model.clone()
     };
-    all_lines.push(Line::from(vec![
+    pinned_lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled("🤖 ", Style::default()),
         Span::styled(
@@ -1907,7 +1995,7 @@ fn render_session_content(
     } else {
         session.provider.clone()
     };
-    all_lines.push(Line::from(vec![
+    pinned_lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled("🏢 ", Style::default()),
         Span::styled(
@@ -1928,7 +2016,7 @@ fn render_session_content(
     } else {
         String::new()
     };
-    all_lines.push(Line::from(vec![
+    pinned_lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled("💰 ", Style::default()),
         Span::styled(
@@ -1937,10 +2025,21 @@ fn render_session_content(
         ),
     ]));
 
-    // Show cost breakdown if expanded
+    // LSP languages (if any)
+    if !session.lsp_languages.is_empty() {
+        let lsp_str = session.lsp_languages.join(", ");
+        pinned_lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+            Span::styled("🔧 ", Style::default()),
+            Span::styled(truncate(&lsp_str), Style::default().fg(Color::Green)),
+        ]));
+    }
+
+    // Cost breakdown list (scrollable region, only visible when expanded)
+    let mut cost_lines: Vec<Line<'static>> = Vec::new();
     if cost_breakdown_expanded {
         if session.cost_breakdown.is_empty() {
-            all_lines.push(Line::from(vec![
+            cost_lines.push(Line::from(vec![
                 Span::styled("│ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     "  └ No usage data yet",
@@ -1955,7 +2054,7 @@ fn render_session_content(
                     "  {} {}/{}: ${:.4}",
                     prefix, entry.provider, entry.model, entry.cost
                 );
-                all_lines.push(Line::from(vec![
+                cost_lines.push(Line::from(vec![
                     Span::styled("│ ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         truncate(&breakdown_text),
@@ -1966,39 +2065,44 @@ fn render_session_content(
         }
     }
 
-    // LSP languages (if any)
-    if !session.lsp_languages.is_empty() {
-        let lsp_str = session.lsp_languages.join(", ");
-        all_lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-            Span::styled("🔧 ", Style::default()),
-            Span::styled(truncate(&lsp_str), Style::default().fg(Color::Green)),
-        ]));
+    let pinned_len = pinned_lines.len();
+    let cost_area_height = SESSION_MAX_VISIBLE_HEIGHT.saturating_sub(pinned_len);
+    let total_lines = pinned_len + cost_lines.len();
+
+    // If we have no room for the cost list, just show pinned lines (truncated).
+    if cost_area_height == 0 {
+        let visible = pinned_lines
+            .into_iter()
+            .take(SESSION_MAX_VISIBLE_HEIGHT)
+            .collect::<Vec<_>>();
+        return (visible, total_lines);
     }
 
-    let total_lines = all_lines.len();
-
-    // Apply scroll and limit to fixed height
-    let needs_scrollbar = total_lines > SESSION_MAX_VISIBLE_HEIGHT;
+    // Apply scroll only to the cost list
+    let needs_scrollbar = cost_lines.len() > cost_area_height;
     let scrollbar = if needs_scrollbar {
         render_scrollbar(
             scroll_offset,
-            SESSION_MAX_VISIBLE_HEIGHT,
-            total_lines,
-            SESSION_MAX_VISIBLE_HEIGHT,
+            cost_area_height,
+            cost_lines.len(),
+            cost_area_height,
         )
     } else {
         vec![]
     };
 
-    // Get visible lines with scroll offset
-    let visible_lines: Vec<Line<'static>> = all_lines
+    let mut visible_lines: Vec<Line<'static>> = Vec::new();
+    // Pinned lines first
+    visible_lines.extend(pinned_lines.into_iter().take(SESSION_MAX_VISIBLE_HEIGHT));
+
+    // Then cost lines (if any room remains)
+    let remaining = SESSION_MAX_VISIBLE_HEIGHT.saturating_sub(visible_lines.len());
+    let cost_visible: Vec<Line<'static>> = cost_lines
         .into_iter()
         .skip(scroll_offset)
-        .take(SESSION_MAX_VISIBLE_HEIGHT)
+        .take(remaining)
         .enumerate()
         .map(|(i, mut line)| {
-            // Add scrollbar indicator on the right if needed
             if needs_scrollbar && i < scrollbar.len() {
                 line.spans.push(Span::styled(
                     format!(" {}", scrollbar[i]),
@@ -2008,7 +2112,9 @@ fn render_session_content(
             line
         })
         .collect();
+    visible_lines.extend(cost_visible);
 
+    visible_lines.truncate(SESSION_MAX_VISIBLE_HEIGHT);
     (visible_lines, total_lines)
 }
 
@@ -2240,11 +2346,16 @@ pub fn render_enhanced_panel(
     ));
 
     if state.session_expanded {
+        let session_scroll = if state.nav_mode == PanelNavMode::SessionCost {
+            state.session_scroll
+        } else {
+            0
+        };
         let (session_lines, _total) = render_session_content(
             &data.session,
             width,
             state.cost_breakdown_expanded,
-            state.session_scroll,
+            session_scroll,
         );
         lines.extend(session_lines);
         lines.push(render_section_footer(width));
@@ -2380,7 +2491,7 @@ mod proptests {
                 tasks_expanded: initial_tasks,
                 files_expanded: initial_files,
                 session_scroll: 0,
-            tasks_scroll: 0,
+                tasks_scroll: 0,
                 files_scroll: 0,
                 focused_section: section,
                 cost_breakdown_expanded: false,
@@ -2388,6 +2499,7 @@ mod proptests {
                 context_has_unread: false,
                 tasks_has_unread: false,
                 files_has_unread: false,
+                nav_mode: PanelNavMode::Sections,
             };
 
             // Get initial expanded state for the focused section
