@@ -2032,6 +2032,58 @@ mod tests {
 /// **Property 5: File Attachment Resolution**
 /// **Property 6: Attachment Size Enforcement**
 /// **Validates: Requirements 4.1, 4.3, 4.5, 4.2, 6.2, 5.1, 5.2, 5.7, 11.2**
+/// Search for files in workspace with optional gitignore support
+///
+/// Returns a list of file paths matching the pattern.
+/// Supports fuzzy matching on file names and paths.
+///
+/// # Arguments
+/// * `workspace` - Root directory to search from
+/// * `pattern` - Search pattern (empty string returns all files)
+/// * `respect_gitignore` - Whether to respect .gitignore rules
+pub fn search_workspace_files(
+    workspace: &Path,
+    pattern: &str,
+    respect_gitignore: bool,
+) -> Vec<PathBuf> {
+    use ignore::WalkBuilder;
+
+    let mut results = Vec::new();
+    let pattern_lower = pattern.to_lowercase();
+
+    let walker = WalkBuilder::new(workspace)
+        .git_ignore(respect_gitignore)
+        .hidden(true) // Show hidden files
+        .max_depth(Some(10)) // Limit recursion depth
+        .build();
+
+    for entry in walker.filter_map(|e| e.ok()) {
+        let path = entry.path();
+
+        // Skip directories for now
+        if path.is_dir() {
+            continue;
+        }
+
+        // Apply filter
+        if pattern.is_empty() {
+            results.push(path.to_path_buf());
+        } else {
+            let path_str = path.to_string_lossy().to_lowercase();
+            if path_str.contains(&pattern_lower) {
+                results.push(path.to_path_buf());
+            }
+        }
+
+        // Limit results to prevent overwhelming the UI
+        if results.len() >= 100 {
+            break;
+        }
+    }
+
+    results
+}
+
 #[cfg(test)]
 mod property_tests {
     use super::*;

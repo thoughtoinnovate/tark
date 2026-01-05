@@ -27,9 +27,9 @@ pub use agent_bridge::{
 pub use app::{AppState, CompletionState, TuiApp};
 pub use attachments::{
     base64_decode, base64_encode, detect_file_type, detect_language, format_size,
-    parse_file_references, remove_file_references, resolve_file_path, Attachment, AttachmentConfig,
-    AttachmentContent, AttachmentError, AttachmentManager, AttachmentType, DataFormat,
-    DocumentFormat, ImageFormat, MessageAttachment,
+    parse_file_references, remove_file_references, resolve_file_path, search_workspace_files,
+    Attachment, AttachmentConfig, AttachmentContent, AttachmentError, AttachmentManager,
+    AttachmentType, DataFormat, DocumentFormat, ImageFormat, MessageAttachment,
 };
 pub use clipboard::{ClipboardContent, ClipboardHandler, ImageData};
 pub use commands::{

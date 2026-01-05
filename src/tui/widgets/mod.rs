@@ -5,6 +5,7 @@
 mod attachment_bar;
 pub mod collapsible;
 mod command_dropdown;
+mod file_dropdown;
 mod input;
 mod message_list;
 pub mod panel;
@@ -22,8 +23,8 @@ pub use command_dropdown::{CommandDropdown, CommandDropdownItem, CommandDropdown
 pub use input::{InputWidget, InputWidgetRenderer};
 pub use message_list::{ChatMessage, MessageList, MessageListWidget, Role};
 pub use panel::{
-    ContextInfo, EnhancedPanelData, EnhancedPanelSection, EnhancedPanelWidget, FileItem,
-    NotificationLevel, PanelDataProvider, PanelSection, PanelSectionState, PanelWidget,
+    ContextInfo, CostBreakdownEntry, EnhancedPanelData, EnhancedPanelSection, EnhancedPanelWidget,
+    FileItem, NotificationLevel, PanelDataProvider, PanelSection, PanelSectionState, PanelWidget,
     SectionItem, SessionInfo, TaskItem, TaskStatus,
 };
 pub use picker::{Picker, PickerItem, PickerWidget};
@@ -32,3 +33,4 @@ pub use thinking_block::{ThinkingBlock, ThinkingBlockManager, ThinkingBlockWidge
 pub use tool_block::{ToolBlock, ToolBlockManager, ToolBlockWidget, ToolStatus};
 mod auth_dialog;
 pub use auth_dialog::{AuthDialog, AuthDialogWidget, AuthStatus};
+pub use file_dropdown::{FileDropdown, FileDropdownItem, FileDropdownWidget};

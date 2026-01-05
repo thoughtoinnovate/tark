@@ -100,6 +100,10 @@ pub struct AppState {
     pub prompt_queue: std::collections::VecDeque<String>,
     /// Command dropdown for slash command intellisense
     pub command_dropdown: CommandDropdown,
+    /// File dropdown for @files feature
+    pub file_dropdown: super::widgets::FileDropdown,
+    /// Position where @ was typed (for file dropdown positioning)
+    pub file_dropdown_trigger_pos: Option<usize>,
     /// Flag to auto-scroll to bottom on next render (for streaming updates)
     pub auto_scroll_pending: bool,
     /// Spinner animation frame index for processing indicator
@@ -205,6 +209,8 @@ impl Default for AppState {
             command_dropdown: CommandDropdown::default(),
             auto_scroll_pending: false,
             spinner_frame: 0,
+            file_dropdown: super::widgets::FileDropdown::default(),
+            file_dropdown_trigger_pos: None,
             spinner_last_update: std::time::Instant::now(),
             pending_async_request: None,
             panel_update_pending: false,
@@ -786,7 +792,7 @@ impl TuiApp {
                 },
                 cost: total_cost,
                 lsp_languages: vec![], // LSP languages are managed separately
-                cost_breakdown: Vec::new(),
+                cost_breakdown: bridge.get_cost_breakdown(),
             };
 
             // Update context info (Requirements 5.3, 5.4, 5.5)
@@ -1276,22 +1282,34 @@ impl TuiApp {
     /// Handle click in panel area
     ///
     /// Determines which section header was clicked and toggles it.
-    fn handle_panel_click(&mut self, _col: u16, row: u16) {
-        // Simple heuristic: each section header is roughly at a fixed position
-        // This is a simplified implementation - proper hit testing would require
-        // tracking the actual rendered positions of section headers
-
+    /// Also handles toolbar button clicks for collapse/expand all.
+    fn handle_panel_click(&mut self, col: u16, row: u16) {
         // Focus the panel
         self.state.set_focused_component(FocusedComponent::Panel);
 
+        // Check if click is on toolbar (row 0)
+        if row == 0 {
+            let panel_width = self.state.terminal_size.0 * 30 / 100; // Panel is 30% of terminal width
+                                                                     // [−] button is around (width - 9) to (width - 7)
+                                                                     // [+] button is around (width - 4) to (width - 2)
+            if col >= panel_width.saturating_sub(9) && col <= panel_width.saturating_sub(6) {
+                // Collapse all clicked
+                self.state.panel_section_state.collapse_all();
+                return;
+            } else if col >= panel_width.saturating_sub(4) && col <= panel_width.saturating_sub(1) {
+                // Expand all clicked
+                self.state.panel_section_state.expand_all();
+                return;
+            }
+        }
+
         // Estimate section positions (this is approximate)
-        // Session header is at row ~1
-        // Context header is at row ~5 (if session expanded)
-        // Tasks header is at row ~9 (if context expanded)
+        // Session header is at row ~1-2
+        // Context header is at row ~5-6 (if session expanded)
+        // Tasks header is at row ~9-10 (if context expanded)
         // Files header is at row ~13+ (depends on tasks count)
 
         // For now, just toggle the focused section on any click
-        // A more sophisticated implementation would track actual positions
         if row < 5 {
             self.state.panel_section_state.focused_section =
                 super::widgets::EnhancedPanelSection::Session;
@@ -1482,12 +1500,28 @@ impl TuiApp {
                     }
                 } else {
                     self.state.input_widget.insert_char(c);
+
+                    // Detect @ trigger for file dropdown
+                    if c == '@' {
+                        self.state.file_dropdown_trigger_pos =
+                            Some(self.state.input_widget.cursor());
+                        self.update_file_dropdown();
+                    } else if self.state.file_dropdown.is_visible() {
+                        self.update_file_dropdown();
+                    }
+
                     // Update command dropdown as user types
                     self.update_command_dropdown();
                 }
             }
             KeyCode::Backspace => {
                 self.state.input_widget.delete_char_before();
+
+                // Update file dropdown after deletion
+                if self.state.file_dropdown.is_visible() {
+                    self.update_file_dropdown();
+                }
+
                 // Update command dropdown after deletion
                 self.update_command_dropdown();
             }
@@ -1516,8 +1550,12 @@ impl TuiApp {
                 self.state.input_widget.move_cursor_to_end();
             }
             KeyCode::Up => {
+                // If file dropdown is visible, navigate up
+                if self.state.file_dropdown.is_visible() {
+                    self.state.file_dropdown.select_previous();
+                }
                 // If command dropdown is visible, navigate up in dropdown
-                if self.state.command_dropdown.is_visible() {
+                else if self.state.command_dropdown.is_visible() {
                     self.state.command_dropdown.select_previous();
                 } else {
                     // Navigate to previous history entry (Requirements 14.1, 14.4)
@@ -1540,8 +1578,24 @@ impl TuiApp {
                 }
             }
             KeyCode::Enter => {
+                // If file dropdown is visible, attach selected files
+                if self.state.file_dropdown.is_visible() {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        // Ctrl+Enter toggles multi-select mode
+                        self.state.file_dropdown.toggle_multi_select_mode();
+                    } else {
+                        // Attach selected file(s)
+                        let paths = self.state.file_dropdown.confirm();
+                        for path in paths {
+                            if let Err(e) = self.attach_file_by_path(&path) {
+                                self.state.status_message =
+                                    Some(format!("Failed to attach: {}", e));
+                            }
+                        }
+                    }
+                }
                 // If command dropdown is visible, apply selection
-                if self.state.command_dropdown.is_visible() {
+                else if self.state.command_dropdown.is_visible() {
                     if let Some(command) = self.state.command_dropdown.selected_command() {
                         self.state.input_widget.set_content(command.clone());
                         self.state.command_dropdown.hide();
@@ -1654,6 +1708,75 @@ impl TuiApp {
         } else {
             self.state.command_dropdown.set_items(items);
             self.state.command_dropdown.show();
+        }
+    }
+
+    /// Update file dropdown based on current input
+    fn update_file_dropdown(&mut self) {
+        let content = self.state.input_widget.content();
+
+        // Find @ position and extract filter
+        if let Some(at_pos) = content.rfind('@') {
+            let filter = &content[at_pos + 1..];
+
+            // Search for files in workspace
+            let workspace = if let Some(ref bridge) = self.agent_bridge {
+                bridge.working_dir().to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default()
+            };
+
+            let files = super::attachments::search_workspace_files(&workspace, filter, true);
+
+            // Convert to FileDropdownItems
+            let items: Vec<super::widgets::FileDropdownItem> = files
+                .into_iter()
+                .map(|path| {
+                    let display_name = path
+                        .strip_prefix(&workspace)
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string();
+                    let is_dir = path.is_dir();
+                    super::widgets::FileDropdownItem::new(path, display_name, is_dir)
+                })
+                .collect();
+
+            if items.is_empty() {
+                self.state.file_dropdown.hide();
+            } else {
+                self.state.file_dropdown.set_items(items);
+                self.state.file_dropdown.set_filter(filter);
+                self.state.file_dropdown.show();
+            }
+        } else {
+            self.state.file_dropdown.hide();
+        }
+    }
+
+    /// Attach a file by path
+    fn attach_file_by_path(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
+        use super::attachments::AttachmentManager;
+
+        let config = self.state.config.to_attachment_config();
+        let mut manager = AttachmentManager::new(config);
+
+        // Transfer existing attachments
+        for attachment in self.state.attachments.drain(..) {
+            let _ = manager.add(attachment);
+        }
+
+        // Attach the new file
+        match manager.attach_file(path) {
+            Ok(_attachment) => {
+                self.state.attachments = manager.take_all();
+                self.state.status_message = Some(format!("📎 Attached: {}", path.display()));
+                Ok(())
+            }
+            Err(e) => {
+                self.state.attachments = manager.take_all();
+                Err(e.into())
+            }
         }
     }
 
@@ -4016,6 +4139,15 @@ impl TuiApp {
                 let dropdown_widget =
                     CommandDropdownWidget::new(&self.state.command_dropdown, cursor_area);
                 frame.render_widget(dropdown_widget, area);
+            }
+
+            // Render file dropdown overlay if visible
+            if self.state.file_dropdown.is_visible() {
+                use super::widgets::FileDropdownWidget;
+                let cursor_area = chat_chunks[2]; // Input area
+                let file_dropdown_widget =
+                    FileDropdownWidget::new(&self.state.file_dropdown, cursor_area);
+                frame.render_widget(file_dropdown_widget, area);
             }
         })?;
 

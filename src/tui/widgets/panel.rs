@@ -137,6 +137,14 @@ pub struct PanelSectionState {
     pub focused_section: EnhancedPanelSection,
     /// Whether the cost breakdown accordion is expanded
     pub cost_breakdown_expanded: bool,
+    /// Whether the Session section has unread activity
+    pub session_has_unread: bool,
+    /// Whether the Context section has unread activity
+    pub context_has_unread: bool,
+    /// Whether the Tasks section has unread activity
+    pub tasks_has_unread: bool,
+    /// Whether the Files section has unread activity
+    pub files_has_unread: bool,
 }
 
 impl Default for PanelSectionState {
@@ -157,6 +165,10 @@ impl PanelSectionState {
             files_scroll: 0,
             focused_section: EnhancedPanelSection::Session,
             cost_breakdown_expanded: false,
+            session_has_unread: false,
+            context_has_unread: false,
+            tasks_has_unread: false,
+            files_has_unread: false,
         }
     }
 
@@ -217,6 +229,54 @@ impl PanelSectionState {
                 self.files_scroll = self.files_scroll.saturating_sub(1);
             }
             _ => {}
+        }
+    }
+
+    /// Collapse all sections
+    pub fn collapse_all(&mut self) {
+        self.session_expanded = false;
+        self.context_expanded = false;
+        self.tasks_expanded = false;
+        self.files_expanded = false;
+        self.cost_breakdown_expanded = false;
+    }
+
+    /// Expand all sections
+    pub fn expand_all(&mut self) {
+        self.session_expanded = true;
+        self.context_expanded = true;
+        self.tasks_expanded = true;
+        self.files_expanded = true;
+        self.cost_breakdown_expanded = true;
+    }
+
+    /// Mark a section as having unread activity
+    pub fn mark_unread(&mut self, section: EnhancedPanelSection) {
+        match section {
+            EnhancedPanelSection::Session => self.session_has_unread = true,
+            EnhancedPanelSection::Context => self.context_has_unread = true,
+            EnhancedPanelSection::Tasks => self.tasks_has_unread = true,
+            EnhancedPanelSection::Files => self.files_has_unread = true,
+        }
+    }
+
+    /// Mark a section as read (clear unread indicator)
+    pub fn mark_read(&mut self, section: EnhancedPanelSection) {
+        match section {
+            EnhancedPanelSection::Session => self.session_has_unread = false,
+            EnhancedPanelSection::Context => self.context_has_unread = false,
+            EnhancedPanelSection::Tasks => self.tasks_has_unread = false,
+            EnhancedPanelSection::Files => self.files_has_unread = false,
+        }
+    }
+
+    /// Get whether a section has unread activity
+    pub fn has_unread(&self, section: EnhancedPanelSection) -> bool {
+        match section {
+            EnhancedPanelSection::Session => self.session_has_unread,
+            EnhancedPanelSection::Context => self.context_has_unread,
+            EnhancedPanelSection::Tasks => self.tasks_has_unread,
+            EnhancedPanelSection::Files => self.files_has_unread,
         }
     }
 
@@ -1704,12 +1764,36 @@ fn render_scrollbar(
     scrollbar
 }
 
+/// Render panel toolbar with collapse/expand all buttons
+fn render_panel_toolbar(width: u16) -> Line<'static> {
+    let title = " Panel ";
+    let buttons = " [−] [+] ";
+    let padding_len = (width as usize).saturating_sub(title.len() + buttons.len() + 4);
+    let padding = "─".repeat(padding_len);
+
+    Line::from(vec![
+        Span::styled("┌─", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(padding, Style::default().fg(Color::DarkGray)),
+        Span::styled("[−]", Style::default().fg(Color::Yellow)),
+        Span::raw(" "),
+        Span::styled("[+]", Style::default().fg(Color::Green)),
+        Span::styled(" ┐", Style::default().fg(Color::DarkGray)),
+    ])
+}
+
 /// Render a section header with accordion indicator
 fn render_section_header(
     title: &str,
     icon: &str,
     expanded: bool,
     is_focused: bool,
+    has_unread: bool,
     width: u16,
 ) -> Line<'static> {
     let expand_icon = if expanded { "▼" } else { "▶" };
@@ -1718,6 +1802,10 @@ fn render_section_header(
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else if has_unread {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
             .fg(Color::White)
@@ -1749,7 +1837,11 @@ fn render_section_footer(width: u16) -> Line<'static> {
 }
 
 /// Render the Session section content
-fn render_session_content(session: &SessionInfo, width: u16) -> Vec<Line<'static>> {
+fn render_session_content(
+    session: &SessionInfo,
+    width: u16,
+    cost_breakdown_expanded: bool,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let content_width = (width as usize).saturating_sub(4); // Account for borders
 
@@ -1804,15 +1896,35 @@ fn render_session_content(session: &SessionInfo, width: u16) -> Vec<Line<'static
         ),
     ]));
 
-    // Cost line
+    // Cost line with breakdown accordion
+    let cost_indicator = if cost_breakdown_expanded {
+        "▼"
+    } else {
+        "▶"
+    };
     lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled("💰 ", Style::default()),
         Span::styled(
-            format!("${:.4}", session.cost),
+            format!("${:.4} {}", session.cost, cost_indicator),
             Style::default().fg(Color::Yellow),
         ),
     ]));
+
+    // Show cost breakdown if expanded
+    if cost_breakdown_expanded && !session.cost_breakdown.is_empty() {
+        for entry in &session.cost_breakdown {
+            let breakdown_text =
+                format!("  ├ {}/{}: ${:.4}", entry.provider, entry.model, entry.cost);
+            lines.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    truncate(&breakdown_text),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+    }
 
     // LSP languages (if any)
     if !session.lsp_languages.is_empty() {
@@ -2056,11 +2168,16 @@ pub fn render_enhanced_panel(
         "ℹ️",
         state.session_expanded,
         state.focused_section == EnhancedPanelSection::Session,
+        state.has_unread(EnhancedPanelSection::Session),
         width,
     ));
 
     if state.session_expanded {
-        lines.extend(render_session_content(&data.session, width));
+        lines.extend(render_session_content(
+            &data.session,
+            width,
+            state.cost_breakdown_expanded,
+        ));
         lines.push(render_section_footer(width));
     }
 
@@ -2070,6 +2187,7 @@ pub fn render_enhanced_panel(
         "📊",
         state.context_expanded,
         state.focused_section == EnhancedPanelSection::Context,
+        state.has_unread(EnhancedPanelSection::Context),
         width,
     ));
 
@@ -2084,6 +2202,7 @@ pub fn render_enhanced_panel(
         "⏱️",
         state.tasks_expanded,
         state.focused_section == EnhancedPanelSection::Tasks,
+        state.has_unread(EnhancedPanelSection::Tasks),
         width,
     ));
 
@@ -2104,6 +2223,7 @@ pub fn render_enhanced_panel(
         "📁",
         state.files_expanded,
         state.focused_section == EnhancedPanelSection::Files,
+        state.has_unread(EnhancedPanelSection::Files),
         width,
     ));
 
@@ -2193,6 +2313,11 @@ mod proptests {
                 tasks_scroll: 0,
                 files_scroll: 0,
                 focused_section: section,
+                cost_breakdown_expanded: false,
+                session_has_unread: false,
+                context_has_unread: false,
+                tasks_has_unread: false,
+                files_has_unread: false,
             };
 
             // Get initial expanded state for the focused section
@@ -2269,6 +2394,7 @@ mod proptests {
                 provider: provider.clone(),
                 cost,
                 lsp_languages: lsp_languages.clone(),
+                cost_breakdown: Vec::new(),
             };
 
             // Test format_header contains all three values

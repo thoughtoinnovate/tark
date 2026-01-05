@@ -564,6 +564,11 @@ impl AgentBridge {
         self.is_processing.load(Ordering::SeqCst)
     }
 
+    /// Get the working directory
+    pub fn working_dir(&self) -> &std::path::Path {
+        &self.working_dir
+    }
+
     /// Get context usage percentage from the actual conversation context
     pub fn context_usage_percent(&self) -> usize {
         self.agent.context_usage_percentage()
@@ -598,6 +603,47 @@ impl AgentBridge {
             }
         }
         None
+    }
+
+    /// Get cost breakdown by model and provider for current session
+    pub fn get_cost_breakdown(&self) -> Vec<crate::tui::widgets::CostBreakdownEntry> {
+        use std::collections::HashMap;
+
+        // Query usage tracker if available
+        if let Some(ref tracker) = self.usage_tracker {
+            if let Ok(logs) = tracker.get_session_logs(&self.current_session.id) {
+                // Aggregate costs by (provider, model)
+                let mut breakdown: HashMap<(String, String), f64> = HashMap::new();
+
+                for log in logs {
+                    let key = (log.provider.clone(), log.model.clone());
+                    *breakdown.entry(key).or_insert(0.0) += log.cost_usd;
+                }
+
+                // Convert to Vec and sort by cost (highest first)
+                let mut entries: Vec<crate::tui::widgets::CostBreakdownEntry> = breakdown
+                    .into_iter()
+                    .map(
+                        |((provider, model), cost)| crate::tui::widgets::CostBreakdownEntry {
+                            provider,
+                            model,
+                            cost,
+                        },
+                    )
+                    .collect();
+
+                entries.sort_by(|a, b| {
+                    b.cost
+                        .partial_cmp(&a.cost)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                return entries;
+            }
+        }
+
+        // Return empty if no usage tracker or no logs
+        Vec::new()
     }
 
     /// Get total tokens from current session (cumulative input/output)

@@ -78,6 +78,8 @@ pub struct ThemeColors {
     pub warning: Option<String>,
     /// Success color
     pub success: Option<String>,
+    /// Color for sections with unread activity (default: "yellow")
+    pub unread_highlight: Option<String>,
 }
 
 /// Keybinding configuration
