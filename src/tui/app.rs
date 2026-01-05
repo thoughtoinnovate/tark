@@ -636,6 +636,79 @@ impl TuiApp {
         Ok(app)
     }
 
+    /// Create a new TUI application with provider and model overrides from CLI
+    ///
+    /// This allows `--provider` and `--model` CLI arguments to be applied
+    /// at AgentBridge creation time, before the LLM provider is instantiated.
+    pub fn with_provider_override(
+        config: TuiConfig,
+        provider: Option<String>,
+        model: Option<String>,
+    ) -> anyhow::Result<Self> {
+        // Set up panic hook before initializing terminal
+        Self::install_panic_hook();
+
+        let terminal = Self::setup_terminal()?;
+        let mut state = AppState::with_config(config);
+        let events = EventHandler::new();
+        let keybindings = KeybindingHandler::new();
+        let commands = CommandHandler::new();
+
+        // Get initial terminal size
+        let size = terminal.size()?;
+        state.set_terminal_size(size.width, size.height);
+
+        // Detect system username (Requirements 2.1)
+        let username = whoami::username();
+
+        // Initialize AgentBridge with provider/model overrides (Requirements 1.3, 1.4, 1.5)
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+        // Initialize prompt history (Requirements 14.3)
+        let prompt_history = super::prompt_history::PromptHistory::for_workspace(&working_dir);
+
+        let (agent_bridge, llm_configured, llm_error) =
+            match AgentBridge::with_provider(working_dir, provider, model) {
+                Ok(bridge) => (Some(bridge), true, None),
+                Err(e) => {
+                    let error_msg = format!(
+                        "To configure an LLM provider, set one of the following environment variables:\n\
+                        • OPENAI_API_KEY - for OpenAI (GPT-4, etc.)\n\
+                        • ANTHROPIC_API_KEY - for Claude\n\
+                        • Run 'tark auth copilot' for GitHub Copilot\n\
+                        • Or configure Ollama for local models\n\n\
+                        Error: {}",
+                        e
+                    );
+                    (None, false, Some(error_msg))
+                }
+            };
+
+        state.llm_configured = llm_configured;
+        state.llm_error = llm_error;
+
+        let mut app = Self {
+            terminal,
+            state,
+            events,
+            keybindings,
+            commands,
+            agent_bridge,
+            agent_event_rx: None,
+            pending_request: None,
+            username,
+            prompt_history,
+        };
+
+        // Initialize panel data from AgentBridge (Requirements 5.1)
+        app.update_panel_from_bridge();
+
+        // Restore messages from current session on startup (Requirements 6.1, 6.6)
+        app.restore_messages_from_session();
+
+        Ok(app)
+    }
+
     /// Get the current configuration
     pub fn config(&self) -> &TuiConfig {
         self.state.config()

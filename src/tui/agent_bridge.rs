@@ -216,6 +216,18 @@ pub struct AgentBridge {
 impl AgentBridge {
     /// Create a new agent bridge
     pub fn new(working_dir: PathBuf) -> Result<Self> {
+        Self::with_provider(working_dir, None, None)
+    }
+
+    /// Create a new agent bridge with optional provider and model overrides
+    ///
+    /// This allows CLI arguments to override the config defaults before
+    /// the provider is created.
+    pub fn with_provider(
+        working_dir: PathBuf,
+        provider_override: Option<String>,
+        model_override: Option<String>,
+    ) -> Result<Self> {
         let config = Config::load().unwrap_or_default();
         let storage = TarkStorage::new(&working_dir)?;
 
@@ -226,14 +238,21 @@ impl AgentBridge {
             session
         });
 
-        // Get provider and model from session or config
-        let provider_name = if current_session.provider.is_empty() {
-            config.llm.default_provider.clone()
-        } else {
+        // Get provider: CLI override > session > config
+        let provider_name = if let Some(ref p) = provider_override {
+            p.clone()
+        } else if !current_session.provider.is_empty() {
             current_session.provider.clone()
+        } else {
+            config.llm.default_provider.clone()
         };
 
-        let model_name = if current_session.model.is_empty() {
+        // Get model: CLI override > session > config default for provider
+        let model_name = if let Some(ref m) = model_override {
+            m.clone()
+        } else if !current_session.model.is_empty() {
+            current_session.model.clone()
+        } else {
             // Get default model based on provider
             match provider_name.as_str() {
                 "claude" | "anthropic" => config.llm.claude.model.clone(),
@@ -244,8 +263,6 @@ impl AgentBridge {
                 "ollama" | "local" => config.llm.ollama.model.clone(),
                 _ => String::new(),
             }
-        } else {
-            current_session.model.clone()
         };
 
         // Create LLM provider

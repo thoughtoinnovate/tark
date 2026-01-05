@@ -36,38 +36,19 @@ pub async fn run_tui_chat(
 ) -> Result<()> {
     let working_dir = PathBuf::from(working_dir).canonicalize()?;
 
-    // Load configuration
-    let config = Config::load().unwrap_or_default();
-
-    // Check if LLM is configured before starting TUI
-    let llm_status = check_llm_configuration(&config);
-
     // Load TUI configuration
     let tui_config = TuiConfig::load().unwrap_or_default();
 
-    // Create the TUI application
-    let mut app = TuiApp::with_config(tui_config)?;
+    // Create the TUI application with provider/model overrides from CLI
+    // This ensures the correct provider is used when creating the AgentBridge
+    let mut app = TuiApp::with_provider_override(tui_config, provider.clone(), model.clone())?;
 
-    // Override provider and model from CLI args if provided
-    if let Some(ref mut bridge) = app.agent_bridge_mut() {
-        if let Some(p) = provider {
-            if let Err(e) = bridge.set_provider(&p) {
-                tracing::warn!("Failed to set provider from CLI: {}", e);
-            } else {
-                tracing::info!("Set provider from CLI: {}", p);
-            }
-        }
-        if let Some(m) = model {
-            bridge.set_model(&m);
-            tracing::info!("Set model from CLI: {}", m);
-        }
-    }
-
-    // Set LLM configuration status
-    app.state.llm_configured = llm_status.is_ok();
-    if let Err(ref error_msg) = llm_status {
-        app.state.llm_error = Some(error_msg.clone());
-    }
+    // Determine effective provider for logging
+    let effective_provider = provider.unwrap_or_else(|| {
+        let config = Config::load().unwrap_or_default();
+        config.llm.default_provider.clone()
+    });
+    tracing::info!("Using provider: {}", effective_provider);
 
     // Determine standalone mode
     let is_standalone = socket_path.is_none();
@@ -116,11 +97,9 @@ pub async fn run_tui_chat(
     Ok(())
 }
 
-/// Check if LLM is properly configured
+/// Check if LLM is properly configured for a specific provider
 /// Returns Ok(()) if configured, Err(message) with helpful guidance if not
-fn check_llm_configuration(config: &Config) -> Result<(), String> {
-    let provider = &config.llm.default_provider;
-
+fn check_llm_configuration_for_provider(provider: &str) -> Result<(), String> {
     match provider.to_lowercase().as_str() {
         "openai" | "gpt" => {
             if std::env::var("OPENAI_API_KEY").is_err() {
@@ -144,6 +123,40 @@ fn check_llm_configuration(config: &Config) -> Result<(), String> {
                     .to_string());
             }
         }
+        "copilot" | "github" => {
+            // Check if Copilot token exists
+            let token_path = dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("tark")
+                .join("copilot_token.json");
+            if !token_path.exists() {
+                return Err("GitHub Copilot not authenticated.\n\n\
+                    Run 'tark auth copilot' to authenticate with GitHub Copilot."
+                    .to_string());
+            }
+        }
+        "gemini" | "google" => {
+            if std::env::var("GOOGLE_API_KEY").is_err() && std::env::var("GEMINI_API_KEY").is_err() {
+                return Err("Google Gemini API key not configured.\n\n\
+                    To use Gemini, set the GOOGLE_API_KEY or GEMINI_API_KEY environment variable:\n\
+                    \n\
+                    export GOOGLE_API_KEY=\"your-api-key-here\"\n\
+                    \n\
+                    Get your API key from: https://aistudio.google.com/apikey"
+                    .to_string());
+            }
+        }
+        "openrouter" => {
+            if std::env::var("OPENROUTER_API_KEY").is_err() {
+                return Err("OpenRouter API key not configured.\n\n\
+                    To use OpenRouter, set the OPENROUTER_API_KEY environment variable:\n\
+                    \n\
+                    export OPENROUTER_API_KEY=\"your-api-key-here\"\n\
+                    \n\
+                    Get your API key from: https://openrouter.ai/keys"
+                    .to_string());
+            }
+        }
         "ollama" | "local" => {
             // Ollama doesn't require an API key, but we could check if it's running
             // For now, assume it's configured if selected
@@ -154,6 +167,9 @@ fn check_llm_configuration(config: &Config) -> Result<(), String> {
                 Supported providers:\n\
                 - openai (requires OPENAI_API_KEY)\n\
                 - claude (requires ANTHROPIC_API_KEY)\n\
+                - copilot (requires 'tark auth copilot')\n\
+                - gemini (requires GOOGLE_API_KEY)\n\
+                - openrouter (requires OPENROUTER_API_KEY)\n\
                 - ollama (local, no API key needed)\n\
                 \n\
                 Configure in ~/.config/tark/config.toml or set default_provider",
@@ -163,6 +179,12 @@ fn check_llm_configuration(config: &Config) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Check if LLM is properly configured using config's default provider
+/// Returns Ok(()) if configured, Err(message) with helpful guidance if not
+fn check_llm_configuration(config: &Config) -> Result<(), String> {
+    check_llm_configuration_for_provider(&config.llm.default_provider)
 }
 
 /// Run interactive chat mode
