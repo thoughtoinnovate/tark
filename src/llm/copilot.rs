@@ -45,6 +45,7 @@ impl Drop for AuthFileGuard {
     }
 }
 
+
 impl CopilotToken {
     /// Extract SKU from token string (free_limited_copilot, copilot_enterprise, etc.)
     fn get_sku(&self) -> Option<String> {
@@ -204,12 +205,27 @@ impl CopilotProvider {
 
     /// Ensure we have a valid token, initiating Device Flow if needed
     pub async fn ensure_token(&mut self) -> Result<String> {
+
         // Check if we have a token and it's not expired
         if let Some(ref token) = self.token {
             if !token.is_expired() {
                 return Ok(token.access_token.clone());
             }
             tracing::info!("GitHub Copilot token expired, re-authenticating...");
+        }
+
+        // Check disk for token
+        let file_exists = self.token_path.exists();
+        if file_exists {
+            match Self::load_token(&self.token_path) {
+                Ok(tok) => {
+                    if !tok.is_expired() {
+                        self.token = Some(tok.clone());
+                        return Ok(tok.access_token);
+                    }
+                }
+                Err(_) => {}
+            }
         }
 
         // Need to authenticate
@@ -219,6 +235,7 @@ impl CopilotProvider {
         // Save token
         Self::save_token(&self.token_path, &new_token)?;
         self.token = Some(new_token.clone());
+
 
         Ok(new_token.access_token)
     }
@@ -244,6 +261,7 @@ impl CopilotProvider {
                 let _ = f.flush();
             }
             auth_file_path = Some(auth_file);
+
         }
 
         // Ensure the file is cleaned up no matter what happens

@@ -1001,6 +1001,8 @@ impl TuiApp {
         }
     }
 
+
+
     /// Cancel Copilot authentication by deleting the pending file
     fn cancel_copilot_auth(&mut self) {
         if let Some(home) = dirs::home_dir() {
