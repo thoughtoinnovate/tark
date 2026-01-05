@@ -382,7 +382,9 @@ impl CopilotProvider {
             .client
             .post(COPILOT_API_URL)
             .header("Authorization", format!("Bearer {}", token))
-            .header("Editor-Version", "Tark/0.1.0")
+            .header("User-Agent", "Tark/0.3.0")
+            .header("Editor-Version", "Tark/0.3.0")
+            .header("Editor-Plugin-Version", "copilot/0.3.0")
             .header("Copilot-Integration-Id", "vscode-chat")
             .header("Content-Type", "application/json")
             .json(&request)
@@ -489,7 +491,9 @@ impl LlmProvider for CopilotProvider {
             .client
             .post(COPILOT_API_URL)
             .header("Authorization", format!("Bearer {}", token))
-            .header("Editor-Version", "Tark/0.1.0")
+            .header("User-Agent", "Tark/0.3.0")
+            .header("Editor-Version", "Tark/0.3.0")
+            .header("Editor-Plugin-Version", "copilot/0.3.0")
             .header("Copilot-Integration-Id", "vscode-chat")
             .header("Content-Type", "application/json")
             .json(&request)
