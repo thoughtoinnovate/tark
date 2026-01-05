@@ -110,6 +110,8 @@ pub struct AppState {
     pub pending_async_request: Option<AsyncMessageRequest>,
     /// Flag indicating panel needs update when bridge is restored
     pub panel_update_pending: bool,
+    /// Authentication dialog state (OAuth device flow)
+    pub auth_dialog: super::widgets::AuthDialog,
 }
 
 /// State for tab completion
@@ -206,6 +208,7 @@ impl Default for AppState {
             spinner_last_update: std::time::Instant::now(),
             pending_async_request: None,
             panel_update_pending: false,
+            auth_dialog: super::widgets::AuthDialog::default(),
         }
     }
 }
@@ -667,11 +670,14 @@ impl TuiApp {
         // Initialize prompt history (Requirements 14.3)
         let prompt_history = super::prompt_history::PromptHistory::for_workspace(&working_dir);
 
-        let (agent_bridge, llm_configured, llm_error) =
-            match AgentBridge::with_provider(working_dir, provider, model) {
-                Ok(bridge) => (Some(bridge), true, None),
-                Err(e) => {
-                    let error_msg = format!(
+        let (agent_bridge, llm_configured, llm_error) = match AgentBridge::with_provider(
+            working_dir,
+            provider,
+            model,
+        ) {
+            Ok(bridge) => (Some(bridge), true, None),
+            Err(e) => {
+                let error_msg = format!(
                         "To configure an LLM provider, set one of the following environment variables:\n\
                         • OPENAI_API_KEY - for OpenAI (GPT-4, etc.)\n\
                         • ANTHROPIC_API_KEY - for Claude\n\
@@ -680,9 +686,9 @@ impl TuiApp {
                         Error: {}",
                         e
                     );
-                    (None, false, Some(error_msg))
-                }
-            };
+                (None, false, Some(error_msg))
+            }
+        };
 
         state.llm_configured = llm_configured;
         state.llm_error = llm_error;
@@ -780,6 +786,7 @@ impl TuiApp {
                 },
                 cost: total_cost,
                 lsp_languages: vec![], // LSP languages are managed separately
+                cost_breakdown: Vec::new(),
             };
 
             // Update context info (Requirements 5.3, 5.4, 5.5)
@@ -1097,9 +1104,30 @@ impl TuiApp {
             }
         }
     }
-
-    /// Handle a key event
+    // Handle auth dialog input if visible
     fn handle_key_event(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
+        // Handle auth dialog input if visible
+        if self.state.auth_dialog.is_visible() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.state.auth_dialog.hide();
+                    return Ok(true);
+                }
+                KeyCode::Char('c') | KeyCode::Char('C') => {
+                    // Copy code to clipboard
+                    let code = self.state.auth_dialog.user_code().to_string();
+                    if let Err(e) = super::clipboard::copy_to_clipboard(&code) {
+                        self.state.status_message = Some(format!("Failed to copy: {}", e));
+                    } else {
+                        self.state.status_message =
+                            Some("✅ Code copied to clipboard!".to_string());
+                    }
+                    return Ok(true);
+                }
+                _ => return Ok(true),
+            }
+        }
+
         // Handle picker input first if picker is visible (Requirements 6.4, 12.1, 12.2)
         if self.state.picker.is_visible() {
             return self.handle_picker_key(key);
@@ -1939,8 +1967,28 @@ impl TuiApp {
                             let mut manager = super::attachments::AttachmentManager::new(config);
 
                             // Transfer existing attachments to manager for limit checking
+                            let mut failed_attachments = Vec::new();
                             for attachment in self.state.attachments.drain(..) {
-                                let _ = manager.add(attachment);
+                                if let Err(e) = manager.add(attachment.clone()) {
+                                    tracing::warn!(
+                                        "Failed to transfer attachment to manager: {}",
+                                        e
+                                    );
+                                    failed_attachments.push(attachment);
+                                }
+                            }
+
+                            // If we had failures, restore them and abort
+                            if !failed_attachments.is_empty() {
+                                self.state.attachments.extend(failed_attachments);
+                                self.state.status_message = Some(
+                                    "❌ Cannot attach: Cannot process existing attachments"
+                                        .to_string(),
+                                );
+                                // Restore any attachments that made it to the manager
+                                let remaining = manager.take_all();
+                                self.state.attachments.extend(remaining);
+                                return;
                             }
 
                             match manager.attach_file(&resolved_path) {
@@ -2224,8 +2272,24 @@ impl TuiApp {
                         let mut manager = super::attachments::AttachmentManager::new(config);
 
                         // Transfer existing attachments to manager for limit checking
+                        let mut failed_attachments = Vec::new();
                         for attachment in self.state.attachments.drain(..) {
-                            let _ = manager.add(attachment);
+                            if let Err(e) = manager.add(attachment.clone()) {
+                                tracing::warn!("Failed to transfer attachment to manager: {}", e);
+                                failed_attachments.push(attachment);
+                            }
+                        }
+
+                        // If we had failures, restore them and abort
+                        if !failed_attachments.is_empty() {
+                            self.state.attachments.extend(failed_attachments);
+                            self.state.status_message = Some(
+                                "❌ Cannot attach: Cannot process existing attachments".to_string(),
+                            );
+                            // Restore any attachments that made it to the manager
+                            let remaining = manager.take_all();
+                            self.state.attachments.extend(remaining);
+                            return;
                         }
 
                         match manager.attach_file(&resolved_path) {
@@ -3581,6 +3645,51 @@ impl TuiApp {
                         // Keep processing flag true so we can auto-retry
                         // The tick handler will check for retry
                     }
+                    AgentEvent::AuthRequired {
+                        provider,
+                        verification_url,
+                        user_code,
+                        timeout_secs,
+                    } => {
+                        // Show authentication required message
+                        self.state.status_message =
+                            Some(format!("🔐 {} authentication required", provider));
+
+                        // Add a system message with auth instructions
+                        self.state.message_list.push(ChatMessage::system(format!(
+                            "🔐 **Authentication Required for {}**\n\n\
+                            Please visit: {}\n\n\
+                            Enter code: **{}**\n\n\
+                            ⏳ Waiting for authentication (timeout: {}s)...",
+                            provider, verification_url, user_code, timeout_secs
+                        )));
+                    }
+                    AgentEvent::AuthSuccess { provider } => {
+                        // Show authentication success
+                        self.state.status_message =
+                            Some(format!("✅ {} authenticated successfully", provider));
+
+                        self.state.message_list.push(ChatMessage::system(format!(
+                            "✅ **{} Authentication Successful**\n\n\
+                            You can now use {} models.",
+                            provider, provider
+                        )));
+                    }
+                    AgentEvent::AuthFailed { provider, error } => {
+                        // Show authentication failure
+                        self.state.status_message =
+                            Some(format!("❌ {} authentication failed", provider));
+
+                        self.state.message_list.push(ChatMessage::system(format!(
+                            "❌ **{} Authentication Failed**\n\n\
+                            Error: {}\n\n\
+                            Please try again with `/model` or check your credentials.",
+                            provider, error
+                        )));
+
+                        // Stop processing since auth failed
+                        self.state.agent_processing = false;
+                    }
                 }
             }
 
@@ -3883,6 +3992,12 @@ impl TuiApp {
             if self.state.picker.is_visible() {
                 let picker_widget = PickerWidget::new(&self.state.picker);
                 frame.render_widget(picker_widget, area);
+            }
+
+            // Render auth dialog overlay if visible
+            if self.state.auth_dialog.is_visible() {
+                let auth_widget = super::widgets::AuthDialogWidget::new(&self.state.auth_dialog);
+                frame.render_widget(auth_widget, area);
             }
 
             // Render command dropdown overlay if visible (above input area)
@@ -4635,6 +4750,7 @@ mod property_tests {
                 provider: provider_name.clone(),
                 cost,
                 lsp_languages: vec![],
+                cost_breakdown: Vec::new(),
             };
             state.update_session_info(session_info);
 
@@ -5017,6 +5133,7 @@ mod property_tests {
                 provider: selected_provider.clone(),
                 cost,
                 lsp_languages: vec![],
+                cost_breakdown: Vec::new(),
             };
             state.update_session_info(session_info);
 
@@ -5302,6 +5419,7 @@ mod model_selection_integration_tests {
             provider: "openai".to_string(),
             cost: 0.0,
             lsp_languages: vec![],
+                cost_breakdown: Vec::new(),
         };
         state.update_session_info(session_info);
 
