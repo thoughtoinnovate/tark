@@ -1550,7 +1550,12 @@ impl TuiApp {
             }
             // Collapsible block and attachment actions (Task 11)
             Action::ToggleBlock => {
-                self.handle_toggle_block();
+                // If Panel is focused, toggle the current section instead
+                if self.state.focused_component == FocusedComponent::Panel {
+                    self.state.panel_section_state.toggle_focused();
+                } else {
+                    self.handle_toggle_block();
+                }
                 Ok(true)
             }
             Action::ToggleAttachmentDropdown => {

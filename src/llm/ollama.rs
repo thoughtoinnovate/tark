@@ -20,7 +20,23 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
+    /// Create a new Ollama provider
+    ///
+    /// Requires either OLLAMA_BASE_URL or OLLAMA_MODEL to be set.
+    /// This ensures users explicitly configure Ollama rather than
+    /// accidentally falling back to it.
     pub fn new() -> Result<Self> {
+        let has_base_url = env::var("OLLAMA_BASE_URL").is_ok();
+        let has_model = env::var("OLLAMA_MODEL").is_ok();
+
+        // Require explicit configuration to use Ollama
+        if !has_base_url && !has_model {
+            anyhow::bail!(
+                "Ollama not configured. Set OLLAMA_BASE_URL or OLLAMA_MODEL environment variable, \
+                or ensure Ollama is running locally with: ollama serve"
+            );
+        }
+
         let base_url =
             env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
         let model = env::var("OLLAMA_MODEL").unwrap_or_else(|_| "codellama".to_string());

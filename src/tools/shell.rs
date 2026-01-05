@@ -180,17 +180,48 @@ impl Tool for ShellTool {
             .unwrap_or_else(|| self.working_dir.clone());
         let timeout = std::time::Duration::from_secs(params.timeout_secs.unwrap_or(60));
 
-        // Determine shell based on OS
-        let (shell, shell_arg) = if cfg!(windows) {
-            ("cmd", "/C")
+        // Determine shell based on OS (prefer bash/Powershell, fallback to sh/cmd)
+        let (shell, shell_args): (&str, &[&str]) = if cfg!(windows) {
+            // Check for PowerShell; fallback to cmd if unavailable
+            let ps_available = std::process::Command::new("powershell")
+                .arg("-NoProfile")
+                .arg("-NonInteractive")
+                .arg("-Command")
+                .arg("Write-Output ok")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .is_ok();
+
+            if ps_available {
+                (
+                    "powershell",
+                    &["-NoProfile", "-NonInteractive", "-Command"] as &[&str],
+                )
+            } else {
+                ("cmd", &["/C"] as &[&str])
+            }
         } else {
-            ("sh", "-c")
+            // Prefer bash; fallback to sh if unavailable
+            let bash_available = std::process::Command::new("bash")
+                .arg("-lc")
+                .arg("echo ok")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .is_ok();
+
+            if bash_available {
+                ("bash", &["-lc"] as &[&str])
+            } else {
+                ("sh", &["-c"] as &[&str])
+            }
         };
 
         let result = tokio::time::timeout(
             timeout,
             Command::new(shell)
-                .arg(shell_arg)
+                .args(shell_args)
                 .arg(&params.command)
                 .current_dir(&working_dir)
                 .stdout(Stdio::piped())
