@@ -1719,8 +1719,12 @@ impl TuiApp {
                 }
             }
             KeyCode::Down => {
+                // If file dropdown is visible, navigate down
+                if self.state.file_dropdown.is_visible() {
+                    self.state.file_dropdown.select_next();
+                }
                 // If command dropdown is visible, navigate down in dropdown
-                if self.state.command_dropdown.is_visible() {
+                else if self.state.command_dropdown.is_visible() {
                     self.state.command_dropdown.select_next();
                 } else {
                     // Navigate to next history entry (Requirements 14.2, 14.4)
@@ -1728,20 +1732,49 @@ impl TuiApp {
                 }
             }
             KeyCode::Esc => {
+                // Hide file dropdown on Esc
+                if self.state.file_dropdown.is_visible() {
+                    self.state.file_dropdown.hide();
+                    self.state.file_dropdown_trigger_pos = None;
+                }
                 // Hide command dropdown on Esc
-                if self.state.command_dropdown.is_visible() {
+                else if self.state.command_dropdown.is_visible() {
                     self.state.command_dropdown.hide();
                 }
             }
             KeyCode::Enter => {
-                // If file dropdown is visible, attach selected files
+                // If file dropdown is visible, attach selected files (don't submit)
                 if self.state.file_dropdown.is_visible() {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                         // Ctrl+Enter toggles multi-select mode
                         self.state.file_dropdown.toggle_multi_select_mode();
                     } else {
-                        // Attach selected file(s)
+                        // Attach selected file(s) and remove @query from input
                         let paths = self.state.file_dropdown.confirm();
+
+                        // Remove the @query text from input
+                        if let Some(at_pos) = self.state.file_dropdown_trigger_pos {
+                            let content = self.state.input_widget.content();
+                            // Find where the @ query ends (current cursor position or end of input)
+                            let cursor = self.state.input_widget.cursor();
+                            // The @ is at at_pos - 1 (trigger_pos is cursor after @)
+                            let at_start = at_pos.saturating_sub(1);
+                            // Build new content without the @query
+                            let before = &content[..at_start];
+                            let after = if cursor < content.len() {
+                                &content[cursor..]
+                            } else {
+                                ""
+                            };
+                            let new_content = format!("{}{}", before, after);
+                            self.state.input_widget.set_content(new_content);
+                            self.state.input_widget.set_cursor(at_start);
+                        }
+
+                        // Clear trigger position
+                        self.state.file_dropdown_trigger_pos = None;
+
+                        // Attach the files
                         for path in paths {
                             if let Err(e) = self.attach_file_by_path(&path) {
                                 self.state.status_message =
@@ -1749,6 +1782,7 @@ impl TuiApp {
                             }
                         }
                     }
+                    // Don't fall through to submit - just attach and stay in input mode
                 }
                 // If command dropdown is visible, apply selection
                 else if self.state.command_dropdown.is_visible() {

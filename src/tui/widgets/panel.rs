@@ -164,6 +164,12 @@ pub struct PanelSectionState {
     pub tasks_has_unread: bool,
     /// Whether the Files section has unread activity
     pub files_has_unread: bool,
+    /// Currently selected item index within Session cost breakdown
+    pub session_selected: usize,
+    /// Currently selected item index within Tasks list
+    pub tasks_selected: usize,
+    /// Currently selected item index within Files list
+    pub files_selected: usize,
 }
 
 impl Default for PanelSectionState {
@@ -190,6 +196,9 @@ impl PanelSectionState {
             context_has_unread: false,
             tasks_has_unread: false,
             files_has_unread: false,
+            session_selected: 0,
+            tasks_selected: 0,
+            files_selected: 0,
         }
     }
 
@@ -210,14 +219,21 @@ impl PanelSectionState {
                 if !self.cost_breakdown_expanded {
                     self.cost_breakdown_expanded = true;
                 }
+                // Reset selection to first item
+                self.session_selected = 0;
+                self.session_scroll = 0;
                 self.nav_mode = PanelNavMode::SessionCost;
             }
             EnhancedPanelSection::Tasks => {
                 self.tasks_expanded = true;
+                self.tasks_selected = 0;
+                self.tasks_scroll = 0;
                 self.nav_mode = PanelNavMode::TasksItems;
             }
             EnhancedPanelSection::Files => {
                 self.files_expanded = true;
+                self.files_selected = 0;
+                self.files_scroll = 0;
                 self.nav_mode = PanelNavMode::FilesItems;
             }
             EnhancedPanelSection::Context => {
@@ -230,6 +246,7 @@ impl PanelSectionState {
     /// Go back to the parent navigation level (`-`).
     pub fn back(&mut self) {
         self.nav_mode = PanelNavMode::Sections;
+        // Keep selection state so user can drill back in where they left off
     }
 
     /// Toggle the focused section's expanded state
@@ -270,37 +287,53 @@ impl PanelSectionState {
         };
     }
 
-    /// Scroll down in the focused scrollable section
+    /// Move selection down in the focused section (j key when drilled in)
     pub fn scroll_down(&mut self, max_session: usize, max_tasks: usize, max_files: usize) {
+        const VISIBLE_ITEMS: usize = 4; // Max visible items before scrolling
+
         match self.nav_mode {
             PanelNavMode::SessionCost
                 if self.focused_section == EnhancedPanelSection::Session
                     && self.session_expanded
                     && self.cost_breakdown_expanded =>
             {
-                if self.session_scroll < max_session.saturating_sub(1) {
-                    self.session_scroll += 1;
+                let max_idx = max_session.saturating_sub(1);
+                if self.session_selected < max_idx {
+                    self.session_selected += 1;
+                    // Scroll to keep selection visible
+                    if self.session_selected >= self.session_scroll + VISIBLE_ITEMS {
+                        self.session_scroll =
+                            self.session_selected.saturating_sub(VISIBLE_ITEMS - 1);
+                    }
                 }
             }
             PanelNavMode::TasksItems
                 if self.focused_section == EnhancedPanelSection::Tasks && self.tasks_expanded =>
             {
-                if self.tasks_scroll < max_tasks.saturating_sub(1) {
-                    self.tasks_scroll += 1;
+                let max_idx = max_tasks.saturating_sub(1);
+                if self.tasks_selected < max_idx {
+                    self.tasks_selected += 1;
+                    if self.tasks_selected >= self.tasks_scroll + VISIBLE_ITEMS {
+                        self.tasks_scroll = self.tasks_selected.saturating_sub(VISIBLE_ITEMS - 1);
+                    }
                 }
             }
             PanelNavMode::FilesItems
                 if self.focused_section == EnhancedPanelSection::Files && self.files_expanded =>
             {
-                if self.files_scroll < max_files.saturating_sub(1) {
-                    self.files_scroll += 1;
+                let max_idx = max_files.saturating_sub(1);
+                if self.files_selected < max_idx {
+                    self.files_selected += 1;
+                    if self.files_selected >= self.files_scroll + VISIBLE_ITEMS {
+                        self.files_scroll = self.files_selected.saturating_sub(VISIBLE_ITEMS - 1);
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    /// Scroll up in the focused scrollable section
+    /// Move selection up in the focused section (k key when drilled in)
     pub fn scroll_up(&mut self) {
         match self.nav_mode {
             PanelNavMode::SessionCost
@@ -308,17 +341,33 @@ impl PanelSectionState {
                     && self.session_expanded
                     && self.cost_breakdown_expanded =>
             {
-                self.session_scroll = self.session_scroll.saturating_sub(1);
+                if self.session_selected > 0 {
+                    self.session_selected -= 1;
+                    // Scroll to keep selection visible
+                    if self.session_selected < self.session_scroll {
+                        self.session_scroll = self.session_selected;
+                    }
+                }
             }
             PanelNavMode::TasksItems
                 if self.focused_section == EnhancedPanelSection::Tasks && self.tasks_expanded =>
             {
-                self.tasks_scroll = self.tasks_scroll.saturating_sub(1);
+                if self.tasks_selected > 0 {
+                    self.tasks_selected -= 1;
+                    if self.tasks_selected < self.tasks_scroll {
+                        self.tasks_scroll = self.tasks_selected;
+                    }
+                }
             }
             PanelNavMode::FilesItems
                 if self.focused_section == EnhancedPanelSection::Files && self.files_expanded =>
             {
-                self.files_scroll = self.files_scroll.saturating_sub(1);
+                if self.files_selected > 0 {
+                    self.files_selected -= 1;
+                    if self.files_selected < self.files_scroll {
+                        self.files_scroll = self.files_selected;
+                    }
+                }
             }
             _ => {}
         }
@@ -1201,27 +1250,27 @@ mod tests {
         state.focused_section = EnhancedPanelSection::Tasks;
         state.nav_mode = PanelNavMode::TasksItems;
 
-        // Scroll down
+        // Move selection down (now tracks selected index, not scroll)
         state.scroll_down(10, 10, 5);
-        assert_eq!(state.tasks_scroll, 1);
+        assert_eq!(state.tasks_selected, 1);
         state.scroll_down(10, 10, 5);
-        assert_eq!(state.tasks_scroll, 2);
+        assert_eq!(state.tasks_selected, 2);
 
-        // Scroll up
+        // Move selection up
         state.scroll_up();
-        assert_eq!(state.tasks_scroll, 1);
+        assert_eq!(state.tasks_selected, 1);
         state.scroll_up();
-        assert_eq!(state.tasks_scroll, 0);
+        assert_eq!(state.tasks_selected, 0);
         state.scroll_up(); // Should not go negative
-        assert_eq!(state.tasks_scroll, 0);
+        assert_eq!(state.tasks_selected, 0);
 
         // Focus on Files section and enter item mode
         state.focused_section = EnhancedPanelSection::Files;
         state.nav_mode = PanelNavMode::FilesItems;
         state.scroll_down(10, 10, 5);
-        assert_eq!(state.files_scroll, 1);
+        assert_eq!(state.files_selected, 1);
         state.scroll_up();
-        assert_eq!(state.files_scroll, 0);
+        assert_eq!(state.files_selected, 0);
     }
 
     #[test]
@@ -1251,17 +1300,17 @@ mod tests {
         state.focused_section = EnhancedPanelSection::Tasks;
         state.nav_mode = PanelNavMode::TasksItems;
 
-        // Try to scroll beyond max
+        // Try to select beyond max (selection should stop at max_tasks - 1)
         for _ in 0..20 {
             state.scroll_down(5, 5, 3);
         }
-        assert_eq!(state.tasks_scroll, 4); // max_tasks - 1 = 5 - 1 = 4
+        assert_eq!(state.tasks_selected, 4); // max_tasks - 1 = 5 - 1 = 4
 
-        // Scroll when collapsed should not change offset
+        // Selection when collapsed should not change
         state.tasks_expanded = false;
-        let prev_scroll = state.tasks_scroll;
+        let prev_selected = state.tasks_selected;
         state.scroll_down(10, 10, 5);
-        assert_eq!(state.tasks_scroll, prev_scroll);
+        assert_eq!(state.tasks_selected, prev_selected);
     }
 
     #[test]
@@ -1968,6 +2017,8 @@ fn render_session_content(
     width: u16,
     cost_breakdown_expanded: bool,
     scroll_offset: usize,
+    selected_index: usize,
+    is_drilled_in: bool,
 ) -> (Vec<Line<'static>>, usize) {
     let content_width = (width as usize).saturating_sub(4); // Account for borders
 
@@ -2060,12 +2111,16 @@ fn render_session_content(
     let mut cost_lines: Vec<Line<'static>> = Vec::new();
     if cost_breakdown_expanded {
         if session.cost_breakdown.is_empty() {
+            // Show "no data" line - can be selected if drilled in
+            let is_selected = is_drilled_in && selected_index == 0;
+            let text_style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
             cost_lines.push(Line::from(vec![
                 Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    "  └ No usage data yet",
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled("  └ No usage data yet", text_style),
             ]));
         } else {
             for (i, entry) in session.cost_breakdown.iter().enumerate() {
@@ -2075,12 +2130,16 @@ fn render_session_content(
                     "  {} {}/{}: ${:.4}",
                     prefix, entry.provider, entry.model, entry.cost
                 );
+                // Highlight selected item when drilled in
+                let is_selected = is_drilled_in && i == selected_index;
+                let text_style = if is_selected {
+                    Style::default().fg(Color::Black).bg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
                 cost_lines.push(Line::from(vec![
                     Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        truncate(&breakdown_text),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(truncate(&breakdown_text), text_style),
                 ]));
             }
         }
@@ -2197,13 +2256,20 @@ fn render_tasks_content(
     scroll_offset: usize,
     visible_height: usize,
     width: u16,
+    selected_index: usize,
+    is_drilled_in: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     if tasks.is_empty() {
+        let text_style = if is_drilled_in {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
         lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-            Span::styled("No active tasks", Style::default().fg(Color::DarkGray)),
+            Span::styled("No active tasks", text_style),
             Span::raw(" "),
         ]));
         return lines;
@@ -2216,6 +2282,7 @@ fn render_tasks_content(
     // Render visible tasks
     let visible_tasks = tasks.iter().skip(scroll_offset).take(visible_height);
     for (i, task) in visible_tasks.enumerate() {
+        let actual_index = scroll_offset + i;
         let display = task.format_display();
         let content_width = if needs_scrollbar {
             (width as usize).saturating_sub(5) // Account for borders and scrollbar
@@ -2235,9 +2302,17 @@ fn render_tasks_content(
             String::new()
         };
 
+        // Highlight selected item when drilled in
+        let is_selected = is_drilled_in && actual_index == selected_index;
+        let text_style = if is_selected {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(task.status.color())
+        };
+
         lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(truncated, Style::default().fg(task.status.color())),
+            Span::styled(truncated, text_style),
             Span::raw(" "),
             Span::styled(scrollbar_char, Style::default().fg(Color::DarkGray)),
         ]));
@@ -2252,13 +2327,20 @@ fn render_files_content(
     scroll_offset: usize,
     visible_height: usize,
     width: u16,
+    selected_index: usize,
+    is_drilled_in: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     if files.is_empty() {
+        let text_style = if is_drilled_in {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
         lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-            Span::styled("No modified files", Style::default().fg(Color::DarkGray)),
+            Span::styled("No modified files", text_style),
             Span::raw(" "),
         ]));
         return lines;
@@ -2271,6 +2353,7 @@ fn render_files_content(
     // Render visible files
     let visible_files = files.iter().skip(scroll_offset).take(visible_height);
     for (i, file) in visible_files.enumerate() {
+        let actual_index = scroll_offset + i;
         let indicator = if file.modified { "●" } else { " " };
         let display = format!("{} {}", indicator, file.path);
         let content_width = if needs_scrollbar {
@@ -2291,9 +2374,17 @@ fn render_files_content(
             String::new()
         };
 
+        // Highlight selected item when drilled in
+        let is_selected = is_drilled_in && actual_index == selected_index;
+        let text_style = if is_selected {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+
         lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(truncated, Style::default().fg(Color::Yellow)),
+            Span::styled(truncated, text_style),
             Span::raw(" "),
             Span::styled(scrollbar_char, Style::default().fg(Color::DarkGray)),
         ]));
@@ -2372,11 +2463,14 @@ pub fn render_enhanced_panel(
         } else {
             0
         };
+        let is_drilled_in = state.nav_mode == PanelNavMode::SessionCost;
         let (session_lines, _total) = render_session_content(
             &data.session,
             width,
             state.cost_breakdown_expanded,
             session_scroll,
+            state.session_selected,
+            is_drilled_in,
         );
         lines.extend(session_lines);
         lines.push(render_section_footer(width));
@@ -2409,11 +2503,14 @@ pub fn render_enhanced_panel(
 
     if state.tasks_expanded {
         let visible_height = std::cmp::max(1, tasks_visible_height.saturating_sub(2)); // -2 for header/footer
+        let is_drilled_in = state.nav_mode == PanelNavMode::TasksItems;
         lines.extend(render_tasks_content(
             &data.tasks,
             state.tasks_scroll,
             visible_height,
             width,
+            state.tasks_selected,
+            is_drilled_in,
         ));
         lines.push(render_section_footer(width));
     }
@@ -2430,11 +2527,14 @@ pub fn render_enhanced_panel(
 
     if state.files_expanded {
         let visible_height = std::cmp::max(1, files_visible_height.saturating_sub(2)); // -2 for header/footer
+        let is_drilled_in = state.nav_mode == PanelNavMode::FilesItems;
         lines.extend(render_files_content(
             &data.files,
             state.files_scroll,
             visible_height,
             width,
+            state.files_selected,
+            is_drilled_in,
         ));
         lines.push(render_section_footer(width));
     }
@@ -2521,6 +2621,9 @@ mod proptests {
                 tasks_has_unread: false,
                 files_has_unread: false,
                 nav_mode: PanelNavMode::Sections,
+                session_selected: 0,
+                tasks_selected: 0,
+                files_selected: 0,
             };
 
             // Get initial expanded state for the focused section

@@ -306,6 +306,11 @@ impl InputWidget {
         self.cursor = self.content.len();
         self.history_index = None;
     }
+
+    /// Set the cursor position directly
+    pub fn set_cursor(&mut self, pos: usize) {
+        self.cursor = pos.min(self.content.len());
+    }
 }
 
 /// Renderable input widget
