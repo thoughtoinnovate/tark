@@ -3358,9 +3358,15 @@ impl TuiApp {
                 if needs_redraw {
                     self.render()?;
                 }
-            } else if agent_events_processed || needs_spinner_update {
-                // Re-render for agent updates or spinner animation
-                self.render()?;
+            } else {
+                // No terminal event - check for periodic tasks
+                self.check_rate_limit_retry();
+                self.check_copilot_auth_pending();
+                
+                if agent_events_processed || needs_spinner_update || self.state.auth_dialog.is_visible() {
+                    // Re-render for agent updates, spinner animation, or auth dialog
+                    self.render()?;
+                }
             }
         }
 

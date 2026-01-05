@@ -237,7 +237,11 @@ impl CopilotProvider {
         // Write to a temp file that the TUI can check
         // This provides a way for users to see the auth info
         if let Some(home) = dirs::home_dir() {
-            let auth_file = home.join(".tark").join("copilot_auth_pending.txt");
+            let tark_dir = home.join(".tark");
+            // Ensure .tark directory exists
+            let _ = std::fs::create_dir_all(&tark_dir);
+            
+            let auth_file = tark_dir.join("copilot_auth_pending.txt");
             if let Ok(mut f) = std::fs::File::create(&auth_file) {
                 use std::io::Write;
                 let _ = writeln!(f, "GitHub Copilot Authentication Required");
@@ -247,6 +251,9 @@ impl CopilotProvider {
                 let _ = writeln!(f, "Enter code: {}", device_response.user_code);
                 let _ = writeln!(f, "");
                 let _ = writeln!(f, "This file will be deleted once authentication completes.");
+                
+                // Flush to ensure it's written immediately
+                let _ = f.flush();
             }
         }
 
