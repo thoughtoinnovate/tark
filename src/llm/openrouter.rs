@@ -285,8 +285,13 @@ impl LlmProvider for OpenRouterProvider {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
         callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<LlmResponse> {
         use futures::StreamExt;
+        use tokio::time::{timeout, Duration};
+
+        const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+        const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
         let openrouter_messages = self.convert_messages(messages);
 
@@ -343,7 +348,37 @@ impl LlmProvider for OpenRouterProvider {
         let mut tool_call_map: std::collections::HashMap<usize, (String, String, String)> =
             std::collections::HashMap::new();
 
-        while let Some(chunk_result) = stream.next().await {
+        let mut last_activity_at = std::time::Instant::now();
+        loop {
+            // Check for user interrupt frequently so Ctrl+C/Esc+Esc are responsive
+            if let Some(check) = interrupt_check {
+                if check() {
+                    for (id, name, args) in tool_call_map.values() {
+                        builder
+                            .tool_calls
+                            .insert(id.clone(), (name.clone(), args.clone()));
+                    }
+                    return Ok(builder.build());
+                }
+            }
+
+            // Enforce per-chunk timeout: if we haven't received any bytes recently, abort.
+            if last_activity_at.elapsed() >= STREAM_CHUNK_TIMEOUT {
+                anyhow::bail!(
+                    "Stream timeout - no response from OpenRouter for {} seconds",
+                    STREAM_CHUNK_TIMEOUT.as_secs()
+                );
+            }
+
+            // Use a short poll interval so interrupts can be observed quickly even when
+            // the server is silent, while still enforcing an overall 60s no-data timeout.
+            let chunk_result = match timeout(INTERRUPT_POLL_INTERVAL, stream.next()).await {
+                Ok(Some(res)) => res,
+                Ok(None) => break, // Stream ended
+                Err(_) => continue, // Poll interval elapsed - re-check interrupt/timeout
+            };
+
+            last_activity_at = std::time::Instant::now();
             let chunk = chunk_result.context("Error reading stream chunk")?;
             let chunk_str = String::from_utf8_lossy(&chunk);
 

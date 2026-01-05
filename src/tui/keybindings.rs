@@ -7,6 +7,10 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// Maximum time between two Escape presses to treat as a "double Esc"
+const DOUBLE_ESC_WINDOW: Duration = Duration::from_millis(500);
 
 /// Actions that can be triggered by keybindings
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -44,6 +48,8 @@ pub enum Action {
     CollapseSection,
     /// Toggle section (za)
     ToggleSection,
+    /// Toggle cost breakdown in Session section (c)
+    ToggleCostBreakdown,
 
     // Collapsible block actions
     /// Toggle collapsible block under cursor (Enter in messages)
@@ -88,6 +94,8 @@ pub enum Action {
     /// Interrupt current operation (Ctrl+C during streaming)
     /// Requirements: 8.1, 8.2
     Interrupt,
+    /// Interrupt current operation without quitting if idle (double Esc)
+    InterruptNoQuit,
 }
 
 /// Input mode for the application
@@ -175,6 +183,8 @@ pub struct KeybindingHandler {
     sequence_state: KeySequenceState,
     /// Custom keybindings (for future configuration support)
     custom_bindings: HashMap<(KeyCode, KeyModifiers), Action>,
+    /// Last time Escape was pressed (for double-Esc detection)
+    last_esc_time: Option<Instant>,
 }
 
 impl Default for KeybindingHandler {
@@ -189,7 +199,22 @@ impl KeybindingHandler {
         Self {
             sequence_state: KeySequenceState::new(),
             custom_bindings: HashMap::new(),
+            last_esc_time: None,
         }
+    }
+
+    fn handle_escape(&mut self, fallback: Action) -> Action {
+        let now = Instant::now();
+        if let Some(last) = self.last_esc_time {
+            if now.duration_since(last) <= DOUBLE_ESC_WINDOW {
+                // Second Esc within window -> interrupt (without quitting if idle)
+                self.last_esc_time = None;
+                return Action::InterruptNoQuit;
+            }
+        }
+
+        self.last_esc_time = Some(now);
+        fallback
     }
 
     /// Add a custom keybinding
@@ -255,6 +280,9 @@ impl KeybindingHandler {
                 None
             }
 
+            // Cost breakdown toggle (c key in normal mode when panel is focused on Session)
+            (KeyCode::Char('c'), KeyModifiers::NONE) => Some(Action::ToggleCostBreakdown),
+
             // Focus management
             (KeyCode::Tab, KeyModifiers::NONE) => Some(Action::FocusNext),
             // Shift+Tab cycles through agent modes (Build → Plan → Review)
@@ -281,7 +309,7 @@ impl KeybindingHandler {
             (KeyCode::Enter, KeyModifiers::NONE) => Some(Action::ToggleBlock),
 
             // Escape
-            (KeyCode::Esc, KeyModifiers::NONE) => Some(Action::Cancel),
+            (KeyCode::Esc, KeyModifiers::NONE) => Some(self.handle_escape(Action::Cancel)),
 
             _ => None,
         }
@@ -294,7 +322,9 @@ impl KeybindingHandler {
     pub fn handle_insert_mode(&mut self, key: KeyEvent) -> Option<Action> {
         match (key.code, key.modifiers) {
             // Exit insert mode
-            (KeyCode::Esc, KeyModifiers::NONE) => Some(Action::ExitInsertMode),
+            (KeyCode::Esc, KeyModifiers::NONE) => {
+                Some(self.handle_escape(Action::ExitInsertMode))
+            }
 
             // Interrupt current operation (Ctrl+C during streaming)
             // Requirements: 8.1 - WHEN the user presses Ctrl+C during streaming, THE TUI SHALL stop the current response
@@ -348,6 +378,11 @@ impl KeybindingHandler {
 
     /// Handle a key event based on the current mode
     pub fn handle_key(&mut self, key: KeyEvent, mode: InputMode) -> Option<Action> {
+        // Only consider Esc presses consecutive; any other key resets the double-Esc timer.
+        if key.code != KeyCode::Esc {
+            self.last_esc_time = None;
+        }
+
         match mode {
             InputMode::Normal => self.handle_normal_mode(key),
             InputMode::Insert | InputMode::Command => self.handle_insert_mode(key),
@@ -500,6 +535,35 @@ mod tests {
         let action =
             handler.handle_insert_mode(make_key_event(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn test_double_esc_interrupt_no_quit() {
+        let mut handler = KeybindingHandler::new();
+
+        // First Esc behaves normally
+        let action = handler.handle_key(make_key_event(KeyCode::Esc, KeyModifiers::NONE), InputMode::Insert);
+        assert_eq!(action, Some(Action::ExitInsertMode));
+
+        // Second Esc within the window triggers interrupt (without quit semantics)
+        let action = handler.handle_key(make_key_event(KeyCode::Esc, KeyModifiers::NONE), InputMode::Normal);
+        assert_eq!(action, Some(Action::InterruptNoQuit));
+
+        // After triggering, timer resets - next Esc is normal again
+        let action = handler.handle_key(make_key_event(KeyCode::Esc, KeyModifiers::NONE), InputMode::Normal);
+        assert_eq!(action, Some(Action::Cancel));
+    }
+
+    #[test]
+    fn test_double_esc_requires_consecutive_presses() {
+        let mut handler = KeybindingHandler::new();
+
+        let _ = handler.handle_key(make_key_event(KeyCode::Esc, KeyModifiers::NONE), InputMode::Normal);
+        // Any non-Esc key resets the timer
+        let _ = handler.handle_key(make_key_event(KeyCode::Char('x'), KeyModifiers::NONE), InputMode::Normal);
+
+        let action = handler.handle_key(make_key_event(KeyCode::Esc, KeyModifiers::NONE), InputMode::Normal);
+        assert_eq!(action, Some(Action::Cancel));
     }
 
     #[test]

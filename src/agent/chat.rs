@@ -1297,14 +1297,36 @@ impl ChatAgent {
             });
 
             // Call LLM with streaming - callbacks fire in real-time during this await
+            let interrupt_check_ref: &(dyn Fn() -> bool + Send + Sync) = &interrupt_check;
             let response = self
                 .llm
-                .chat_streaming(self.context.messages(), Some(&tool_definitions), callback)
+                .chat_streaming(
+                    self.context.messages(),
+                    Some(&tool_definitions),
+                    callback,
+                    Some(interrupt_check_ref),
+                )
                 .await;
 
             // Get accumulated text from shared state
             if let Ok(acc) = accumulated_text_shared.lock() {
                 accumulated_text = acc.clone();
+            }
+
+            // If the user interrupted during streaming, stop immediately without
+            // incorporating partial output into the agent's context.
+            if interrupt_check() {
+                tracing::info!("Agent interrupted during streaming");
+                self.context
+                    .add_assistant("⚠️ *Operation interrupted by user*");
+                return Ok(AgentResponse {
+                    text: "⚠️ *Operation interrupted by user*".to_string(),
+                    tool_calls_made: total_tool_calls,
+                    tool_call_log,
+                    auto_compacted,
+                    context_usage_percent: self.context.usage_percentage(),
+                    usage: Some(accumulated_usage),
+                });
             }
 
             let response = response?;

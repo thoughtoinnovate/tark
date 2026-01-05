@@ -54,7 +54,19 @@ pub trait LlmProvider: Send + Sync {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
         callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<LlmResponse> {
+        // Allow callers (TUI/agent) to interrupt even when using the fallback
+        // non-streaming implementation.
+        if let Some(check) = interrupt_check {
+            if check() {
+                return Ok(LlmResponse::Text {
+                    text: "⚠️ *Operation interrupted by user*".to_string(),
+                    usage: None,
+                });
+            }
+        }
+
         // Default: fall back to non-streaming and emit complete response
         let response = self.chat(messages, tools).await?;
 

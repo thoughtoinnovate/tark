@@ -217,14 +217,11 @@ impl CopilotProvider {
         // Check disk for token
         let file_exists = self.token_path.exists();
         if file_exists {
-            match Self::load_token(&self.token_path) {
-                Ok(tok) => {
-                    if !tok.is_expired() {
-                        self.token = Some(tok.clone());
-                        return Ok(tok.access_token);
-                    }
+            if let Ok(tok) = Self::load_token(&self.token_path) {
+                if !tok.is_expired() {
+                    self.token = Some(tok.clone());
+                    return Ok(tok.access_token);
                 }
-                Err(_) => {}
             }
         }
 
@@ -658,9 +655,14 @@ impl LlmProvider for CopilotProvider {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
         callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<LlmResponse> {
         use futures::StreamExt;
         use std::collections::HashMap;
+        use tokio::time::{timeout, Duration};
+
+        const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+        const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
         let mut provider = Self {
             client: self.client.clone(),
@@ -722,7 +724,32 @@ impl LlmProvider for CopilotProvider {
         // Track tool calls being built up from streaming chunks
         let mut tool_call_builders: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (id, name, arguments)
 
-        while let Some(chunk_result) = stream.next().await {
+        let mut last_activity_at = std::time::Instant::now();
+        loop {
+            // Check for user interrupt frequently so Ctrl+C/Esc+Esc are responsive
+            if let Some(check) = interrupt_check {
+                if check() {
+                    return Ok(builder.build());
+                }
+            }
+
+            // Enforce per-chunk timeout: if we haven't received any bytes recently, abort.
+            if last_activity_at.elapsed() >= STREAM_CHUNK_TIMEOUT {
+                anyhow::bail!(
+                    "Stream timeout - no response from Copilot for {} seconds",
+                    STREAM_CHUNK_TIMEOUT.as_secs()
+                );
+            }
+
+            // Use a short poll interval so interrupts can be observed quickly even when
+            // the server is silent, while still enforcing an overall 60s no-data timeout.
+            let chunk_result = match timeout(INTERRUPT_POLL_INTERVAL, stream.next()).await {
+                Ok(Some(res)) => res,
+                Ok(None) => break, // Stream ended
+                Err(_) => continue, // Poll interval elapsed - re-check interrupt/timeout
+            };
+
+            last_activity_at = std::time::Instant::now();
             let chunk = chunk_result.context("Error reading stream chunk")?;
             let chunk_str = String::from_utf8_lossy(&chunk);
 

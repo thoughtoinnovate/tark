@@ -257,7 +257,7 @@ impl<'a> FileDropdownWidget<'a> {
 
         // Position above cursor if there's room, otherwise below
         let x = self.cursor_area.x.min(area.width.saturating_sub(width));
-        let y = if self.cursor_area.y >= max_height + 1 {
+        let y = if self.cursor_area.y > max_height {
             self.cursor_area.y.saturating_sub(max_height)
         } else {
             (self.cursor_area.y + 1).min(area.height.saturating_sub(max_height))
