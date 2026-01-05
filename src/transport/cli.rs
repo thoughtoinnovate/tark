@@ -136,7 +136,8 @@ fn check_llm_configuration_for_provider(provider: &str) -> Result<(), String> {
             }
         }
         "gemini" | "google" => {
-            if std::env::var("GOOGLE_API_KEY").is_err() && std::env::var("GEMINI_API_KEY").is_err() {
+            if std::env::var("GOOGLE_API_KEY").is_err() && std::env::var("GEMINI_API_KEY").is_err()
+            {
                 return Err("Google Gemini API key not configured.\n\n\
                     To use Gemini, set the GOOGLE_API_KEY or GEMINI_API_KEY environment variable:\n\
                     \n\

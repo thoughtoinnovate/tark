@@ -1124,7 +1124,9 @@ impl TuiApp {
                     }
                     return Ok(true);
                 }
-                _ => return Ok(true),
+                _ => {
+                    // Unhandled key - do not consume it
+                }
             }
         }
 

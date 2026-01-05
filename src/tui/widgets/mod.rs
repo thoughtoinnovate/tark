@@ -30,3 +30,5 @@ pub use picker::{Picker, PickerItem, PickerWidget};
 pub use status_bar::StatusBar;
 pub use thinking_block::{ThinkingBlock, ThinkingBlockManager, ThinkingBlockWidget};
 pub use tool_block::{ToolBlock, ToolBlockManager, ToolBlockWidget, ToolStatus};
+mod auth_dialog;
+pub use auth_dialog::{AuthDialog, AuthDialogWidget, AuthStatus};

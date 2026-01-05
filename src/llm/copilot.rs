@@ -219,14 +219,14 @@ impl CopilotProvider {
 
         // Step 2: Display user instructions
         let timeout_minutes = self.auth_timeout_secs.max(device_response.expires_in) / 60;
-        println!("\n╭─────────────────────────────────────────────────────╮");
-        println!("│  GitHub Copilot Authentication Required            │");
-        println!("╰─────────────────────────────────────────────────────╯");
-        println!("\n📋 Please follow these steps:");
-        println!("   1. Visit: {}", device_response.verification_uri);
-        println!("   2. Enter code: {}", device_response.user_code);
-        println!("   3. Authorize Tark to use GitHub Copilot");
-        println!(
+        tracing::info!("\n╭─────────────────────────────────────────────────────╮");
+        tracing::info!("│  GitHub Copilot Authentication Required            │");
+        tracing::info!("╰─────────────────────────────────────────────────────╯");
+        tracing::info!("\n📋 Please follow these steps:");
+        tracing::info!("   1. Visit: {}", device_response.verification_uri);
+        tracing::info!("   2. Enter code: {}", device_response.user_code);
+        tracing::info!("   3. Authorize Tark to use GitHub Copilot");
+        tracing::info!(
             "\n⏳ Waiting for authorization (timeout: {} minutes)...\n",
             timeout_minutes
         );
@@ -240,13 +240,13 @@ impl CopilotProvider {
             )
             .await?;
 
-        println!("✅ Successfully authenticated with GitHub!\n");
-        println!("📝 Exchanging for Copilot token...");
+        tracing::info!("✅ Successfully authenticated with GitHub!\n");
+        tracing::info!("📝 Exchanging for Copilot token...");
 
         // Step 4: Exchange OAuth token for Copilot token
         let copilot_token = self.get_copilot_token(&token_response.access_token).await?;
 
-        println!("✅ Successfully obtained Copilot token!\n");
+        tracing::info!("✅ Successfully obtained Copilot token!\n");
 
         Ok(copilot_token)
     }
@@ -707,9 +707,10 @@ impl LlmProvider for CopilotProvider {
                             // Handle tool calls (streaming)
                             if let Some(ref tool_calls) = choice.delta.tool_calls {
                                 for tc in tool_calls {
-                                    let entry = tool_call_builders
-                                        .entry(tc.index)
-                                        .or_insert_with(|| (String::new(), String::new(), String::new()));
+                                    let entry =
+                                        tool_call_builders.entry(tc.index).or_insert_with(|| {
+                                            (String::new(), String::new(), String::new())
+                                        });
 
                                     if let Some(ref id) = tc.id {
                                         entry.0 = id.clone();
@@ -822,7 +823,13 @@ impl LlmProvider for CopilotProvider {
         let response = provider.send_request(request).await?;
 
         let text = if let Some(choice) = response.choices.first() {
-            choice.message.content.clone().unwrap_or_default().trim().to_string()
+            choice
+                .message
+                .content
+                .clone()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
         } else {
             String::new()
         };

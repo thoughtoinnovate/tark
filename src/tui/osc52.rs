@@ -134,8 +134,7 @@ impl Osc52Clipboard {
     /// Get a user-friendly message about clipboard support
     pub fn support_message() -> String {
         if Self::is_likely_supported() {
-            "Use /attach <file> to attach files. Clipboard paste may not work over SSH."
-                .to_string()
+            "Use /attach <file> to attach files. Clipboard paste may not work over SSH.".to_string()
         } else {
             "Clipboard not available. Use /attach <file> to attach files.".to_string()
         }
@@ -158,4 +157,3 @@ mod tests {
         assert!(!msg.is_empty());
     }
 }
-

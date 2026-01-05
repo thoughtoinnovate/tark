@@ -30,6 +30,14 @@ pub struct EnhancedPanelData {
     pub files: Vec<FileItem>,
 }
 
+/// Cost breakdown entry for a specific model/provider combination
+#[derive(Debug, Clone, Default)]
+pub struct CostBreakdownEntry {
+    pub provider: String,
+    pub model: String,
+    pub cost: f64,
+}
+
 /// Session information displayed in the panel
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
@@ -42,6 +50,8 @@ pub struct SessionInfo {
     /// Total cost in USD
     pub cost: f64,
     /// Active LSP languages (e.g., ["rust", "lua"])
+    /// Cost breakdown by model/provider
+    pub cost_breakdown: Vec<CostBreakdownEntry>,
     pub lsp_languages: Vec<String>,
 }
 
@@ -125,6 +135,8 @@ pub struct PanelSectionState {
     pub files_scroll: usize,
     /// Currently focused section (for keyboard navigation)
     pub focused_section: EnhancedPanelSection,
+    /// Whether the cost breakdown accordion is expanded
+    pub cost_breakdown_expanded: bool,
 }
 
 impl Default for PanelSectionState {
@@ -144,6 +156,7 @@ impl PanelSectionState {
             tasks_scroll: 0,
             files_scroll: 0,
             focused_section: EnhancedPanelSection::Session,
+            cost_breakdown_expanded: false,
         }
     }
 
@@ -1358,6 +1371,7 @@ impl<'a> PanelDataProvider<'a> {
                 provider: bridge.provider_name().to_string(),
                 cost: bridge.total_cost(),
                 lsp_languages: self.collect_lsp_languages(),
+                cost_breakdown: Vec::new(),
             }
         } else {
             SessionInfo::default()

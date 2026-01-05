@@ -62,6 +62,17 @@ pub enum AgentEvent {
         retry_after_secs: u64,
         message: String,
     },
+    /// Authentication required (OAuth device flow)
+    AuthRequired {
+        provider: String,
+        verification_url: String,
+        user_code: String,
+        timeout_secs: u64,
+    },
+    /// Authentication succeeded
+    AuthSuccess { provider: String },
+    /// Authentication failed
+    AuthFailed { provider: String, error: String },
 }
 
 /// Summary info from agent response

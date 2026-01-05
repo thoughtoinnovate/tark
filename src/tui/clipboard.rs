@@ -179,17 +179,28 @@ impl ClipboardHandler {
 /// - ClipboardContent::Image if image found (arboard only, OSC 52 doesn't support images well)
 /// - ClipboardContent::FilePath if text looks like a file path
 /// - ClipboardContent::Text for plain text
-/// - ClipboardContent::Empty if nothing found
+/// - Err if clipboard access failed (no display server, etc.)
 pub fn get_clipboard_with_fallback() -> Result<ClipboardContent, AttachmentError> {
+    // Track whether native clipboard failed (for better error messages)
+    let native_clipboard_error: Option<String>;
+
     // Try native clipboard first (arboard)
-    if let Ok(mut handler) = ClipboardHandler::new() {
-        if let Ok(content) = handler.get_content() {
-            match &content {
-                ClipboardContent::Empty => {
-                    // Fall through to OSC 52
+    match ClipboardHandler::new() {
+        Ok(mut handler) => {
+            native_clipboard_error = None;
+            if let Ok(content) = handler.get_content() {
+                match &content {
+                    ClipboardContent::Empty => {
+                        // Fall through to OSC 52
+                    }
+                    _ => return Ok(content),
                 }
-                _ => return Ok(content),
             }
+        }
+        Err(e) => {
+            // Native clipboard failed - likely no display server
+            native_clipboard_error = Some(e.to_string());
+            tracing::debug!("Native clipboard unavailable: {}", e);
         }
     }
 
@@ -206,10 +217,29 @@ pub fn get_clipboard_with_fallback() -> Result<ClipboardContent, AttachmentError
                 Ok(ClipboardContent::Text(text))
             }
         }
-        Ok(None) => Ok(ClipboardContent::Empty),
+        Ok(None) => {
+            // OSC 52 returned nothing - if native clipboard also failed, report error
+            if let Some(err) = native_clipboard_error {
+                Err(AttachmentError::ClipboardError(format!(
+                    "No display server ({})",
+                    err
+                )))
+            } else {
+                Ok(ClipboardContent::Empty)
+            }
+        }
         Err(e) => {
             tracing::debug!("OSC 52 read failed: {}", e);
-            Ok(ClipboardContent::Empty)
+            // If both failed, report the native clipboard error (more informative)
+            if let Some(native_err) = native_clipboard_error {
+                Err(AttachmentError::ClipboardError(format!(
+                    "No display server ({})",
+                    native_err
+                )))
+            } else {
+                // Native worked but was empty, OSC 52 failed - just return empty
+                Ok(ClipboardContent::Empty)
+            }
         }
     }
 }
