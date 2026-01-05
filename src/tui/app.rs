@@ -1001,44 +1001,52 @@ impl TuiApp {
         }
     }
 
-    /// Check for Copilot authentication pending file and show in auth dialog
-    fn check_copilot_auth_pending(&mut self) {
-        // Only check if agent is processing and auth dialog is not already visible
-        if !self.state.agent_processing || self.state.auth_dialog.is_visible() {
-            return;
+    /// Cancel Copilot authentication by deleting the pending file
+    fn cancel_copilot_auth(&mut self) {
+        if let Some(home) = dirs::home_dir() {
+            let auth_file = home.join(".tark").join("copilot_auth_pending.txt");
+            let _ = std::fs::remove_file(auth_file);
         }
-        
+        // Stop processing
+        self.state.agent_processing = false;
+    }
+
+    /// Check for Copilot authentication pending file and show/hide auth dialog
+    fn check_copilot_auth_pending(&mut self) {
         // Check for auth pending file
         if let Some(home) = dirs::home_dir() {
             let auth_file = home.join(".tark").join("copilot_auth_pending.txt");
+
             if auth_file.exists() {
-                // Read the auth info
-                if let Ok(content) = std::fs::read_to_string(&auth_file) {
-                    // Parse URL and code from the file
-                    let mut url = String::new();
-                    let mut code = String::new();
-                    for line in content.lines() {
-                        if line.starts_with("Visit: ") {
-                            url = line.strip_prefix("Visit: ").unwrap_or("").to_string();
-                        } else if line.starts_with("Enter code: ") {
-                            code = line.strip_prefix("Enter code: ").unwrap_or("").to_string();
+                // File exists - show dialog if not already visible
+                if !self.state.auth_dialog.is_visible() {
+                    // Read the auth info
+                    if let Ok(content) = std::fs::read_to_string(&auth_file) {
+                        // Parse URL and code from the file
+                        let mut url = String::new();
+                        let mut code = String::new();
+                        for line in content.lines() {
+                            if line.starts_with("Visit: ") {
+                                url = line.strip_prefix("Visit: ").unwrap_or("").to_string();
+                            } else if line.starts_with("Enter code: ") {
+                                code = line.strip_prefix("Enter code: ").unwrap_or("").to_string();
+                            }
+                        }
+
+                        if !url.is_empty() && !code.is_empty() {
+                            // Show auth dialog
+                            self.state.auth_dialog.show_copilot_auth(
+                                &url,
+                                &code,
+                                300, // 5 minute timeout
+                            );
                         }
                     }
-                    
-                    if !url.is_empty() && !code.is_empty() {
-                        // Show auth dialog
-                        self.state.auth_dialog.show_copilot_auth(
-                            &url,
-                            &code,
-                            300, // 5 minute timeout
-                        );
-                        // Also show in status bar as fallback
-                        self.state.status_message = Some(format!(
-                            "🔐 Visit {} and enter code: {}",
-                            url, code
-                        ));
-                    }
                 }
+            } else if self.state.auth_dialog.is_visible() {
+                // File deleted (auth completed) - close dialog
+                self.state.auth_dialog.hide();
+                self.state.status_message = Some("✅ Authentication successful!".to_string());
             }
         }
     }
@@ -1148,7 +1156,7 @@ impl TuiApp {
             Event::Tick => {
                 // Check for rate limit retry (Requirements 7.4)
                 self.check_rate_limit_retry();
-                
+
                 // Check for Copilot auth pending file
                 self.check_copilot_auth_pending();
                 Ok(false)
@@ -1161,7 +1169,10 @@ impl TuiApp {
         if self.state.auth_dialog.is_visible() {
             match key.code {
                 KeyCode::Esc => {
+                    // Cancel auth - hide dialog and delete pending file
                     self.state.auth_dialog.hide();
+                    self.cancel_copilot_auth();
+                    self.state.status_message = Some("Auth cancelled. You can select a different model.".to_string());
                     return Ok(true);
                 }
                 KeyCode::Char('c') | KeyCode::Char('C') => {
@@ -1172,6 +1183,23 @@ impl TuiApp {
                     } else {
                         self.state.status_message =
                             Some("✅ Code copied to clipboard!".to_string());
+                    }
+                    return Ok(true);
+                }
+                KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Enter => {
+                    // Copy code and open URL in browser
+                    let code = self.state.auth_dialog.user_code().to_string();
+                    let _ = super::clipboard::copy_to_clipboard(&code);
+
+                    let url = self.state.auth_dialog.verification_url().to_string();
+                    if !url.is_empty() {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("open").arg(&url).spawn();
+                        #[cfg(target_os = "linux")]
+                        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                        #[cfg(target_os = "windows")]
+                        let _ = std::process::Command::new("cmd").args(["/c", "start", &url]).spawn();
+                        self.state.status_message = Some("📋 Code copied! Opening browser...".to_string());
                     }
                     return Ok(true);
                 }
@@ -3367,7 +3395,7 @@ impl TuiApp {
                 // No terminal event - check for periodic tasks
                 self.check_rate_limit_retry();
                 self.check_copilot_auth_pending();
-                
+
                 if agent_events_processed || needs_spinner_update || self.state.auth_dialog.is_visible() {
                     // Re-render for agent updates, spinner animation, or auth dialog
                     self.render()?;
@@ -3895,7 +3923,7 @@ impl TuiApp {
     /// - "🤖 Tark" in top border title (compact header)
     pub fn render(&mut self) -> anyhow::Result<()> {
         use super::widgets::InputWidgetRenderer;
-        
+
         // Check for Copilot auth on every render
         self.check_copilot_auth_pending();
         use ratatui::layout::{Constraint, Direction, Layout};

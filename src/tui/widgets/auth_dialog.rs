@@ -103,6 +103,11 @@ impl AuthDialog {
         &self.user_code
     }
 
+    /// Get the verification URL (for opening in browser)
+    pub fn verification_url(&self) -> &str {
+        &self.verification_url
+    }
+
     /// Get elapsed time percentage (0.0 to 1.0)
     fn elapsed_percent(&self) -> f32 {
         if let Some(started) = self.started_at {
@@ -227,7 +232,7 @@ impl Widget for AuthDialogWidget<'_> {
                     ),
                 ]));
                 lines.push(Line::from(vec![Span::styled(
-                    "      [Press 'c' to copy code]",
+                    "      [Press 'o' or Enter to copy code & open URL]",
                     Style::default().fg(Color::DarkGray),
                 )]));
                 lines.push(Line::from(""));
