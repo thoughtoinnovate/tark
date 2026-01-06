@@ -329,6 +329,7 @@ impl CopilotProvider {
                 &device_response.device_code,
                 device_response.interval,
                 device_response.expires_in,
+                auth_file_path.as_ref(),
             )
             .await?;
 
@@ -417,6 +418,7 @@ impl CopilotProvider {
         device_code: &str,
         interval: u64,
         expires_in: u64,
+        auth_file_path: Option<&PathBuf>,
     ) -> Result<AccessTokenResponse> {
         let start = std::time::Instant::now();
         // Use the longer of GitHub's expires_in or our configured timeout
@@ -441,8 +443,28 @@ impl CopilotProvider {
                 anyhow::bail!("Device flow authentication timed out");
             }
 
-            // Wait before polling
-            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+            // Wait before polling, but check for cancellation frequently
+            // Break the sleep into 1-second chunks so cancellation is detected quickly
+            let sleep_duration = std::time::Duration::from_secs(interval);
+            let check_interval = std::time::Duration::from_secs(1);
+            let mut remaining = sleep_duration;
+            
+            while remaining > std::time::Duration::ZERO {
+                // Check if auth file still exists (user cancellation check)
+                // If the file was deleted, the user cancelled the authentication
+                if let Some(auth_file) = auth_file_path {
+                    if !auth_file.exists() {
+                        eprintln!();
+                        eprintln!("❌ Authentication cancelled by user");
+                        tracing::info!("Authentication cancelled - auth file deleted");
+                        anyhow::bail!("Authentication cancelled by user");
+                    }
+                }
+                
+                let sleep_time = remaining.min(check_interval);
+                tokio::time::sleep(sleep_time).await;
+                remaining = remaining.saturating_sub(sleep_time);
+            }
 
             // Show progress every 5 polls (roughly every 15-25 seconds depending on interval)
             poll_count += 1;
