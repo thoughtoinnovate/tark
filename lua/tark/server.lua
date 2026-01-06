@@ -121,10 +121,12 @@ local function detect_platform()
         os_key = 'linux'
     elseif os_name == 'Darwin' then
         os_key = 'darwin'
+    elseif os_name == 'FreeBSD' then
+        os_key = 'freebsd'
     elseif os_name:match('Windows') or os_name:match('MINGW') or os_name:match('MSYS') then
         os_key = 'windows'
     else
-        os_key = 'linux'  -- fallback (FreeBSD/OpenBSD/NetBSD not currently supported)
+        os_key = 'linux'  -- fallback
     end
     
     -- Detect architecture
@@ -152,7 +154,26 @@ end
 
 -- Download tark binary automatically with SHA256 verification
 function M.download_binary(callback)
-    local os_key, arch_key, binary_name = detect_platform()
+    local os_key, arch_key, binary_name, unsupported_os = detect_platform()
+    
+    -- Check for unsupported OS
+    if os_key == nil then
+        local err_msg = string.format(
+            "Unsupported operating system: %s\n\n" ..
+            "Tark currently supports:\n" ..
+            "  - Linux (x86_64, arm64)\n" ..
+            "  - macOS (x86_64, arm64)\n" ..
+            "  - Windows (x86_64, arm64)\n\n" ..
+            "FreeBSD/OpenBSD/NetBSD are not currently supported.\n" ..
+            "You can build from source: https://github.com/thoughtoinnovate/tark",
+            unsupported_os or "unknown"
+        )
+        vim.notify('tark: ' .. err_msg, vim.log.levels.ERROR)
+        if callback then
+            callback(false, err_msg)
+        end
+        return
+    end
     
     -- Determine download URL based on channel
     local channel = M.config.channel or 'stable'
@@ -865,4 +886,3 @@ function M.setup(opts)
 end
 
 return M
-
