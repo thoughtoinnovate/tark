@@ -68,6 +68,14 @@ local function should_attach(bufnr)
     return true
 end
 
+-- Debug logging (silent by default)
+local function tracing_debug(msg)
+    -- Only log if verbose mode is enabled
+    if vim.g.tark_verbose then
+        vim.notify('tark: ' .. msg, vim.log.levels.DEBUG)
+    end
+end
+
 -- ============================================================================
 -- LSP Client
 -- ============================================================================
@@ -171,17 +179,6 @@ function M.status()
     end
     
     return 'running'
-end
-
--- ============================================================================
--- Debug logging (silent by default)
--- ============================================================================
-
-local function tracing_debug(msg)
-    -- Only log if verbose mode is enabled
-    if vim.g.tark_verbose then
-        vim.notify('tark: ' .. msg, vim.log.levels.DEBUG)
-    end
 end
 
 -- ============================================================================
