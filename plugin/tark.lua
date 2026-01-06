@@ -11,6 +11,10 @@ vim.api.nvim_create_user_command('Tark', function()
     require('tark').toggle()
 end, { desc = 'Toggle tark TUI' })
 
+vim.api.nvim_create_user_command('TarkToggle', function()
+    require('tark').toggle()
+end, { desc = 'Toggle tark TUI (show/hide)' })
+
 vim.api.nvim_create_user_command('TarkOpen', function()
     require('tark').open()
 end, { desc = 'Open tark TUI' })

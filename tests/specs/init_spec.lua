@@ -103,6 +103,11 @@ describe('tark - main module', function()
             assert.is_not_nil(commands.Tark)
         end)
 
+        it('TarkToggle command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkToggle)
+        end)
+
         it('TarkOpen command exists', function()
             local commands = vim.api.nvim_get_commands({})
             assert.is_not_nil(commands.TarkOpen)
