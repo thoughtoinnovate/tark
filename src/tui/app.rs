@@ -1251,6 +1251,11 @@ impl TuiApp {
             return self.handle_picker_key(key);
         }
 
+        // Handle file dropdown keys if visible (works in any mode)
+        if self.state.file_dropdown.is_visible() {
+            return self.handle_file_dropdown_key(key);
+        }
+
         // Get action from keybinding handler
         if let Some(action) = self.keybindings.handle_key(key, self.state.input_mode) {
             return self.handle_action(action);
@@ -1263,6 +1268,73 @@ impl TuiApp {
         }
 
         Ok(false)
+    }
+
+    /// Handle key events when file dropdown is visible
+    fn handle_file_dropdown_key(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.state.file_dropdown.select_previous();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.state.file_dropdown.select_next();
+            }
+            KeyCode::Esc => {
+                self.state.file_dropdown.hide();
+                self.state.file_dropdown_trigger_pos = None;
+            }
+            KeyCode::Enter => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    // Ctrl+Enter toggles multi-select mode
+                    self.state.file_dropdown.toggle_multi_select_mode();
+                } else {
+                    // Attach selected file(s) and remove @query from input
+                    let paths = self.state.file_dropdown.confirm();
+
+                    // Remove the @query text from input
+                    if let Some(at_pos) = self.state.file_dropdown_trigger_pos {
+                        let content = self.state.input_widget.content();
+                        let cursor = self.state.input_widget.cursor();
+                        let at_start = at_pos.saturating_sub(1);
+                        let before = &content[..at_start];
+                        let after = if cursor < content.len() {
+                            &content[cursor..]
+                        } else {
+                            ""
+                        };
+                        let new_content = format!("{}{}", before, after);
+                        self.state.input_widget.set_content(new_content);
+                        self.state.input_widget.set_cursor(at_start);
+                    }
+
+                    // Clear trigger position
+                    self.state.file_dropdown_trigger_pos = None;
+
+                    // Attach the files
+                    for path in paths {
+                        if let Err(e) = self.attach_file_by_path(&path) {
+                            self.state.status_message = Some(format!("Failed to attach: {}", e));
+                        }
+                    }
+                }
+            }
+            KeyCode::Char(' ') if self.state.file_dropdown.is_multi_select_mode() => {
+                // Space toggles selection in multi-select mode
+                self.state.file_dropdown.toggle_current_selection();
+            }
+            KeyCode::Char(c) => {
+                // Continue typing to filter - also insert into input
+                self.state.input_widget.insert_char(c);
+                self.update_file_dropdown();
+            }
+            KeyCode::Backspace => {
+                // Delete character and update filter
+                self.state.input_widget.delete_char_before();
+                self.update_file_dropdown();
+            }
+            _ => {}
+        }
+        Ok(true)
     }
 
     /// Handle a mouse event
@@ -1279,6 +1351,48 @@ impl TuiApp {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let (col, row) = (mouse.column, mouse.row);
+
+                // Check if click is in file dropdown area
+                if self.state.file_dropdown.is_visible() {
+                    if let Some(clicked_index) = self.get_file_dropdown_click_index(col, row) {
+                        // Select and confirm the clicked item
+                        self.state.file_dropdown.set_selected_index(clicked_index);
+                        let paths = self.state.file_dropdown.confirm();
+
+                        // Remove the @query text from input
+                        if let Some(at_pos) = self.state.file_dropdown_trigger_pos {
+                            let input_content = self.state.input_widget.content();
+                            let cursor = self.state.input_widget.cursor();
+                            let at_start = at_pos.saturating_sub(1);
+                            let before = &input_content[..at_start];
+                            let after = if cursor < input_content.len() {
+                                &input_content[cursor..]
+                            } else {
+                                ""
+                            };
+                            let new_content = format!("{}{}", before, after);
+                            self.state.input_widget.set_content(new_content);
+                            self.state.input_widget.set_cursor(at_start);
+                        }
+
+                        // Clear trigger position
+                        self.state.file_dropdown_trigger_pos = None;
+
+                        // Attach the files
+                        for path in paths {
+                            if let Err(e) = self.attach_file_by_path(&path) {
+                                self.state.status_message =
+                                    Some(format!("Failed to attach: {}", e));
+                            }
+                        }
+                        return Ok(true);
+                    } else {
+                        // Click outside dropdown - close it
+                        self.state.file_dropdown.hide();
+                        self.state.file_dropdown_trigger_pos = None;
+                        return Ok(true);
+                    }
+                }
 
                 // Check if click is in attachment dropdown area
                 if self.handle_attachment_click(col, row) {
@@ -1899,6 +2013,43 @@ impl TuiApp {
             self.state.command_dropdown.set_items(items);
             self.state.command_dropdown.show();
         }
+    }
+
+    /// Get the file dropdown item index at the given screen position
+    /// Returns None if the click is outside the dropdown
+    fn get_file_dropdown_click_index(&self, col: u16, row: u16) -> Option<usize> {
+        // Calculate dropdown position (similar to FileDropdownWidget::calculate_area)
+        let (width, height) = self.state.terminal_size;
+        let dropdown_width = 50.min(width.saturating_sub(4));
+        let visible_count = self.state.file_dropdown.visible_count();
+        let dropdown_height = 10.min(visible_count as u16 + 3);
+
+        // Get cursor position for dropdown positioning
+        // The dropdown is positioned near the input area
+        let input_y = height.saturating_sub(3); // Approximate input position
+        let dropdown_y = if input_y > dropdown_height {
+            input_y.saturating_sub(dropdown_height)
+        } else {
+            input_y + 1
+        };
+        let dropdown_x = 2u16; // Left margin
+
+        // Check if click is within dropdown bounds
+        if col >= dropdown_x
+            && col < dropdown_x + dropdown_width
+            && row >= dropdown_y
+            && row < dropdown_y + dropdown_height
+        {
+            // Calculate which item was clicked (accounting for border and title)
+            let inner_row = row.saturating_sub(dropdown_y + 1); // +1 for top border
+            let item_index = inner_row as usize;
+
+            if item_index < visible_count {
+                return Some(item_index);
+            }
+        }
+
+        None
     }
 
     /// Update file dropdown based on current input

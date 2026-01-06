@@ -1915,7 +1915,7 @@ fn render_scrollbar(
         0
     };
 
-    // Draw the thumb
+    // Draw the thumb (solid block for thumb position, light shade for track)
     for item in scrollbar
         .iter_mut()
         .take((thumb_pos + thumb_size).min(available_height))
@@ -1924,15 +1924,7 @@ fn render_scrollbar(
         *item = '█';
     }
 
-    // Add arrows at top and bottom if there's content above/below
-    if scroll_offset > 0 && !scrollbar.is_empty() {
-        scrollbar[0] = '▲';
-    }
-    if scroll_offset < max_scroll && scrollbar.len() > 1 {
-        let last = scrollbar.len() - 1;
-        scrollbar[last] = '▼';
-    }
-
+    // No arrow indicators - just use the thumb position to show scroll state
     scrollbar
 }
 
@@ -2009,7 +2001,8 @@ fn render_section_footer(width: u16) -> Line<'static> {
 }
 
 /// Maximum visible height for Session section content (excluding header/footer)
-const SESSION_MAX_VISIBLE_HEIGHT: usize = 6;
+/// Increased to allow more cost breakdown entries to be visible
+const SESSION_MAX_VISIBLE_HEIGHT: usize = 10;
 
 /// Render the Session section content with scroll support
 fn render_session_content(

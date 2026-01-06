@@ -175,6 +175,28 @@ impl FileDropdown {
         }
     }
 
+    /// Set selected index directly (for mouse clicks)
+    pub fn set_selected_index(&mut self, index: usize) {
+        if index < self.filtered_indices.len() {
+            self.selected_index = index;
+        }
+    }
+
+    /// Get the number of visible items
+    pub fn visible_count(&self) -> usize {
+        self.filtered_indices.len()
+    }
+
+    /// Check if in multi-select mode
+    pub fn is_multi_select_mode(&self) -> bool {
+        self.multi_select_mode
+    }
+
+    /// Toggle current selection (for multi-select mode)
+    pub fn toggle_current_selection(&mut self) {
+        self.toggle_current();
+    }
+
     /// Toggle multi-select mode
     pub fn toggle_multi_select_mode(&mut self) {
         self.multi_select_mode = !self.multi_select_mode;
