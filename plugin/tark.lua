@@ -103,3 +103,18 @@ vim.api.nvim_create_user_command('TarkGhostStatus', function()
     local status = require('tark').ghost_status()
     vim.notify(status, vim.log.levels.INFO)
 end, { desc = 'Show tark ghost text status (diagnose issues)' })
+
+vim.api.nvim_create_user_command('TarkGhostProvider', function(opts)
+    if opts.args and opts.args ~= '' then
+        require('tark').ghost_set_provider(opts.args)
+    else
+        local provider = require('tark').ghost_get_provider() or 'default'
+        vim.notify('tark: Current provider: ' .. provider, vim.log.levels.INFO)
+    end
+end, {
+    nargs = '?',
+    complete = function()
+        return { 'openai', 'claude', 'copilot', 'ollama', 'google' }
+    end,
+    desc = 'Set or show ghost text provider (openai, claude, copilot, ollama, google)',
+})

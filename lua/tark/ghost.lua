@@ -24,6 +24,9 @@ M.config = {
     auto_trigger = true,
     debounce_ms = 300,
     server_port = 8765,
+    -- Provider for completions (nil = use server default)
+    -- Options: 'openai', 'claude', 'copilot', 'ollama'
+    provider = nil,
     -- Keymaps
     accept_key = '<Tab>',
     dismiss_key = '<Esc>',
@@ -220,12 +223,19 @@ local function request_completion()
     
     -- Make HTTP request
     local url = string.format('http://127.0.0.1:%d/inline-complete', M.config.server_port)
-    local body = vim.fn.json_encode({
-        content = content,
-        position = pos,
-        filepath = filepath,
-        language = filetype,
-    })
+    local request_body = {
+        file_path = filepath,
+        file_content = content,
+        cursor_line = row,
+        cursor_col = col,
+    }
+    
+    -- Add provider if configured
+    if M.config.provider then
+        request_body.provider = M.config.provider
+    end
+    
+    local body = vim.fn.json_encode(request_body)
     
     -- Use curl for HTTP request
     local cmd = string.format(
@@ -373,6 +383,7 @@ function M.status()
     -- Server status
     table.insert(lines, 'Server: ' .. (M.is_server_running() and 'running' or 'stopped'))
     table.insert(lines, 'Enabled: ' .. (M.config.enabled and 'yes' or 'no'))
+    table.insert(lines, 'Provider: ' .. (M.config.provider or 'default (server selects)'))
     table.insert(lines, 'Port: ' .. M.config.server_port)
     
     -- Test server connectivity
@@ -419,6 +430,42 @@ function M.toggle()
     else
         M.enable()
     end
+end
+
+--- Set the provider for completions
+---@param provider string|nil Provider name ('openai', 'claude', 'copilot', 'ollama') or nil for default
+function M.set_provider(provider)
+    local valid_providers = { 'openai', 'claude', 'copilot', 'ollama', 'google' }
+    
+    if provider and provider ~= '' then
+        local is_valid = false
+        for _, p in ipairs(valid_providers) do
+            if provider == p then
+                is_valid = true
+                break
+            end
+        end
+        
+        if not is_valid then
+            vim.notify(
+                'tark: Invalid provider "' .. provider .. '". Valid: ' .. table.concat(valid_providers, ', '),
+                vim.log.levels.ERROR
+            )
+            return
+        end
+        
+        M.config.provider = provider
+        vim.notify('tark: Completion provider set to ' .. provider, vim.log.levels.INFO)
+    else
+        M.config.provider = nil
+        vim.notify('tark: Completion provider set to default (server selects)', vim.log.levels.INFO)
+    end
+end
+
+--- Get current provider
+---@return string|nil
+function M.get_provider()
+    return M.config.provider
 end
 
 -- ============================================================================

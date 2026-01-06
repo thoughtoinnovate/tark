@@ -38,6 +38,9 @@ M.config = {
         debounce_ms = 300,
         -- Accept key (default Tab)
         accept_key = '<Tab>',
+        -- Provider for completions (nil = server default)
+        -- Options: 'openai', 'claude', 'copilot', 'ollama', 'google'
+        provider = nil,
     },
 }
 
@@ -185,6 +188,14 @@ end
 
 function M.ghost_accept()
     return get_ghost().accept()
+end
+
+function M.ghost_set_provider(provider)
+    get_ghost().set_provider(provider)
+end
+
+function M.ghost_get_provider()
+    return get_ghost().get_provider()
 end
 
 return M
