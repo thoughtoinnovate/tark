@@ -2287,7 +2287,10 @@ fn render_tasks_content(
         };
 
         let truncated = if display.chars().count() > content_width {
-            let chars: String = display.chars().take(content_width.saturating_sub(1)).collect();
+            let chars: String = display
+                .chars()
+                .take(content_width.saturating_sub(1))
+                .collect();
             format!("{}…", chars)
         } else {
             display
@@ -2360,7 +2363,10 @@ fn render_files_content(
         };
 
         let truncated = if display.chars().count() > content_width {
-            let chars: String = display.chars().take(content_width.saturating_sub(1)).collect();
+            let chars: String = display
+                .chars()
+                .take(content_width.saturating_sub(1))
+                .collect();
             format!("{}…", chars)
         } else {
             display
