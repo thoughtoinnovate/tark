@@ -7,6 +7,10 @@ local M = {}
 M.state = {
     client_id = nil,  -- LSP client ID
     attached_buffers = {},  -- Buffers with LSP attached
+    -- Usage tracking
+    session_start = nil,  -- Session start time
+    completions_requested = 0,  -- Number of completion requests
+    completions_accepted = 0,  -- Number of completions accepted
 }
 
 -- Config (set by setup)
@@ -169,6 +173,10 @@ end
 
 --- Get LSP status
 function M.status()
+    if not M.config.enabled then
+        return 'disabled'
+    end
+    
     if not M.state.client_id then
         return 'stopped'
     end
@@ -179,6 +187,111 @@ function M.status()
     end
     
     return 'running'
+end
+
+--- Enable completions
+function M.enable()
+    if M.config.enabled then
+        return -- Already enabled
+    end
+    
+    M.config.enabled = true
+    M.state.session_start = os.time()
+    M.state.completions_requested = 0
+    M.state.completions_accepted = 0
+    
+    -- Setup autocmds and start LSP
+    M.setup_autocmds()
+    M.start()
+    
+    -- Attach to current buffer
+    local bufnr = vim.api.nvim_get_current_buf()
+    if vim.bo[bufnr].buftype == '' then
+        M.attach(bufnr)
+    end
+    
+    vim.notify('tark: Completions enabled', vim.log.levels.INFO)
+end
+
+--- Disable completions
+function M.disable()
+    if not M.config.enabled then
+        return -- Already disabled
+    end
+    
+    M.config.enabled = false
+    M.stop()
+    
+    -- Clear autocmds
+    if augroup then
+        vim.api.nvim_del_augroup_by_id(augroup)
+        augroup = nil
+    end
+    
+    vim.notify('tark: Completions disabled', vim.log.levels.INFO)
+end
+
+--- Toggle completions
+function M.toggle()
+    if M.config.enabled then
+        M.disable()
+    else
+        M.enable()
+    end
+end
+
+--- Get usage statistics
+function M.usage()
+    local stats = {
+        enabled = M.config.enabled,
+        status = M.status(),
+        session_start = M.state.session_start,
+        completions_requested = M.state.completions_requested,
+        completions_accepted = M.state.completions_accepted,
+        attached_buffers = vim.tbl_count(M.state.attached_buffers),
+    }
+    
+    -- Calculate session duration
+    if M.state.session_start then
+        stats.session_duration = os.time() - M.state.session_start
+    else
+        stats.session_duration = 0
+    end
+    
+    return stats
+end
+
+--- Format usage for display
+function M.format_usage()
+    local stats = M.usage()
+    local lines = {}
+    
+    table.insert(lines, '┌─ tark Completion Stats ─────────────────┐')
+    table.insert(lines, string.format('│ Status: %-31s │', stats.status))
+    table.insert(lines, string.format('│ Enabled: %-30s │', stats.enabled and 'yes' or 'no'))
+    
+    if stats.session_duration > 0 then
+        local mins = math.floor(stats.session_duration / 60)
+        local secs = stats.session_duration % 60
+        table.insert(lines, string.format('│ Session: %dm %ds                        │', mins, secs))
+    end
+    
+    table.insert(lines, string.format('│ Buffers attached: %-21d │', stats.attached_buffers))
+    table.insert(lines, string.format('│ Completions requested: %-16d │', stats.completions_requested))
+    table.insert(lines, string.format('│ Completions accepted: %-17d │', stats.completions_accepted))
+    table.insert(lines, '└──────────────────────────────────────────┘')
+    
+    return table.concat(lines, '\n')
+end
+
+--- Increment completion request count (called internally)
+function M.track_request()
+    M.state.completions_requested = M.state.completions_requested + 1
+end
+
+--- Increment completion accepted count (called internally)
+function M.track_accepted()
+    M.state.completions_accepted = M.state.completions_accepted + 1
 end
 
 -- ============================================================================
@@ -231,6 +344,11 @@ end
 
 function M.setup(config)
     M.config = vim.tbl_deep_extend('force', M.config, config or {})
+    
+    -- Initialize session tracking
+    M.state.session_start = os.time()
+    M.state.completions_requested = 0
+    M.state.completions_accepted = 0
     
     -- Setup autocmds
     M.setup_autocmds()

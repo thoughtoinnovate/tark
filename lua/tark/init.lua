@@ -121,4 +121,20 @@ function M.lsp_status()
     return get_lsp().status()
 end
 
+function M.lsp_enable()
+    get_lsp().enable()
+end
+
+function M.lsp_disable()
+    get_lsp().disable()
+end
+
+function M.lsp_toggle()
+    get_lsp().toggle()
+end
+
+function M.lsp_usage()
+    return get_lsp().format_usage()
+end
+
 return M

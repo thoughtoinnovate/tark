@@ -127,5 +127,64 @@ describe('lsp - LSP client integration', function()
             assert.is_nil(lsp.state.client_id)
         end)
     end)
+
+    describe('enable/disable functions', function()
+        it('has enable function', function()
+            assert.is_function(lsp.enable)
+        end)
+
+        it('has disable function', function()
+            assert.is_function(lsp.disable)
+        end)
+
+        it('has toggle function', function()
+            assert.is_function(lsp.toggle)
+        end)
+
+        it('disable sets enabled to false', function()
+            lsp.disable()
+            assert.is_false(lsp.config.enabled)
+        end)
+
+        it('enable sets enabled to true', function()
+            lsp.config.enabled = false
+            lsp.enable()
+            assert.is_true(lsp.config.enabled)
+        end)
+    end)
+
+    describe('usage tracking', function()
+        it('has usage function', function()
+            assert.is_function(lsp.usage)
+        end)
+
+        it('has format_usage function', function()
+            assert.is_function(lsp.format_usage)
+        end)
+
+        it('usage returns table', function()
+            local stats = lsp.usage()
+            assert.is_table(stats)
+        end)
+
+        it('format_usage returns string', function()
+            local output = lsp.format_usage()
+            assert.is_string(output)
+        end)
+
+        it('has track_request function', function()
+            assert.is_function(lsp.track_request)
+        end)
+
+        it('has track_accepted function', function()
+            assert.is_function(lsp.track_accepted)
+        end)
+
+        it('track_request increments counter', function()
+            local before = lsp.state.completions_requested
+            lsp.track_request()
+            assert.equals(before + 1, lsp.state.completions_requested)
+        end)
+    end)
 end)
 

@@ -146,7 +146,7 @@ return {
 | `:TarkDownload` | Download tark binary |
 | `:TarkVersion` | Show tark version |
 
-### LSP Commands
+### LSP/Completion Commands
 
 | Command | Description |
 |---------|-------------|
@@ -154,6 +154,10 @@ return {
 | `:TarkLspStop` | Stop tark LSP server |
 | `:TarkLspRestart` | Restart tark LSP server |
 | `:TarkLspStatus` | Show tark LSP status |
+| `:TarkLspEnable` | Enable tark completions |
+| `:TarkLspDisable` | Disable tark completions |
+| `:TarkLspToggle` | Toggle tark completions on/off |
+| `:TarkLspUsage` | Show completion usage stats for session |
 
 ## Usage
 

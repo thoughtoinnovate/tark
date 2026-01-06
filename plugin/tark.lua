@@ -63,3 +63,20 @@ vim.api.nvim_create_user_command('TarkLspStatus', function()
     local status = require('tark').lsp_status()
     vim.notify('tark: LSP ' .. status, vim.log.levels.INFO)
 end, { desc = 'Show tark LSP status' })
+
+vim.api.nvim_create_user_command('TarkLspEnable', function()
+    require('tark').lsp_enable()
+end, { desc = 'Enable tark completions' })
+
+vim.api.nvim_create_user_command('TarkLspDisable', function()
+    require('tark').lsp_disable()
+end, { desc = 'Disable tark completions' })
+
+vim.api.nvim_create_user_command('TarkLspToggle', function()
+    require('tark').lsp_toggle()
+end, { desc = 'Toggle tark completions' })
+
+vim.api.nvim_create_user_command('TarkLspUsage', function()
+    local usage = require('tark').lsp_usage()
+    vim.notify(usage, vim.log.levels.INFO)
+end, { desc = 'Show tark completion usage stats' })

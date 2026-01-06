@@ -147,6 +147,26 @@ describe('tark - main module', function()
             local commands = vim.api.nvim_get_commands({})
             assert.is_not_nil(commands.TarkLspStatus)
         end)
+
+        it('TarkLspEnable command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkLspEnable)
+        end)
+
+        it('TarkLspDisable command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkLspDisable)
+        end)
+
+        it('TarkLspToggle command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkLspToggle)
+        end)
+
+        it('TarkLspUsage command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkLspUsage)
+        end)
     end)
 
     describe('LSP API functions', function()
@@ -164,6 +184,22 @@ describe('tark - main module', function()
 
         it('has lsp_status function', function()
             assert.is_function(tark.lsp_status)
+        end)
+
+        it('has lsp_enable function', function()
+            assert.is_function(tark.lsp_enable)
+        end)
+
+        it('has lsp_disable function', function()
+            assert.is_function(tark.lsp_disable)
+        end)
+
+        it('has lsp_toggle function', function()
+            assert.is_function(tark.lsp_toggle)
+        end)
+
+        it('has lsp_usage function', function()
+            assert.is_function(tark.lsp_usage)
         end)
     end)
 end)
