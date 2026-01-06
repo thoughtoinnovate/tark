@@ -1287,7 +1287,8 @@ impl ChatSession {
     /// by the config defaults or user selection when the session is used.
     pub fn new() -> Self {
         let now = Utc::now();
-        let id = format!("session_{}", now.format("%Y%m%d_%H%M%S_%3f"));
+        // Use UUID v4 for cryptographically unique session IDs
+        let id = format!("session_{}", uuid::Uuid::new_v4());
         Self {
             id,
             name: String::new(), // Will be set from first prompt
