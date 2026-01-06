@@ -179,6 +179,10 @@ function M.ghost_usage()
     return get_ghost().format_usage()
 end
 
+function M.ghost_status()
+    return get_ghost().status()
+end
+
 function M.ghost_accept()
     return get_ghost().accept()
 end

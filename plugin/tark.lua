@@ -98,3 +98,8 @@ vim.api.nvim_create_user_command('TarkGhostUsage', function()
     local usage = require('tark').ghost_usage()
     vim.notify(usage, vim.log.levels.INFO)
 end, { desc = 'Show tark ghost text usage stats' })
+
+vim.api.nvim_create_user_command('TarkGhostStatus', function()
+    local status = require('tark').ghost_status()
+    vim.notify(status, vim.log.levels.INFO)
+end, { desc = 'Show tark ghost text status (diagnose issues)' })

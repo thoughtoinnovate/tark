@@ -101,28 +101,58 @@ function M.start_server()
     
     local bin = get_binary()
     if not bin then
+        vim.notify('tark: Binary not found. Run :TarkDownload', vim.log.levels.WARN)
         return false
+    end
+    
+    -- Check for API keys
+    local has_key = os.getenv('OPENAI_API_KEY') 
+        or os.getenv('ANTHROPIC_API_KEY')
+        or os.getenv('GOOGLE_API_KEY')
+        or os.getenv('OPENROUTER_API_KEY')
+    
+    if not has_key then
+        -- Check for Copilot token
+        local copilot_token = vim.fn.expand('~/.config/tark/copilot_token.json')
+        if vim.fn.filereadable(copilot_token) == 0 then
+            vim.notify(
+                'tark: No API key found. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or run "tark auth copilot"',
+                vim.log.levels.WARN
+            )
+            return false
+        end
     end
     
     local cmd = string.format('%s serve --port %d', bin, M.config.server_port)
     
+    local server_error = nil
     M.state.server_job = vim.fn.jobstart(cmd, {
         on_exit = function(_, code)
             M.state.server_job = nil
             if code ~= 0 and code ~= 143 then  -- 143 = SIGTERM
                 vim.schedule(function()
-                    vim.notify('tark: Server exited with code ' .. code, vim.log.levels.WARN)
+                    if server_error then
+                        vim.notify('tark: Server failed - ' .. server_error, vim.log.levels.ERROR)
+                    else
+                        vim.notify('tark: Server exited with code ' .. code, vim.log.levels.WARN)
+                    end
                 end)
             end
         end,
         on_stderr = function(_, data)
-            -- Log errors in verbose mode
-            if vim.g.tark_verbose and data then
+            if data then
                 for _, line in ipairs(data) do
                     if line ~= '' then
-                        vim.schedule(function()
-                            vim.notify('tark server: ' .. line, vim.log.levels.DEBUG)
-                        end)
+                        -- Capture errors
+                        if line:match('Error') or line:match('error') then
+                            server_error = line
+                        end
+                        -- Log in verbose mode
+                        if vim.g.tark_verbose then
+                            vim.schedule(function()
+                                vim.notify('tark server: ' .. line, vim.log.levels.DEBUG)
+                            end)
+                        end
                     end
                 end
             end
@@ -131,6 +161,10 @@ function M.start_server()
     
     -- Give server time to start
     vim.wait(500, function() return false end)
+    
+    if M.state.server_job then
+        vim.notify('tark: Completion server started on port ' .. M.config.server_port, vim.log.levels.INFO)
+    end
     
     return M.state.server_job ~= nil
 end
@@ -306,6 +340,53 @@ function M.format_usage()
     table.insert(lines, string.format('│ Completions shown: %-20d │', stats.completions_shown))
     table.insert(lines, string.format('│ Completions accepted: %-17d │', stats.completions_accepted))
     table.insert(lines, '└──────────────────────────────────────────┘')
+    
+    return table.concat(lines, '\n')
+end
+
+function M.status()
+    local lines = {}
+    
+    -- Check binary
+    local bin = get_binary()
+    local bin_status = bin and ('found: ' .. bin) or 'NOT FOUND (run :TarkDownload)'
+    table.insert(lines, 'Binary: ' .. bin_status)
+    
+    -- Check API keys
+    local keys = {}
+    if os.getenv('OPENAI_API_KEY') then table.insert(keys, 'OPENAI') end
+    if os.getenv('ANTHROPIC_API_KEY') then table.insert(keys, 'ANTHROPIC') end
+    if os.getenv('GOOGLE_API_KEY') then table.insert(keys, 'GOOGLE') end
+    if os.getenv('OPENROUTER_API_KEY') then table.insert(keys, 'OPENROUTER') end
+    
+    local copilot_token = vim.fn.expand('~/.config/tark/copilot_token.json')
+    if vim.fn.filereadable(copilot_token) == 1 then
+        table.insert(keys, 'COPILOT')
+    end
+    
+    if #keys > 0 then
+        table.insert(lines, 'API Keys: ' .. table.concat(keys, ', '))
+    else
+        table.insert(lines, 'API Keys: NONE - set OPENAI_API_KEY or run "tark auth copilot"')
+    end
+    
+    -- Server status
+    table.insert(lines, 'Server: ' .. (M.is_server_running() and 'running' or 'stopped'))
+    table.insert(lines, 'Enabled: ' .. (M.config.enabled and 'yes' or 'no'))
+    table.insert(lines, 'Port: ' .. M.config.server_port)
+    
+    -- Test server connectivity
+    if M.is_server_running() then
+        local health_check = vim.fn.system(string.format(
+            'curl -s -o /dev/null -w "%%{http_code}" http://127.0.0.1:%d/health 2>/dev/null',
+            M.config.server_port
+        ))
+        if health_check == '200' then
+            table.insert(lines, 'Server health: OK')
+        else
+            table.insert(lines, 'Server health: NOT responding (code: ' .. health_check .. ')')
+        end
+    end
     
     return table.concat(lines, '\n')
 end

@@ -342,11 +342,41 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         (config.llm.default_provider.clone(), "gpt-4o".to_string())
     };
 
-    // Create initial chat agent
-    let provider: Arc<dyn LlmProvider> = Arc::from(llm::create_provider(&default_provider)?);
+    // Try to create initial chat agent - try multiple providers in order of preference
+    let providers_to_try = vec![
+        default_provider.clone(),
+        "copilot".to_string(),
+        "openai".to_string(),
+        "claude".to_string(),
+        "ollama".to_string(),
+    ];
+
+    let mut working_provider = None;
+    for provider_name in providers_to_try {
+        match llm::create_provider(&provider_name) {
+            Ok(p) => {
+                tracing::info!("Using provider: {}", provider_name);
+                working_provider = Some((provider_name, Arc::from(p) as Arc<dyn LlmProvider>));
+                break;
+            }
+            Err(e) => {
+                tracing::debug!("Provider {} not available: {}", provider_name, e);
+            }
+        }
+    }
+
+    let (actual_provider, provider) = working_provider.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No LLM provider available. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or run 'tark auth copilot'"
+        )
+    })?;
+
     let tools = ToolRegistry::with_defaults(working_dir.clone(), config.tools.shell_enabled);
     let chat_agent =
         ChatAgent::new(provider, tools).with_max_iterations(config.agent.max_iterations);
+
+    // Use the actual working provider, not the default
+    let default_provider = actual_provider;
 
     // Load or create current chat session
     let current_chat_session = if let Some(ref s) = storage {
