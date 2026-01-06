@@ -302,7 +302,8 @@ local augroup = nil
 
 function M.setup_autocmds()
     if augroup then
-        vim.api.nvim_del_augroup_by_id(augroup)
+        pcall(vim.api.nvim_del_augroup_by_id, augroup)
+        augroup = nil
     end
     
     if not M.config.enabled then
