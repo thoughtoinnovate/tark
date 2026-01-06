@@ -106,7 +106,6 @@ describe('server - platform and binary management', function()
                 ['darwin-x86_64'] = true,
                 ['darwin-arm64'] = true,
                 ['windows-x86_64'] = true,
-                ['freebsd-x86_64'] = true,
             }
             -- Platform should match pattern os-arch
             assert.is_true(platform:match('^%w+-%w+') ~= nil)

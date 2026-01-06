@@ -90,7 +90,7 @@ tests/
 - ✅ Version info
 
 ### Server Module (`server_spec.lua`)
-- ✅ Platform detection (Linux, macOS, Windows, FreeBSD)
+- ✅ Platform detection (Linux, macOS, Windows)
 - ✅ Architecture detection (x86_64, arm64)
 - ✅ Binary name generation
 - ✅ Channel configuration (stable, nightly, latest)

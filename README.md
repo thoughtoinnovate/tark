@@ -89,7 +89,6 @@ Download from [GitHub Releases](https://github.com/thoughtoinnovate/tark/release
 | Linux ARM64 (glibc) | [tark-linux-arm64-gnu](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-arm64-gnu) | ARM64 with glibc |
 | **macOS Intel** | [tark-darwin-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-x86_64) | |
 | **macOS Apple Silicon** | [tark-darwin-arm64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-arm64) | M1/M2/M3 |
-| **FreeBSD** | [tark-freebsd-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-freebsd-x86_64) | |
 | **Windows x64** | [tark-windows-x86_64.exe](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-windows-x86_64.exe) | |
 
 > **Tip:** Use the `-musl` binaries for universal Linux compatibility (Alpine, Arch, NixOS, Void, etc.)

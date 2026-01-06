@@ -48,11 +48,11 @@ detect_platform() {
     case "$(uname -s)" in
         Linux*)   os="linux" ;;
         Darwin*)  os="darwin" ;;
-        FreeBSD*) os="freebsd" ;;
-        OpenBSD*) os="openbsd" ;;
-        NetBSD*)  os="netbsd" ;;
         MINGW*|MSYS*|CYGWIN*) os="windows" ;;
-        *)        error "Unsupported operating system: $(uname -s)" ;;
+        *)        error "Unsupported operating system: $(uname -s)
+
+Supported: Linux, macOS (Darwin), Windows
+Note: FreeBSD/OpenBSD/NetBSD are not currently supported." ;;
     esac
 
     case "$(uname -m)" in
@@ -88,7 +88,6 @@ Available platforms:
   - linux-arm64        (Any Linux ARM64)
   - darwin-x86_64      (macOS Intel)
   - darwin-arm64       (macOS Apple Silicon)
-  - freebsd-x86_64     (FreeBSD)
   - windows-x86_64     (Windows x64)
   - windows-arm64      (Windows ARM64)
 

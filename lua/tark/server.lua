@@ -121,12 +121,10 @@ local function detect_platform()
         os_key = 'linux'
     elseif os_name == 'Darwin' then
         os_key = 'darwin'
-    elseif os_name == 'FreeBSD' then
-        os_key = 'freebsd'
     elseif os_name:match('Windows') or os_name:match('MINGW') or os_name:match('MSYS') then
         os_key = 'windows'
     else
-        os_key = 'linux'  -- fallback
+        os_key = 'linux'  -- fallback (FreeBSD/OpenBSD/NetBSD not currently supported)
     end
     
     -- Detect architecture
