@@ -288,6 +288,46 @@ Create `.tark/` in your project for local settings:
 └── conversations/   # Saved sessions
 ```
 
+## Statusline Integration
+
+Show Tark status in your statusline with a nice icon:
+
+### With Lualine
+
+```lua
+require('lualine').setup({
+    sections = {
+        lualine_x = {
+            -- Full: icon + "tark"
+            require('tark.statusline').lualine,
+            
+            -- Or compact: icon only
+            -- require('tark.statusline').lualine_icon,
+        }
+    }
+})
+```
+
+### Manual Statusline
+
+```lua
+-- In your statusline string
+vim.o.statusline = "%f %m %= %{%v:lua.require('tark.statusline').status()%}"
+
+-- Or with highlights
+vim.o.statusline = "%f %m %= " .. require('tark.statusline').status_with_hl()
+```
+
+### Status Icons (Nerd Fonts)
+
+| Icon | Status | Meaning |
+|------|--------|---------|
+| 󱙺 | Active | Completions working |
+| 󰊠 | Idle | Ready, no recent activity |
+| 󰌆 | No Key | Missing API key |
+| 󰚌 | Disabled | Ghost text disabled |
+|  | Error | Binary not found |
+
 ## Architecture
 
 ```
