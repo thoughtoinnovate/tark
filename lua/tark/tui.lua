@@ -347,17 +347,12 @@ if not _G._tark_opening then
 end
 
 function M.open()
-    -- Debug: log every open attempt
-    vim.notify('[tark] open() called, _G._tark_opening=' .. tostring(_G._tark_opening), vim.log.levels.DEBUG)
-    
     -- Prevent concurrent opens
     if _G._tark_opening then
-        vim.notify('[tark] blocked concurrent open', vim.log.levels.DEBUG)
         return
     end
     _G._tark_opening = true
     
-    -- Ensure we reset the flag when done
     local function done()
         _G._tark_opening = false
     end
@@ -372,18 +367,14 @@ function M.open()
         if name:match('tark://') or name:match('tark$') or 
            (buftype == 'terminal' and name:match('tark')) then
             table.insert(tark_wins, { win = win, buf = buf })
-            vim.notify('[tark] found existing tark win=' .. win .. ' buf=' .. buf .. ' name=' .. name, vim.log.levels.DEBUG)
         end
     end
     
-    -- If we found tark windows
+    -- If we found tark windows, focus the first and close duplicates
     if #tark_wins > 0 then
-        vim.notify('[tark] found ' .. #tark_wins .. ' existing tark windows, focusing first', vim.log.levels.DEBUG)
-        -- Keep the first one, close the rest
         for i = 2, #tark_wins do
             pcall(vim.api.nvim_win_close, tark_wins[i].win, true)
         end
-        -- Focus the remaining one
         M.state.win = tark_wins[1].win
         M.state.buf = tark_wins[1].buf
         vim.api.nvim_set_current_win(M.state.win)
@@ -425,12 +416,16 @@ function M.open()
     local total_width = vim.o.columns
     local total_height = vim.o.lines
     
-    -- Create split
+    -- IMPORTANT: Create a fresh scratch buffer FIRST to avoid buffer sharing
+    -- This prevents the issue where vsplit shows the same buffer in both windows
+    M.state.buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(M.state.buf, 'tark://chat')
+    
+    -- Create window with the fresh buffer
     if pos == 'float' then
         local width = calculate_size(M.config.window.width, total_width)
         local height = calculate_size(M.config.window.height, total_height)
         
-        M.state.buf = vim.api.nvim_create_buf(false, true)
         M.state.win = vim.api.nvim_open_win(M.state.buf, true, {
             relative = 'editor',
             width = width,
@@ -440,31 +435,42 @@ function M.open()
             style = 'minimal',
             border = 'rounded',
         })
-    elseif pos == 'right' then
-        local width = calculate_size(M.config.window.width, total_width)
-        vim.notify('[tark] creating right split, width=' .. width, vim.log.levels.DEBUG)
-        vim.cmd('botright vsplit')
-        vim.cmd('vertical resize ' .. width)
-    elseif pos == 'left' then
-        local width = calculate_size(M.config.window.width, total_width)
-        vim.cmd('topleft vsplit')
-        vim.cmd('vertical resize ' .. width)
-    elseif pos == 'bottom' then
-        local height = calculate_size(M.config.window.height, total_height)
-        vim.cmd('botright split')
-        vim.cmd('resize ' .. height)
-    elseif pos == 'top' then
-        local height = calculate_size(M.config.window.height, total_height)
-        vim.cmd('topleft split')
-        vim.cmd('resize ' .. height)
     else
-        -- Default: right
+        -- For splits: use API to create window with our buffer directly
         local width = calculate_size(M.config.window.width, total_width)
-        vim.cmd('botright vsplit')
-        vim.cmd('vertical resize ' .. width)
+        local height = calculate_size(M.config.window.height, total_height)
+        
+        -- Calculate split size
+        local split_opts = { win = 0 }  -- split from current window
+        
+        if pos == 'right' or pos == nil then
+            split_opts.vertical = true
+            split_opts.width = width
+            M.state.win = vim.api.nvim_open_win(M.state.buf, true, split_opts)
+            -- Move to far right
+            vim.cmd('wincmd L')
+        elseif pos == 'left' then
+            split_opts.vertical = true
+            split_opts.width = width
+            M.state.win = vim.api.nvim_open_win(M.state.buf, true, split_opts)
+            -- Move to far left
+            vim.cmd('wincmd H')
+        elseif pos == 'bottom' then
+            split_opts.vertical = false
+            split_opts.height = height
+            M.state.win = vim.api.nvim_open_win(M.state.buf, true, split_opts)
+            -- Move to bottom
+            vim.cmd('wincmd J')
+        elseif pos == 'top' then
+            split_opts.vertical = false
+            split_opts.height = height
+            M.state.win = vim.api.nvim_open_win(M.state.buf, true, split_opts)
+            -- Move to top
+            vim.cmd('wincmd K')
+        end
     end
     
-    -- Open terminal
+    -- Open terminal in the dedicated buffer
     M.state.job_id = vim.fn.termopen(cmd, {
         on_exit = function()
             vim.schedule(function()
@@ -473,17 +479,12 @@ function M.open()
         end,
     })
     
-    if pos ~= 'float' then
-        M.state.buf = vim.api.nvim_get_current_buf()
-        M.state.win = vim.api.nvim_get_current_win()
-    end
-    
     -- Configure buffer
     vim.bo[M.state.buf].buflisted = false
-    pcall(vim.api.nvim_buf_set_name, M.state.buf, 'tark://chat')
     
     -- Configure window to prevent accidental duplication
     vim.wo[M.state.win].winfixwidth = true
+    vim.wo[M.state.win].winfixheight = true
     vim.wo[M.state.win].number = false
     vim.wo[M.state.win].relativenumber = false
     vim.wo[M.state.win].signcolumn = 'no'
