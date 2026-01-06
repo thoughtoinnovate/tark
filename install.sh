@@ -6,7 +6,7 @@
 
 set -e
 
-VERSION="v0.3.0"
+VERSION="v0.4.0"
 REPO="thoughtoinnovate/tark"
 BINARY_NAME="tark"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -251,7 +251,7 @@ If you trust the source, you can bypass with: SKIP_VERIFY=true ./install.sh"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version|-v)
-            VERSION="v0.3.0"
+            VERSION="v0.4.0"
             shift 2
             ;;
         --install-dir|-d)
