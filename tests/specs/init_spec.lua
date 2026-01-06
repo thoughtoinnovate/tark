@@ -127,5 +127,43 @@ describe('tark - main module', function()
             local commands = vim.api.nvim_get_commands({})
             assert.is_not_nil(commands.TarkVersion)
         end)
+
+        it('TarkLspStart command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkLspStart)
+        end)
+
+        it('TarkLspStop command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkLspStop)
+        end)
+
+        it('TarkLspRestart command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkLspRestart)
+        end)
+
+        it('TarkLspStatus command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkLspStatus)
+        end)
+    end)
+
+    describe('LSP API functions', function()
+        it('has lsp_start function', function()
+            assert.is_function(tark.lsp_start)
+        end)
+
+        it('has lsp_stop function', function()
+            assert.is_function(tark.lsp_stop)
+        end)
+
+        it('has lsp_restart function', function()
+            assert.is_function(tark.lsp_restart)
+        end)
+
+        it('has lsp_status function', function()
+            assert.is_function(tark.lsp_status)
+        end)
     end)
 end)

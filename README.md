@@ -114,7 +114,7 @@ return {
         -- Binary path (auto-detected if nil)
         binary = nil,
         
-        -- Window settings
+        -- Window settings for TUI
         window = {
             position = 'right',  -- 'right', 'left', 'bottom', 'top', 'float'
             width = 0.4,         -- 40% of screen (or columns if > 1)
@@ -123,11 +123,19 @@ return {
         
         -- Auto-download binary if not found
         auto_download = true,
+        
+        -- LSP settings for AI completions
+        lsp = {
+            enabled = true,  -- Enable LSP for completions
+            exclude_filetypes = { 'TelescopePrompt', 'NvimTree', 'neo-tree' },
+        },
     },
 }
 ```
 
 ## Commands
+
+### TUI Commands
 
 | Command | Description |
 |---------|-------------|
@@ -137,6 +145,15 @@ return {
 | `:TarkClose` | Close tark TUI |
 | `:TarkDownload` | Download tark binary |
 | `:TarkVersion` | Show tark version |
+
+### LSP Commands
+
+| Command | Description |
+|---------|-------------|
+| `:TarkLspStart` | Start tark LSP server |
+| `:TarkLspStop` | Stop tark LSP server |
+| `:TarkLspRestart` | Restart tark LSP server |
+| `:TarkLspStatus` | Show tark LSP status |
 
 ## Usage
 

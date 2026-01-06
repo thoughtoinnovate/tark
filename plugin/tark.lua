@@ -37,3 +37,29 @@ vim.api.nvim_create_user_command('TarkVersion', function()
         vim.notify('tark: Binary not found. Run :TarkDownload', vim.log.levels.WARN)
     end
 end, { desc = 'Show tark version' })
+
+-- LSP commands
+vim.api.nvim_create_user_command('TarkLspStart', function()
+    local tark = require('tark')
+    local client_id = tark.lsp_start()
+    if client_id then
+        vim.notify('tark: LSP started (client ' .. client_id .. ')', vim.log.levels.INFO)
+    else
+        vim.notify('tark: Failed to start LSP', vim.log.levels.ERROR)
+    end
+end, { desc = 'Start tark LSP server' })
+
+vim.api.nvim_create_user_command('TarkLspStop', function()
+    require('tark').lsp_stop()
+    vim.notify('tark: LSP stopped', vim.log.levels.INFO)
+end, { desc = 'Stop tark LSP server' })
+
+vim.api.nvim_create_user_command('TarkLspRestart', function()
+    require('tark').lsp_restart()
+    vim.notify('tark: LSP restarting...', vim.log.levels.INFO)
+end, { desc = 'Restart tark LSP server' })
+
+vim.api.nvim_create_user_command('TarkLspStatus', function()
+    local status = require('tark').lsp_status()
+    vim.notify('tark: LSP ' .. status, vim.log.levels.INFO)
+end, { desc = 'Show tark LSP status' })
