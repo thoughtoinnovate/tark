@@ -2698,7 +2698,9 @@ impl TuiApp {
             CommandResult::ShowUsageTotal => {
                 // Display all-time usage totals as a system message
                 if let Some(ref bridge) = self.agent_bridge {
-                    match crate::storage::usage::UsageTracker::new(bridge.working_dir()) {
+                    match crate::storage::usage::UsageTracker::new(
+                        bridge.working_dir().join(".tark"),
+                    ) {
                         Ok(tracker) => match tracker.get_summary() {
                             Ok(summary) => {
                                 let mut usage_text = String::new();

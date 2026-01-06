@@ -115,18 +115,15 @@ describe('statusline', function()
             assert.is_function(statusline.lualine.color)
         end)
         
-        it('has cond function', function()
-            assert.is_function(statusline.lualine.cond)
-        end)
-        
         it('function returns string', function()
             local result = statusline.lualine[1]()
             assert.is_string(result)
         end)
         
-        it('color returns table', function()
+        it('color returns table with fg', function()
             local result = statusline.lualine.color()
             assert.is_table(result)
+            assert.is_string(result.fg)
         end)
     end)
     

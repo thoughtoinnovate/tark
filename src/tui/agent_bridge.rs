@@ -299,7 +299,9 @@ impl AgentBridge {
         }
 
         // Initialize usage tracker and ensure session exists
-        let usage_tracker = UsageTracker::new(&working_dir).ok();
+        // Usage database is stored in .tark/ directory
+        let tark_dir = working_dir.join(".tark");
+        let usage_tracker = UsageTracker::new(&tark_dir).ok();
 
         // Register the current session in the usage tracker so foreign key constraints work
         if let Some(ref tracker) = usage_tracker {

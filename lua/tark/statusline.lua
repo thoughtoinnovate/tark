@@ -144,28 +144,27 @@ function M.status_with_hl(opts)
     return '%#' .. status.highlight .. '#' .. text .. '%*'
 end
 
---- Lualine component
+-- Color function shared between components
+local function get_color()
+    local status = M.get_status()
+    local colors = {
+        TarkStatusActive = { fg = '#7aa2f7' },
+        TarkStatusIdle = { fg = '#9ece6a' },
+        TarkStatusLoading = { fg = '#e0af68' },
+        TarkStatusError = { fg = '#f7768e' },
+        TarkStatusDisabled = { fg = '#565f89' },
+    }
+    return colors[status.highlight] or { fg = '#565f89' }
+end
+
+--- Lualine component (full: icon + text)
 --- Usage: require('lualine').setup({ sections = { lualine_x = { require('tark.statusline').lualine } } })
 M.lualine = {
     function()
         return M.status()
     end,
-    color = function()
-        local status = M.get_status()
-        -- Map highlight group to lualine color
-        local colors = {
-            TarkStatusActive = { fg = '#7aa2f7' },
-            TarkStatusIdle = { fg = '#9ece6a' },
-            TarkStatusLoading = { fg = '#e0af68' },
-            TarkStatusError = { fg = '#f7768e' },
-            TarkStatusDisabled = { fg = '#565f89' },
-        }
-        return colors[status.highlight] or {}
-    end,
-    cond = function()
-        -- Only show if tark is loaded
-        return package.loaded['tark'] ~= nil
-    end,
+    color = get_color,
+    -- Always show - status indicates if working or not
 }
 
 --- Lualine component (compact - icon only)
@@ -173,8 +172,7 @@ M.lualine_icon = {
     function()
         return M.status({ show_text = false })
     end,
-    color = M.lualine.color,
-    cond = M.lualine.cond,
+    color = get_color,
 }
 
 --- Setup (call this to initialize highlights)
