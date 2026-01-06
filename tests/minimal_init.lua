@@ -43,6 +43,12 @@ vim.g.tark_test_mode = true
 -- Disable auto-start for tests
 vim.env.TARK_NO_AUTO_START = '1'
 
+-- Source plugin file to register commands (normally done automatically by Neovim)
+local plugin_file = plugin_dir .. 'plugin/tark.lua'
+if vim.fn.filereadable(plugin_file) == 1 then
+    vim.cmd('source ' .. plugin_file)
+end
+
 print('Test environment initialized')
 print('Plugin dir: ' .. plugin_dir)
 print('Plenary dir: ' .. plenary_dir)

@@ -760,13 +760,13 @@ mod tests {
     }
 
     #[test]
-    fn test_confirm_reject_keys() {
+    fn test_copy_and_reject_keys() {
         let mut handler = KeybindingHandler::new();
 
-        // y for confirm
+        // y for copy selection (vim-style yank)
         let action =
             handler.handle_normal_mode(make_key_event(KeyCode::Char('y'), KeyModifiers::NONE));
-        assert_eq!(action, Some(Action::Confirm));
+        assert_eq!(action, Some(Action::CopySelection));
 
         // n for reject
         let action =

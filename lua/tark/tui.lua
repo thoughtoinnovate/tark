@@ -514,7 +514,7 @@ function M.toggle()
 end
 
 function M.is_open()
-    return M.state.win and vim.api.nvim_win_is_valid(M.state.win)
+    return M.state.win ~= nil and vim.api.nvim_win_is_valid(M.state.win)
 end
 
 function M.cleanup()

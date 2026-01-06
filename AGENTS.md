@@ -33,13 +33,11 @@ tark/
 ├── lua/                    # Neovim plugin (Lua)
 │   └── tark/
 │       ├── init.lua        # Plugin entry point & setup
-│       ├── server.lua      # Server management (binary/docker)
-│       ├── chat.lua        # Chat UI
-│       ├── ghost.lua       # Ghost text completions
-│       ├── lsp.lua         # LSP integration helpers (async)
-│       ├── lsp_server.lua  # LSP proxy HTTP server
-│       ├── usage.lua       # Usage tracking UI
+│       ├── tui.lua         # TUI integration (socket RPC)
+│       ├── binary.lua      # Binary find/download/version
 │       └── health.lua      # :checkhealth integration
+├── plugin/
+│   └── tark.lua            # Command registration
 ├── .github/workflows/      # CI/CD
 │   ├── ci.yml              # Tests, build, lint
 │   ├── release.yml         # Multi-platform releases
@@ -136,11 +134,10 @@ tark/
 | `src/completion/engine.rs` | FIM completion logic | Changing completion behavior |
 | `src/storage/usage.rs` | Usage tracking & SQLite | Adding usage analytics |
 | `src/transport/dashboard.rs` | Usage dashboard HTML | Modifying dashboard UI |
-| `lua/tark/server.lua` | Server management | Binary/Docker handling |
-| `lua/tark/init.lua` | Plugin config | Adding config options |
-| `lua/tark/lsp.lua` | LSP helpers | Adding LSP features |
-| `lua/tark/lsp_server.lua` | LSP proxy server | Adding proxy endpoints |
-| `lua/tark/usage.lua` | Usage tracking UI | Adding usage features |
+| `lua/tark/init.lua` | Plugin entry & config | Adding config options |
+| `lua/tark/tui.lua` | TUI integration | Socket RPC handlers |
+| `lua/tark/binary.lua` | Binary management | Download/version logic |
+| `plugin/tark.lua` | Command registration | Adding new commands |
 | `.github/workflows/release.yml` | Release automation | Adding platforms |
 
 ## Common Tasks
@@ -211,7 +208,7 @@ nvim --headless -u tests/minimal_init.lua \
 
 # Run specific Lua test file
 nvim --headless -u tests/minimal_init.lua \
-  -c "PlenaryBustedFile tests/specs/chat_spec.lua"
+  -c "PlenaryBustedFile tests/specs/init_spec.lua"
 ```
 
 ## After Every Code Change ⚡
