@@ -47,8 +47,15 @@ end
 
 local function get_data_dir()
     local dir = vim.fn.stdpath('data') .. '/tark'
+    -- Only create if nothing exists at the path
     if vim.fn.isdirectory(dir) == 0 then
-        vim.fn.mkdir(dir, 'p')
+        -- Check if something else exists (file)
+        if vim.fn.filereadable(dir) == 1 then
+            -- A file exists where we want a directory - remove it
+            vim.fn.delete(dir)
+        end
+        -- Create directory (pcall to handle race conditions)
+        pcall(vim.fn.mkdir, dir, 'p')
     end
     return dir
 end
