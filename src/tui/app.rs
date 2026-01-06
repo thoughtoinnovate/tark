@@ -3859,7 +3859,7 @@ impl TuiApp {
                     compact_result.new_tokens,
                     compact_result.old_tokens.saturating_sub(compact_result.new_tokens),
                     if compact_result.old_tokens > 0 {
-                        (compact_result.old_tokens.saturating_sub(compact_result.new_tokens)) as f64
+                        compact_result.old_tokens.saturating_sub(compact_result.new_tokens) as f64
                          / compact_result.old_tokens as f64 * 100.0
                     } else { 0.0 },
                     compact_result.summary

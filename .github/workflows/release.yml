@@ -50,11 +50,12 @@ jobs:
             os: windows-latest
             artifact_name: tark-windows-arm64.exe
           
-          # FreeBSD
-          - target: x86_64-unknown-freebsd
-            os: ubuntu-latest
-            artifact_name: tark-freebsd-x86_64
-            use_cross: true
+          # FreeBSD - disabled due to cross-compilation issues
+          # See: https://github.com/cross-rs/cross/issues/1292
+          # - target: x86_64-unknown-freebsd
+          #   os: ubuntu-latest
+          #   artifact_name: tark-freebsd-x86_64
+          #   use_cross: true
 
     steps:
       - name: Checkout
