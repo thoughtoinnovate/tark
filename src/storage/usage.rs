@@ -114,6 +114,34 @@ impl UsageTracker {
         Ok(session)
     }
 
+    /// Ensure a session exists in the database (for foreign key constraints)
+    /// This is used when loading an existing ChatSession that may not be in the usage tracker's sessions table
+    pub fn ensure_session_exists(
+        &self,
+        session_id: &str,
+        name: &str,
+        host: &str,
+        username: &str,
+    ) -> Result<()> {
+        let conn = self.db.lock().unwrap();
+
+        // Use INSERT OR IGNORE to avoid duplicates
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions (id, name, host, username, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                session_id,
+                name,
+                host,
+                username,
+                Utc::now().to_rfc3339(),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
     /// Log usage
     pub fn log_usage(&self, log: UsageLog) -> Result<()> {
         let conn = self.db.lock().unwrap();

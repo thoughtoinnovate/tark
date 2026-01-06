@@ -298,8 +298,21 @@ impl AgentBridge {
             agent.restore_from_session(&current_session);
         }
 
-        // Initialize usage tracker
+        // Initialize usage tracker and ensure session exists
         let usage_tracker = UsageTracker::new(&working_dir).ok();
+
+        // Register the current session in the usage tracker so foreign key constraints work
+        if let Some(ref tracker) = usage_tracker {
+            let host = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string());
+            let username = whoami::username();
+            // Try to ensure session exists (ignore errors if it already exists)
+            let _ = tracker.ensure_session_exists(
+                &current_session.id,
+                &current_session.name,
+                &host,
+                &username,
+            );
+        }
 
         Ok(Self {
             agent,
