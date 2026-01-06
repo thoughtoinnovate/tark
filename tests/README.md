@@ -21,25 +21,21 @@ nvim --headless -u tests/minimal_init.lua \
 ### Run Specific Test File
 
 ```bash
-# Ghost text tests
-nvim --headless -u tests/minimal_init.lua \
-  -c "PlenaryBustedFile tests/specs/ghost_spec.lua"
-
-# Chat window tests
-nvim --headless -u tests/minimal_init.lua \
-  -c "PlenaryBustedFile tests/specs/chat_spec.lua"
-
 # Init module tests
 nvim --headless -u tests/minimal_init.lua \
   -c "PlenaryBustedFile tests/specs/init_spec.lua"
 
-# Server tests
+# TUI tests
 nvim --headless -u tests/minimal_init.lua \
-  -c "PlenaryBustedFile tests/specs/server_spec.lua"
+  -c "PlenaryBustedFile tests/specs/tui_spec.lua"
 
-# LSP tests
+# Binary tests
 nvim --headless -u tests/minimal_init.lua \
-  -c "PlenaryBustedFile tests/specs/lsp_spec.lua"
+  -c "PlenaryBustedFile tests/specs/binary_spec.lua"
+
+# Health tests
+nvim --headless -u tests/minimal_init.lua \
+  -c "PlenaryBustedFile tests/specs/health_spec.lua"
 ```
 
 ### Interactive Test Run
@@ -47,62 +43,46 @@ nvim --headless -u tests/minimal_init.lua \
 ```bash
 # See test output in real-time
 nvim -u tests/minimal_init.lua \
-  -c "PlenaryBustedFile tests/specs/ghost_spec.lua"
+  -c "PlenaryBustedFile tests/specs/init_spec.lua"
 ```
 
 ## Test Structure
 
 ```
 tests/
-├── minimal_init.lua    # Test environment setup
-├── README.md           # This file
+├── minimal_init.lua      # Test environment setup
+├── README.md             # This file
 └── specs/
-    ├── ghost_spec.lua  # Ghost text & completion stats tests
-    ├── chat_spec.lua   # Chat window & agent stats tests
-    ├── init_spec.lua   # Main module & commands tests
-    ├── server_spec.lua # Platform detection & server tests
-    └── lsp_spec.lua    # LSP helpers tests
+    ├── init_spec.lua     # Main module tests (setup, API, commands)
+    ├── tui_spec.lua      # TUI integration tests
+    ├── binary_spec.lua   # Binary management tests
+    └── health_spec.lua   # Health check tests
 ```
 
 ## Test Coverage
 
-### Ghost Text Module (`ghost_spec.lua`)
-- ✅ Stats tracking (requests, accepted, dismissed, tokens, cost)
-- ✅ Statusline formatting
-- ✅ Stats reset functionality
-- ✅ Module functions exist
-- ✅ Config validation
-
-### Chat Module (`chat_spec.lua`)
-- ✅ Window open/close/toggle
-- ✅ Window state management
-- ✅ Module functions exist
-- ✅ Config validation
-- ✅ Error handling
-- ✅ Provider state tracking (backend vs display)
-- ✅ Multi-provider support (OpenAI, Claude, Google/Gemini, Ollama)
-
 ### Init Module (`init_spec.lua`)
 - ✅ Module loading
-- ✅ API functions (completion_stats, completion_statusline)
-- ✅ Commands registration (12+ commands)
-- ✅ Config structure
 - ✅ Version info
+- ✅ Config structure (window, auto_download)
+- ✅ Public API functions (open, close, toggle, is_open)
+- ✅ Setup function
+- ✅ Commands registration (Tark, TarkOpen, TarkClose, TarkDownload, TarkVersion)
 
-### Server Module (`server_spec.lua`)
-- ✅ Platform detection (Linux, macOS, Windows)
-- ✅ Architecture detection (x86_64, arm64)
-- ✅ Binary name generation
-- ✅ Channel configuration (stable, nightly, latest)
-- ✅ Status reporting
-- ✅ Binary/Docker availability checks
+### TUI Module (`tui_spec.lua`)
+- ✅ Module functions (open, close, toggle, is_open, cleanup)
+- ✅ State tracking (buf, win, job_id, socket_path)
+- ✅ Config validation (window position, width, height)
+- ✅ Setup function
+- ✅ Cleanup function
 
-### LSP Module (`lsp_spec.lua`)
-- ✅ LSP client detection
-- ✅ Async helper functions
-- ✅ Error handling (no LSP attached)
-- ✅ Callback execution
-- ✅ Graceful degradation
+### Binary Module (`binary_spec.lua`)
+- ✅ Module functions (find, download, version)
+- ✅ Config validation
+- ✅ Setup function
+
+### Health Module (`health_spec.lua`)
+- ✅ Check function exists
 
 ## CI Integration
 
@@ -118,18 +98,17 @@ neovim-tests:
       uses: rhysd/action-setup-vim@v1
       with:
         neovim: true
-        version: stable  # Installs latest stable (0.10+)
-    - name: Verify Neovim version
+        version: stable
+    - name: Install plenary.nvim
       run: |
-        nvim --version
-        # Checks for Neovim 0.8.0+ requirement
+        mkdir -p "$HOME/.local/share/nvim"
+        git clone --depth=1 https://github.com/nvim-lua/plenary.nvim \
+          "$HOME/.local/share/nvim/plenary.nvim"
     - name: Run Neovim tests
       run: |
         nvim --headless -u tests/minimal_init.lua \
           -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
 ```
-
-The CI workflow uses `rhysd/action-setup-vim` with `version: stable`, which installs the latest stable Neovim release (currently 0.10+). A version check ensures the runner has Neovim 0.8.0 or later.
 
 ## Troubleshooting
 
@@ -215,4 +194,3 @@ assert.has_no_errors(function() ... end)
 - [plenary.nvim](https://github.com/nvim-lua/plenary.nvim)
 - [Neovim Lua Guide](https://neovim.io/doc/user/lua-guide.html)
 - [tark Documentation](../README.md)
-

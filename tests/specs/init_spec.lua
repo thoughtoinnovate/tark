@@ -1,5 +1,5 @@
 -- Tests for main tark module
--- Tests module loading, commands, and API functions
+-- Tests module loading, setup, and public API
 
 local tark = require('tark')
 
@@ -19,183 +19,108 @@ describe('tark - main module', function()
         end)
     end)
 
-    describe('API functions', function()
-        it('has completion_stats function', function()
-            assert.is_function(tark.completion_stats)
+    describe('public API functions', function()
+        it('has open function', function()
+            assert.is_function(tark.open)
         end)
 
-        it('has completion_statusline function', function()
-            assert.is_function(tark.completion_statusline)
+        it('has close function', function()
+            assert.is_function(tark.close)
         end)
 
-        it('completion_stats returns table', function()
-            local stats = tark.completion_stats()
-            assert.is_table(stats)
+        it('has toggle function', function()
+            assert.is_function(tark.toggle)
         end)
 
-        it('completion_stats has required fields', function()
-            local stats = tark.completion_stats()
-            assert.is_number(stats.requests)
-            assert.is_number(stats.accepted)
-            assert.is_number(stats.dismissed)
-            assert.is_number(stats.input_tokens)
-            assert.is_number(stats.output_tokens)
-            assert.is_number(stats.total_cost)
+        it('has is_open function', function()
+            assert.is_function(tark.is_open)
         end)
 
-        it('completion_statusline returns string', function()
-            local statusline = tark.completion_statusline()
-            assert.is_string(statusline)
+        it('has setup function', function()
+            assert.is_function(tark.setup)
         end)
     end)
 
-    describe('module access functions', function()
-        it('has ghost function', function()
-            assert.is_function(tark.ghost)
+    describe('is_open function', function()
+        it('returns boolean', function()
+            local result = tark.is_open()
+            assert.is_boolean(result)
         end)
 
-        it('has chat function', function()
-            assert.is_function(tark.chat)
-        end)
-
-        it('has lsp function', function()
-            assert.is_function(tark.lsp)
-        end)
-
-        it('ghost returns module', function()
-            local ghost = tark.ghost()
-            assert.is_table(ghost)
-        end)
-
-        it('chat returns module', function()
-            local chat = tark.chat()
-            assert.is_table(chat)
-        end)
-
-        it('lsp returns module', function()
-            local lsp = tark.lsp()
-            assert.is_table(lsp)
-        end)
-    end)
-
-    describe('server functions', function()
-        it('has start_server function', function()
-            assert.is_function(tark.start_server)
-        end)
-
-        it('has stop_server function', function()
-            assert.is_function(tark.stop_server)
-        end)
-
-        it('has server_status function', function()
-            assert.is_function(tark.server_status)
-        end)
-
-        it('server_status returns table', function()
-            local status = tark.server_status()
-            assert.is_table(status)
-        end)
-    end)
-
-    describe('convenience functions', function()
-        it('has toggle_chat function', function()
-            assert.is_function(tark.toggle_chat)
-        end)
-
-        it('has toggle_ghost function', function()
-            assert.is_function(tark.toggle_ghost)
-        end)
-    end)
-
-    describe('commands registration', function()
-        -- Commands are only registered after setup() is called
-        before_each(function()
-            tark.setup({})
-        end)
-
-        it('TarkServerStart command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkServerStart)
-        end)
-
-        it('TarkServerStop command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkServerStop)
-        end)
-
-        it('TarkServerStatus command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkServerStatus)
-        end)
-
-        it('TarkServerRestart command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkServerRestart)
-        end)
-
-        it('TarkBinaryDownload command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkBinaryDownload)
-        end)
-
-        it('TarkGhostToggle command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkGhostToggle)
-        end)
-
-        it('TarkGhostTrigger command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkGhostTrigger)
-        end)
-
-        it('TarkCompletionStats command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkCompletionStats)
-        end)
-
-        it('TarkCompletionStatsReset command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkCompletionStatsReset)
-        end)
-
-        it('TarkChatToggle command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkChatToggle)
-        end)
-
-        it('TarkChatOpen command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkChatOpen)
-        end)
-
-        it('TarkChatClose command exists', function()
-            local commands = vim.api.nvim_get_commands({})
-            assert.is_not_nil(commands.TarkChatClose)
+        it('returns false when TUI is not open', function()
+            assert.is_false(tark.is_open())
         end)
     end)
 
     describe('config structure', function()
-        it('has server config', function()
-            assert.is_table(tark.config.server)
+        it('has window config', function()
+            assert.is_table(tark.config.window)
         end)
 
-        it('has ghost_text config', function()
-            assert.is_table(tark.config.ghost_text)
+        it('has auto_download config', function()
+            assert.is_boolean(tark.config.auto_download)
         end)
 
-        it('has chat config', function()
-            assert.is_table(tark.config.chat)
+        it('window config has position', function()
+            assert.is_string(tark.config.window.position)
         end)
 
-        it('has lsp config', function()
-            assert.is_table(tark.config.lsp)
+        it('window config has width', function()
+            assert.is_number(tark.config.window.width)
         end)
 
-        it('server config has expected fields', function()
-            assert.is_not_nil(tark.config.server.auto_start)
-            assert.is_not_nil(tark.config.server.mode)
-            assert.is_not_nil(tark.config.server.channel)
+        it('window config has height', function()
+            assert.is_number(tark.config.window.height)
+        end)
+    end)
+
+    describe('setup function', function()
+        it('accepts empty config', function()
+            assert.has_no_errors(function()
+                tark.setup({})
+            end)
+        end)
+
+        it('merges config with defaults', function()
+            tark.setup({ window = { position = 'left' } })
+            assert.equals('left', tark.config.window.position)
+            -- Reset
+            tark.setup({ window = { position = 'right' } })
+        end)
+
+        it('preserves other config values', function()
+            local original_width = tark.config.window.width
+            tark.setup({ window = { position = 'bottom' } })
+            assert.equals(original_width, tark.config.window.width)
+            -- Reset
+            tark.setup({ window = { position = 'right' } })
+        end)
+    end)
+
+    describe('commands registration', function()
+        it('Tark command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.Tark)
+        end)
+
+        it('TarkOpen command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkOpen)
+        end)
+
+        it('TarkClose command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkClose)
+        end)
+
+        it('TarkDownload command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkDownload)
+        end)
+
+        it('TarkVersion command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkVersion)
         end)
     end)
 end)
-
