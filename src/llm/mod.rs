@@ -126,11 +126,17 @@ pub trait LlmProvider: Send + Sync {
 
 /// Create an LLM provider based on name
 pub fn create_provider(name: &str) -> Result<Box<dyn LlmProvider>> {
+    create_provider_with_options(name, false)
+}
+
+/// Create an LLM provider with options
+/// - `silent`: When true, suppress CLI output (for TUI usage)
+pub fn create_provider_with_options(name: &str, silent: bool) -> Result<Box<dyn LlmProvider>> {
     match name.to_lowercase().as_str() {
         "claude" | "anthropic" => Ok(Box::new(ClaudeProvider::new()?)),
         "openai" | "gpt" => Ok(Box::new(OpenAiProvider::new()?)),
         "ollama" | "local" => Ok(Box::new(OllamaProvider::new()?)),
-        "copilot" | "github" => Ok(Box::new(CopilotProvider::new()?)),
+        "copilot" | "github" => Ok(Box::new(CopilotProvider::new()?.with_silent(silent))),
         "gemini" | "google" => Ok(Box::new(GeminiProvider::new()?)),
         "openrouter" => Ok(Box::new(OpenRouterProvider::new()?)),
         _ => anyhow::bail!(

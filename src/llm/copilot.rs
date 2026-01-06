@@ -148,6 +148,8 @@ pub struct CopilotProvider {
     model: String,
     max_tokens: usize,
     auth_timeout_secs: u64,
+    /// When true, suppress CLI output (for TUI mode)
+    silent: bool,
 }
 
 impl CopilotProvider {
@@ -162,6 +164,7 @@ impl CopilotProvider {
             model: "gpt-4o".to_string(),
             max_tokens: 4096,
             auth_timeout_secs: 1800, // 30 minutes default
+            silent: false,
         })
     }
 
@@ -202,6 +205,12 @@ impl CopilotProvider {
 
     pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    /// Enable silent mode (suppress CLI output for TUI usage)
+    pub fn with_silent(mut self, silent: bool) -> Self {
+        self.silent = silent;
         self
     }
 
@@ -303,19 +312,21 @@ impl CopilotProvider {
             device_response.user_code.clone()
         };
 
-        // Print to stdout for CLI visibility
-        eprintln!();
-        eprintln!("🔐 GitHub Copilot Authentication");
-        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        eprintln!();
-        eprintln!("1. Visit this URL in your browser:");
-        eprintln!("   {}", device_response.verification_uri);
-        eprintln!();
-        eprintln!("2. Enter this code:");
-        eprintln!("   {}", formatted_code);
-        eprintln!();
-        eprintln!("Waiting for authorization...");
-        eprintln!();
+        // Print to stdout for CLI visibility (suppressed in TUI mode)
+        if !self.silent {
+            eprintln!();
+            eprintln!("🔐 GitHub Copilot Authentication");
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            eprintln!();
+            eprintln!("1. Visit this URL in your browser:");
+            eprintln!("   {}", device_response.verification_uri);
+            eprintln!();
+            eprintln!("2. Enter this code:");
+            eprintln!("   {}", formatted_code);
+            eprintln!();
+            eprintln!("Waiting for authorization...");
+            eprintln!();
+        }
 
         tracing::info!(
             "GitHub Copilot auth: visit {} and enter code {}",
@@ -334,11 +345,15 @@ impl CopilotProvider {
             .await?;
 
         // Clear progress indicator and show success
-        eprint!("\r"); // Clear the progress line
-        eprintln!("✅ Authorization received!");
+        if !self.silent {
+            eprint!("\r"); // Clear the progress line
+            eprintln!("✅ Authorization received!");
+        }
         tracing::info!("✅ Successfully authenticated with GitHub!\n");
 
-        eprintln!("📝 Exchanging for Copilot token...");
+        if !self.silent {
+            eprintln!("📝 Exchanging for Copilot token...");
+        }
         tracing::info!("📝 Exchanging for Copilot token...");
 
         // Clean up auth pending file (guard will also run on drop)
@@ -349,7 +364,9 @@ impl CopilotProvider {
         // Step 4: Exchange OAuth token for Copilot token
         let copilot_token = self.get_copilot_token(&token_response.access_token).await?;
 
-        eprintln!("✅ Successfully obtained Copilot token!");
+        if !self.silent {
+            eprintln!("✅ Successfully obtained Copilot token!");
+        }
         tracing::info!("✅ Successfully obtained Copilot token!\n");
 
         Ok(copilot_token)
@@ -435,11 +452,13 @@ impl CopilotProvider {
         loop {
             // Check timeout
             if start.elapsed() > timeout {
-                eprintln!();
-                eprintln!(
-                    "❌ Authentication timed out after {} minutes",
-                    timeout_secs / 60
-                );
+                if !self.silent {
+                    eprintln!();
+                    eprintln!(
+                        "❌ Authentication timed out after {} minutes",
+                        timeout_secs / 60
+                    );
+                }
                 anyhow::bail!("Device flow authentication timed out");
             }
 
@@ -454,8 +473,10 @@ impl CopilotProvider {
                 // If the file was deleted, the user cancelled the authentication
                 if let Some(auth_file) = auth_file_path {
                     if !auth_file.exists() {
-                        eprintln!();
-                        eprintln!("❌ Authentication cancelled by user");
+                        if !self.silent {
+                            eprintln!();
+                            eprintln!("❌ Authentication cancelled by user");
+                        }
                         tracing::info!("Authentication cancelled - auth file deleted");
                         anyhow::bail!("Authentication cancelled by user");
                     }
@@ -468,7 +489,7 @@ impl CopilotProvider {
 
             // Show progress every 5 polls (roughly every 15-25 seconds depending on interval)
             poll_count += 1;
-            if poll_count.is_multiple_of(5) {
+            if !self.silent && poll_count.is_multiple_of(5) {
                 let elapsed = start.elapsed().as_secs();
                 eprint!("\r⏳ Still waiting... ({}s elapsed)  ", elapsed);
                 use std::io::Write;
@@ -681,6 +702,7 @@ impl LlmProvider for CopilotProvider {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
             auth_timeout_secs: self.auth_timeout_secs,
+            silent: self.silent,
         };
 
         let copilot_messages = provider.convert_messages(messages);
@@ -765,6 +787,7 @@ impl LlmProvider for CopilotProvider {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
             auth_timeout_secs: self.auth_timeout_secs,
+            silent: self.silent,
         };
 
         let token = provider.ensure_token().await?;
@@ -959,6 +982,7 @@ impl LlmProvider for CopilotProvider {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
             auth_timeout_secs: self.auth_timeout_secs,
+            silent: self.silent,
         };
 
         let system = format!(
