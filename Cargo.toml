@@ -86,6 +86,7 @@ ratatui = "0.28"
 crossterm = "0.28"
 arboard = "3.4"
 image = "0.25"
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -353,23 +353,91 @@ impl AppState {
     }
 
     /// Handle navigation within the message list
+    ///
+    /// Supports vim-style navigation (j/k/h/l/gg/G/Ctrl-d/Ctrl-u)
+    /// and cursor movement with optional selection (Shift modifier)
     fn handle_message_navigation(&mut self, action: Action) {
+        self.handle_message_navigation_with_selection(action, false);
+    }
+
+    /// Handle navigation within the message list with optional selection
+    fn handle_message_navigation_with_selection(&mut self, action: Action, with_selection: bool) {
         let width = self.get_message_area_width();
         match action {
-            Action::LineDown => self.message_list.scroll_down(width),
-            Action::LineUp => self.message_list.scroll_up(),
-            Action::GoToTop => self.message_list.scroll_to_top(),
-            Action::GoToBottom => self.message_list.scroll_to_bottom(width),
-            Action::HalfPageDown => self.message_list.scroll_half_page_down(width),
-            Action::HalfPageUp => self.message_list.scroll_half_page_up(),
+            Action::LineDown => {
+                if with_selection {
+                    self.message_list.cursor_down(width, true);
+                } else {
+                    self.message_list.cursor_down(width, false);
+                }
+            }
+            Action::LineUp => {
+                if with_selection {
+                    self.message_list.cursor_up(true);
+                } else {
+                    self.message_list.cursor_up(false);
+                }
+            }
+            Action::GoToTop => self.message_list.cursor_to_top(with_selection),
+            Action::GoToBottom => self.message_list.cursor_to_bottom(width, with_selection),
+            Action::HalfPageDown => self
+                .message_list
+                .cursor_half_page_down(width, with_selection),
+            Action::HalfPageUp => self.message_list.cursor_half_page_up(with_selection),
             // Collapsible block actions (Requirements 7.5, 7.6, 8.7, 8.8)
-            // Note: These require cursor tracking to identify which block to expand/collapse
-            // For now, they are handled as no-ops in messages; full implementation pending
             Action::ExpandSection | Action::CollapseSection | Action::ToggleSection => {
                 // TODO: Implement block-level expand/collapse when cursor tracking is added
-                // This would require tracking which collapsible block is under the cursor
             }
             _ => {}
+        }
+    }
+
+    /// Handle cursor left/right movement in messages (for text selection)
+    fn handle_message_cursor_horizontal(&mut self, left: bool, with_selection: bool) {
+        let width = self.get_message_area_width();
+        if left {
+            self.message_list.cursor_left(with_selection);
+        } else {
+            self.message_list.cursor_right(width, with_selection);
+        }
+    }
+
+    /// Handle line start/end movement in messages
+    fn handle_message_line_bounds(&mut self, start: bool, with_selection: bool) {
+        let width = self.get_message_area_width();
+        if start {
+            self.message_list.cursor_line_start(with_selection);
+        } else {
+            self.message_list.cursor_line_end(width, with_selection);
+        }
+    }
+
+    /// Handle word movement in messages
+    fn handle_message_word_movement(&mut self, forward: bool, with_selection: bool) {
+        let width = self.get_message_area_width();
+        if forward {
+            self.message_list.cursor_word_forward(width, with_selection);
+        } else {
+            self.message_list.cursor_word_backward(with_selection);
+        }
+    }
+
+    /// Select all text in messages
+    fn select_all_messages(&mut self) {
+        let width = self.get_message_area_width();
+        self.message_list.select_all(width);
+    }
+
+    /// Copy selected text from messages to clipboard
+    fn copy_message_selection(&mut self) {
+        let width = self.get_message_area_width();
+        let text = self.message_list.get_selected_text(width);
+        if !text.is_empty() {
+            if let Err(e) = super::clipboard::copy_to_clipboard(&text) {
+                self.status_message = Some(format!("Failed to copy: {}", e));
+            } else {
+                self.status_message = Some("Copied to clipboard".to_string());
+            }
         }
     }
 
@@ -1418,48 +1486,71 @@ impl TuiApp {
                 Ok(true)
             }
             MouseEventKind::ScrollDown => {
-                // Scroll down in the focused component
-                let width = self.state.terminal_size.0;
-                match self.state.focused_component {
-                    FocusedComponent::Messages => {
-                        self.state.message_list.scroll_down(width);
+                // Determine which area the mouse is in based on position
+                let (width, height) = self.state.terminal_size;
+                let chat_column_width = (width as f32 * 0.70) as u16;
+                let chat_height = height;
+                let input_height = std::cmp::max(3, (chat_height as f32 * 0.20) as u16);
+                let input_top = height.saturating_sub(input_height);
+
+                // Check if mouse is in input area (bottom 20% of chat column)
+                if mouse.row >= input_top && mouse.column < chat_column_width {
+                    // Scroll down in input area
+                    let scroll = self.state.input_widget.scroll_offset();
+                    let inner_height = input_height.saturating_sub(2) as usize;
+                    let inner_width = chat_column_width.saturating_sub(2) as usize;
+                    let total_lines = self.state.input_widget.get_wrapped_line_count(inner_width);
+                    let max_scroll = total_lines.saturating_sub(inner_height);
+                    if scroll < max_scroll {
+                        self.state.input_widget.set_scroll_offset(scroll + 1);
                     }
-                    FocusedComponent::Panel => {
-                        let max_session = 4
-                            + self.state.enhanced_panel_data.session.cost_breakdown.len()
-                            + if self
-                                .state
-                                .enhanced_panel_data
-                                .session
-                                .lsp_languages
-                                .is_empty()
-                            {
-                                0
-                            } else {
-                                1
-                            };
-                        let max_tasks = self.state.enhanced_panel_data.tasks.len();
-                        let max_files = self.state.enhanced_panel_data.files.len();
-                        self.state.panel_section_state.scroll_down(
-                            max_session,
-                            max_tasks,
-                            max_files,
-                        );
-                    }
-                    _ => {}
+                } else if mouse.column >= chat_column_width {
+                    // Panel area
+                    let max_session = 4
+                        + self.state.enhanced_panel_data.session.cost_breakdown.len()
+                        + if self
+                            .state
+                            .enhanced_panel_data
+                            .session
+                            .lsp_languages
+                            .is_empty()
+                        {
+                            0
+                        } else {
+                            1
+                        };
+                    let max_tasks = self.state.enhanced_panel_data.tasks.len();
+                    let max_files = self.state.enhanced_panel_data.files.len();
+                    self.state
+                        .panel_section_state
+                        .scroll_down(max_session, max_tasks, max_files);
+                } else {
+                    // Messages area
+                    self.state.message_list.scroll_down(width);
                 }
                 Ok(true)
             }
             MouseEventKind::ScrollUp => {
-                // Scroll up in the focused component
-                match self.state.focused_component {
-                    FocusedComponent::Messages => {
-                        self.state.message_list.scroll_up();
+                // Determine which area the mouse is in based on position
+                let (width, height) = self.state.terminal_size;
+                let chat_column_width = (width as f32 * 0.70) as u16;
+                let chat_height = height;
+                let input_height = std::cmp::max(3, (chat_height as f32 * 0.20) as u16);
+                let input_top = height.saturating_sub(input_height);
+
+                // Check if mouse is in input area (bottom 20% of chat column)
+                if mouse.row >= input_top && mouse.column < chat_column_width {
+                    // Scroll up in input area
+                    let scroll = self.state.input_widget.scroll_offset();
+                    if scroll > 0 {
+                        self.state.input_widget.set_scroll_offset(scroll - 1);
                     }
-                    FocusedComponent::Panel => {
-                        self.state.panel_section_state.scroll_up();
-                    }
-                    _ => {}
+                } else if mouse.column >= chat_column_width {
+                    // Panel area
+                    self.state.panel_section_state.scroll_up();
+                } else {
+                    // Messages area
+                    self.state.message_list.scroll_up();
                 }
                 Ok(true)
             }
@@ -1737,6 +1828,94 @@ impl TuiApp {
                 }
                 Ok(true)
             }
+            // Cursor movement actions (for messages area text navigation)
+            Action::CursorLeft => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.handle_message_cursor_horizontal(true, false);
+                }
+                Ok(true)
+            }
+            Action::CursorRight => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.handle_message_cursor_horizontal(false, false);
+                }
+                Ok(true)
+            }
+            Action::LineStart => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.handle_message_line_bounds(true, false);
+                }
+                Ok(true)
+            }
+            Action::LineEnd => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.handle_message_line_bounds(false, false);
+                }
+                Ok(true)
+            }
+            Action::WordForward => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.handle_message_word_movement(true, false);
+                }
+                Ok(true)
+            }
+            Action::WordBackward => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.handle_message_word_movement(false, false);
+                }
+                Ok(true)
+            }
+            // Selection actions (with Shift modifier)
+            Action::SelectDown => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state
+                        .handle_message_navigation_with_selection(Action::LineDown, true);
+                }
+                Ok(true)
+            }
+            Action::SelectUp => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state
+                        .handle_message_navigation_with_selection(Action::LineUp, true);
+                }
+                Ok(true)
+            }
+            Action::SelectLeft => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.handle_message_cursor_horizontal(true, true);
+                }
+                Ok(true)
+            }
+            Action::SelectRight => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.handle_message_cursor_horizontal(false, true);
+                }
+                Ok(true)
+            }
+            Action::SelectLineStart => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.handle_message_line_bounds(true, true);
+                }
+                Ok(true)
+            }
+            Action::SelectLineEnd => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.handle_message_line_bounds(false, true);
+                }
+                Ok(true)
+            }
+            Action::SelectAll => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.select_all_messages();
+                }
+                Ok(true)
+            }
+            Action::CopySelection => {
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.copy_message_selection();
+                }
+                Ok(true)
+            }
         }
     }
 
@@ -1767,6 +1946,8 @@ impl TuiApp {
                     // Handle Ctrl combinations
                     match c {
                         'w' => self.state.input_widget.delete_word_before(),
+                        'u' => self.state.input_widget.clear(), // Clear entire input (Ctrl+U)
+                        'k' => self.state.input_widget.delete_to_end(), // Delete from cursor to end
                         'a' => self.state.input_widget.move_cursor_to_start(),
                         'e' => self.state.input_widget.move_cursor_to_end(),
                         _ => {}
@@ -1830,10 +2011,12 @@ impl TuiApp {
                 // If command dropdown is visible, navigate up in dropdown
                 else if self.state.command_dropdown.is_visible() {
                     self.state.command_dropdown.select_previous();
-                } else {
-                    // Navigate to previous history entry (Requirements 14.1, 14.4)
-                    self.navigate_history_previous();
                 }
+                // If multi-line input, move cursor up within text
+                else if self.state.input_widget.is_multiline() {
+                    self.state.input_widget.move_cursor_up();
+                }
+                // Single line: do nothing in insert mode (history is normal mode only)
             }
             KeyCode::Down => {
                 // If file dropdown is visible, navigate down
@@ -1843,10 +2026,12 @@ impl TuiApp {
                 // If command dropdown is visible, navigate down in dropdown
                 else if self.state.command_dropdown.is_visible() {
                     self.state.command_dropdown.select_next();
-                } else {
-                    // Navigate to next history entry (Requirements 14.2, 14.4)
-                    self.navigate_history_next();
                 }
+                // If multi-line input, move cursor down within text
+                else if self.state.input_widget.is_multiline() {
+                    self.state.input_widget.move_cursor_down();
+                }
+                // Single line: do nothing in insert mode (history is normal mode only)
             }
             KeyCode::Esc => {
                 // Hide file dropdown on Esc
@@ -1860,6 +2045,17 @@ impl TuiApp {
                 }
             }
             KeyCode::Enter => {
+                // This code path is only reached when keybinding handler returns None
+                // Plain Enter (no modifiers) returns Action::Submit from keybindings
+                // So if we get here with Enter, it has some modifier (like Shift)
+                // Insert a newline for multi-line input if no dropdowns are visible
+                if !self.state.file_dropdown.is_visible()
+                    && !self.state.command_dropdown.is_visible()
+                {
+                    self.state.input_widget.insert_newline();
+                    return;
+                }
+
                 // If file dropdown is visible, attach selected files (don't submit)
                 if self.state.file_dropdown.is_visible() {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -4426,6 +4622,21 @@ impl TuiApp {
         let current_tool = self.state.current_tool.clone();
         // Whether agent is processing (for loading indicator)
         let agent_processing = self.state.agent_processing;
+
+        // Calculate input area dimensions for scroll management
+        // We need to compute this before cloning to update scroll offset
+        let terminal_area = self.terminal.get_frame().area();
+        let chat_column_width = (terminal_area.width as f32 * 0.70) as u16;
+        let chat_height = terminal_area.height;
+        let input_height = std::cmp::max(3, (chat_height as f32 * 0.20) as u16);
+        // Account for borders (2 chars horizontal, 2 chars vertical)
+        let input_inner_width = chat_column_width.saturating_sub(2);
+        let input_inner_height = input_height.saturating_sub(2);
+
+        // Update scroll offset to keep cursor visible
+        self.state
+            .input_widget
+            .ensure_cursor_visible(input_inner_width, input_inner_height);
 
         // Clone input widget for rendering (it implements Clone)
         let input_widget = self.state.input_widget.clone();

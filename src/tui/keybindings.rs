@@ -20,6 +20,18 @@ pub enum Action {
     LineDown,
     /// Move up one line (k)
     LineUp,
+    /// Move left one character (h)
+    CursorLeft,
+    /// Move right one character (l)
+    CursorRight,
+    /// Move to line start (0)
+    LineStart,
+    /// Move to line end ($)
+    LineEnd,
+    /// Move forward one word (w)
+    WordForward,
+    /// Move backward one word (b)
+    WordBackward,
     /// Go to top (gg)
     GoToTop,
     /// Go to bottom (G)
@@ -28,6 +40,24 @@ pub enum Action {
     HalfPageDown,
     /// Page up (Ctrl-u)
     HalfPageUp,
+
+    // Selection (with Shift modifier)
+    /// Select down one line (Shift+j or Shift+Down)
+    SelectDown,
+    /// Select up one line (Shift+k or Shift+Up)
+    SelectUp,
+    /// Select left one character (Shift+h or Shift+Left)
+    SelectLeft,
+    /// Select right one character (Shift+l or Shift+Right)
+    SelectRight,
+    /// Select to line start (Shift+0 or Shift+Home)
+    SelectLineStart,
+    /// Select to line end (Shift+$ or Shift+End)
+    SelectLineEnd,
+    /// Select all (Ctrl+a)
+    SelectAll,
+    /// Copy selection (y in normal mode, Ctrl+c)
+    CopySelection,
 
     // Focus management
     /// Cycle focus to next component (Tab)
@@ -72,6 +102,8 @@ pub enum Action {
     EnterInsertMode,
     /// Exit insert mode (Escape)
     ExitInsertMode,
+    /// Enter visual mode for selection (v)
+    EnterVisualMode,
 
     // Clipboard
     /// Paste from clipboard (Ctrl+V)
@@ -106,6 +138,8 @@ pub enum InputMode {
     /// Normal mode - vim-style navigation
     #[default]
     Normal,
+    /// Visual mode - text selection
+    Visual,
     /// Insert mode - typing in input
     Insert,
     /// Command mode - entering slash commands
@@ -261,6 +295,44 @@ impl KeybindingHandler {
             (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, KeyModifiers::NONE) => {
                 Some(Action::LineUp)
             }
+            // Horizontal cursor movement (vim-style h/l)
+            (KeyCode::Char('h'), KeyModifiers::NONE) | (KeyCode::Left, KeyModifiers::NONE) => {
+                Some(Action::CursorLeft)
+            }
+            (KeyCode::Char('l'), KeyModifiers::NONE) | (KeyCode::Right, KeyModifiers::NONE) => {
+                Some(Action::CursorRight)
+            }
+            // Line start/end (vim-style 0/$)
+            (KeyCode::Char('0'), KeyModifiers::NONE) | (KeyCode::Home, KeyModifiers::NONE) => {
+                Some(Action::LineStart)
+            }
+            (KeyCode::Char('$'), KeyModifiers::SHIFT) | (KeyCode::End, KeyModifiers::NONE) => {
+                Some(Action::LineEnd)
+            }
+            // Word movement (vim-style w/b)
+            (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Action::WordForward),
+            (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Action::WordBackward),
+
+            // Selection with Shift modifier
+            (KeyCode::Char('J'), KeyModifiers::SHIFT) | (KeyCode::Down, KeyModifiers::SHIFT) => {
+                Some(Action::SelectDown)
+            }
+            (KeyCode::Char('K'), KeyModifiers::SHIFT) | (KeyCode::Up, KeyModifiers::SHIFT) => {
+                Some(Action::SelectUp)
+            }
+            (KeyCode::Char('H'), KeyModifiers::SHIFT) | (KeyCode::Left, KeyModifiers::SHIFT) => {
+                Some(Action::SelectLeft)
+            }
+            (KeyCode::Char('L'), KeyModifiers::SHIFT) | (KeyCode::Right, KeyModifiers::SHIFT) => {
+                Some(Action::SelectRight)
+            }
+            (KeyCode::Home, KeyModifiers::SHIFT) => Some(Action::SelectLineStart),
+            (KeyCode::End, KeyModifiers::SHIFT) => Some(Action::SelectLineEnd),
+            // Select all (Ctrl+a)
+            (KeyCode::Char('a'), KeyModifiers::CONTROL) => Some(Action::SelectAll),
+            // Copy selection (y in normal mode for vim-style yank)
+            (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Action::CopySelection),
+
             // Panel: go back to parent level (`-`)
             (KeyCode::Char('-'), KeyModifiers::NONE) => Some(Action::PanelBack),
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Action::HalfPageDown),
@@ -270,8 +342,7 @@ impl KeybindingHandler {
             // Delete attachment (d key in normal mode)
             (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Action::DeleteAttachment),
 
-            // Confirm/Reject actions (y/n keys)
-            (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Action::Confirm),
+            // Reject/cancel action (n key)
             (KeyCode::Char('n'), KeyModifiers::NONE) => Some(Action::Reject),
 
             // Multi-key sequences
@@ -308,6 +379,9 @@ impl KeybindingHandler {
 
             // Enter insert mode
             (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Action::EnterInsertMode),
+
+            // Enter visual mode for selection (v)
+            (KeyCode::Char('v'), KeyModifiers::NONE) => Some(Action::EnterVisualMode),
 
             // Enter key - context-dependent (toggle block in messages, toggle section in panel)
             (KeyCode::Enter, KeyModifiers::NONE) => Some(Action::ToggleBlock),
@@ -353,8 +427,12 @@ impl KeybindingHandler {
             }
             (KeyCode::BackTab, KeyModifiers::CONTROL) => Some(Action::CycleModePrev),
 
-            // Submit
+            // Submit (only plain Enter, not Shift+Enter)
             (KeyCode::Enter, KeyModifiers::NONE) => Some(Action::Submit),
+
+            // Shift+Enter should NOT submit - return None to let input widget handle it
+            // This inserts a newline for multi-line input
+            (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => None,
 
             // Everything else is handled by the input widget
             _ => None,
@@ -387,7 +465,53 @@ impl KeybindingHandler {
 
         match mode {
             InputMode::Normal => self.handle_normal_mode(key),
+            InputMode::Visual => self.handle_visual_mode(key),
             InputMode::Insert | InputMode::Command => self.handle_insert_mode(key),
+        }
+    }
+
+    /// Handle a key event in visual mode (selection mode)
+    ///
+    /// In visual mode, navigation keys extend the selection.
+    /// Escape exits visual mode, y copies selection.
+    pub fn handle_visual_mode(&mut self, key: KeyEvent) -> Option<Action> {
+        match (key.code, key.modifiers) {
+            // Exit visual mode
+            (KeyCode::Esc, KeyModifiers::NONE) => Some(Action::ExitInsertMode), // Reuse to exit visual
+
+            // Copy selection and exit (y)
+            (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Action::CopySelection),
+
+            // Navigation extends selection in visual mode
+            (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
+                Some(Action::SelectDown)
+            }
+            (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, KeyModifiers::NONE) => {
+                Some(Action::SelectUp)
+            }
+            (KeyCode::Char('h'), KeyModifiers::NONE) | (KeyCode::Left, KeyModifiers::NONE) => {
+                Some(Action::SelectLeft)
+            }
+            (KeyCode::Char('l'), KeyModifiers::NONE) | (KeyCode::Right, KeyModifiers::NONE) => {
+                Some(Action::SelectRight)
+            }
+            (KeyCode::Char('0'), KeyModifiers::NONE) | (KeyCode::Home, KeyModifiers::NONE) => {
+                Some(Action::SelectLineStart)
+            }
+            (KeyCode::Char('$'), KeyModifiers::SHIFT) | (KeyCode::End, KeyModifiers::NONE) => {
+                Some(Action::SelectLineEnd)
+            }
+            (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Action::SelectRight), // Simplified word movement
+            (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Action::SelectLeft),  // Simplified word movement
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Action::HalfPageDown),
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Action::HalfPageUp),
+            (KeyCode::Char('G'), KeyModifiers::SHIFT) => Some(Action::GoToBottom),
+            (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                self.sequence_state.set_pending('g');
+                None
+            }
+
+            _ => None,
         }
     }
 

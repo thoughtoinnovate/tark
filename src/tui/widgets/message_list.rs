@@ -175,6 +175,111 @@ impl ChatMessage {
     }
 }
 
+/// Position in the text content (line and column)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextPosition {
+    /// Line index (0-based)
+    pub line: usize,
+    /// Column index (0-based, character position)
+    pub col: usize,
+}
+
+impl TextPosition {
+    /// Create a new text position
+    pub fn new(line: usize, col: usize) -> Self {
+        Self { line, col }
+    }
+
+    /// Check if this position is before another
+    pub fn is_before(&self, other: &Self) -> bool {
+        self.line < other.line || (self.line == other.line && self.col < other.col)
+    }
+}
+
+/// Text selection range
+#[derive(Debug, Clone, Default)]
+pub struct TextSelection {
+    /// Selection anchor (where selection started)
+    pub anchor: TextPosition,
+    /// Selection cursor (where selection ends)
+    pub cursor: TextPosition,
+    /// Whether selection is active
+    pub active: bool,
+}
+
+impl TextSelection {
+    /// Create a new inactive selection
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start a selection at the given position
+    pub fn start(&mut self, pos: TextPosition) {
+        self.anchor = pos;
+        self.cursor = pos;
+        self.active = true;
+    }
+
+    /// Extend selection to the given position
+    pub fn extend_to(&mut self, pos: TextPosition) {
+        if self.active {
+            self.cursor = pos;
+        }
+    }
+
+    /// Clear the selection
+    pub fn clear(&mut self) {
+        self.active = false;
+    }
+
+    /// Get the start position (min of anchor and cursor)
+    pub fn start_pos(&self) -> TextPosition {
+        if self.anchor.is_before(&self.cursor) {
+            self.anchor
+        } else {
+            self.cursor
+        }
+    }
+
+    /// Get the end position (max of anchor and cursor)
+    pub fn end_pos(&self) -> TextPosition {
+        if self.anchor.is_before(&self.cursor) {
+            self.cursor
+        } else {
+            self.anchor
+        }
+    }
+
+    /// Check if a position is within the selection
+    pub fn contains(&self, pos: TextPosition) -> bool {
+        if !self.active {
+            return false;
+        }
+        let start = self.start_pos();
+        let end = self.end_pos();
+
+        if pos.line < start.line || pos.line > end.line {
+            return false;
+        }
+
+        if pos.line == start.line && pos.line == end.line {
+            // Single line selection
+            return pos.col >= start.col && pos.col < end.col;
+        }
+
+        if pos.line == start.line {
+            return pos.col >= start.col;
+        }
+
+        if pos.line == end.line {
+            return pos.col < end.col;
+        }
+
+        // Middle lines are fully selected
+        true
+    }
+}
+
 /// Message list widget with scroll state
 #[derive(Debug, Default)]
 pub struct MessageList {
@@ -188,6 +293,14 @@ pub struct MessageList {
     visible_height: u16,
     /// State for collapsible blocks (expand/collapse tracking)
     block_state: CollapsibleBlockState,
+    /// Cursor position for text navigation
+    cursor_pos: TextPosition,
+    /// Text selection state
+    selection: TextSelection,
+    /// Last known width for line calculations
+    last_width: u16,
+    /// Cached total lines (invalidated on content change)
+    cached_total_lines: Option<usize>,
 }
 
 impl MessageList {
@@ -204,6 +317,10 @@ impl MessageList {
             selected: None,
             visible_height: 0,
             block_state: CollapsibleBlockState::new(),
+            cursor_pos: TextPosition::default(),
+            selection: TextSelection::new(),
+            last_width: 0,
+            cached_total_lines: None,
         }
     }
 
@@ -361,6 +478,373 @@ impl MessageList {
     /// Clear selection
     pub fn clear_selection(&mut self) {
         self.selected = None;
+    }
+
+    // ==================== Text Cursor and Selection Methods ====================
+
+    /// Get the current cursor position
+    pub fn cursor_pos(&self) -> TextPosition {
+        self.cursor_pos
+    }
+
+    /// Get the text selection state
+    pub fn selection(&self) -> &TextSelection {
+        &self.selection
+    }
+
+    /// Check if there's an active selection
+    pub fn has_selection(&self) -> bool {
+        self.selection.active
+    }
+
+    /// Clear text selection
+    pub fn clear_text_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// Get the total number of lines
+    pub fn get_total_lines(&self, width: u16) -> usize {
+        self.total_lines(width)
+    }
+
+    /// Get the line length at a given line index
+    fn get_line_length(&self, _line_idx: usize, width: u16) -> usize {
+        // This is a simplified version - in practice we'd need to
+        // track the actual rendered line content
+        // For now, return width as max
+        width as usize
+    }
+
+    /// Move cursor up by one line
+    pub fn cursor_up(&mut self, with_selection: bool) {
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        if self.cursor_pos.line > 0 {
+            self.cursor_pos.line -= 1;
+            // Ensure cursor is visible
+            if self.cursor_pos.line < self.scroll_offset {
+                self.scroll_offset = self.cursor_pos.line;
+            }
+        }
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor down by one line
+    pub fn cursor_down(&mut self, width: u16, with_selection: bool) {
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        let total = self.total_lines(width);
+        if self.cursor_pos.line + 1 < total {
+            self.cursor_pos.line += 1;
+            // Ensure cursor is visible
+            let visible_end = self.scroll_offset + self.visible_height as usize;
+            if self.cursor_pos.line >= visible_end {
+                self.scroll_offset = self
+                    .cursor_pos
+                    .line
+                    .saturating_sub(self.visible_height as usize - 1);
+            }
+        }
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor left by one character
+    pub fn cursor_left(&mut self, with_selection: bool) {
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        if self.cursor_pos.col > 0 {
+            self.cursor_pos.col -= 1;
+        } else if self.cursor_pos.line > 0 {
+            // Move to end of previous line
+            self.cursor_pos.line -= 1;
+            self.cursor_pos.col = self.get_line_length(self.cursor_pos.line, self.last_width);
+            // Ensure cursor is visible
+            if self.cursor_pos.line < self.scroll_offset {
+                self.scroll_offset = self.cursor_pos.line;
+            }
+        }
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor right by one character
+    pub fn cursor_right(&mut self, width: u16, with_selection: bool) {
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        let line_len = self.get_line_length(self.cursor_pos.line, width);
+        let total = self.total_lines(width);
+
+        if self.cursor_pos.col < line_len {
+            self.cursor_pos.col += 1;
+        } else if self.cursor_pos.line + 1 < total {
+            // Move to start of next line
+            self.cursor_pos.line += 1;
+            self.cursor_pos.col = 0;
+            // Ensure cursor is visible
+            let visible_end = self.scroll_offset + self.visible_height as usize;
+            if self.cursor_pos.line >= visible_end {
+                self.scroll_offset = self
+                    .cursor_pos
+                    .line
+                    .saturating_sub(self.visible_height as usize - 1);
+            }
+        }
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor to the start of the current line
+    pub fn cursor_line_start(&mut self, with_selection: bool) {
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        self.cursor_pos.col = 0;
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor to the end of the current line
+    pub fn cursor_line_end(&mut self, width: u16, with_selection: bool) {
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        self.cursor_pos.col = self.get_line_length(self.cursor_pos.line, width);
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor to the top of the document
+    pub fn cursor_to_top(&mut self, with_selection: bool) {
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        self.cursor_pos = TextPosition::new(0, 0);
+        self.scroll_offset = 0;
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor to the bottom of the document
+    pub fn cursor_to_bottom(&mut self, width: u16, with_selection: bool) {
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        let total = self.total_lines(width);
+        if total > 0 {
+            self.cursor_pos.line = total - 1;
+            self.cursor_pos.col = 0;
+            self.scroll_offset = self.max_scroll(width);
+        }
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor by word (forward)
+    pub fn cursor_word_forward(&mut self, width: u16, with_selection: bool) {
+        // Simplified: move to end of line or next line start
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        let line_len = self.get_line_length(self.cursor_pos.line, width);
+        if self.cursor_pos.col < line_len {
+            // Move to end of line (simplified word movement)
+            self.cursor_pos.col = line_len;
+        } else {
+            // Move to next line
+            self.cursor_down(width, false);
+            self.cursor_pos.col = 0;
+        }
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor by word (backward)
+    pub fn cursor_word_backward(&mut self, with_selection: bool) {
+        // Simplified: move to start of line or previous line end
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        if self.cursor_pos.col > 0 {
+            // Move to start of line (simplified word movement)
+            self.cursor_pos.col = 0;
+        } else if self.cursor_pos.line > 0 {
+            // Move to previous line end
+            self.cursor_up(false);
+            self.cursor_pos.col = self.get_line_length(self.cursor_pos.line, self.last_width);
+        }
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor half page up
+    pub fn cursor_half_page_up(&mut self, with_selection: bool) {
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        let half_page = (self.visible_height / 2) as usize;
+        self.cursor_pos.line = self.cursor_pos.line.saturating_sub(half_page);
+        self.scroll_half_page_up();
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Move cursor half page down
+    pub fn cursor_half_page_down(&mut self, width: u16, with_selection: bool) {
+        if with_selection && !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+
+        let half_page = (self.visible_height / 2) as usize;
+        let total = self.total_lines(width);
+        self.cursor_pos.line = (self.cursor_pos.line + half_page).min(total.saturating_sub(1));
+        self.scroll_half_page_down(width);
+
+        if with_selection {
+            self.selection.extend_to(self.cursor_pos);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    /// Select all text
+    pub fn select_all(&mut self, width: u16) {
+        let total = self.total_lines(width);
+        if total > 0 {
+            self.selection.anchor = TextPosition::new(0, 0);
+            self.selection.cursor =
+                TextPosition::new(total - 1, self.get_line_length(total - 1, width));
+            self.selection.active = true;
+        }
+    }
+
+    /// Handle mouse click at position (for selection start)
+    pub fn handle_mouse_click(&mut self, line: usize, col: usize) {
+        self.cursor_pos = TextPosition::new(line + self.scroll_offset, col);
+        self.selection.clear();
+    }
+
+    /// Handle mouse drag (for selection extension)
+    pub fn handle_mouse_drag(&mut self, line: usize, col: usize) {
+        if !self.selection.active {
+            self.selection.start(self.cursor_pos);
+        }
+        self.cursor_pos = TextPosition::new(line + self.scroll_offset, col);
+        self.selection.extend_to(self.cursor_pos);
+    }
+
+    /// Update last width (called during render)
+    pub fn set_last_width(&mut self, width: u16) {
+        self.last_width = width;
+    }
+
+    /// Get selected text content (returns empty string if no selection)
+    pub fn get_selected_text(&self, _width: u16) -> String {
+        if !self.selection.active {
+            return String::new();
+        }
+
+        // Build all lines and extract selected portion
+        let mut all_text = String::new();
+        for message in &self.messages {
+            if !all_text.is_empty() {
+                all_text.push('\n');
+            }
+            all_text.push_str(&message.content);
+        }
+
+        // This is a simplified implementation
+        // In practice, we'd need to map selection positions to actual content
+        let lines: Vec<&str> = all_text.lines().collect();
+        let start = self.selection.start_pos();
+        let end = self.selection.end_pos();
+
+        let mut result = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            if i < start.line || i > end.line {
+                continue;
+            }
+
+            let line_chars: Vec<char> = line.chars().collect();
+            let start_col = if i == start.line { start.col } else { 0 };
+            let end_col = if i == end.line {
+                end.col.min(line_chars.len())
+            } else {
+                line_chars.len()
+            };
+
+            if start_col < line_chars.len() {
+                let selected: String = line_chars[start_col..end_col.min(line_chars.len())]
+                    .iter()
+                    .collect();
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(&selected);
+            }
+        }
+
+        result
     }
 }
 
@@ -1183,6 +1667,81 @@ impl<'a> MessageListWidget<'a> {
         // Render the paragraph
         let paragraph = Paragraph::new(Text::from(visible_lines));
         paragraph.render(inner, buf);
+
+        // Apply selection highlighting when focused
+        if self.focused && self.message_list.selection.active {
+            let selection = &self.message_list.selection;
+            let start = selection.start_pos();
+            let end = selection.end_pos();
+            let cursor_pos = &self.message_list.cursor_pos;
+
+            // Calculate which lines are visible
+            let visible_start = scroll_offset;
+            let visible_end = scroll_offset + inner.height as usize;
+
+            // Highlight selected lines
+            for screen_row in 0..inner.height {
+                let content_line = scroll_offset + screen_row as usize;
+
+                // Check if this line is within the selection
+                if content_line >= start.line && content_line <= end.line {
+                    let line_start_col = if content_line == start.line {
+                        start.col
+                    } else {
+                        0
+                    };
+                    let line_end_col = if content_line == end.line {
+                        end.col
+                    } else {
+                        inner.width as usize
+                    };
+
+                    // Apply selection highlight to the cells in this line
+                    for col in line_start_col..line_end_col.min(inner.width as usize) {
+                        let x = inner.x + col as u16;
+                        let y = inner.y + screen_row;
+                        if x < inner.x + inner.width && y < inner.y + inner.height {
+                            if let Some(cell) = buf.cell_mut((x, y)) {
+                                cell.set_bg(Color::DarkGray);
+                                cell.set_fg(Color::White);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Show cursor position indicator (only if within visible area)
+            if cursor_pos.line >= visible_start && cursor_pos.line < visible_end {
+                let cursor_screen_row = (cursor_pos.line - scroll_offset) as u16;
+                let cursor_col = cursor_pos.col.min(inner.width.saturating_sub(1) as usize) as u16;
+                let x = inner.x + cursor_col;
+                let y = inner.y + cursor_screen_row;
+                if x < inner.x + inner.width && y < inner.y + inner.height {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_bg(Color::Cyan);
+                        cell.set_fg(Color::Black);
+                    }
+                }
+            }
+        } else if self.focused {
+            // Show cursor position even without selection (when focused)
+            let cursor_pos = &self.message_list.cursor_pos;
+            let visible_start = scroll_offset;
+            let visible_end = scroll_offset + inner.height as usize;
+
+            if cursor_pos.line >= visible_start && cursor_pos.line < visible_end {
+                let cursor_screen_row = (cursor_pos.line - scroll_offset) as u16;
+                let cursor_col = cursor_pos.col.min(inner.width.saturating_sub(1) as usize) as u16;
+                let x = inner.x + cursor_col;
+                let y = inner.y + cursor_screen_row;
+                if x < inner.x + inner.width && y < inner.y + inner.height {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_bg(Color::Cyan);
+                        cell.set_fg(Color::Black);
+                    }
+                }
+            }
+        }
 
         // Render scrollbar only when focused and content overflows
         let total_lines = self.message_list.total_lines(inner.width);
