@@ -146,6 +146,11 @@ local function setup_commands()
         
         if status.version then
             table.insert(lines, 'Version: ' .. status.version)
+            -- Check if binary version matches running server version
+            if status.binary_version and status.binary_version ~= status.version then
+                table.insert(lines, '⚠️  WARNING: Binary version (' .. status.binary_version .. ') differs from running server (' .. status.version .. ')')
+                table.insert(lines, '   Restart server with :TarkServerRestart to use the new binary')
+            end
         end
         if status.provider then
             table.insert(lines, 'Provider: ' .. status.provider)
@@ -159,6 +164,12 @@ local function setup_commands()
         
         table.insert(lines, '')
         table.insert(lines, '--- Availability ---')
+        if status.binary_path then
+            table.insert(lines, 'Binary Path: ' .. status.binary_path)
+        end
+        if status.binary_version then
+            table.insert(lines, 'Binary Version: ' .. status.binary_version)
+        end
         table.insert(lines, 'Binary: ' .. (status.binary_available and '✅ ' .. (status.binary_info or 'available') or '❌ ' .. (status.binary_info or 'not found')))
         table.insert(lines, 'Docker: ' .. (status.docker_available and '✅ available' or '❌ ' .. (status.docker_info or 'not available')))
         
@@ -207,13 +218,33 @@ local function setup_commands()
         
         get_server().download_binary(function(success)
             if success then
-                -- Auto-restart server if it was running (to use the new binary)
+                -- Verify the downloaded binary version
                 local status = get_server().status()
+                if status.binary_version then
+                    vim.notify('tark: Binary downloaded successfully! Version: ' .. status.binary_version, vim.log.levels.INFO)
+                end
+                
+                -- Auto-restart server if it was running (to use the new binary)
                 if status.running then
                     vim.notify('tark: Restarting server with new binary...', vim.log.levels.INFO)
                     get_server().restart(function(restart_success)
                         if restart_success then
-                            vim.notify('tark: Server restarted with new binary ✓', vim.log.levels.INFO)
+                            -- Check if the new version is actually running
+                            vim.defer_fn(function()
+                                local new_status = get_server().status()
+                                if new_status.version and new_status.binary_version then
+                                    if new_status.version == new_status.binary_version then
+                                        vim.notify('tark: Server restarted with new binary ✓ (v' .. new_status.version .. ')', vim.log.levels.INFO)
+                                    else
+                                        vim.notify('tark: ⚠️  Server restarted but version mismatch!\n' ..
+                                            '  Binary: v' .. new_status.binary_version .. '\n' ..
+                                            '  Running: v' .. new_status.version .. '\n' ..
+                                            '  Try :TarkServerStop then :TarkServerStart', vim.log.levels.WARN)
+                                    end
+                                else
+                                    vim.notify('tark: Server restarted ✓', vim.log.levels.INFO)
+                                end
+                            end, 2000)
                         else
                             vim.notify('tark: Server restart failed. Try :TarkServerRestart manually', vim.log.levels.WARN)
                         end
@@ -221,6 +252,8 @@ local function setup_commands()
                 else
                     vim.notify('tark: Binary ready! Run :TarkServerStart', vim.log.levels.INFO)
                 end
+            else
+                vim.notify('tark: Binary download failed. Check your internet connection and try again.', vim.log.levels.ERROR)
             end
         end)
     end, { 

@@ -20,8 +20,13 @@ M.config = {
     binary = 'tark',        -- Path to tark binary
     window = {
         position = 'right', -- 'right', 'left', 'bottom', 'top'
-        width = 80,         -- Width for vertical splits
-        height = 20,        -- Height for horizontal splits
+        -- TUI layout requires: 70% chat column + 30% panel (horizontal split)
+        -- Minimum recommended: 120 columns for proper panel display
+        -- For vertical splits (right/left), use wider window
+        width = 120,        -- Width for vertical splits (was 80, too narrow for 70/30 layout)
+        -- For horizontal splits (bottom/top), need enough height for:
+        -- messages (75%) + status (5%) + input (20%) = minimum ~30 lines
+        height = 35,        -- Height for horizontal splits (was 20, too cramped)
     },
     context_sync = {
         enabled = true,     -- Send buffer/diagnostic updates to TUI
@@ -726,6 +731,9 @@ function M.open()
     local cmd = string.format('%s chat --socket %s', binary, M.state.socket_path)
     
     -- Open terminal split based on position
+    -- Note: TUI layout requires 70% chat + 30% panel (horizontal split)
+    -- For vertical splits: need at least 120 columns (56 chat + 36 panel + borders)
+    -- For horizontal splits: need at least 35 lines (messages + status + input)
     local pos = M.config.window.position
     if pos == 'right' then
         vim.cmd('botright vsplit')

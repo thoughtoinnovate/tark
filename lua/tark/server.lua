@@ -154,26 +154,7 @@ end
 
 -- Download tark binary automatically with SHA256 verification
 function M.download_binary(callback)
-    local os_key, arch_key, binary_name, unsupported_os = detect_platform()
-    
-    -- Check for unsupported OS
-    if os_key == nil then
-        local err_msg = string.format(
-            "Unsupported operating system: %s\n\n" ..
-            "Tark currently supports:\n" ..
-            "  - Linux (x86_64, arm64)\n" ..
-            "  - macOS (x86_64, arm64)\n" ..
-            "  - Windows (x86_64, arm64)\n\n" ..
-            "FreeBSD/OpenBSD/NetBSD are not currently supported.\n" ..
-            "You can build from source: https://github.com/thoughtoinnovate/tark",
-            unsupported_os or "unknown"
-        )
-        vim.notify('tark: ' .. err_msg, vim.log.levels.ERROR)
-        if callback then
-            callback(false, err_msg)
-        end
-        return
-    end
+    local os_key, arch_key, binary_name = detect_platform()
     
     -- Determine download URL based on channel
     local channel = M.config.channel or 'stable'
@@ -357,7 +338,19 @@ end
 
 -- Check if tark binary is available (system or local)
 function M.binary_available()
-    -- First check system binary
+    local channel = M.config.channel or 'stable'
+    
+    -- If channel is nightly, prefer local binary (user explicitly wants nightly)
+    if channel == 'nightly' then
+        local local_ok, local_path = local_binary_available()
+        if local_ok then
+            M.config.binary = local_path
+            return true, 'local (nightly): ' .. local_path
+        end
+        -- Fallback to system binary if local not found
+    end
+    
+    -- Check system binary first (for stable/default)
     local binary = M.config.binary
     if command_exists(binary) then
         local handle = io.popen(binary .. ' --version 2>&1')
@@ -370,7 +363,7 @@ function M.binary_available()
         end
     end
     
-    -- Check local binary (downloaded by plugin)
+    -- Check local binary (downloaded by plugin) as fallback
     local local_ok, local_path = local_binary_available()
     if local_ok then
         M.config.binary = local_path
@@ -637,7 +630,7 @@ function M.start_docker(callback)
 end
 
 -- Start server in binary mode
-function M.start_binary(callback)
+function M.start_binary(callback, force)
     local binary_ok, binary_info = M.binary_available()
     if not binary_ok then
         vim.notify('tark binary not available: ' .. binary_info, vim.log.levels.ERROR)
@@ -645,8 +638,8 @@ function M.start_binary(callback)
         return
     end
     
-    -- Check if server already running
-    if M.health_check() then
+    -- Check if server already running (unless forced restart)
+    if not force and M.health_check() then
         vim.notify('tark server already running', vim.log.levels.INFO)
         M.state.running = true
         M.state.mode = 'binary'
@@ -784,19 +777,57 @@ function M.stop(callback)
             end,
         })
     elseif M.state.mode == 'binary' then
-        -- Try graceful shutdown via curl
-        local url = string.format('http://%s:%d/shutdown', M.config.host, M.config.port)
-        vim.fn.system('curl -s -X POST ' .. url .. ' 2>/dev/null')
+        vim.notify('Stopping tark server...', vim.log.levels.INFO)
         
-        -- Also try killing the process
+        -- Try killing via job ID first (if started by Neovim)
         if M.state.pid then
             vim.fn.jobstop(M.state.pid)
         end
         
-        M.state.running = false
-        M.state.pid = nil
-        vim.notify('tark server stopped', vim.log.levels.INFO)
-        if callback then callback(true) end
+        -- Also find and kill the process by port (handles cases where server was started outside Neovim)
+        local port = get_server_port()
+        local kill_cmd
+        if vim.fn.has('unix') == 1 then
+            -- Find process using the port and kill it
+            -- Try multiple methods: lsof, fuser, pkill
+            kill_cmd = string.format(
+                "(lsof -ti:%d 2>/dev/null | xargs kill -9 2>/dev/null || " ..
+                "fuser -k %d/tcp 2>/dev/null || " ..
+                "pkill -f 'tark.*serve' 2>/dev/null || true)",
+                port, port
+            )
+        else
+            -- Windows: use netstat and taskkill
+            kill_cmd = string.format(
+                'for /f "tokens=5" %%a in (\'netstat -ano ^| findstr :%d\') do taskkill /F /PID %%a 2>nul',
+                port
+            )
+        end
+        
+        -- Kill the process
+        vim.fn.system(kill_cmd)
+        
+        -- Wait a bit for process to actually stop
+        vim.defer_fn(function()
+            -- Verify it's actually stopped
+            local still_running = M.health_check()
+            if still_running then
+                vim.notify('tark: Server still running, trying force kill...', vim.log.levels.WARN)
+                -- Try one more time with more aggressive kill
+                vim.fn.system(kill_cmd)
+                vim.defer_fn(function()
+                    M.state.running = false
+                    M.state.pid = nil
+                    vim.notify('tark server stopped', vim.log.levels.INFO)
+                    if callback then callback(true) end
+                end, 500)
+            else
+                M.state.running = false
+                M.state.pid = nil
+                vim.notify('tark server stopped', vim.log.levels.INFO)
+                if callback then callback(true) end
+            end
+        end, 500)
     else
         M.state.running = false
         if callback then callback(true) end
@@ -807,9 +838,19 @@ end
 function M.restart(callback)
     M.stop(function(stopped)
         if stopped then
+            -- Wait longer to ensure server is fully stopped before restarting
             vim.defer_fn(function()
-                M.start(callback)
-            end, 500)
+                -- Force refresh binary selection before starting
+                -- This ensures we use the latest downloaded binary
+                M.config.binary = nil  -- Reset to force re-detection
+                -- Force start even if health check says it's running
+                -- (since we just stopped it, it might take a moment to fully stop)
+                if M.state.mode == 'binary' then
+                    M.start_binary(callback, true)  -- Force start
+                else
+                    M.start(callback)
+                end
+            end, 1000)  -- Increased wait time to 1 second
         elseif callback then
             callback(false)
         end
@@ -851,6 +892,23 @@ function M.status()
     local binary_ok, binary_info = M.binary_available()
     status.binary_available = binary_ok
     status.binary_info = binary_info
+    
+    -- Get the actual binary path and version being used
+    if binary_ok and M.config.binary then
+        status.binary_path = M.config.binary
+        -- Try to get version from binary
+        local handle = io.popen(M.config.binary .. ' --version 2>&1')
+        if handle then
+            local result = handle:read('*a')
+            handle:close()
+            if result then
+                local binary_version = result:match('tark%s+([%d%.]+)') or result:match('([%d%.]+)')
+                if binary_version then
+                    status.binary_version = binary_version
+                end
+            end
+        end
+    end
     
     -- Check Docker availability
     local docker_ok, docker_info = M.docker_available()
