@@ -36,8 +36,10 @@ M.config = {
         auto_trigger = true,
         -- Debounce delay in ms
         debounce_ms = 300,
-        -- Accept key (default Tab)
-        accept_key = '<Tab>',
+        -- Accept key (Ctrl+L avoids Tab conflicts with nvim-cmp/copilot)
+        accept_key = '<C-l>',
+        -- Trigger key (Ctrl+Space to manually request completion)
+        trigger_key = '<C-Space>',
         -- Provider for completions (nil = server default)
         -- Options: 'openai', 'claude', 'copilot', 'ollama', 'google'
         provider = nil,
@@ -188,6 +190,10 @@ end
 
 function M.ghost_accept()
     return get_ghost().accept()
+end
+
+function M.ghost_trigger()
+    get_ghost().trigger()
 end
 
 function M.ghost_set_provider(provider)

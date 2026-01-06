@@ -28,7 +28,8 @@ M.config = {
     -- Options: 'openai', 'claude', 'copilot', 'ollama'
     provider = nil,
     -- Keymaps
-    accept_key = '<Tab>',
+    accept_key = '<C-l>',      -- Ctrl+L to accept (avoids Tab conflicts)
+    trigger_key = '<C-Space>', -- Ctrl+Space to manually trigger
     dismiss_key = '<Esc>',
     -- Appearance
     hl_group = 'Comment',
@@ -280,6 +281,18 @@ local function trigger_completion()
     end)
 end
 
+--- Manually trigger completion (no debounce)
+function M.trigger()
+    -- Cancel any pending request
+    if M.state.debounce_timer then
+        vim.fn.timer_stop(M.state.debounce_timer)
+        M.state.debounce_timer = nil
+    end
+    
+    -- Request immediately
+    request_completion()
+end
+
 -- ============================================================================
 -- Accept/Dismiss
 -- ============================================================================
@@ -525,13 +538,20 @@ end
 -- ============================================================================
 
 function M.setup_keymaps()
-    -- Accept with Tab (only when suggestion is shown)
+    -- Accept with Ctrl+L (only when suggestion is shown)
     vim.keymap.set('i', M.config.accept_key, function()
         if M.accept() then
             return ''
         end
         return M.config.accept_key
     end, { expr = true, silent = true, desc = 'Accept tark suggestion' })
+    
+    -- Trigger with Ctrl+Space (force show completions)
+    if M.config.trigger_key then
+        vim.keymap.set('i', M.config.trigger_key, function()
+            M.trigger()
+        end, { silent = true, desc = 'Trigger tark completion' })
+    end
 end
 
 -- ============================================================================

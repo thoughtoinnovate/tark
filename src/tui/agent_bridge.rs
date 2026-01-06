@@ -279,7 +279,7 @@ impl AgentBridge {
         };
 
         // Create LLM provider (silent mode for TUI)
-        let provider = llm::create_provider_with_options(&provider_name, true)?;
+        let provider = llm::create_provider_with_options(&provider_name, true, None)?;
         let provider = Arc::from(provider);
 
         // Get mode from session
@@ -1153,7 +1153,7 @@ impl AgentBridge {
     ///
     /// Also updates the context limit based on the current model and new provider.
     pub fn set_provider(&mut self, provider_name: &str) -> Result<()> {
-        let provider = llm::create_provider_with_options(provider_name, true)?;
+        let provider = llm::create_provider_with_options(provider_name, true, None)?;
         let provider = Arc::from(provider);
 
         self.provider_name = provider_name.to_string();

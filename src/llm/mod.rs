@@ -126,19 +126,59 @@ pub trait LlmProvider: Send + Sync {
 
 /// Create an LLM provider based on name
 pub fn create_provider(name: &str) -> Result<Box<dyn LlmProvider>> {
-    create_provider_with_options(name, false)
+    create_provider_with_options(name, false, None)
 }
 
 /// Create an LLM provider with options
 /// - `silent`: When true, suppress CLI output (for TUI usage)
-pub fn create_provider_with_options(name: &str, silent: bool) -> Result<Box<dyn LlmProvider>> {
+pub fn create_provider_with_options(
+    name: &str,
+    silent: bool,
+    model: Option<&str>,
+) -> Result<Box<dyn LlmProvider>> {
     match name.to_lowercase().as_str() {
-        "claude" | "anthropic" => Ok(Box::new(ClaudeProvider::new()?)),
-        "openai" | "gpt" => Ok(Box::new(OpenAiProvider::new()?)),
-        "ollama" | "local" => Ok(Box::new(OllamaProvider::new()?)),
-        "copilot" | "github" => Ok(Box::new(CopilotProvider::new()?.with_silent(silent))),
-        "gemini" | "google" => Ok(Box::new(GeminiProvider::new()?)),
-        "openrouter" => Ok(Box::new(OpenRouterProvider::new()?)),
+        "claude" | "anthropic" => {
+            let mut p = ClaudeProvider::new()?;
+            if let Some(m) = model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
+        "openai" | "gpt" => {
+            let mut p = OpenAiProvider::new()?;
+            if let Some(m) = model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
+        "ollama" | "local" => {
+            let mut p = OllamaProvider::new()?;
+            if let Some(m) = model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
+        "copilot" | "github" => {
+            let mut p = CopilotProvider::new()?.with_silent(silent);
+            if let Some(m) = model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
+        "gemini" | "google" => {
+            let mut p = GeminiProvider::new()?;
+            if let Some(m) = model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
+        "openrouter" => {
+            let mut p = OpenRouterProvider::new()?;
+            if let Some(m) = model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
         _ => anyhow::bail!(
             "Unknown LLM provider: {}. Supported: claude, openai, ollama, copilot, gemini, openrouter",
             name

@@ -148,6 +148,8 @@ struct InlineCompleteRequest {
     cursor_col: usize,
     #[serde(default)]
     provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
     /// LSP context from Neovim plugin
     #[serde(default)]
     context: Option<LspContext>,
@@ -658,16 +660,18 @@ async fn handle_inline_completion(
     let current = state.current_provider.read().await.clone();
     let provider_name = req.provider.unwrap_or(current);
 
-    let provider: Arc<dyn LlmProvider> = match llm::create_provider(&provider_name) {
-        Ok(p) => Arc::from(p),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
+    // Create provider with optional model override
+    let provider: Arc<dyn LlmProvider> =
+        match llm::create_provider_with_options(&provider_name, true, req.model.as_deref()) {
+            Ok(p) => Arc::from(p),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
 
     let engine = CompletionEngine::new(provider)
         .with_cache_size(state.config.completion.cache_size)
