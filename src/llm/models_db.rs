@@ -414,7 +414,7 @@ impl ModelsDbManager {
             "anthropic" | "claude" => "anthropic".to_string(),
             "google" | "gemini" => "google".to_string(),
             "ollama" | "local" => "ollama".to_string(),
-            "copilot" | "github" => "github".to_string(),
+            "copilot" | "github" | "github-copilot" => "github-copilot".to_string(),
             "openrouter" => "openrouter".to_string(),
             "groq" => "groq".to_string(),
             "together" | "togetherai" => "together".to_string(),
@@ -756,8 +756,14 @@ mod tests {
         );
         assert_eq!(ModelsDbManager::normalize_provider("ollama"), "ollama");
         assert_eq!(ModelsDbManager::normalize_provider("local"), "ollama");
-        assert_eq!(ModelsDbManager::normalize_provider("copilot"), "github");
-        assert_eq!(ModelsDbManager::normalize_provider("github"), "github");
+        assert_eq!(
+            ModelsDbManager::normalize_provider("copilot"),
+            "github-copilot"
+        );
+        assert_eq!(
+            ModelsDbManager::normalize_provider("github"),
+            "github-copilot"
+        );
         assert_eq!(ModelsDbManager::normalize_provider("gemini"), "google");
         assert_eq!(ModelsDbManager::normalize_provider("google"), "google");
         assert_eq!(
