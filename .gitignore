@@ -5,6 +5,7 @@
 # IDE
 .idea/
 .vscode/
+.cursor/
 *.swp
 *.swo
 *~
@@ -20,18 +21,14 @@ Thumbs.db
 *.key
 id_rsa*
 
-# Local tark config (may contain user preferences)
-# Keep .tark/config.toml as example, but ignore user's actual config
-/.tark/conversations/
-/.tark/plans/
-/.tark/*.local.toml
-
 # Neovim
 *.log
 
 # Testing
 coverage/
 *.profraw
+usage.db
+
+# AI coding agent folders
 .tark/
 .kiro/
-usage.db
