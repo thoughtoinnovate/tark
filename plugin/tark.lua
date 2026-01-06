@@ -1,23 +1,35 @@
--- tark.nvim plugin loader
--- This file is auto-loaded by Neovim/lazy.nvim
+-- tark.nvim plugin entry point
+-- Lazy-loads the main module on first use
 
 if vim.g.loaded_tark then
     return
 end
 vim.g.loaded_tark = true
 
--- Register health check (handles both :checkhealth tark and :checkhealth Tark)
-if vim.health and vim.health.register then
-    -- Neovim 0.10+
-    vim.health.register('tark', function()
-        require('tark.health').check()
-    end)
-else
-    -- Older Neovim - create module alias
-    package.preload['Tark.health'] = function()
-        return require('tark.health')
+-- Create commands that lazy-load the plugin
+vim.api.nvim_create_user_command('Tark', function()
+    require('tark').toggle()
+end, { desc = 'Toggle tark TUI' })
+
+vim.api.nvim_create_user_command('TarkOpen', function()
+    require('tark').open()
+end, { desc = 'Open tark TUI' })
+
+vim.api.nvim_create_user_command('TarkClose', function()
+    require('tark').close()
+end, { desc = 'Close tark TUI' })
+
+vim.api.nvim_create_user_command('TarkDownload', function()
+    require('tark.binary').download()
+end, { desc = 'Download tark binary' })
+
+vim.api.nvim_create_user_command('TarkVersion', function()
+    local binary = require('tark.binary')
+    local bin = binary.find()
+    if bin then
+        local ver = binary.version() or 'unknown'
+        vim.notify('tark: v' .. ver .. '\nPath: ' .. bin, vim.log.levels.INFO)
+    else
+        vim.notify('tark: Binary not found. Run :TarkDownload', vim.log.levels.WARN)
     end
-    package.preload['Tark'] = function()
-        return require('tark')
-    end
-end
+end, { desc = 'Show tark version' })
