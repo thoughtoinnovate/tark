@@ -2015,10 +2015,13 @@ fn render_session_content(
 ) -> (Vec<Line<'static>>, usize) {
     let content_width = (width as usize).saturating_sub(4); // Account for borders
 
-    // Helper to truncate text if needed
+    // Helper to truncate text if needed (respects UTF-8 char boundaries)
     let truncate = |s: &str| -> String {
-        if s.len() > content_width.saturating_sub(3) {
-            format!("{}…", &s[..content_width.saturating_sub(4)])
+        let max_chars = content_width.saturating_sub(4);
+        let char_count = s.chars().count();
+        if char_count > max_chars {
+            let truncated: String = s.chars().take(max_chars).collect();
+            format!("{}…", truncated)
         } else {
             s.to_string()
         }
@@ -2283,8 +2286,9 @@ fn render_tasks_content(
             (width as usize).saturating_sub(4)
         };
 
-        let truncated = if display.len() > content_width {
-            format!("{}…", &display[..content_width.saturating_sub(1)])
+        let truncated = if display.chars().count() > content_width {
+            let chars: String = display.chars().take(content_width.saturating_sub(1)).collect();
+            format!("{}…", chars)
         } else {
             display
         };
@@ -2355,8 +2359,9 @@ fn render_files_content(
             (width as usize).saturating_sub(4)
         };
 
-        let truncated = if display.len() > content_width {
-            format!("{}…", &display[..content_width.saturating_sub(1)])
+        let truncated = if display.chars().count() > content_width {
+            let chars: String = display.chars().take(content_width.saturating_sub(1)).collect();
+            format!("{}…", chars)
         } else {
             display
         };

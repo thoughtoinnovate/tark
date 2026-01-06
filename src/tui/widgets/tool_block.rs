@@ -243,12 +243,13 @@ impl ToolBlock {
         }
     }
 
-    /// Truncate result for preview
+    /// Truncate result for preview (respects UTF-8 char boundaries)
     fn truncate_result(result: &str, max_len: usize) -> String {
-        if result.len() <= max_len {
+        if result.chars().count() <= max_len {
             result.to_string()
         } else {
-            format!("{}...", &result[..max_len.saturating_sub(3)])
+            let chars: String = result.chars().take(max_len.saturating_sub(3)).collect();
+            format!("{}...", chars)
         }
     }
 
