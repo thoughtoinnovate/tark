@@ -342,11 +342,28 @@ local function calculate_size(value, total)
 end
 
 function M.open()
-    -- Already open?
+    -- Already open? Check both state and look for existing tark buffer
     if M.state.win and vim.api.nvim_win_is_valid(M.state.win) then
         vim.api.nvim_set_current_win(M.state.win)
         return
     end
+    
+    -- Also check if there's an existing tark buffer in any window
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+        local buf = vim.api.nvim_win_get_buf(win)
+        local name = vim.api.nvim_buf_get_name(buf)
+        if name:match('tark://') or name:match('tark$') then
+            -- Found existing tark window, focus it
+            M.state.win = win
+            M.state.buf = buf
+            vim.api.nvim_set_current_win(win)
+            vim.cmd('startinsert')
+            return
+        end
+    end
+    
+    -- Clean up any stale state
+    M.cleanup()
     
     -- Find binary
     local bin = get_binary_path()
@@ -422,7 +439,13 @@ function M.open()
     
     -- Configure buffer
     vim.bo[M.state.buf].buflisted = false
-    vim.api.nvim_buf_set_name(M.state.buf, 'tark')
+    pcall(vim.api.nvim_buf_set_name, M.state.buf, 'tark://chat')
+    
+    -- Configure window to prevent accidental duplication
+    vim.wo[M.state.win].winfixwidth = true
+    vim.wo[M.state.win].number = false
+    vim.wo[M.state.win].relativenumber = false
+    vim.wo[M.state.win].signcolumn = 'no'
     
     -- Enter terminal mode
     vim.cmd('startinsert')
