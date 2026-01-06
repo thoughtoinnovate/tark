@@ -1,64 +1,26 @@
 # tark
 
-AI-powered CLI agent with LSP server for code completion, hover, diagnostics, and chat.
+AI-powered CLI agent with TUI chat interface and Neovim integration.
 
 ## Features
 
-- **Ghost Text Completions**: Cursor-style inline completions with Tab to accept
-- **Chat Agent**: Interactive chat with tools for file operations and shell commands
-- **LSP-Powered Tools**: Go to definition, find references, call hierarchy using tree-sitter
-- **Multi-Provider**: Supports Claude (Anthropic), OpenAI, and local Ollama models
-- **Usage Dashboard**: Track costs, tokens, and sessions with interactive web dashboard
-- **Context Tracking**: Real-time token usage and cost estimation
-- **Agent Modes**: Plan (read-only), Build (full access), Review (approval required)
-- **blink.cmp Integration**: Works seamlessly with blink.cmp - no config needed!
-- **Auto-Start Server**: Server starts automatically when Neovim opens
-- **New Rust TUI**: High-performance terminal chat with image/file attachments
-
-## Migration: Lua Chat → Rust TUI
-
-The original Lua-based chat (`:TarkChatOpen`) is being replaced by a new Rust-based TUI (`:TarkTuiOpen`). The new TUI offers:
-
-- **Better Performance**: Native Rust implementation with ratatui
+- **TUI Chat Interface**: Interactive terminal chat with AI assistant
+- **Neovim Integration**: Socket-based communication with your editor
+- **File Operations**: Read, write, and search files through chat
+- **Shell Commands**: Execute commands directly from chat
 - **Image Attachments**: Paste images from clipboard with `Ctrl-v`
-- **File Attachments**: Attach files with `/attach` or `@filepath` syntax
-- **Standalone Mode**: Run `tark chat` directly in any terminal
-- **Neovim Integration**: Full editor integration via socket RPC
-
-### Migration Steps
-
-1. **Update your keymaps** to use the new TUI commands:
-   ```lua
-   -- Old (deprecated)
-   { "<leader>tc", "<cmd>TarkChatToggle<cr>" }
-   
-   -- New (recommended)
-   { "<leader>tc", "<cmd>TarkTuiToggle<cr>" }
-   ```
-
-2. **Command mapping**:
-   | Old Command | New Command |
-   |-------------|-------------|
-   | `:TarkChatOpen` | `:TarkTuiOpen` |
-   | `:TarkChatClose` | `:TarkTuiClose` |
-   | `:TarkChatToggle` | `:TarkTuiToggle` |
-
-3. **Standalone usage** (new feature):
-   ```bash
-   # Run chat directly in terminal without Neovim
-   tark chat
-   ```
-
-The old Lua chat will continue to work during the transition period but will show a deprecation warning. It will be removed in a future major version.
+- **Multi-Provider**: Supports Claude (Anthropic), OpenAI, Google (Gemini), GitHub Copilot, and local Ollama models
+- **Usage Dashboard**: Track costs, tokens, and sessions with interactive web dashboard
+- **Agent Modes**: Plan (read-only), Build (full access)
 
 ## Quick Install
 
 ```bash
-# Option 1: Docker (easiest - no installation needed!)
-docker pull ghcr.io/thoughtoinnovate/tark:alpine
-
-# Option 2: Binary install (Linux/macOS)
+# Option 1: Binary install (Linux/macOS)
 curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash
+
+# Option 2: Docker
+docker pull ghcr.io/thoughtoinnovate/tark:alpine
 ```
 
 ## Installation
@@ -67,72 +29,30 @@ curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.
 
 #### Option A: Install Script (Recommended)
 
-The install script automatically detects your platform and installs the correct binary:
-
 ```bash
-# Auto-detect platform and install
 curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash
-
-# Or with options
-curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash -s -- --install-dir ~/.local/bin
 ```
 
 #### Option B: Manual Download
 
 Download from [GitHub Releases](https://github.com/thoughtoinnovate/tark/releases):
 
-| Platform | Binary | Notes |
-|----------|--------|-------|
-| **Linux (Any Distro)** | [tark-linux-x86_64-musl](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64-musl) | Static binary - works everywhere |
-| Linux (glibc) | [tark-linux-x86_64-gnu](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64-gnu) | Ubuntu, Debian, Fedora, etc. |
-| Linux ARM64 (Any) | [tark-linux-arm64-musl](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-arm64-musl) | Static ARM64 binary |
-| Linux ARM64 (glibc) | [tark-linux-arm64-gnu](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-arm64-gnu) | ARM64 with glibc |
-| **macOS Intel** | [tark-darwin-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-x86_64) | |
-| **macOS Apple Silicon** | [tark-darwin-arm64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-arm64) | M1/M2/M3 |
-| **Windows x64** | [tark-windows-x86_64.exe](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-windows-x86_64.exe) | |
-
-> **Tip:** Use the `-musl` binaries for universal Linux compatibility (Alpine, Arch, NixOS, Void, etc.)
+| Platform | Binary |
+|----------|--------|
+| **Linux x64** | [tark-linux-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64) |
+| **Linux ARM64** | [tark-linux-arm64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-arm64) |
+| **macOS Intel** | [tark-darwin-x86_64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-x86_64) |
+| **macOS Apple Silicon** | [tark-darwin-arm64](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-darwin-arm64) |
+| **Windows x64** | [tark-windows-x86_64.exe](https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-windows-x86_64.exe) |
 
 ```bash
-# Example: Universal Linux binary (works on any distro)
-curl -L https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64-musl -o tark
+# Example: Linux
+curl -L https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64 -o tark
 chmod +x tark
 sudo mv tark /usr/local/bin/
 ```
 
-#### Option C: Docker (No Installation Needed!)
-
-Docker is the easiest way - the plugin will automatically pull and run the container:
-
-```bash
-# Just make sure Docker is installed and running
-docker --version
-
-# The plugin handles the rest automatically!
-```
-
-**Two image options:**
-| Image | Size | Description |
-|-------|------|-------------|
-| `ghcr.io/thoughtoinnovate/tark:latest` | ~15MB | Minimal (scratch), binary + certs only |
-| `ghcr.io/thoughtoinnovate/tark:alpine` | ~30MB | Alpine-based, includes shell for debugging |
-
-Or run manually:
-```bash
-# Minimal image (default)
-docker run -d --name tark-server \
-  -p 8765:8765 \
-  -v $(pwd):/workspace \
-  -e OPENAI_API_KEY=$OPENAI_API_KEY \
-  ghcr.io/thoughtoinnovate/tark:latest
-
-# Alpine image (for debugging)
-docker run -it --name tark-server \
-  -p 8765:8765 \
-  ghcr.io/thoughtoinnovate/tark:alpine sh
-```
-
-#### Option D: Build from Source (Requires Rust)
+#### Option C: Build from Source
 
 ```bash
 cargo install --git https://github.com/thoughtoinnovate/tark.git
@@ -141,174 +61,103 @@ cargo install --git https://github.com/thoughtoinnovate/tark.git
 #### Verify Installation
 
 ```bash
-# Binary
 tark --version
-
-# Or Docker
-docker run --rm ghcr.io/thoughtoinnovate/tark:latest --version
 ```
 
 ### 2. Set API Key
 
 ```bash
-# For OpenAI (recommended)
+# For OpenAI
 export OPENAI_API_KEY="your-api-key"
 
 # Or for Claude
 export ANTHROPIC_API_KEY="your-api-key"
 
+# Or for Google Gemini
+export GOOGLE_API_KEY="your-api-key"
+
+# Or for GitHub Copilot (interactive auth)
+tark chat  # Then use /auth command
+
 # Or for local Ollama (no key needed)
-ollama serve  # start Ollama
+ollama serve
 ```
 
 ### 3. Install Neovim Plugin
 
-#### lazy.nvim / LazyVim (Recommended)
-
-Add to your `lua/plugins/tark.lua`:
-
-##### Minimal Config (Auto-download binary)
-
-```lua
--- Simplest setup - plugin auto-downloads binary
-return {
-    "thoughtoinnovate/tark",
-    lazy = false,
-}
-```
-
-That's it! The plugin automatically:
-1. Downloads the correct binary for your platform
-2. Verifies SHA256 checksum for security
-3. Starts the server
-
-No manual installation needed!
-
-##### Recommended Config (with keymaps)
+#### lazy.nvim (Recommended)
 
 ```lua
 return {
     "thoughtoinnovate/tark",
     lazy = false,
     keys = {
-        { "<leader>tc", "<cmd>TarkTuiToggle<cr>", desc = "Toggle tark TUI chat" },
-        { "<leader>tg", "<cmd>TarkGhostToggle<cr>", desc = "Toggle ghost text" },
-        { "<leader>ts", "<cmd>TarkServerStatus<cr>", desc = "Server status" },
+        { "<leader>tc", "<cmd>TarkToggle<cr>", desc = "Toggle tark chat" },
     },
 }
 ```
 
-##### Docker Config (no binary download)
+The plugin automatically downloads the correct binary for your platform.
+
+#### Full Config (all options)
 
 ```lua
 return {
     "thoughtoinnovate/tark",
     lazy = false,
     keys = {
-        { "<leader>tc", "<cmd>TarkTuiToggle<cr>", desc = "Toggle tark TUI chat" },
+        { "<leader>tc", "<cmd>TarkToggle<cr>", desc = "Toggle tark chat" },
+        { "<leader>to", "<cmd>TarkOpen<cr>", desc = "Open tark chat" },
+        { "<leader>tx", "<cmd>TarkClose<cr>", desc = "Close tark chat" },
     },
     opts = {
-        server = { mode = 'docker' },
-    },
-}
-```
-
-##### Nightly Config (bleeding edge)
-
-```lua
-return {
-    "thoughtoinnovate/tark",
-    lazy = false,
-    opts = {
-        server = { channel = 'nightly' },
-    },
-}
-```
-
-##### Full Config (all options)
-
-```lua
-return {
-    "thoughtoinnovate/tark",
-    lazy = false,
-    dependencies = {
-        "nvim-lua/plenary.nvim",                  -- Required: HTTP requests
-        { "saghen/blink.cmp", optional = true },  -- Optional: Tab integration
-    },
-    keys = {
-        { "<leader>tc", "<cmd>TarkTuiToggle<cr>", desc = "Toggle tark TUI chat" },
-        { "<leader>tg", "<cmd>TarkGhostToggle<cr>", desc = "Toggle ghost text" },
-        { "<leader>ts", "<cmd>TarkServerStatus<cr>", desc = "Server status" },
-        { "<leader>tr", "<cmd>TarkServerRestart<cr>", desc = "Restart server" },
-    },
-    opts = {
-        server = {
-            auto_start = true,
-            channel = 'stable',  -- or 'nightly'
+        -- Binary path (auto-detected if nil)
+        binary = nil,
+        
+        -- Window settings
+        window = {
+            position = 'right',  -- 'right', 'left', 'bottom', 'top', 'float'
+            width = 0.4,         -- 40% of screen (or columns if > 1)
+            height = 0.5,        -- 50% of screen (or rows if > 1)
         },
-        ghost_text = { enabled = true },
-        chat = { enabled = true },
+        
+        -- Auto-download binary if not found
+        auto_download = true,
     },
 }
 ```
 
-#### packer.nvim
-
-```lua
-use {
-    'thoughtoinnovate/tark',
-    config = function()
-        require('tark').setup({
-            server = { auto_start = true },
-        })
-    end
-}
-```
-
-### 4. Server Management
-
-The server starts automatically by default. You can also manage it manually:
+## Commands
 
 | Command | Description |
 |---------|-------------|
-| `:TarkServerStart` | Start the server |
-| `:TarkServerStop` | Stop the server |
-| `:TarkServerStatus` | Check server status |
-| `:TarkServerRestart` | Restart the server |
-| `:TarkBinaryDownload [channel]` | Download binary (optional: `stable`/`nightly`) |
-| `:TarkTuiOpen` | Open TUI chat (new Rust-based interface) |
-| `:TarkTuiClose` | Close TUI chat |
-| `:TarkTuiToggle` | Toggle TUI chat |
-| `:TarkChatOpen` | Open legacy Lua chat (deprecated) |
-| `:TarkChatToggle` | Toggle legacy Lua chat (deprecated) |
-| `:TarkCompletionStats` | Show completion token usage and cost |
-| `:TarkCompletionStatsReset` | Reset completion stats |
-| `:TarkUsage` | Show usage summary (tokens, costs, sessions) |
-| `:TarkUsageOpen` | Open usage dashboard in browser |
-| `:TarkUsageCleanup [days]` | Cleanup logs older than N days (default: 30) |
-
-Or start manually in a terminal:
-```bash
-tark serve
-```
+| `:Tark` | Toggle tark TUI |
+| `:TarkToggle` | Toggle tark TUI (show/hide) |
+| `:TarkOpen` | Open tark TUI |
+| `:TarkClose` | Close tark TUI |
+| `:TarkDownload` | Download tark binary |
+| `:TarkVersion` | Show tark version |
 
 ## Usage
 
-### Keybindings
+### Standalone (Terminal)
 
-| Key | Mode | Description |
-|-----|------|-------------|
-| `<leader>tc` | Normal | Toggle TUI chat window |
-| `<leader>ts` | Normal | Show server status |
-| `<leader>tg` | Normal | Toggle ghost text |
-| `Tab` | Insert | Accept ghost text (or blink.cmp) |
-| `Ctrl+]` | Insert | Accept ghost text (always) |
-| `Ctrl+Space` | Insert | Trigger completion manually |
-| `Tab` | Chat | Toggle Plan ↔ Build mode |
+```bash
+# Start chat in any terminal
+tark chat
 
-### Chat Commands (TUI)
+# With specific model
+tark chat --model gpt-4o
 
-The new Rust TUI supports all slash commands from the original Lua chat:
+# In a specific directory
+cd /my/project && tark chat
+```
+
+### In Neovim
+
+Press `<leader>tc` (or your configured keymap) to toggle the chat window.
+
+### Chat Commands
 
 | Command | Description |
 |---------|-------------|
@@ -316,20 +165,22 @@ The new Rust TUI supports all slash commands from the original Lua chat:
 | `/model` | Open provider/model picker |
 | `/plan` | Switch to Plan mode (read-only) |
 | `/build` | Switch to Build mode (full access) |
-| `/thinking` | Toggle verbose output |
 | `/clear` | Clear chat history |
-| `/attach <file>` | Attach a file to the message |
+| `/attach <file>` | Attach a file |
 | `/sessions` | List and switch sessions |
 | `/new` | Start a new session |
 | `/usage` | Show usage stats |
-| `/usage-open` | Open usage dashboard in browser |
-| `/exit` | Close chat window |
+| `/exit` | Close chat |
 
-**TUI-specific features:**
-- `Ctrl-v` - Paste image from clipboard
-- `@filepath` - Inline file attachment syntax
-- `j/k` - Vim-style navigation in message list
-- `Tab` - Toggle Plan ↔ Build mode
+### Keyboard Shortcuts
+
+| Key | Description |
+|-----|-------------|
+| `Ctrl-v` | Paste image from clipboard |
+| `@filepath` | Inline file attachment |
+| `j/k` | Vim-style navigation in messages |
+| `Tab` | Toggle Plan ↔ Build mode |
+| `Ctrl-c` | Cancel current request |
 
 ### Agent Modes
 
@@ -337,77 +188,22 @@ The new Rust TUI supports all slash commands from the original Lua chat:
 |------|--------|---------|
 | **Plan** | Read-only | Explore, analyze, propose changes |
 | **Build** | Full access | Execute changes, run commands |
-| **Review** | Approval needed | Careful modifications |
 
-### Special Features
+## CLI Usage
 
-- Type `@` for file autocompletion
-- Type `/` for command autocompletion  
-- Context usage shown in title bar
-- Real-time thinking display with tool calls
-
-### Usage Tracking & Dashboard
-
-Track token usage, costs, and sessions across all your AI interactions:
-
-#### Terminal Command
 ```bash
-# Show usage summary in terminal
+# Start TUI chat
+tark chat
+
+# Show usage statistics
 tark usage
 
-# Export as JSON
-tark usage --format json
+# Serve HTTP API
+tark serve --port 8765
 
-# Cleanup old logs
-tark usage --cleanup 30
+# Show version
+tark --version
 ```
-
-#### Neovim Commands
-```vim
-:TarkUsage              " Show summary in floating window
-:TarkUsageOpen          " Open interactive dashboard in browser
-:TarkUsageCleanup 30    " Delete logs older than 30 days
-```
-
-#### Chat Slash Commands
-```
-/usage                  " Show stats in chat
-/usage-open            " Open browser dashboard
-```
-
-#### Web Dashboard
-The interactive HTML dashboard (`http://localhost:8765/usage`) provides:
-- 📊 **Interactive charts** - Visualize costs and token usage by model
-- 💰 **Real-time pricing** - Fetches latest rates from models.dev
-- 📈 **Detailed breakdown** - By model, mode (chat/completion), session, user
-- 🗄️ **Storage insights** - SQLite database size and cleanup tools
-- 📤 **Export to CSV** - Download usage data for external analysis
-
-All usage data is stored locally in `.tark/usage.db` within your workspace.
-
-### Statusline Integration
-
-Add completion stats to your statusline:
-
-```lua
--- lualine.nvim example
-require('lualine').setup({
-    sections = {
-        lualine_x = {
-            { function() return require('tark').completion_statusline() end },
-        },
-    },
-})
-
--- Or get raw stats for custom formatting
-local stats = require('tark').completion_stats()
--- stats.requests, stats.accepted, stats.input_tokens, stats.output_tokens, stats.total_cost
-```
-
-The statusline shows: `⚡5K · 3/10 (30%) · $0.02`
-- Total tokens used
-- Accepted/total completions (acceptance rate)
-- Estimated cost
 
 ## Health Check
 
@@ -416,152 +212,6 @@ The statusline shows: `⚡5K · 3/10 (30%) · $0.02`
 ```
 
 ## Configuration
-
-### Neovim Options
-
-```lua
-require('tark').setup({
-    -- Server settings
-    server = {
-        auto_start = true,       -- Auto-start server when Neovim opens
-        mode = 'auto',           -- 'auto', 'binary', or 'docker'
-        binary = 'tark',         -- Path to tark binary (if using binary mode)
-        host = '127.0.0.1',
-        port = 8765,
-        stop_on_exit = true,     -- Stop server when Neovim exits
-        channel = 'stable',      -- 'stable' (pinned to plugin version) or 'nightly' (latest)
-    },
-    -- Docker settings (used when mode = 'docker' or 'auto' without binary)
-    docker = {
-        image = 'ghcr.io/thoughtoinnovate/tark:alpine',  -- Alpine by default (has shell)
-        container_name = 'tark-server',
-        pull_on_start = true,    -- Pull latest image before starting
-        build_local = false,     -- Build from plugin's Dockerfile (no Rust needed!)
-        dockerfile = 'alpine',   -- 'alpine' (~30MB, shell) or 'minimal' (~15MB, scratch)
-        mount_workspace = true,  -- Mount cwd into container for file access
-    },
-    -- Ghost text (inline completions)
-    ghost_text = {
-        enabled = true,
-        debounce_ms = 150,       -- Delay before requesting completion
-        hl_group = 'Comment',    -- Highlight group for ghost text
-    },
-    -- Chat window
-    chat = {
-        enabled = true,
-        window = {
-            style = 'split',           -- 'split' (docked), 'sidepane' (floating), or 'popup' (centered)
-            position = 'right',        -- 'right' or 'left' (for split/sidepane)
-            split_width = 80,          -- Width in columns for split mode
-            sidepane_width = 0.35,     -- 35% of editor width for sidepane mode
-            width = 80,                -- Width for popup mode
-            height = 20,               -- Height for popup mode
-            border = 'rounded',        -- Border style
-        },
-    },
-    -- LSP integration (enhances completions and agent tools)
-    lsp = {
-        enabled = true,                  -- Enable LSP context in completions/chat
-        context_in_completions = true,   -- Send LSP context with ghost text requests
-        context_in_chat = true,          -- Include buffer context in chat
-        proxy_timeout_ms = 50,           -- Fast fallback to tree-sitter
-    },
-})
-```
-
-### Server Modes
-
-| Mode | Description |
-|------|-------------|
-| `auto` | Use binary if available, fallback to Docker (default) |
-| `binary` | Only use local binary |
-| `docker` | Only use Docker container |
-
-### Update Channels
-
-| Channel | Description |
-|---------|-------------|
-| `stable` | Downloads binary matching plugin version (default, recommended) |
-| `nightly` | Always downloads latest release (bleeding edge) |
-
-```lua
--- Use nightly/latest releases
-opts = {
-    server = { channel = 'nightly' },
-}
-```
-
-Switch channels at runtime:
-```vim
-:TarkBinaryDownload nightly   " Switch to nightly
-:TarkBinaryDownload stable    " Switch back to stable
-:TarkServerRestart            " Restart with new binary
-```
-
-### Docker Options
-
-| Option | Description |
-|--------|-------------|
-| `pull_on_start` | Pull latest image from registry (default: true) |
-| `build_local` | Build image from plugin's Dockerfile (default: false) |
-| `dockerfile` | Image type: `'alpine'` (~30MB, has shell, default) or `'minimal'` (~15MB, scratch) |
-
-#### Build Docker Image Locally
-
-If you want to build from source without installing Rust:
-
-```lua
--- lua/plugins/tark.lua
-return {
-    "thoughtoinnovate/tark",
-    lazy = false,
-    opts = {
-        server = { mode = 'docker' },
-        docker = { 
-            build_local = true,    -- Build from Dockerfile in plugin directory
-            pull_on_start = false, -- Don't pull from registry
-            -- dockerfile = 'alpine', -- Default, or use 'minimal' for smaller image
-        },
-    },
-}
-```
-
-Or build manually with:
-```vim
-:TarkDockerBuild
-```
-
-This builds the image using Docker on your machine - no Rust toolchain required!
-
-**Image sizes:**
-- `alpine` (default): ~30MB - Includes shell and curl for debugging
-- `minimal`: ~15MB - Super lightweight, binary + CA certs only (no shell)
-
-### LSP Integration
-
-tark integrates with Neovim's built-in LSP for enhanced completions and agent tools:
-
-| Option | Description |
-|--------|-------------|
-| `lsp.enabled` | Enable LSP integration (default: true) |
-| `lsp.context_in_completions` | Include diagnostics, types, symbols in ghost text requests |
-| `lsp.context_in_chat` | Start LSP proxy for agent tools when chat opens |
-| `lsp.proxy_timeout_ms` | Timeout for LSP proxy calls before falling back to tree-sitter (default: 50ms) |
-
-**How it works:**
-
-1. **Ghost Text**: When you're typing, tark gathers LSP context (diagnostics, hover types, nearby symbols) and sends it with completion requests. This helps the AI understand your code better.
-
-2. **Chat/Agent Tools**: When chat opens, tark starts a lightweight HTTP proxy that exposes Neovim's LSP. Agent tools like `go_to_definition` and `find_references` try the proxy first (50ms timeout), then fall back to tree-sitter if unavailable.
-
-3. **No Configuration Needed**: If you have LSP servers configured in Neovim (e.g., `lua_ls`, `rust_analyzer`), tark automatically uses them. If not, it falls back to tree-sitter.
-
-```lua
--- Disable LSP integration (use tree-sitter only)
-opts = {
-    lsp = { enabled = false },
-}
-```
 
 ### CLI Config (`~/.config/tark/config.toml`)
 
@@ -586,20 +236,7 @@ port = 8765
 shell_enabled = true
 ```
 
-## LSP-Powered Tools
-
-The agent has access to intelligent code understanding:
-
-| Tool | Description |
-|------|-------------|
-| `list_symbols` | List functions/classes/types in a file |
-| `go_to_definition` | Jump to where a symbol is defined |
-| `find_all_references` | Find all usages of a symbol |
-| `call_hierarchy` | Trace who calls what |
-| `get_signature` | Get function signature and docs |
-| `codebase_overview` | Get project structure overview |
-
-## Project Config (`.tark/`)
+### Project Config (`.tark/`)
 
 Create `.tark/` in your project for local settings:
 
@@ -608,7 +245,6 @@ Create `.tark/` in your project for local settings:
 ├── config.toml      # Project settings
 ├── rules/           # Custom instructions
 │   └── style.md
-├── agents/          # Custom agent configs
 └── conversations/   # Saved sessions
 ```
 
@@ -617,53 +253,30 @@ Create `.tark/` in your project for local settings:
 ```
 ┌─────────────────────────────────────────┐
 │              Neovim                      │
-│  ┌─────────────┐  ┌─────────────────┐   │
-│  │ Ghost Text  │  │      Chat       │   │
-│  │   (Tab)     │  │   (<leader>ec)  │   │
-│  └──────┬──────┘  └────────┬────────┘   │
-└─────────┼──────────────────┼────────────┘
-          │                  │
-          └────────┬─────────┘
-                   ▼
+│  ┌─────────────────────────────────┐    │
+│  │         Terminal Window          │    │
+│  │    (tark chat --socket ...)     │    │
+│  └──────────────┬──────────────────┘    │
+└─────────────────┼────────────────────────┘
+                  │ Unix Socket
+                  ▼
        ┌───────────────────────┐
-       │    tark serve         │
-       │    (HTTP :8765)       │
+       │      tark TUI         │
+       │   (Rust + ratatui)    │
        ├───────────────────────┤
-       │  ┌─────┐ ┌─────────┐  │
-       │  │ FIM │ │  Agent  │  │
-       │  │     │ │ + Tools │  │
-       │  └──┬──┘ └────┬────┘  │
-       └─────┼─────────┼───────┘
-             │         │
-     ┌───────┴─────────┴───────┐
-     │      LLM Providers       │
-     │  OpenAI │ Claude │ Ollama│
-     └─────────────────────────┘
+       │  ┌─────────────────┐  │
+       │  │  Agent + Tools  │  │
+       │  └────────┬────────┘  │
+       └───────────┼───────────┘
+                   │
+       ┌───────────┴───────────┐
+       │     LLM Providers      │
+       │ OpenAI│Claude│Gemini│  │
+       │ Copilot│Ollama         │
+       └───────────────────────┘
 ```
 
 ## Security
-
-### Binary Verification
-
-All release binaries include SHA256 checksums for verification:
-
-```bash
-# The install script automatically verifies checksums
-curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash
-
-# Manual verification
-curl -L https://github.com/thoughtoinnovate/tark/releases/latest/download/tark-linux-x86_64.sha256
-sha256sum tark-linux-x86_64  # Compare with downloaded checksum
-```
-
-You can also verify your installed binary in Neovim:
-```vim
-:checkhealth tark
-```
-
-This shows the SHA256 hash of your installed binary which you can compare against the official release.
-
-### Privacy & Security
 
 - API keys are **only** sent to official provider endpoints
 - No telemetry or data collection
