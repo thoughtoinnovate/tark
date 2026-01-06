@@ -502,6 +502,24 @@ impl MessageList {
         self.selection.clear();
     }
 
+    /// Start a new selection at the current cursor position
+    pub fn start_selection(&mut self) {
+        self.selection.start(self.cursor_pos);
+    }
+
+    /// Set the cursor position directly (for mouse selection)
+    pub fn set_cursor_position(&mut self, line: usize, col: usize) {
+        self.cursor_pos.line = line;
+        self.cursor_pos.col = col;
+    }
+
+    /// Extend the current selection to the cursor position
+    pub fn extend_selection(&mut self) {
+        if self.selection.active {
+            self.selection.extend_to(self.cursor_pos);
+        }
+    }
+
     /// Get the total number of lines
     pub fn get_total_lines(&self, width: u16) -> usize {
         self.total_lines(width)

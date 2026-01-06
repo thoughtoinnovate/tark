@@ -433,11 +433,23 @@ impl AppState {
         let width = self.get_message_area_width();
         let text = self.message_list.get_selected_text(width);
         if !text.is_empty() {
+            let char_count = text.chars().count();
+            let line_count = text.lines().count();
             if let Err(e) = super::clipboard::copy_to_clipboard(&text) {
                 self.status_message = Some(format!("Failed to copy: {}", e));
             } else {
-                self.status_message = Some("Copied to clipboard".to_string());
+                let msg = if line_count > 1 {
+                    format!(
+                        "Copied {} chars ({} lines) to clipboard",
+                        char_count, line_count
+                    )
+                } else {
+                    format!("Copied {} chars to clipboard", char_count)
+                };
+                self.status_message = Some(msg);
             }
+        } else {
+            self.status_message = Some("No text selected".to_string());
         }
     }
 
@@ -1481,8 +1493,44 @@ impl TuiApp {
                 }
 
                 // Click in messages area - could be on a collapsible block header
-                // For now, just focus the messages area
-                self.state.set_focused_component(FocusedComponent::Messages);
+                // Calculate message area bounds
+                let chat_height = _height;
+                let status_height = std::cmp::max(1, (chat_height as f32 * 0.05) as u16);
+                let input_height = std::cmp::max(3, (chat_height as f32 * 0.20) as u16);
+                let messages_height = chat_height.saturating_sub(status_height + input_height);
+
+                // Check if click is in messages area
+                if row < messages_height {
+                    // Convert screen position to text position
+                    let inner_col = col.saturating_sub(1); // Account for border
+                    let inner_row = row.saturating_sub(1); // Account for border
+                    let scroll_offset = self.state.message_list.scroll_offset();
+                    let content_line = scroll_offset + inner_row as usize;
+
+                    // Set cursor position and start potential selection
+                    self.state
+                        .message_list
+                        .set_cursor_position(content_line, inner_col as usize);
+                    self.state.message_list.clear_text_selection();
+                    self.state.set_focused_component(FocusedComponent::Messages);
+                    // Enter visual mode on click to prepare for drag selection
+                    self.state.set_input_mode(InputMode::Visual);
+                    self.state.message_list.start_selection();
+                } else {
+                    self.state.set_focused_component(FocusedComponent::Messages);
+                }
+                Ok(true)
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                // On mouse up, if we're in visual mode with no actual selection, exit visual mode
+                if self.state.input_mode == InputMode::Visual {
+                    let selection = self.state.message_list.selection();
+                    // If anchor and cursor are the same, it was just a click, not a drag
+                    if selection.anchor == selection.cursor {
+                        self.state.message_list.clear_text_selection();
+                        self.state.set_input_mode(InputMode::Normal);
+                    }
+                }
                 Ok(true)
             }
             MouseEventKind::ScrollDown => {
@@ -1551,6 +1599,39 @@ impl TuiApp {
                 } else {
                     // Messages area
                     self.state.message_list.scroll_up();
+                }
+                Ok(true)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                // Handle mouse drag for text selection in messages area
+                let (col, row) = (mouse.column, mouse.row);
+                let (width, height) = self.state.terminal_size;
+                let chat_column_width = (width as f32 * 0.70) as u16;
+                let chat_height = height;
+                let status_height = std::cmp::max(1, (chat_height as f32 * 0.05) as u16);
+                let input_height = std::cmp::max(3, (chat_height as f32 * 0.20) as u16);
+                let messages_height = chat_height.saturating_sub(status_height + input_height);
+
+                // Check if drag is in messages area (left 70%, top portion)
+                if col < chat_column_width && row < messages_height {
+                    // Convert screen position to text position
+                    let inner_col = col.saturating_sub(1); // Account for border
+                    let inner_row = row.saturating_sub(1); // Account for border
+                    let scroll_offset = self.state.message_list.scroll_offset();
+                    let content_line = scroll_offset + inner_row as usize;
+
+                    // If not already in visual mode, enter it and start selection
+                    if self.state.input_mode != InputMode::Visual {
+                        self.state.set_input_mode(InputMode::Visual);
+                        self.state.set_focused_component(FocusedComponent::Messages);
+                        self.state.message_list.start_selection();
+                    }
+
+                    // Update cursor position and extend selection
+                    self.state
+                        .message_list
+                        .set_cursor_position(content_line, inner_col as usize);
+                    self.state.message_list.extend_selection();
                 }
                 Ok(true)
             }
@@ -1691,7 +1772,20 @@ impl TuiApp {
                 self.state.set_focused_component(FocusedComponent::Input);
                 Ok(true)
             }
+            Action::EnterVisualMode => {
+                // Only enter visual mode when messages are focused
+                if self.state.focused_component == FocusedComponent::Messages {
+                    self.state.set_input_mode(InputMode::Visual);
+                    // Start selection at current cursor position
+                    self.state.message_list.start_selection();
+                }
+                Ok(true)
+            }
             Action::ExitInsertMode => {
+                // Also exit visual mode and clear selection
+                if self.state.input_mode == InputMode::Visual {
+                    self.state.message_list.clear_text_selection();
+                }
                 self.state.set_input_mode(InputMode::Normal);
                 Ok(true)
             }
@@ -1724,6 +1818,10 @@ impl TuiApp {
                 // Close attachment dropdown if open
                 if self.state.attachment_dropdown_state.is_open() {
                     self.state.attachment_dropdown_state.close();
+                } else if self.state.input_mode == InputMode::Visual {
+                    // Exit visual mode and clear selection
+                    self.state.message_list.clear_text_selection();
+                    self.state.set_input_mode(InputMode::Normal);
                 } else if self.state.input_mode == InputMode::Insert {
                     self.state.set_input_mode(InputMode::Normal);
                 }
@@ -1913,6 +2011,11 @@ impl TuiApp {
             Action::CopySelection => {
                 if self.state.focused_component == FocusedComponent::Messages {
                     self.state.copy_message_selection();
+                    // Exit visual mode after copying
+                    if self.state.input_mode == InputMode::Visual {
+                        self.state.message_list.clear_text_selection();
+                        self.state.set_input_mode(InputMode::Normal);
+                    }
                 }
                 Ok(true)
             }
@@ -4797,6 +4900,7 @@ impl TuiApp {
             // Input area (same width as chat area - Requirements 9.1, 9.2)
             let mode_indicator = match input_mode {
                 InputMode::Normal => ("NORMAL", Color::Blue),
+                InputMode::Visual => ("VISUAL", Color::Magenta),
                 InputMode::Insert => ("INSERT", Color::Green),
                 InputMode::Command => ("COMMAND", Color::Yellow),
             };

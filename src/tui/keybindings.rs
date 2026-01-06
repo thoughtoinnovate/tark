@@ -479,8 +479,9 @@ impl KeybindingHandler {
             // Exit visual mode
             (KeyCode::Esc, KeyModifiers::NONE) => Some(Action::ExitInsertMode), // Reuse to exit visual
 
-            // Copy selection and exit (y)
+            // Copy selection and exit (y or Ctrl+C)
             (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Action::CopySelection),
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::CopySelection),
 
             // Navigation extends selection in visual mode
             (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
@@ -502,7 +503,7 @@ impl KeybindingHandler {
                 Some(Action::SelectLineEnd)
             }
             (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Action::SelectRight), // Simplified word movement
-            (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Action::SelectLeft),  // Simplified word movement
+            (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Action::SelectLeft), // Simplified word movement
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Action::HalfPageDown),
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Action::HalfPageUp),
             (KeyCode::Char('G'), KeyModifiers::SHIFT) => Some(Action::GoToBottom),

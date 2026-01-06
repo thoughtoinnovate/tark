@@ -39,40 +39,12 @@ local function get_binary()
     return binary
 end
 
--- Setup commands
-local function setup_commands()
-    vim.api.nvim_create_user_command('Tark', function()
-        get_tui().toggle()
-    end, { desc = 'Toggle tark TUI' })
-    
-    vim.api.nvim_create_user_command('TarkOpen', function()
-        get_tui().open()
-    end, { desc = 'Open tark TUI' })
-    
-    vim.api.nvim_create_user_command('TarkClose', function()
-        get_tui().close()
-    end, { desc = 'Close tark TUI' })
-    
-    vim.api.nvim_create_user_command('TarkDownload', function()
-        get_binary().download()
-    end, { desc = 'Download tark binary' })
-    
-    vim.api.nvim_create_user_command('TarkVersion', function()
-        local bin = get_binary().find()
-        if bin then
-            local version = vim.fn.system(bin .. ' --version'):gsub('%s+$', '')
-            vim.notify('tark: ' .. version .. '\nPath: ' .. bin, vim.log.levels.INFO)
-        else
-            vim.notify('tark: Binary not found. Run :TarkDownload', vim.log.levels.WARN)
-        end
-    end, { desc = 'Show tark version' })
-end
+-- Commands are registered in plugin/tark.lua for lazy-loading
+-- No need to register them again here
 
 -- Main setup function
 function M.setup(opts)
     M.config = vim.tbl_deep_extend('force', M.config, opts or {})
-    
-    setup_commands()
     
     -- Pass config to submodules
     get_tui().setup(M.config)

@@ -152,6 +152,8 @@ impl ModelsDbManager {
 }
 ```
 
+
+
 ### Phase 3: Add ThinkingConfig with Per-Model Overrides
 
 Add to `src/config/mod.rs`:
@@ -195,6 +197,8 @@ impl Default for ThinkingConfig {
 }
 ```
 
+
+
 ### Example Config File with Per-Model Overrides
 
 ```toml
@@ -222,6 +226,8 @@ budget_tokens = 16000
 disabled = true           # Don't use thinking prompt injection
 ```
 
+
+
 ### Phase 3: Add Cost Estimation Helpers
 
 Add to `src/llm/models_db.rs`:
@@ -246,6 +252,8 @@ impl ModelCapabilities {
     }
 }
 ```
+
+
 
 ### Phase 4: Add ThinkingSettings Runtime Type
 
@@ -307,6 +315,8 @@ impl ThinkingSettings {
 }
 ```
 
+
+
 ### Phase 5: Update LlmProvider Trait
 
 ```rust
@@ -318,12 +328,18 @@ async fn chat(
 ) -> Result<LlmResponse>;
 ```
 
+
+
 ### Phase 6: Update Provider Implementations
 
 | Provider | Config Field Used | API Parameter |
+
 |----------|-------------------|---------------|
+
 | Claude | `budget_tokens` | `thinking.budget_tokens` |
+
 | OpenAI | `reasoning_effort` | `reasoning_effort` |
+
 | Gemini | `budget_tokens` | `thinkingConfig.thinkingBudget` |
 
 ### Phase 7: UI Updates
@@ -336,7 +352,7 @@ async fn chat(
 
 ## Architecture: Smart Defaults + Config Overrides
 
-```
+```javascript
 ┌─────────────────────────────────────────────────────────────────┐
 │                        models.dev API                           │
 │  { reasoning: bool, cost.reasoning: float, limit.output: int }  │
@@ -378,9 +394,11 @@ async fn chat(
     └───────────┘     └───────────┘     └───────────┘
 ```
 
+
+
 ### Resolution Flow Example
 
-```
+```javascript
 User selects: claude-sonnet-4-20250514
          │
          ▼
@@ -412,33 +430,47 @@ User selects: claude-sonnet-4-20250514
 ## Pricing Reference (from models.dev)
 
 | Model | Input | Output | Reasoning | Notes |
-|-------|-------|--------|-----------|-------|
-| Claude Sonnet 4 | $3/M | $15/M | $15/M | Same as output |
-| OpenAI o1 | $15/M | $60/M | $60/M | Same as output |
-| OpenAI o3-mini | $1.1/M | $4.4/M | $4.4/M | Affordable |
-| Qwen3-32b | $0.7/M | $2.8/M | $8.4/M | 3x output cost! |
-| xAI Grok-4 | $3/M | $15/M | $15/M | Same as output |
 
----
+|-------|-------|--------|-----------|-------|
+
+| Claude Sonnet 4 | $3/M | $15/M | $15/M | Same as output |
+
+| OpenAI o1 | $15/M | $60/M | $60/M | Same as output |
+
+| OpenAI o3-mini | $1.1/M | $4.4/M | $4.4/M | Affordable |
+
+| Qwen3-32b | $0.7/M | $2.8/M | $8.4/M | 3x output cost! |
+
+| xAI Grok-4 | $3/M | $15/M | $15/M | Same as output |---
 
 ## Default Values Summary
 
 ### Global Config Defaults
 
 | Setting | Default | Rationale |
+
 |---------|---------|-----------|
+
 | `enabled` | `false` | Cost protection - opt-in |
+
 | `max_budget_tokens` | `50,000` | ~$0.75 safety cap |
+
 | `fallback_reasoning_effort` | `"medium"` | OpenAI recommendation |
 
 ### Smart Per-Model Defaults (from models.dev)
 
 | Model | Param Type | Suggested Budget | Est. Cost |
+
 |-------|------------|------------------|-----------|
+
 | Claude Sonnet 4 | budget_tokens | 16,000 (64K/4) | ~$0.24 |
+
 | Claude Opus 4 | budget_tokens | 8,000 (32K/4) | ~$0.60 |
+
 | OpenAI o1 | reasoning_effort | "medium" | varies |
+
 | OpenAI o3-mini | reasoning_effort | "medium" | varies |
+
 | Gemini Thinking | thinkingBudget | 8,192 | free |
 
 ### Example Config Overrides
@@ -466,6 +498,7 @@ disabled = true           # This model doesn't support thinking
 ## Model Picker with Thinking Filter
 
 ### Current State
+
 - `list_available_models()` in `agent_bridge.rs` already uses models.dev
 - Returns `(model_id, display_name, description)` tuples
 - `capability_summary()` already includes "reasoning" text
@@ -508,11 +541,13 @@ pub async fn list_available_models_full(&self) -> Vec<PickerModelInfo> {
 }
 ```
 
+
+
 #### 2. Add Filter Tabs to Model Picker
 
 Update model picker UI in `src/tui/app.rs`:
 
-```
+```javascript
 ┌─────────────────────────────────────────┐
 │  Select Model                           │
 ├─────────────────────────────────────────┤
@@ -524,6 +559,8 @@ Update model picker UI in `src/tui/app.rs`:
 │  🧠 Claude Opus 4           $15/$75/M   │
 └─────────────────────────────────────────┘
 ```
+
+
 
 #### 3. Enhance PickerItem with Reasoning Flag
 
@@ -538,6 +575,8 @@ pub struct PickerItem {
     pub cost_info: Option<String>,
 }
 ```
+
+
 
 #### 4. Add Filter State to Picker
 
@@ -555,6 +594,8 @@ pub struct Picker {
 }
 ```
 
+
+
 #### 5. Keyboard Shortcuts for Filter
 
 - `Tab` or `1/2/3` - Cycle through filter modes
@@ -562,7 +603,7 @@ pub struct Picker {
 
 ### Visual Design
 
-```
+```javascript
 All Models:
   🧠 o1               Advanced reasoning ($15/$60/M)
   🧠 o3-mini          Fast reasoning ($1.1/$4.4/M)
@@ -583,6 +624,7 @@ Standard Only (filtered):
 ## TODOs
 
 ### Phase 1: Extend models.dev Integration
+
 1. [ ] Add `reasoning: Option<f64>` to `ModelCost` struct in `models_db.rs`
 2. [ ] Add `ModelThinkingDefaults` struct with `suggested_budget`, `cost_per_1k`, `param_type`
 3. [ ] Add `ThinkingParamType` enum (BudgetTokens, ReasoningEffort, ThinkingBudget)
@@ -592,6 +634,7 @@ Standard Only (filtered):
 7. [ ] Add `estimate_thinking_cost()` helper method
 
 ### Phase 2: Configuration Layer with Per-Model Overrides
+
 8. [ ] Add `ThinkingConfig` struct to `src/config/mod.rs`
 9. [ ] Add `ModelThinkingOverride` struct (budget_tokens, reasoning_effort, disabled)
 10. [ ] Add `models: HashMap<String, ModelThinkingOverride>` to ThinkingConfig
@@ -600,6 +643,7 @@ Standard Only (filtered):
 13. [ ] Implement `ThinkingSettings::resolve()` with priority: config override > model defaults
 
 ### Phase 3: Provider Integration
+
 14. [ ] Update `LlmProvider` trait to accept `ThinkingSettings`
 15. [ ] Wire Claude provider to use `budget_tokens` from resolved settings
 16. [ ] Wire OpenAI provider to use `reasoning_effort` from resolved settings
@@ -607,6 +651,7 @@ Standard Only (filtered):
 18. [ ] Update OpenRouter to pass through thinking settings
 
 ### Phase 4: Model Picker Enhancement
+
 19. [ ] Create `PickerModelInfo` struct with reasoning flag and cost info
 20. [ ] Add `list_available_models_full()` to AgentBridge
 21. [ ] Add 🧠 icon to PickerItem for reasoning models
@@ -617,6 +662,7 @@ Standard Only (filtered):
 26. [ ] Show per-model override indicator if configured
 
 ### Phase 5: Fix `/thinking` Toggle to Actually Enable Thinking
+
 27. [ ] Make `/thinking` toggle actually pass `ThinkingSettings` to providers
 28. [ ] When thinking is OFF: don't send thinking params to API (save tokens/cost)
 29. [ ] When thinking is ON: send resolved `ThinkingSettings` to provider
@@ -624,6 +670,7 @@ Standard Only (filtered):
 31. [ ] Update status bar to show thinking state: 🧠 ON/OFF
 
 ### Phase 6: Thinking Block UI Enhancement  
+
 32. [ ] Add `max_visible_lines` config to ThinkingBlock (default: 6)
 33. [ ] Add `scroll_offset` state for internal scrolling
 34. [ ] Add scroll indicators (↑ more above / ↓ more below)
@@ -632,6 +679,7 @@ Standard Only (filtered):
 37. [ ] Ensure fixed height doesn't pollute conversation
 
 ### Phase 7: Markdown Rendering in Thinking Blocks
+
 38. [ ] Parse thinking content as markdown
 39. [ ] Render **bold**, *italic*, `code`, lists properly
 40. [ ] Word-wrap long lines to fit block width
@@ -639,7 +687,9 @@ Standard Only (filtered):
 42. [ ] Handle numbered/bullet lists with proper indentation
 
 ### Phase 8: Commands
+
 43. [ ] Enhance `/thinking` command with subcommands:
+
     - `/thinking` - Toggle on/off (actually enables/disables API thinking)
     - `/thinking budget <N>` - Set session budget override
     - `/thinking effort <low|medium|high>` - Set session effort override
@@ -653,7 +703,7 @@ Standard Only (filtered):
 
 ### Fixed Height Scrollable Box
 
-```
+```javascript
 ╭── 🧠 Thinking (42 lines) [3/42] ────────────────╮
 │ ↑ 2 more lines above                            │
 ├─────────────────────────────────────────────────┤
@@ -667,6 +717,8 @@ Standard Only (filtered):
 │ ↓ 35 more lines below                           │
 ╰─────────────────────────────────────────────────╯
 ```
+
+
 
 ### ThinkingBlock Struct Enhancements
 
@@ -746,6 +798,8 @@ impl ThinkingBlock {
 }
 ```
 
+
+
 ### Render with Fixed Height
 
 ```rust
@@ -810,9 +864,12 @@ pub fn render_lines(&self) -> Vec<Line<'static>> {
 }
 ```
 
+
+
 ### Keyboard Navigation
 
 When a thinking block is focused (click or Tab to focus):
+
 - `j` or `↓` - Scroll down
 - `k` or `↑` - Scroll up  
 - `g` - Jump to top
@@ -835,7 +892,7 @@ auto_collapse = false    # Collapse after response complete
 
 ### Current Problem
 
-```
+```javascript
 /thinking toggle
     ↓
 self.state.thinking_mode = true  (only controls DISPLAY)
@@ -845,9 +902,11 @@ Provider ALWAYS sends thinking params (if model supports it)
 User pays for thinking even when toggle is OFF!
 ```
 
+
+
 ### Fixed Flow
 
-```
+```javascript
 /thinking toggle
     ↓
 self.state.thinking_enabled = true
@@ -859,6 +918,8 @@ If ON:  Provider sends resolved ThinkingSettings
     ↓
 Thinking content displayed in UI
 ```
+
+
 
 ### Code Change in `app.rs`
 
@@ -880,6 +941,8 @@ async fn send_message(&mut self, content: String) {
     self.agent_bridge.send_message(content, thinking_settings).await;
 }
 ```
+
+
 
 ### Code Change in Providers
 
@@ -916,7 +979,7 @@ async fn chat(
 
 ### Current: Plain Text
 
-```
+````javascript
 ╭── 🧠 Thinking ──────────────────────────────────╮
 │ Let's analyze this step by step...              │
 │ 1. **First point**: The user wants X            │
@@ -927,11 +990,13 @@ async fn chat(
 │ fn example() { }                                │
 │ ```                                             │
 ╰─────────────────────────────────────────────────╯
-```
+````
+
+
 
 ### Fixed: Rendered Markdown
 
-```
+```javascript
 ╭── 🧠 Thinking ──────────────────────────────────╮
 │ Let's analyze this step by step...              │
 │ 1. First point: The user wants X                │  ← bold rendered
@@ -943,6 +1008,8 @@ async fn chat(
 │ └────────────────────────────────────────┘      │
 ╰─────────────────────────────────────────────────╯
 ```
+
+
 
 ### Implementation
 
@@ -1013,5 +1080,5 @@ impl ThinkingBlock {
         Span::styled(text.to_string(), style)
     }
 }
-```
 
+```

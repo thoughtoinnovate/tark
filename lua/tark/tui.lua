@@ -341,19 +341,25 @@ local function calculate_size(value, total)
     return math.floor(value)
 end
 
--- Prevent concurrent opens
-local opening = false
+-- Prevent concurrent opens (global across all requires)
+if not _G._tark_opening then
+    _G._tark_opening = false
+end
 
 function M.open()
+    -- Debug: log every open attempt
+    vim.notify('[tark] open() called, _G._tark_opening=' .. tostring(_G._tark_opening), vim.log.levels.DEBUG)
+    
     -- Prevent concurrent opens
-    if opening then
+    if _G._tark_opening then
+        vim.notify('[tark] blocked concurrent open', vim.log.levels.DEBUG)
         return
     end
-    opening = true
+    _G._tark_opening = true
     
     -- Ensure we reset the flag when done
     local function done()
-        opening = false
+        _G._tark_opening = false
     end
     
     -- Find ALL existing tark windows/buffers and close duplicates
@@ -366,11 +372,13 @@ function M.open()
         if name:match('tark://') or name:match('tark$') or 
            (buftype == 'terminal' and name:match('tark')) then
             table.insert(tark_wins, { win = win, buf = buf })
+            vim.notify('[tark] found existing tark win=' .. win .. ' buf=' .. buf .. ' name=' .. name, vim.log.levels.DEBUG)
         end
     end
     
     -- If we found tark windows
     if #tark_wins > 0 then
+        vim.notify('[tark] found ' .. #tark_wins .. ' existing tark windows, focusing first', vim.log.levels.DEBUG)
         -- Keep the first one, close the rest
         for i = 2, #tark_wins do
             pcall(vim.api.nvim_win_close, tark_wins[i].win, true)
@@ -434,6 +442,7 @@ function M.open()
         })
     elseif pos == 'right' then
         local width = calculate_size(M.config.window.width, total_width)
+        vim.notify('[tark] creating right split, width=' .. width, vim.log.levels.DEBUG)
         vim.cmd('botright vsplit')
         vim.cmd('vertical resize ' .. width)
     elseif pos == 'left' then
