@@ -332,15 +332,7 @@ async fn chat(
 
 ### Phase 6: Update Provider Implementations
 
-| Provider | Config Field Used | API Parameter |
-
-|----------|-------------------|---------------|
-
-| Claude | `budget_tokens` | `thinking.budget_tokens` |
-
-| OpenAI | `reasoning_effort` | `reasoning_effort` |
-
-| Gemini | `budget_tokens` | `thinkingConfig.thinkingBudget` |
+| Provider | Config Field Used | API Parameter ||----------|-------------------|---------------|| Claude | `budget_tokens` | `thinking.budget_tokens` || OpenAI | `reasoning_effort` | `reasoning_effort` || Gemini | `budget_tokens` | `thinkingConfig.thinkingBudget` |
 
 ### Phase 7: UI Updates
 
@@ -429,49 +421,17 @@ User selects: claude-sonnet-4-20250514
 
 ## Pricing Reference (from models.dev)
 
-| Model | Input | Output | Reasoning | Notes |
-
-|-------|-------|--------|-----------|-------|
-
-| Claude Sonnet 4 | $3/M | $15/M | $15/M | Same as output |
-
-| OpenAI o1 | $15/M | $60/M | $60/M | Same as output |
-
-| OpenAI o3-mini | $1.1/M | $4.4/M | $4.4/M | Affordable |
-
-| Qwen3-32b | $0.7/M | $2.8/M | $8.4/M | 3x output cost! |
-
-| xAI Grok-4 | $3/M | $15/M | $15/M | Same as output |---
+| Model | Input | Output | Reasoning | Notes ||-------|-------|--------|-----------|-------|| Claude Sonnet 4 | $3/M | $15/M | $15/M | Same as output || OpenAI o1 | $15/M | $60/M | $60/M | Same as output || OpenAI o3-mini | $1.1/M | $4.4/M | $4.4/M | Affordable || Qwen3-32b | $0.7/M | $2.8/M | $8.4/M | 3x output cost! || xAI Grok-4 | $3/M | $15/M | $15/M | Same as output |---
 
 ## Default Values Summary
 
 ### Global Config Defaults
 
-| Setting | Default | Rationale |
-
-|---------|---------|-----------|
-
-| `enabled` | `false` | Cost protection - opt-in |
-
-| `max_budget_tokens` | `50,000` | ~$0.75 safety cap |
-
-| `fallback_reasoning_effort` | `"medium"` | OpenAI recommendation |
+| Setting | Default | Rationale ||---------|---------|-----------|| `enabled` | `false` | Cost protection - opt-in || `max_budget_tokens` | `50,000` | ~$0.75 safety cap || `fallback_reasoning_effort` | `"medium"` | OpenAI recommendation |
 
 ### Smart Per-Model Defaults (from models.dev)
 
-| Model | Param Type | Suggested Budget | Est. Cost |
-
-|-------|------------|------------------|-----------|
-
-| Claude Sonnet 4 | budget_tokens | 16,000 (64K/4) | ~$0.24 |
-
-| Claude Opus 4 | budget_tokens | 8,000 (32K/4) | ~$0.60 |
-
-| OpenAI o1 | reasoning_effort | "medium" | varies |
-
-| OpenAI o3-mini | reasoning_effort | "medium" | varies |
-
-| Gemini Thinking | thinkingBudget | 8,192 | free |
+| Model | Param Type | Suggested Budget | Est. Cost ||-------|------------|------------------|-----------|| Claude Sonnet 4 | budget_tokens | 16,000 (64K/4) | ~$0.24 || Claude Opus 4 | budget_tokens | 8,000 (32K/4) | ~$0.60 || OpenAI o1 | reasoning_effort | "medium" | varies || OpenAI o3-mini | reasoning_effort | "medium" | varies || Gemini Thinking | thinkingBudget | 8,192 | free |
 
 ### Example Config Overrides
 
@@ -1080,5 +1040,6 @@ impl ThinkingBlock {
         Span::styled(text.to_string(), style)
     }
 }
+
 
 ```

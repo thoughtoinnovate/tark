@@ -56,7 +56,20 @@ impl CopilotToken {
     }
 
     /// Get available models based on subscription tier
-    pub fn available_models(&self) -> Vec<String> {
+    /// Tries to fetch from models.dev first, then falls back to hardcoded list based on SKU
+    pub async fn available_models(&self) -> Vec<String> {
+        // Try to fetch from models.dev first
+        let models_db = crate::llm::models_db::models_db();
+        if let Ok(models) = models_db.list_models("github").await {
+            if !models.is_empty() {
+                // Return model IDs from models.dev
+                let model_ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
+                tracing::debug!("Fetched {} Copilot models from models.dev", model_ids.len());
+                return model_ids;
+            }
+        }
+
+        // Fallback to hardcoded list based on subscription tier
         let sku = self.get_sku().unwrap_or_default();
 
         match sku.as_str() {
@@ -153,12 +166,28 @@ impl CopilotProvider {
     }
 
     /// Get available models based on user's subscription
-    pub fn available_models(&self) -> Vec<String> {
+    /// Fetches dynamically from models.dev API with fallback to hardcoded list
+    pub async fn available_models(&self) -> Vec<String> {
+        // If we have a token, use it to get subscription-aware models
         if let Some(ref token) = self.token {
-            token.available_models()
-        } else {
-            vec!["gpt-4o".to_string()]
+            return token.available_models().await;
         }
+
+        // No token - try to fetch all GitHub models from models.dev
+        let models_db = crate::llm::models_db::models_db();
+        if let Ok(models) = models_db.list_models("github").await {
+            if !models.is_empty() {
+                let model_ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
+                tracing::debug!(
+                    "Fetched {} Copilot models from models.dev (no token)",
+                    model_ids.len()
+                );
+                return model_ids;
+            }
+        }
+
+        // Final fallback
+        vec!["gpt-4o".to_string()]
     }
 
     pub fn with_auth_timeout(mut self, timeout_secs: u64) -> Self {
@@ -262,10 +291,36 @@ impl CopilotProvider {
             .as_ref()
             .map(|path| AuthFileGuard { path: path.clone() });
 
+        // Display auth info to user (both for CLI and logging)
+        // Format the code with dashes for readability (e.g., "ABCD-EFGH")
+        let formatted_code = if device_response.user_code.len() == 8 {
+            format!(
+                "{}-{}",
+                &device_response.user_code[..4],
+                &device_response.user_code[4..]
+            )
+        } else {
+            device_response.user_code.clone()
+        };
+
+        // Print to stdout for CLI visibility
+        eprintln!();
+        eprintln!("🔐 GitHub Copilot Authentication");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!();
+        eprintln!("1. Visit this URL in your browser:");
+        eprintln!("   {}", device_response.verification_uri);
+        eprintln!();
+        eprintln!("2. Enter this code:");
+        eprintln!("   {}", formatted_code);
+        eprintln!();
+        eprintln!("Waiting for authorization...");
+        eprintln!();
+
         tracing::info!(
             "GitHub Copilot auth: visit {} and enter code {}",
             device_response.verification_uri,
-            device_response.user_code
+            formatted_code
         );
 
         // Step 3: Poll for token
@@ -277,7 +332,12 @@ impl CopilotProvider {
             )
             .await?;
 
+        // Clear progress indicator and show success
+        eprint!("\r"); // Clear the progress line
+        eprintln!("✅ Authorization received!");
         tracing::info!("✅ Successfully authenticated with GitHub!\n");
+
+        eprintln!("📝 Exchanging for Copilot token...");
         tracing::info!("📝 Exchanging for Copilot token...");
 
         // Clean up auth pending file (guard will also run on drop)
@@ -288,6 +348,7 @@ impl CopilotProvider {
         // Step 4: Exchange OAuth token for Copilot token
         let copilot_token = self.get_copilot_token(&token_response.access_token).await?;
 
+        eprintln!("✅ Successfully obtained Copilot token!");
         tracing::info!("✅ Successfully obtained Copilot token!\n");
 
         Ok(copilot_token)
@@ -361,6 +422,7 @@ impl CopilotProvider {
         // Use the longer of GitHub's expires_in or our configured timeout
         let timeout_secs = expires_in.max(self.auth_timeout_secs);
         let timeout = std::time::Duration::from_secs(timeout_secs);
+        let mut poll_count = 0u32;
 
         tracing::info!(
             "Waiting for GitHub Device Flow authorization (timeout: {}s = {} minutes)",
@@ -371,11 +433,25 @@ impl CopilotProvider {
         loop {
             // Check timeout
             if start.elapsed() > timeout {
+                eprintln!();
+                eprintln!(
+                    "❌ Authentication timed out after {} minutes",
+                    timeout_secs / 60
+                );
                 anyhow::bail!("Device flow authentication timed out");
             }
 
             // Wait before polling
             tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+
+            // Show progress every 5 polls (roughly every 15-25 seconds depending on interval)
+            poll_count += 1;
+            if poll_count.is_multiple_of(5) {
+                let elapsed = start.elapsed().as_secs();
+                eprint!("\r⏳ Still waiting... ({}s elapsed)  ", elapsed);
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+            }
 
             // Poll for token
             let params = [

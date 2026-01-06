@@ -18,6 +18,8 @@ pub enum Event {
     Mouse(MouseEvent),
     /// Terminal was resized
     Resize(u16, u16),
+    /// Paste event (bracketed paste)
+    Paste(String),
     /// Tick event for periodic updates
     Tick,
 }
@@ -78,7 +80,8 @@ impl EventHandler {
             event::Event::Key(key) => Event::Key(key),
             event::Event::Mouse(mouse) => Event::Mouse(mouse),
             event::Event::Resize(cols, rows) => Event::Resize(cols, rows),
-            // FocusGained, FocusLost, Paste are treated as ticks
+            event::Event::Paste(text) => Event::Paste(text),
+            // FocusGained, FocusLost are treated as ticks
             _ => Event::Tick,
         }
     }

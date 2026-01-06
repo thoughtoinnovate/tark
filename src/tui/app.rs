@@ -10,7 +10,10 @@ use std::io::{self, Stdout};
 use std::panic;
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyCode, KeyEvent, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -1232,7 +1235,14 @@ impl TuiApp {
     fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        // Enable bracketed paste to receive pasted text as a single event
+        // instead of individual key presses (prevents newlines from triggering submit)
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         Ok(terminal)
@@ -1244,7 +1254,8 @@ impl TuiApp {
         execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         )?;
         self.terminal.show_cursor()?;
         Ok(())
@@ -1267,6 +1278,11 @@ impl TuiApp {
             }
             Event::Key(key_event) => self.handle_key_event(key_event),
             Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
+            Event::Paste(text) => {
+                // Handle bracketed paste - insert text directly without triggering submit
+                self.handle_paste_text(&text);
+                Ok(true)
+            }
             Event::Tick => {
                 // Check for rate limit retry (Requirements 7.4)
                 self.check_rate_limit_retry();
@@ -1507,15 +1523,13 @@ impl TuiApp {
                     let scroll_offset = self.state.message_list.scroll_offset();
                     let content_line = scroll_offset + inner_row as usize;
 
-                    // Set cursor position and start potential selection
+                    // Set cursor position (don't start selection until drag)
                     self.state
                         .message_list
                         .set_cursor_position(content_line, inner_col as usize);
                     self.state.message_list.clear_text_selection();
                     self.state.set_focused_component(FocusedComponent::Messages);
-                    // Enter visual mode on click to prepare for drag selection
-                    self.state.set_input_mode(InputMode::Visual);
-                    self.state.message_list.start_selection();
+                    // Stay in Normal mode - only enter Visual mode on 'v' key or drag
                 } else {
                     self.state.set_focused_component(FocusedComponent::Messages);
                 }
@@ -3094,6 +3108,32 @@ impl TuiApp {
     /// 1. Native clipboard (arboard) - works with display server
     /// 2. OSC 52 fallback - works over SSH with supported terminals
     ///
+    /// Handle pasted text from bracketed paste event
+    ///
+    /// This is called when text is pasted using the terminal's bracketed paste mode.
+    /// The text is inserted directly into the input field without triggering submit,
+    /// even if it contains newlines.
+    fn handle_paste_text(&mut self, text: &str) {
+        // Only paste into input when in insert mode or when input is focused
+        if self.state.input_mode == InputMode::Insert
+            || self.state.focused_component == FocusedComponent::Input
+        {
+            // Switch to insert mode if not already
+            if self.state.input_mode != InputMode::Insert {
+                self.state.set_input_mode(InputMode::Insert);
+                self.state.set_focused_component(FocusedComponent::Input);
+            }
+
+            // Insert the text directly, preserving newlines
+            for c in text.chars() {
+                // Filter out control characters except newlines and tabs
+                if !c.is_control() || c == '\n' || c == '\t' {
+                    self.state.input_widget.insert_char(c);
+                }
+            }
+        }
+    }
+
     /// Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7
     fn handle_clipboard_paste(&mut self) {
         use super::clipboard::{get_clipboard_with_fallback, ClipboardContent, ClipboardHandler};

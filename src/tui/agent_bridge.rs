@@ -445,7 +445,7 @@ impl AgentBridge {
             "copilot" | "github" => {
                 // Try to get available models from provider based on subscription
                 if let Ok(provider) = crate::llm::CopilotProvider::new() {
-                    let models = provider.available_models();
+                    let models = provider.available_models().await;
                     models
                         .into_iter()
                         .map(|model_id| {
