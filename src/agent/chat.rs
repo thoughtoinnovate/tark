@@ -83,9 +83,9 @@ When user asks for changes, use `propose_change` to show what the diff would loo
 - User can switch to /build mode to apply
 
 🔍 SEARCH STRATEGY:
-1. Start with exact name: grep "CreateTenant"
-2. Try partial: grep "tenant" or grep "create.*tenant"  
-3. File search: file_search "tenant"
+1. Start with exact name: grep "search_pattern"
+2. Try partial: grep "search_pattern" or grep "search.*pattern"  
+3. File search: file_search "pattern"
 4. Check directories: list_directory on likely folders
 5. Use find_references on any matches
 
@@ -172,23 +172,13 @@ Available tools:
 - PlantUML (```plantuml): UML diagrams
 - ASCII art: Simple text-based diagrams
 
-Example Mermaid sequence diagram:
-```mermaid
-sequenceDiagram
-    Client->>API: CreateTenant request
-    API->>Service: ValidateTenant
-    Service->>DB: Insert tenant
-    DB-->>Service: Success
-    Service-->>API: TenantCreated
-    API-->>Client: 201 Created
-```
 
 When asked for diagrams, CREATE THEM using these formats!
 
 🔍 SEARCH STRATEGY (when looking for something):
-1. Start with exact name: grep "CreateTenant"
-2. Try partial/case-insensitive: grep "tenant" or grep "create.*tenant"
-3. Try file search: file_search "tenant"
+1. Start with exact name: grep "search_pattern"
+2. Try partial/case-insensitive: grep "search_pattern" or grep "search_.*pattern"
+3. Try file search: file_search "search_pattern"
 4. Check related directories: list_directory on likely folders
 5. Use find_references on any matches you find
 
