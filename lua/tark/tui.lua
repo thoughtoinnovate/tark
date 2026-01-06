@@ -341,25 +341,55 @@ local function calculate_size(value, total)
     return math.floor(value)
 end
 
+-- Prevent concurrent opens
+local opening = false
+
 function M.open()
-    -- Already open? Check both state and look for existing tark buffer
-    if M.state.win and vim.api.nvim_win_is_valid(M.state.win) then
-        vim.api.nvim_set_current_win(M.state.win)
+    -- Prevent concurrent opens
+    if opening then
         return
     end
+    opening = true
     
-    -- Also check if there's an existing tark buffer in any window
+    -- Ensure we reset the flag when done
+    local function done()
+        opening = false
+    end
+    
+    -- Find ALL existing tark windows/buffers and close duplicates
+    local tark_wins = {}
     for _, win in ipairs(vim.api.nvim_list_wins()) do
         local buf = vim.api.nvim_win_get_buf(win)
         local name = vim.api.nvim_buf_get_name(buf)
-        if name:match('tark://') or name:match('tark$') then
-            -- Found existing tark window, focus it
-            M.state.win = win
-            M.state.buf = buf
-            vim.api.nvim_set_current_win(win)
-            vim.cmd('startinsert')
-            return
+        local buftype = vim.bo[buf].buftype
+        -- Check for tark buffer by name or by being a terminal with tark job
+        if name:match('tark://') or name:match('tark$') or 
+           (buftype == 'terminal' and name:match('tark')) then
+            table.insert(tark_wins, { win = win, buf = buf })
         end
+    end
+    
+    -- If we found tark windows
+    if #tark_wins > 0 then
+        -- Keep the first one, close the rest
+        for i = 2, #tark_wins do
+            pcall(vim.api.nvim_win_close, tark_wins[i].win, true)
+        end
+        -- Focus the remaining one
+        M.state.win = tark_wins[1].win
+        M.state.buf = tark_wins[1].buf
+        vim.api.nvim_set_current_win(M.state.win)
+        vim.cmd('startinsert')
+        done()
+        return
+    end
+    
+    -- Also check state
+    if M.state.win and vim.api.nvim_win_is_valid(M.state.win) then
+        vim.api.nvim_set_current_win(M.state.win)
+        vim.cmd('startinsert')
+        done()
+        return
     end
     
     -- Clean up any stale state
@@ -369,11 +399,13 @@ function M.open()
     local bin = get_binary_path()
     if not bin then
         vim.notify('tark: Binary not found. Run :TarkDownload', vim.log.levels.ERROR)
+        done()
         return
     end
     
     -- Start socket server
     if not start_socket_server() then
+        done()
         return
     end
     
@@ -452,6 +484,8 @@ function M.open()
     
     -- Setup autocmds for context sync
     M.setup_autocmds()
+    
+    done()
 end
 
 function M.close()
