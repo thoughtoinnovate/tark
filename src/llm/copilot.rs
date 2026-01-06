@@ -448,7 +448,7 @@ impl CopilotProvider {
             let sleep_duration = std::time::Duration::from_secs(interval);
             let check_interval = std::time::Duration::from_secs(1);
             let mut remaining = sleep_duration;
-            
+
             while remaining > std::time::Duration::ZERO {
                 // Check if auth file still exists (user cancellation check)
                 // If the file was deleted, the user cancelled the authentication
@@ -460,7 +460,7 @@ impl CopilotProvider {
                         anyhow::bail!("Authentication cancelled by user");
                     }
                 }
-                
+
                 let sleep_time = remaining.min(check_interval);
                 tokio::time::sleep(sleep_time).await;
                 remaining = remaining.saturating_sub(sleep_time);

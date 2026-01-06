@@ -109,6 +109,18 @@ jobs:
           fi
           echo "✓ Neovim $VERSION meets minimum requirement (0.8.0+)"
       
+      - name: Install plenary.nvim
+        run: |
+          # Ensure Neovim data directory exists
+          mkdir -p "$HOME/.local/share/nvim"
+          PLENARY_DIR="$HOME/.local/share/nvim/plenary.nvim"
+          if [ ! -d "$PLENARY_DIR" ]; then
+            echo "Installing plenary.nvim..."
+            git clone --depth=1 https://github.com/nvim-lua/plenary.nvim "$PLENARY_DIR"
+          else
+            echo "plenary.nvim already installed"
+          fi
+      
       - name: Run Neovim tests
         run: |
           nvim --headless -u tests/minimal_init.lua \
