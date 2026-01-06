@@ -80,3 +80,21 @@ vim.api.nvim_create_user_command('TarkLspUsage', function()
     local usage = require('tark').lsp_usage()
     vim.notify(usage, vim.log.levels.INFO)
 end, { desc = 'Show tark completion usage stats' })
+
+-- Ghost text commands
+vim.api.nvim_create_user_command('TarkGhostEnable', function()
+    require('tark').ghost_enable()
+end, { desc = 'Enable tark ghost text' })
+
+vim.api.nvim_create_user_command('TarkGhostDisable', function()
+    require('tark').ghost_disable()
+end, { desc = 'Disable tark ghost text' })
+
+vim.api.nvim_create_user_command('TarkGhostToggle', function()
+    require('tark').ghost_toggle()
+end, { desc = 'Toggle tark ghost text' })
+
+vim.api.nvim_create_user_command('TarkGhostUsage', function()
+    local usage = require('tark').ghost_usage()
+    vim.notify(usage, vim.log.levels.INFO)
+end, { desc = 'Show tark ghost text usage stats' })

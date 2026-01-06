@@ -202,4 +202,48 @@ describe('tark - main module', function()
             assert.is_function(tark.lsp_usage)
         end)
     end)
+
+    describe('Ghost text API functions', function()
+        it('has ghost_enable function', function()
+            assert.is_function(tark.ghost_enable)
+        end)
+
+        it('has ghost_disable function', function()
+            assert.is_function(tark.ghost_disable)
+        end)
+
+        it('has ghost_toggle function', function()
+            assert.is_function(tark.ghost_toggle)
+        end)
+
+        it('has ghost_usage function', function()
+            assert.is_function(tark.ghost_usage)
+        end)
+
+        it('has ghost_accept function', function()
+            assert.is_function(tark.ghost_accept)
+        end)
+    end)
+
+    describe('Ghost text commands registration', function()
+        it('TarkGhostEnable command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkGhostEnable)
+        end)
+
+        it('TarkGhostDisable command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkGhostDisable)
+        end)
+
+        it('TarkGhostToggle command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkGhostToggle)
+        end)
+
+        it('TarkGhostUsage command exists', function()
+            local commands = vim.api.nvim_get_commands({})
+            assert.is_not_nil(commands.TarkGhostUsage)
+        end)
+    end)
 end)

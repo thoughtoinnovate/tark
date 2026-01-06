@@ -20,12 +20,24 @@ M.config = {
     -- Auto-download binary if not found
     auto_download = true,
     
-    -- LSP settings for completions
+    -- LSP settings for completions (menu-based)
     lsp = {
         -- Enable LSP for completions
-        enabled = true,
+        enabled = false,  -- Disabled by default, use ghost text instead
         -- Excluded filetypes
         exclude_filetypes = { 'TelescopePrompt', 'NvimTree', 'neo-tree', 'dashboard', 'alpha' },
+    },
+    
+    -- Ghost text settings (inline suggestions)
+    ghost = {
+        -- Enable ghost text completions
+        enabled = true,
+        -- Auto-trigger on typing
+        auto_trigger = true,
+        -- Debounce delay in ms
+        debounce_ms = 300,
+        -- Accept key (default Tab)
+        accept_key = '<Tab>',
     },
 }
 
@@ -33,6 +45,7 @@ M.config = {
 local tui = nil
 local binary = nil
 local lsp = nil
+local ghost = nil
 
 local function get_tui()
     if not tui then
@@ -53,6 +66,13 @@ local function get_lsp()
         lsp = require('tark.lsp')
     end
     return lsp
+end
+
+local function get_ghost()
+    if not ghost then
+        ghost = require('tark.ghost')
+    end
+    return ghost
 end
 
 -- Commands are registered in plugin/tark.lua for lazy-loading
@@ -84,6 +104,11 @@ function M.setup(opts)
     -- Setup LSP if enabled and binary exists
     if M.config.lsp.enabled then
         get_lsp().setup(M.config.lsp)
+    end
+    
+    -- Setup ghost text if enabled
+    if M.config.ghost.enabled then
+        get_ghost().setup(M.config.ghost)
     end
 end
 
@@ -135,6 +160,27 @@ end
 
 function M.lsp_usage()
     return get_lsp().format_usage()
+end
+
+-- Public API: Ghost Text
+function M.ghost_enable()
+    get_ghost().enable()
+end
+
+function M.ghost_disable()
+    get_ghost().disable()
+end
+
+function M.ghost_toggle()
+    get_ghost().toggle()
+end
+
+function M.ghost_usage()
+    return get_ghost().format_usage()
+end
+
+function M.ghost_accept()
+    return get_ghost().accept()
 end
 
 return M

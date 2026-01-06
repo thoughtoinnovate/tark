@@ -124,9 +124,17 @@ return {
         -- Auto-download binary if not found
         auto_download = true,
         
-        -- LSP settings for AI completions
+        -- Ghost text settings (inline suggestions like Copilot)
+        ghost = {
+            enabled = true,  -- Enable ghost text completions
+            auto_trigger = true,  -- Auto-trigger on typing
+            debounce_ms = 300,  -- Debounce delay
+            accept_key = '<Tab>',  -- Key to accept suggestion
+        },
+        
+        -- LSP settings for completion menu (optional, disabled by default)
         lsp = {
-            enabled = true,  -- Enable LSP for completions
+            enabled = false,  -- Enable LSP for nvim-cmp integration
             exclude_filetypes = { 'TelescopePrompt', 'NvimTree', 'neo-tree' },
         },
     },
@@ -146,7 +154,18 @@ return {
 | `:TarkDownload` | Download tark binary |
 | `:TarkVersion` | Show tark version |
 
-### LSP/Completion Commands
+### Ghost Text Commands (Inline Suggestions)
+
+| Command | Description |
+|---------|-------------|
+| `:TarkGhostEnable` | Enable ghost text suggestions |
+| `:TarkGhostDisable` | Disable ghost text suggestions |
+| `:TarkGhostToggle` | Toggle ghost text on/off |
+| `:TarkGhostUsage` | Show ghost text usage stats |
+
+**Usage:** Type in insert mode and suggestions appear as grey text. Press `<Tab>` to accept.
+
+### LSP Commands (Completion Menu)
 
 | Command | Description |
 |---------|-------------|
@@ -154,10 +173,10 @@ return {
 | `:TarkLspStop` | Stop tark LSP server |
 | `:TarkLspRestart` | Restart tark LSP server |
 | `:TarkLspStatus` | Show tark LSP status |
-| `:TarkLspEnable` | Enable tark completions |
-| `:TarkLspDisable` | Disable tark completions |
-| `:TarkLspToggle` | Toggle tark completions on/off |
-| `:TarkLspUsage` | Show completion usage stats for session |
+| `:TarkLspEnable` | Enable LSP completions |
+| `:TarkLspDisable` | Disable LSP completions |
+| `:TarkLspToggle` | Toggle LSP completions on/off |
+| `:TarkLspUsage` | Show LSP usage stats |
 
 ## Usage
 
