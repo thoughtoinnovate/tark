@@ -116,6 +116,8 @@ pub struct AppState {
     pub panel_update_pending: bool,
     /// Authentication dialog state (OAuth device flow)
     pub auth_dialog: super::widgets::AuthDialog,
+    /// Flag indicating compact operation is pending
+    pub compact_pending: bool,
 }
 
 /// State for tab completion
@@ -214,6 +216,7 @@ impl Default for AppState {
             spinner_last_update: std::time::Instant::now(),
             pending_async_request: None,
             panel_update_pending: false,
+            compact_pending: false,
             auth_dialog: super::widgets::AuthDialog::default(),
         }
     }
@@ -2485,8 +2488,18 @@ impl TuiApp {
                 self.state.status_message = Some("Chat history cleared".to_string());
             }
             CommandResult::Compact => {
-                // TODO: Implement compaction
-                self.state.status_message = Some("Compacting conversation...".to_string());
+                // Check if we have enough messages to compact
+                if self.state.message_list.messages().len() < 4 {
+                    self.state.status_message =
+                        Some("Not enough messages to compact (need at least 4)".to_string());
+                } else if self.agent_bridge.is_none() {
+                    self.state.status_message =
+                        Some("No LLM configured for compaction".to_string());
+                } else {
+                    // Set flag for async processing in run loop
+                    self.state.compact_pending = true;
+                    self.state.status_message = Some("Compacting conversation...".to_string());
+                }
             }
             CommandResult::NewSession => {
                 // Create new session via AgentBridge (Requirements 5.9, 6.3)
@@ -3739,6 +3752,12 @@ impl TuiApp {
                 self.run_llm_with_ui_updates(request).await?;
             }
 
+            // Process pending compact operation
+            if self.state.compact_pending {
+                self.state.compact_pending = false;
+                self.run_compact_operation().await?;
+            }
+
             // Poll for agent events (non-blocking)
             let agent_events_processed = self.poll_agent_events();
 
@@ -3800,6 +3819,76 @@ impl TuiApp {
                 config: self.state.config.to_attachment_config(),
             });
         }
+    }
+
+    /// Run the compact operation asynchronously
+    ///
+    /// This calls the agent's compact method to summarize the conversation
+    /// and displays the result as a system message block.
+    async fn run_compact_operation(&mut self) -> anyhow::Result<()> {
+        use super::widgets::ChatMessage;
+
+        self.state.agent_processing = true;
+        self.render()?;
+
+        // Take the agent bridge temporarily
+        let mut bridge = match self.agent_bridge.take() {
+            Some(b) => b,
+            None => {
+                self.state.status_message = Some("No LLM configured".to_string());
+                self.state.agent_processing = false;
+                return Ok(());
+            }
+        };
+
+        // Run compact operation
+        let result = bridge.compact().await;
+
+        // Restore the bridge
+        self.agent_bridge = Some(bridge);
+        self.state.agent_processing = false;
+
+        match result {
+            Ok(Some(compact_result)) => {
+                // Create a message showing the compaction result
+                let summary_block = format!(
+                    "📦 **Conversation Compacted**\n\n                     **Before:** {} messages (~{} tokens)\n                     **After:** {} messages (~{} tokens)\n                     **Saved:** ~{} tokens ({:.0}% reduction)\n\n                     ---\n\n                     **Summary:**\n{}",
+                    compact_result.old_messages,
+                    compact_result.old_tokens,
+                    compact_result.new_messages,
+                    compact_result.new_tokens,
+                    compact_result.old_tokens.saturating_sub(compact_result.new_tokens),
+                    if compact_result.old_tokens > 0 {
+                        (compact_result.old_tokens.saturating_sub(compact_result.new_tokens)) as f64
+                         / compact_result.old_tokens as f64 * 100.0
+                    } else { 0.0 },
+                    compact_result.summary
+                );
+
+                // Clear the message list and add the summary
+                self.state.message_list.clear();
+                self.state
+                    .message_list
+                    .push(ChatMessage::system(summary_block));
+
+                self.state.status_message = Some(format!(
+                    "Compacted: {} → {} tokens",
+                    compact_result.old_tokens, compact_result.new_tokens
+                ));
+
+                // Update panel
+                self.update_panel_from_bridge();
+            }
+            Ok(None) => {
+                self.state.status_message = Some("Not enough messages to compact".to_string());
+            }
+            Err(e) => {
+                self.state.status_message = Some(format!("Compact failed: {}", e));
+            }
+        }
+
+        self.render()?;
+        Ok(())
     }
 
     /// Run LLM work while continuously updating the UI

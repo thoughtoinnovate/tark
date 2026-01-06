@@ -1249,12 +1249,10 @@ impl AgentBridge {
         let _ = self.storage.save_session(&self.current_session);
     }
 
-    /// Compact the conversation
-    pub async fn compact(&mut self) -> Result<String> {
-        // For now, just clear and return a message
-        // TODO: Implement actual compaction with summary
-        self.clear_history();
-        Ok("Conversation compacted".to_string())
+    /// Compact the conversation by summarizing older messages
+    /// Returns a formatted result message showing before/after stats
+    pub async fn compact(&mut self) -> Result<Option<crate::agent::CompactResult>> {
+        self.agent.compact().await
     }
 
     /// Get available providers
