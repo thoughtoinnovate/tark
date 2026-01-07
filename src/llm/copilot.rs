@@ -489,7 +489,7 @@ impl CopilotProvider {
 
             // Show progress every 5 polls (roughly every 15-25 seconds depending on interval)
             poll_count += 1;
-            if !self.silent && poll_count.is_multiple_of(5) {
+            if !self.silent && poll_count % 5 == 0 {
                 let elapsed = start.elapsed().as_secs();
                 eprint!("\r⏳ Still waiting... ({}s elapsed)  ", elapsed);
                 use std::io::Write;
