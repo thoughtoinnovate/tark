@@ -1059,18 +1059,21 @@ fn render_message(
 fn render_collapsible_block(
     block: &CollapsibleBlock,
     is_expanded: bool,
-    _width: u16,
+    width: u16,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
+    // Calculate usable width (account for border "│ " = 2 chars)
+    let content_width = width.saturating_sub(4) as usize; // 2 for border, 2 for padding
+
     // Determine colors based on block type and error state (Requirements 7.2)
-    let (header_color, border_color) = if block.has_error {
+    let (header_color, border_color, content_color) = if block.has_error {
         // Error blocks use red styling
-        (Color::Red, Color::Red)
+        (Color::Red, Color::Red, Color::Red)
     } else {
         match block.block_type() {
-            BlockType::Thinking => (Color::Cyan, Color::DarkGray),
-            BlockType::Tool => (Color::Magenta, Color::DarkGray),
+            BlockType::Thinking => (Color::Cyan, Color::DarkGray, Color::Rgb(180, 180, 200)),
+            BlockType::Tool => (Color::Magenta, Color::DarkGray, Color::Gray),
         }
     };
 
@@ -1111,28 +1114,159 @@ fn render_collapsible_block(
 
         for content_line in block.content() {
             // Use red for error content lines that start with ✗
-            let content_style = if block.has_error && content_line.starts_with('✗') {
+            let base_style = if block.has_error && content_line.starts_with('✗') {
                 Style::default().fg(Color::Red)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default()
+                    .fg(content_color)
+                    .add_modifier(Modifier::ITALIC)
             };
 
-            // Add border and content
-            let line = Line::from(vec![
-                Span::styled("│ ", border_style),
-                Span::styled(content_line.clone(), content_style),
-            ]);
-            lines.push(line);
+            // Wrap long lines to fit within available width
+            let wrapped_lines = wrap_text_simple(content_line, content_width);
+            for wrapped in wrapped_lines {
+                // Render with basic markdown styling for thinking blocks
+                let styled_spans = if block.block_type() == BlockType::Thinking {
+                    render_thinking_markdown(&wrapped, base_style)
+                } else {
+                    vec![Span::styled(wrapped, base_style)]
+                };
+
+                let mut line_spans = vec![Span::styled("│ ", border_style)];
+                line_spans.extend(styled_spans);
+                lines.push(Line::from(line_spans));
+            }
         }
 
-        // Closing border
-        lines.push(Line::from(Span::styled(
-            "╰──────────────────────────────────────────────────",
-            border_style,
-        )));
+        // Adaptive closing border (matches content width)
+        let border_width = width.saturating_sub(2) as usize;
+        let closing_border = format!("╰{}", "─".repeat(border_width.min(60)));
+        lines.push(Line::from(Span::styled(closing_border, border_style)));
     }
 
     lines
+}
+
+/// Simple text wrapping that respects word boundaries
+fn wrap_text_simple(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+
+    let mut result = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width = 0;
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+
+        if current_width == 0 {
+            // First word on line
+            if word_len > max_width {
+                // Word is longer than max width, split it
+                for chunk in word.chars().collect::<Vec<_>>().chunks(max_width) {
+                    result.push(chunk.iter().collect());
+                }
+            } else {
+                current_line = word.to_string();
+                current_width = word_len;
+            }
+        } else if current_width + 1 + word_len <= max_width {
+            // Word fits on current line
+            current_line.push(' ');
+            current_line.push_str(word);
+            current_width += 1 + word_len;
+        } else {
+            // Word doesn't fit, start new line
+            result.push(std::mem::take(&mut current_line));
+            if word_len > max_width {
+                // Word is longer than max width, split it
+                for chunk in word.chars().collect::<Vec<_>>().chunks(max_width) {
+                    result.push(chunk.iter().collect());
+                }
+                current_width = 0;
+            } else {
+                current_line = word.to_string();
+                current_width = word_len;
+            }
+        }
+    }
+
+    if !current_line.is_empty() {
+        result.push(current_line);
+    }
+
+    if result.is_empty() {
+        result.push(String::new());
+    }
+
+    result
+}
+
+/// Render text with basic markdown styling for thinking blocks
+fn render_thinking_markdown(text: &str, base_style: Style) -> Vec<Span<'static>> {
+    let bold_style = base_style.add_modifier(Modifier::BOLD);
+    let code_style = Style::default()
+        .fg(Color::Yellow)
+        .bg(Color::Rgb(40, 40, 50));
+
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    let mut in_bold = false;
+    let mut in_code = false;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '*' if chars.peek() == Some(&'*') => {
+                // Toggle bold
+                chars.next();
+                if !current.is_empty() {
+                    let style = if in_code {
+                        code_style
+                    } else if in_bold {
+                        bold_style
+                    } else {
+                        base_style
+                    };
+                    spans.push(Span::styled(std::mem::take(&mut current), style));
+                }
+                in_bold = !in_bold;
+            }
+            '`' => {
+                // Toggle inline code
+                if !current.is_empty() {
+                    let style = if in_code {
+                        code_style
+                    } else if in_bold {
+                        bold_style
+                    } else {
+                        base_style
+                    };
+                    spans.push(Span::styled(std::mem::take(&mut current), style));
+                }
+                in_code = !in_code;
+            }
+            _ => current.push(c),
+        }
+    }
+
+    if !current.is_empty() {
+        let style = if in_code {
+            code_style
+        } else if in_bold {
+            bold_style
+        } else {
+            base_style
+        };
+        spans.push(Span::styled(current, style));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), base_style));
+    }
+
+    spans
 }
 
 /// Render a message with collapsible blocks for assistant messages

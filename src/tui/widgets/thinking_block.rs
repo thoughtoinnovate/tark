@@ -218,17 +218,25 @@ impl ThinkingBlock {
     ///
     /// Requirements: 9.1, 9.2
     pub fn render_lines(&self) -> Vec<Line<'static>> {
+        self.render_lines_with_width(60) // Default width
+    }
+
+    /// Render the thinking block with a specific width
+    pub fn render_lines_with_width(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         let border_style = Style::default().fg(Color::DarkGray);
         let header_style = Style::default()
-            .fg(Color::Magenta)
+            .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD);
         let scroll_style = Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM);
         let streaming_style = Style::default()
-            .fg(Color::Magenta)
+            .fg(Color::Cyan)
             .add_modifier(Modifier::SLOW_BLINK);
+
+        // Calculate content width (account for border "│ " = 2 chars)
+        let content_width = width.saturating_sub(4);
 
         // Header with line count and scroll position
         let header_text = if self.content.is_empty() {
@@ -248,7 +256,9 @@ impl ThinkingBlock {
 
         // Content if expanded
         if self.expanded {
-            let content_style = Style::default().fg(Color::Gray);
+            let content_style = Style::default()
+                .fg(Color::Rgb(180, 180, 200))
+                .add_modifier(Modifier::ITALIC);
 
             if self.content.is_empty() {
                 // Show placeholder when empty
@@ -277,11 +287,16 @@ impl ThinkingBlock {
 
                 // Render only visible content (fixed height with scrolling)
                 for line in self.visible_content() {
-                    // Parse inline markdown for styling
-                    let styled_spans = self.render_markdown_line(line);
-                    let mut span_vec = vec![Span::styled("│ ", border_style)];
-                    span_vec.extend(styled_spans);
-                    lines.push(Line::from(span_vec));
+                    // Wrap long lines to fit within available width
+                    let wrapped_lines = Self::wrap_text(line, content_width);
+                    for wrapped in wrapped_lines {
+                        // Parse inline markdown for styling
+                        let styled_spans =
+                            self.render_markdown_line_styled(&wrapped, content_style);
+                        let mut span_vec = vec![Span::styled("│ ", border_style)];
+                        span_vec.extend(styled_spans);
+                        lines.push(Line::from(span_vec));
+                    }
                 }
 
                 // Show "more below" indicator
@@ -304,25 +319,81 @@ impl ThinkingBlock {
                 }
             }
 
-            // Closing border
-            lines.push(Line::from(Span::styled(
-                "╰──────────────────────────────────────────────────",
-                border_style,
-            )));
+            // Adaptive closing border
+            let border_width = width.saturating_sub(2).min(60);
+            let closing_border = format!("╰{}", "─".repeat(border_width));
+            lines.push(Line::from(Span::styled(closing_border, border_style)));
         }
 
         lines
     }
 
-    /// Render a line with basic markdown formatting
+    /// Simple text wrapping that respects word boundaries
+    fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+        if max_width == 0 || text.is_empty() {
+            return vec![text.to_string()];
+        }
+
+        let mut result = Vec::new();
+        let mut current_line = String::new();
+        let mut current_width = 0;
+
+        for word in text.split_whitespace() {
+            let word_len = word.chars().count();
+
+            if current_width == 0 {
+                if word_len > max_width {
+                    // Word is longer than max width, split it
+                    for chunk in word.chars().collect::<Vec<_>>().chunks(max_width) {
+                        result.push(chunk.iter().collect());
+                    }
+                } else {
+                    current_line = word.to_string();
+                    current_width = word_len;
+                }
+            } else if current_width + 1 + word_len <= max_width {
+                current_line.push(' ');
+                current_line.push_str(word);
+                current_width += 1 + word_len;
+            } else {
+                result.push(std::mem::take(&mut current_line));
+                if word_len > max_width {
+                    for chunk in word.chars().collect::<Vec<_>>().chunks(max_width) {
+                        result.push(chunk.iter().collect());
+                    }
+                    current_width = 0;
+                } else {
+                    current_line = word.to_string();
+                    current_width = word_len;
+                }
+            }
+        }
+
+        if !current_line.is_empty() {
+            result.push(current_line);
+        }
+
+        if result.is_empty() {
+            result.push(String::new());
+        }
+
+        result
+    }
+
+    /// Render a line with basic markdown formatting (default style)
     fn render_markdown_line(&self, line: &str) -> Vec<Span<'static>> {
-        let thinking_style = Style::default()
-            .fg(Color::Magenta)
+        let base_style = Style::default()
+            .fg(Color::Rgb(180, 180, 200))
             .add_modifier(Modifier::ITALIC);
-        let bold_style = Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::BOLD | Modifier::ITALIC);
-        let code_style = Style::default().fg(Color::Yellow).bg(Color::DarkGray);
+        self.render_markdown_line_styled(line, base_style)
+    }
+
+    /// Render a line with basic markdown formatting using a custom base style
+    fn render_markdown_line_styled(&self, line: &str, base_style: Style) -> Vec<Span<'static>> {
+        let bold_style = base_style.add_modifier(Modifier::BOLD);
+        let code_style = Style::default()
+            .fg(Color::Yellow)
+            .bg(Color::Rgb(40, 40, 50));
 
         let mut spans = Vec::new();
         let mut current = String::new();
@@ -341,7 +412,7 @@ impl ThinkingBlock {
                         } else if in_bold {
                             bold_style
                         } else {
-                            thinking_style
+                            base_style
                         };
                         spans.push(Span::styled(std::mem::take(&mut current), style));
                     }
@@ -355,7 +426,7 @@ impl ThinkingBlock {
                         } else if in_bold {
                             bold_style
                         } else {
-                            thinking_style
+                            base_style
                         };
                         spans.push(Span::styled(std::mem::take(&mut current), style));
                     }
@@ -371,13 +442,13 @@ impl ThinkingBlock {
             } else if in_bold {
                 bold_style
             } else {
-                thinking_style
+                base_style
             };
             spans.push(Span::styled(current, style));
         }
 
         if spans.is_empty() {
-            spans.push(Span::styled(String::new(), thinking_style));
+            spans.push(Span::styled(String::new(), base_style));
         }
 
         spans
