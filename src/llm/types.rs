@@ -391,3 +391,76 @@ impl StreamingResponseBuilder {
         }
     }
 }
+
+// ============================================================================
+// Thinking Settings
+// ============================================================================
+
+use crate::config::ThinkingConfig;
+use crate::llm::models_db::{models_db, ThinkingParamType};
+
+/// Per-request thinking settings (resolved from model defaults + config overrides)
+#[derive(Debug, Clone, Default)]
+pub struct ThinkingSettings {
+    /// Whether thinking is enabled for this request
+    pub enabled: bool,
+    /// Token budget for Claude/Gemini
+    pub budget_tokens: Option<u32>,
+    /// Reasoning effort for OpenAI o1/o3
+    pub reasoning_effort: Option<String>,
+    /// Which API param type to use
+    pub param_type: ThinkingParamType,
+}
+
+impl ThinkingSettings {
+    /// Resolve settings: models.dev defaults -> config overrides
+    ///
+    /// Priority:
+    /// 1. Per-model config override (config.thinking.models[model_id])
+    /// 2. Model defaults from models.dev
+    /// 3. Global config fallbacks
+    ///
+    /// Safety: Budget is capped at config.thinking.max_budget_tokens
+    pub async fn resolve(provider: &str, model_id: &str, config: &ThinkingConfig) -> Self {
+        let db = models_db();
+        let defaults = db.get_thinking_defaults(provider, model_id).await;
+
+        // Check if model supports thinking
+        if !defaults.supported {
+            return Self::default();
+        }
+
+        // Check for per-model config override
+        let override_settings = config.models.get(model_id);
+
+        // Check if explicitly disabled
+        if let Some(ovr) = override_settings {
+            if ovr.disabled.unwrap_or(false) {
+                return Self::default();
+            }
+        }
+
+        // Resolve budget_tokens: override > model default
+        let budget_tokens = override_settings
+            .and_then(|o| o.budget_tokens)
+            .or(Some(defaults.suggested_budget))
+            .map(|b| b.min(config.max_budget_tokens)); // Apply cap
+
+        // Resolve reasoning_effort: override > fallback
+        let reasoning_effort = override_settings
+            .and_then(|o| o.reasoning_effort.clone())
+            .or(Some(config.fallback_reasoning_effort.clone()));
+
+        Self {
+            enabled: config.enabled,
+            budget_tokens,
+            reasoning_effort,
+            param_type: defaults.param_type,
+        }
+    }
+
+    /// Create disabled settings
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+}

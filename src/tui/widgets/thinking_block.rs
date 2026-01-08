@@ -32,6 +32,10 @@ pub struct ThinkingBlock {
     pub expanded: bool,
     /// Whether this block is still receiving content (streaming)
     pub is_streaming: bool,
+    /// Current scroll position for internal scrolling
+    pub scroll_offset: usize,
+    /// Maximum visible lines (configurable, default 6)
+    pub max_visible_lines: usize,
 }
 
 impl ThinkingBlock {
@@ -44,6 +48,8 @@ impl ThinkingBlock {
             content: Vec::new(),
             expanded: true, // Default expanded per Requirement 9.2
             is_streaming: false,
+            scroll_offset: 0,
+            max_visible_lines: 6, // Default visible lines
         }
     }
 
@@ -54,7 +60,15 @@ impl ThinkingBlock {
             content,
             expanded: true,
             is_streaming: false,
+            scroll_offset: 0,
+            max_visible_lines: 6,
         }
+    }
+
+    /// Set max visible lines from config
+    pub fn with_max_visible_lines(mut self, lines: usize) -> Self {
+        self.max_visible_lines = lines;
+        self
     }
 
     /// Create a thinking block from a message ID and index
@@ -126,12 +140,77 @@ impl ThinkingBlock {
     /// Get the number of visible lines
     pub fn visible_lines(&self) -> usize {
         if self.expanded {
-            let mut lines = 1; // Header
-            lines += self.content.len().max(1); // Content lines (at least 1 for empty)
-            lines += 1; // Closing border
-            lines
+            // Header + min(content, max_visible) + scroll indicators + closing border
+            let content_lines = self.content.len().min(self.max_visible_lines).max(1);
+            let scroll_indicator_lines = if self.has_content_above() { 1 } else { 0 }
+                + if self.has_content_below() { 1 } else { 0 };
+            1 + content_lines + scroll_indicator_lines + 1
         } else {
             1 // Header only
+        }
+    }
+
+    /// Scroll up within the thinking block
+    pub fn scroll_up(&mut self) {
+        if self.scroll_offset > 0 {
+            self.scroll_offset -= 1;
+        }
+    }
+
+    /// Scroll down within the thinking block
+    pub fn scroll_down(&mut self) {
+        let max_offset = self.content.len().saturating_sub(self.max_visible_lines);
+        if self.scroll_offset < max_offset {
+            self.scroll_offset += 1;
+        }
+    }
+
+    /// Auto-scroll to bottom when streaming
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = self.content.len().saturating_sub(self.max_visible_lines);
+    }
+
+    /// Get visible content slice
+    pub fn visible_content(&self) -> &[String] {
+        let start = self.scroll_offset;
+        let end = (start + self.max_visible_lines).min(self.content.len());
+        if start < self.content.len() {
+            &self.content[start..end]
+        } else {
+            &[]
+        }
+    }
+
+    /// Check if there's content above the visible area
+    pub fn has_content_above(&self) -> bool {
+        self.scroll_offset > 0
+    }
+
+    /// Check if there's content below the visible area
+    pub fn has_content_below(&self) -> bool {
+        self.scroll_offset + self.max_visible_lines < self.content.len()
+    }
+
+    /// Get lines above count
+    pub fn lines_above(&self) -> usize {
+        self.scroll_offset
+    }
+
+    /// Get lines below count
+    pub fn lines_below(&self) -> usize {
+        self.content
+            .len()
+            .saturating_sub(self.scroll_offset + self.max_visible_lines)
+    }
+
+    /// Get scroll position string
+    pub fn scroll_position(&self) -> String {
+        if self.content.is_empty() {
+            String::new()
+        } else {
+            let current = self.scroll_offset + 1;
+            let total = self.content.len();
+            format!("[{}/{}]", current, total)
         }
     }
 
@@ -140,13 +219,28 @@ impl ThinkingBlock {
     /// Requirements: 9.1, 9.2
     pub fn render_lines(&self) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-
-        // Header with thinking indicator
+        let border_style = Style::default().fg(Color::DarkGray);
         let header_style = Style::default()
             .fg(Color::Magenta)
             .add_modifier(Modifier::BOLD);
+        let scroll_style = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM);
+        let streaming_style = Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::SLOW_BLINK);
 
-        let header_text = self.display_header();
+        // Header with line count and scroll position
+        let header_text = if self.content.is_empty() {
+            self.display_header()
+        } else {
+            format!(
+                "{} ({} lines) {}",
+                self.display_header(),
+                self.content.len(),
+                self.scroll_position()
+            )
+        };
         lines.push(Line::from(Span::styled(
             format!("╭── {} ", header_text),
             header_style,
@@ -154,18 +248,11 @@ impl ThinkingBlock {
 
         // Content if expanded
         if self.expanded {
-            let border_style = Style::default().fg(Color::DarkGray);
             let content_style = Style::default().fg(Color::Gray);
-            let thinking_style = Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::ITALIC);
 
             if self.content.is_empty() {
                 // Show placeholder when empty
                 if self.is_streaming {
-                    let streaming_style = Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::SLOW_BLINK);
                     lines.push(Line::from(vec![
                         Span::styled("│ ", border_style),
                         Span::styled("Thinking...", streaming_style),
@@ -177,31 +264,39 @@ impl ThinkingBlock {
                     ]));
                 }
             } else {
-                // Render content lines
-                for (i, line) in self.content.iter().enumerate() {
-                    // Limit displayed lines to prevent overwhelming the UI
-                    if i >= 20 {
-                        lines.push(Line::from(vec![
-                            Span::styled("│ ", border_style),
-                            Span::styled(
-                                format!("... ({} more lines)", self.content.len() - 20),
-                                content_style,
-                            ),
-                        ]));
-                        break;
-                    }
-
+                // Show "more above" indicator
+                if self.has_content_above() {
                     lines.push(Line::from(vec![
                         Span::styled("│ ", border_style),
-                        Span::styled(line.clone(), thinking_style),
+                        Span::styled(
+                            format!("↑ {} more lines above", self.lines_above()),
+                            scroll_style,
+                        ),
+                    ]));
+                }
+
+                // Render only visible content (fixed height with scrolling)
+                for line in self.visible_content() {
+                    // Parse inline markdown for styling
+                    let styled_spans = self.render_markdown_line(line);
+                    let mut span_vec = vec![Span::styled("│ ", border_style)];
+                    span_vec.extend(styled_spans);
+                    lines.push(Line::from(span_vec));
+                }
+
+                // Show "more below" indicator
+                if self.has_content_below() {
+                    lines.push(Line::from(vec![
+                        Span::styled("│ ", border_style),
+                        Span::styled(
+                            format!("↓ {} more lines below", self.lines_below()),
+                            scroll_style,
+                        ),
                     ]));
                 }
 
                 // Show streaming indicator at the end if still streaming
                 if self.is_streaming {
-                    let streaming_style = Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::SLOW_BLINK);
                     lines.push(Line::from(vec![
                         Span::styled("│ ", border_style),
                         Span::styled("...", streaming_style),
@@ -217,6 +312,75 @@ impl ThinkingBlock {
         }
 
         lines
+    }
+
+    /// Render a line with basic markdown formatting
+    fn render_markdown_line(&self, line: &str) -> Vec<Span<'static>> {
+        let thinking_style = Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::ITALIC);
+        let bold_style = Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC);
+        let code_style = Style::default().fg(Color::Yellow).bg(Color::DarkGray);
+
+        let mut spans = Vec::new();
+        let mut current = String::new();
+        let mut chars = line.chars().peekable();
+        let mut in_bold = false;
+        let mut in_code = false;
+
+        while let Some(c) = chars.next() {
+            match c {
+                '*' if chars.peek() == Some(&'*') => {
+                    // Toggle bold
+                    chars.next();
+                    if !current.is_empty() {
+                        let style = if in_code {
+                            code_style
+                        } else if in_bold {
+                            bold_style
+                        } else {
+                            thinking_style
+                        };
+                        spans.push(Span::styled(std::mem::take(&mut current), style));
+                    }
+                    in_bold = !in_bold;
+                }
+                '`' => {
+                    // Toggle inline code
+                    if !current.is_empty() {
+                        let style = if in_code {
+                            code_style
+                        } else if in_bold {
+                            bold_style
+                        } else {
+                            thinking_style
+                        };
+                        spans.push(Span::styled(std::mem::take(&mut current), style));
+                    }
+                    in_code = !in_code;
+                }
+                _ => current.push(c),
+            }
+        }
+
+        if !current.is_empty() {
+            let style = if in_code {
+                code_style
+            } else if in_bold {
+                bold_style
+            } else {
+                thinking_style
+            };
+            spans.push(Span::styled(current, style));
+        }
+
+        if spans.is_empty() {
+            spans.push(Span::styled(String::new(), thinking_style));
+        }
+
+        spans
     }
 }
 
@@ -259,18 +423,37 @@ impl Widget for ThinkingBlockWidget<'_> {
 pub struct ThinkingBlockManager {
     /// Thinking blocks
     blocks: Vec<ThinkingBlock>,
+    /// Max visible lines for new blocks (from config)
+    max_visible_lines: usize,
 }
 
 impl ThinkingBlockManager {
     /// Create a new empty manager
     pub fn new() -> Self {
-        Self { blocks: Vec::new() }
+        Self {
+            blocks: Vec::new(),
+            max_visible_lines: 6,
+        }
+    }
+
+    /// Create with config settings
+    pub fn with_max_visible_lines(max_visible_lines: usize) -> Self {
+        Self {
+            blocks: Vec::new(),
+            max_visible_lines,
+        }
+    }
+
+    /// Set max visible lines for new blocks
+    pub fn set_max_visible_lines(&mut self, lines: usize) {
+        self.max_visible_lines = lines;
     }
 
     /// Add a new thinking block
     pub fn add(&mut self, message_id: &str) -> &mut ThinkingBlock {
         let index = self.blocks.len();
-        let block = ThinkingBlock::from_message(message_id, index);
+        let mut block = ThinkingBlock::from_message(message_id, index);
+        block.max_visible_lines = self.max_visible_lines;
         self.blocks.push(block);
         self.blocks.last_mut().unwrap()
     }
@@ -356,6 +539,8 @@ mod tests {
         assert!(block.content.is_empty());
         assert!(block.expanded); // Default expanded per Requirement 9.2
         assert!(!block.is_streaming);
+        assert_eq!(block.scroll_offset, 0);
+        assert_eq!(block.max_visible_lines, 6);
     }
 
     #[test]

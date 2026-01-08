@@ -1028,7 +1028,7 @@ fn render_message(
 
     // Clone content to make it 'static
     let content = message.content.clone();
-    let content_lines = format_content_owned(content, content_style);
+    let content_lines = format_content_owned_with_width(content, content_style, width as usize);
     lines.extend(content_lines);
 
     // Streaming indicator
@@ -1043,9 +1043,6 @@ fn render_message(
 
     // Add spacing
     lines.push(Line::from(""));
-
-    // Ensure we don't exceed width (basic truncation)
-    let _ = width; // Width is used for future wrapping implementation
 
     lines
 }
@@ -1210,7 +1207,11 @@ fn render_message_with_blocks(
                     } else {
                         Style::default()
                     };
-                    let content_lines = format_content_owned(text.clone(), content_style);
+                    let content_lines = format_content_owned_with_width(
+                        text.clone(),
+                        content_style,
+                        width as usize,
+                    );
                     lines.extend(content_lines);
                 }
                 ContentSegment::Block(block) => {
@@ -1235,7 +1236,11 @@ fn render_message_with_blocks(
                         } else {
                             Style::default()
                         };
-                        let content_lines = format_content_owned(text.clone(), content_style);
+                        let content_lines = format_content_owned_with_width(
+                            text.clone(),
+                            content_style,
+                            width as usize,
+                        );
                         lines.extend(content_lines);
                     }
                     ContentSegment::Block(block) => {
@@ -1252,7 +1257,11 @@ fn render_message_with_blocks(
             } else {
                 Style::default()
             };
-            let content_lines = format_content_owned(message.content.clone(), content_style);
+            let content_lines = format_content_owned_with_width(
+                message.content.clone(),
+                content_style,
+                width as usize,
+            );
             lines.extend(content_lines);
         }
     } else {
@@ -1262,7 +1271,8 @@ fn render_message_with_blocks(
         } else {
             Style::default()
         };
-        let content_lines = format_content_owned(message.content.clone(), content_style);
+        let content_lines =
+            format_content_owned_with_width(message.content.clone(), content_style, width as usize);
         lines.extend(content_lines);
     }
 
@@ -1293,13 +1303,65 @@ fn render_message_with_blocks(
     lines
 }
 
+/// Wrap text to fit within a given width using word boundaries
+/// Returns a vector of wrapped lines
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+
+    if max_width == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width = 0;
+
+    for word in text.split_inclusive(|c: char| c.is_whitespace()) {
+        let word_width = UnicodeWidthStr::width(word);
+
+        if current_width + word_width > max_width && !current_line.is_empty() {
+            // Push current line and start new one
+            lines.push(current_line.trim_end().to_string());
+            current_line = word.trim_start().to_string();
+            current_width = UnicodeWidthStr::width(current_line.as_str());
+        } else {
+            current_line.push_str(word);
+            current_width += word_width;
+        }
+    }
+
+    // Don't forget the last line
+    if !current_line.is_empty() {
+        lines.push(current_line.trim_end().to_string());
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
+}
+
 /// Format content with owned strings for 'static lifetime
 /// Supports markdown: headers, code blocks, lists, blockquotes, horizontal rules
+/// If width is provided (> 0), text will be wrapped to fit within the width
 fn format_content_owned(content: String, base_style: Style) -> Vec<Line<'static>> {
+    format_content_owned_with_width(content, base_style, 0)
+}
+
+/// Format content with owned strings and optional word wrapping
+fn format_content_owned_with_width(
+    content: String,
+    base_style: Style,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
     let mut code_block_lines: Vec<String> = Vec::new();
     let mut code_lang = String::new();
+
+    // Reserve some space for margins/indentation
+    let wrap_width = if width > 4 { width - 2 } else { 0 };
 
     for line in content.lines() {
         // Code block handling
@@ -1352,15 +1414,30 @@ fn format_content_owned(content: String, base_style: Style) -> Vec<Line<'static>
         // Blockquote (> text)
         if line.trim_start().starts_with('>') {
             let quote_text = line.trim_start().trim_start_matches('>').trim();
-            lines.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(Color::Blue)),
-                Span::styled(
-                    quote_text.to_string(),
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ]));
+            // Wrap quote text if needed
+            if wrap_width > 6 {
+                for wrapped in wrap_text(quote_text, wrap_width - 4) {
+                    lines.push(Line::from(vec![
+                        Span::styled("  │ ", Style::default().fg(Color::Blue)),
+                        Span::styled(
+                            wrapped,
+                            Style::default()
+                                .fg(Color::Blue)
+                                .add_modifier(Modifier::ITALIC),
+                        ),
+                    ]));
+                }
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(Color::Blue)),
+                    Span::styled(
+                        quote_text.to_string(),
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+            }
             continue;
         }
 
@@ -1376,9 +1453,17 @@ fn format_content_owned(content: String, base_style: Style) -> Vec<Line<'static>
             continue;
         }
 
-        // Regular line with inline formatting
-        let formatted_line = format_inline_owned(line.to_string(), base_style);
-        lines.push(formatted_line);
+        // Regular line with inline formatting and wrapping
+        if wrap_width > 0 {
+            let wrapped_lines = wrap_text(line, wrap_width);
+            for wrapped in wrapped_lines {
+                let formatted_line = format_inline_owned(wrapped, base_style);
+                lines.push(formatted_line);
+            }
+        } else {
+            let formatted_line = format_inline_owned(line.to_string(), base_style);
+            lines.push(formatted_line);
+        }
     }
 
     // Handle unclosed code block

@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Main configuration structure
@@ -15,6 +16,7 @@ pub struct Config {
     pub completion: CompletionConfig,
     pub agent: AgentConfig,
     pub tools: ToolsConfig,
+    pub thinking: ThinkingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +218,49 @@ impl Default for ToolsConfig {
             allowed_paths: vec![".".to_string()],
         }
     }
+}
+
+/// Configuration for thinking/reasoning features
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThinkingConfig {
+    /// Enable thinking by default
+    pub enabled: bool,
+    /// Maximum token budget allowed (cost protection)
+    pub max_budget_tokens: u32,
+    /// Fallback reasoning effort for OpenAI o1/o3: "low", "medium", "high"
+    pub fallback_reasoning_effort: String,
+    /// Maximum visible lines for thinking block in UI
+    pub max_visible_lines: usize,
+    /// Automatically collapse thinking block after response complete
+    pub auto_collapse: bool,
+    /// Per-model overrides (model_id -> settings)
+    #[serde(default)]
+    pub models: HashMap<String, ModelThinkingOverride>,
+}
+
+impl Default for ThinkingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,            // Opt-in (cost protection)
+            max_budget_tokens: 50_000, // ~$0.75 safety cap
+            fallback_reasoning_effort: "medium".to_string(),
+            max_visible_lines: 6,
+            auto_collapse: false,
+            models: HashMap::new(),
+        }
+    }
+}
+
+/// Per-model thinking configuration override
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelThinkingOverride {
+    /// Override token budget (for Claude, Gemini)
+    pub budget_tokens: Option<u32>,
+    /// Override reasoning effort (for OpenAI o1/o3)
+    pub reasoning_effort: Option<String>,
+    /// Disable thinking for this model even if supported
+    pub disabled: Option<bool>,
 }
 
 impl Config {

@@ -35,6 +35,16 @@ pub struct ModelCost {
     /// Cache write cost per million (for prompt caching)
     #[serde(default)]
     pub cache_write: Option<f64>,
+    /// Reasoning/thinking token cost per million (if different from output)
+    #[serde(default)]
+    pub reasoning: Option<f64>,
+}
+
+impl ModelCost {
+    /// Get the cost for reasoning tokens (falls back to output cost)
+    pub fn reasoning_cost_per_million(&self) -> f64 {
+        self.reasoning.unwrap_or(self.output)
+    }
 }
 
 /// Model context/output limits
@@ -563,6 +573,7 @@ impl ModelsDbManager {
                 input_cost: model.cost.input,
                 output_cost: model.cost.output,
                 supports_caching: model.cost.cache_read.is_some(),
+                reasoning_cost: model.cost.reasoning_cost_per_million(),
             }
         } else {
             // Return defaults
@@ -582,7 +593,82 @@ impl ModelsDbManager {
                 input_cost: 0.0,
                 output_cost: 0.0,
                 supports_caching: false,
+                reasoning_cost: 0.0,
             }
+        }
+    }
+
+    /// Get smart thinking defaults for a specific model from models.dev
+    pub async fn get_thinking_defaults(
+        &self,
+        provider: &str,
+        model_id: &str,
+    ) -> ModelThinkingDefaults {
+        if let Ok(Some(model)) = self.get_model(provider, model_id).await {
+            if !model.reasoning {
+                return ModelThinkingDefaults::default();
+            }
+
+            // Calculate suggested budget: 1/4 of output limit, min 8K, max 50K
+            let suggested_budget = (model.limit.output / 4).clamp(8192, 50000);
+
+            // Get thinking cost (falls back to output cost)
+            let cost_per_million = model.cost.reasoning.unwrap_or(model.cost.output);
+            let cost_per_1k = cost_per_million / 1000.0;
+
+            // Determine param type based on provider
+            let param_type = match Self::normalize_provider(provider).as_str() {
+                "anthropic" => ThinkingParamType::BudgetTokens,
+                "openai" => ThinkingParamType::ReasoningEffort,
+                "google" => ThinkingParamType::ThinkingBudget,
+                _ => ThinkingParamType::BudgetTokens,
+            };
+
+            ModelThinkingDefaults {
+                supported: true,
+                suggested_budget,
+                cost_per_1k,
+                param_type,
+            }
+        } else {
+            Self::fallback_thinking_defaults(provider, model_id)
+        }
+    }
+
+    /// Fallback thinking defaults for unknown models
+    fn fallback_thinking_defaults(provider: &str, model_id: &str) -> ModelThinkingDefaults {
+        // Check known reasoning models by name pattern
+        let is_reasoning = model_id.contains("o1")
+            || model_id.contains("o3")
+            || model_id.contains("thinking")
+            || model_id.contains("sonnet-4")
+            || model_id.contains("3-7-sonnet")
+            || model_id.contains("deepseek-r1");
+
+        if !is_reasoning {
+            return ModelThinkingDefaults::default();
+        }
+
+        match provider.to_lowercase().as_str() {
+            "openai" | "gpt" => ModelThinkingDefaults {
+                supported: true,
+                suggested_budget: 0, // Uses effort level, not tokens
+                cost_per_1k: 0.06,   // ~$60/M for o1
+                param_type: ThinkingParamType::ReasoningEffort,
+            },
+            "anthropic" | "claude" => ModelThinkingDefaults {
+                supported: true,
+                suggested_budget: 10_000,
+                cost_per_1k: 0.015, // ~$15/M
+                param_type: ThinkingParamType::BudgetTokens,
+            },
+            "google" | "gemini" => ModelThinkingDefaults {
+                supported: true,
+                suggested_budget: 8_192,
+                cost_per_1k: 0.0, // Included in output
+                param_type: ThinkingParamType::ThinkingBudget,
+            },
+            _ => ModelThinkingDefaults::default(),
         }
     }
 }
@@ -605,6 +691,8 @@ pub struct ModelCapabilities {
     pub input_cost: f64,
     pub output_cost: f64,
     pub supports_caching: bool,
+    /// Reasoning/thinking token cost per million
+    pub reasoning_cost: f64,
 }
 
 impl ModelCapabilities {
@@ -660,6 +748,42 @@ impl ModelCapabilities {
             format!("{}", self.context_limit)
         }
     }
+
+    /// Estimate thinking cost for given token budget
+    pub fn estimate_thinking_cost(&self, budget_tokens: u32) -> f64 {
+        let cost_per_million = if self.reasoning_cost > 0.0 {
+            self.reasoning_cost
+        } else {
+            self.output_cost
+        };
+        (budget_tokens as f64) * cost_per_million / 1_000_000.0
+    }
+}
+
+/// Provider-specific thinking parameter type
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ThinkingParamType {
+    #[default]
+    None,
+    /// Claude: thinking.budget_tokens
+    BudgetTokens,
+    /// OpenAI o1/o3: reasoning_effort (low/medium/high)
+    ReasoningEffort,
+    /// Gemini: thinkingConfig.thinkingBudget
+    ThinkingBudget,
+}
+
+/// Thinking configuration defaults for a specific model
+#[derive(Debug, Clone, Default)]
+pub struct ModelThinkingDefaults {
+    /// Whether this model supports thinking
+    pub supported: bool,
+    /// Suggested token budget (based on model's output limit)
+    pub suggested_budget: u32,
+    /// Cost per 1K thinking tokens
+    pub cost_per_1k: f64,
+    /// Provider-specific param type
+    pub param_type: ThinkingParamType,
 }
 
 /// Global singleton for the models database manager
@@ -703,6 +827,7 @@ mod tests {
                 output: 10.0,
                 cache_read: Some(1.25),
                 cache_write: Some(2.5),
+                reasoning: None,
             },
             limit: ModelLimits {
                 context: 128000,
@@ -801,6 +926,7 @@ mod tests {
             input_cost: 3.0,
             output_cost: 15.0,
             supports_caching: true,
+            reasoning_cost: 15.0,
         };
 
         let summary = caps.summary();
