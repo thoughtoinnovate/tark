@@ -2466,6 +2466,53 @@ impl TuiApp {
         }
     }
 
+    /// Scroll up within the most recent thinking block
+    ///
+    /// Uses [ key in normal mode when focused on messages
+    fn scroll_thinking_block_up(&mut self) {
+        // Find the most recent assistant message with thinking content
+        if let Some(msg) = self
+            .state
+            .message_list
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == super::widgets::Role::Assistant && !m.thinking_content.is_empty())
+        {
+            let block_id = format!("{}-thinking-stream", msg.id);
+            self.state
+                .message_list
+                .block_state_mut()
+                .scroll_up(&block_id);
+        }
+    }
+
+    /// Scroll down within the most recent thinking block
+    ///
+    /// Uses ] key in normal mode when focused on messages
+    fn scroll_thinking_block_down(&mut self) {
+        // Find the most recent assistant message with thinking content
+        if let Some(msg) = self
+            .state
+            .message_list
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == super::widgets::Role::Assistant && !m.thinking_content.is_empty())
+        {
+            let block_id = format!("{}-thinking-stream", msg.id);
+            // Calculate max scroll offset (total lines - visible lines)
+            // For simplicity, use a reasonable max based on content length
+            let total_lines = msg.thinking_content.lines().count();
+            let max_visible = 5; // Matches the max_visible_lines in render_collapsible_block
+            let max_offset = total_lines.saturating_sub(max_visible);
+            self.state
+                .message_list
+                .block_state_mut()
+                .scroll_down(&block_id, max_offset);
+        }
+    }
+
     /// Handle submit action
     fn handle_submit(&mut self) {
         // Hide command dropdown if visible
@@ -3377,6 +3424,17 @@ impl TuiApp {
     ///
     /// Requirements: 2.6, 13.4, 13.5, 13.6
     fn apply_mode_change(&mut self, new_mode: AgentMode) {
+        // Don't allow mode changes while a message is being processed
+        // The agent_bridge is taken during async processing, so mode changes
+        // would only update the UI state, not the actual agent tools.
+        // This could lead to security issues where Plan mode shows in UI
+        // but Build tools are still available to the running agent.
+        if self.agent_bridge.is_none() {
+            self.state.status_message =
+                Some("⚠️ Cannot change mode while processing - please wait".to_string());
+            return;
+        }
+
         let old_mode = self.state.mode;
 
         // Update state
