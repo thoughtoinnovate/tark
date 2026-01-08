@@ -157,6 +157,10 @@ impl CollapsibleBlock {
 pub struct CollapsibleBlockState {
     /// Map of block ID to expanded state
     states: HashMap<String, bool>,
+    /// Map of block ID to scroll offset (for thinking blocks)
+    scroll_offsets: HashMap<String, usize>,
+    /// Currently focused block ID (for keyboard navigation)
+    focused_block: Option<String>,
 }
 
 impl CollapsibleBlockState {
@@ -164,6 +168,8 @@ impl CollapsibleBlockState {
     pub fn new() -> Self {
         Self {
             states: HashMap::new(),
+            scroll_offsets: HashMap::new(),
+            focused_block: None,
         }
     }
 
@@ -196,6 +202,8 @@ impl CollapsibleBlockState {
     /// Clear all stored states
     pub fn clear(&mut self) {
         self.states.clear();
+        self.scroll_offsets.clear();
+        self.focused_block = None;
     }
 
     /// Get the number of stored states
@@ -206,6 +214,54 @@ impl CollapsibleBlockState {
     /// Check if there are no stored states
     pub fn is_empty(&self) -> bool {
         self.states.is_empty()
+    }
+
+    /// Get scroll offset for a block (0 if not set)
+    pub fn scroll_offset(&self, id: &str) -> usize {
+        self.scroll_offsets.get(id).copied().unwrap_or(0)
+    }
+
+    /// Set scroll offset for a block
+    pub fn set_scroll_offset(&mut self, id: &str, offset: usize) {
+        self.scroll_offsets.insert(id.to_string(), offset);
+    }
+
+    /// Scroll up within a block (returns true if scrolled)
+    pub fn scroll_up(&mut self, id: &str) -> bool {
+        let offset = self.scroll_offset(id);
+        if offset > 0 {
+            self.set_scroll_offset(id, offset - 1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Scroll down within a block (returns true if scrolled)
+    /// max_offset is total_lines - visible_lines
+    pub fn scroll_down(&mut self, id: &str, max_offset: usize) -> bool {
+        let offset = self.scroll_offset(id);
+        if offset < max_offset {
+            self.set_scroll_offset(id, offset + 1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the currently focused block ID
+    pub fn focused_block(&self) -> Option<&str> {
+        self.focused_block.as_deref()
+    }
+
+    /// Set the focused block
+    pub fn set_focused_block(&mut self, id: Option<String>) {
+        self.focused_block = id;
+    }
+
+    /// Check if a block is focused
+    pub fn is_focused(&self, id: &str) -> bool {
+        self.focused_block.as_deref() == Some(id)
     }
 }
 

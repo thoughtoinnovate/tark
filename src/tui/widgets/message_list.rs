@@ -1099,6 +1099,7 @@ fn render_collapsible_block(
     block: &CollapsibleBlock,
     is_expanded: bool,
     width: u16,
+    scroll_offset: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
@@ -1185,31 +1186,34 @@ fn render_collapsible_block(
 
         // For thinking blocks with more content than max_visible_lines, show limited view
         if is_thinking && total_lines > max_visible_lines {
-            // Show scroll indicator at top
-            lines.push(Line::from(vec![
-                Span::styled("│ ", border_style),
-                Span::styled(
-                    format!("─── 🧠 {} lines total ───", total_lines),
-                    scroll_style,
-                ),
-            ]));
+            // Calculate visible window based on scroll offset
+            // scroll_offset=0 means show from the end (most recent)
+            // As scroll_offset increases, we show earlier content
+            let max_scroll = total_lines.saturating_sub(max_visible_lines);
+            let effective_scroll = scroll_offset.min(max_scroll);
+            let start_idx = max_scroll.saturating_sub(effective_scroll);
+            let end_idx = (start_idx + max_visible_lines).min(total_lines);
 
-            // Show last N lines (most recent thinking)
-            let start_idx = total_lines.saturating_sub(max_visible_lines);
             let lines_above = start_idx;
+            let lines_below = total_lines.saturating_sub(end_idx);
 
+            // Show "more above" indicator
             if lines_above > 0 {
                 lines.push(Line::from(vec![
                     Span::styled("│ ", border_style),
                     Span::styled(
-                        format!("  ↑ {} more lines above", lines_above),
+                        format!("  ↑ {} more above (scroll up)", lines_above),
                         scroll_style,
                     ),
                 ]));
             }
 
-            // Render visible content
-            for (wrapped, base_style) in all_content_lines.iter().skip(start_idx) {
+            // Render visible content (from start_idx to end_idx)
+            for (wrapped, base_style) in all_content_lines
+                .iter()
+                .skip(start_idx)
+                .take(end_idx - start_idx)
+            {
                 let styled_spans = if is_thinking {
                     render_thinking_markdown(wrapped, *base_style)
                 } else {
@@ -1219,6 +1223,17 @@ fn render_collapsible_block(
                 let mut line_spans = vec![Span::styled("│ ", border_style)];
                 line_spans.extend(styled_spans);
                 lines.push(Line::from(line_spans));
+            }
+
+            // Show "more below" indicator
+            if lines_below > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("│ ", border_style),
+                    Span::styled(
+                        format!("  ↓ {} more below (scroll down)", lines_below),
+                        scroll_style,
+                    ),
+                ]));
             }
         } else {
             // Show all content (either not thinking block or fits within limit)
@@ -1420,7 +1435,9 @@ fn render_message_with_blocks(
         let thinking_block =
             CollapsibleBlock::thinking(thinking_block_id.clone(), thinking_content);
         let is_expanded = block_state.is_expanded(&thinking_block_id, BlockType::Thinking);
-        let block_lines = render_collapsible_block(&thinking_block, is_expanded, width);
+        let scroll_offset = block_state.scroll_offset(&thinking_block_id);
+        let block_lines =
+            render_collapsible_block(&thinking_block, is_expanded, width, scroll_offset);
         lines.extend(block_lines);
     }
 
@@ -1453,7 +1470,9 @@ fn render_message_with_blocks(
                         continue;
                     }
                     let is_expanded = block_state.is_expanded(block.id(), block.block_type());
-                    let block_lines = render_collapsible_block(block, is_expanded, width);
+                    let scroll_offset = block_state.scroll_offset(block.id());
+                    let block_lines =
+                        render_collapsible_block(block, is_expanded, width, scroll_offset);
                     lines.extend(block_lines);
                 }
             }
@@ -1486,7 +1505,9 @@ fn render_message_with_blocks(
                             continue;
                         }
                         let is_expanded = block_state.is_expanded(block.id(), block.block_type());
-                        let block_lines = render_collapsible_block(block, is_expanded, width);
+                        let scroll_offset = block_state.scroll_offset(block.id());
+                        let block_lines =
+                            render_collapsible_block(block, is_expanded, width, scroll_offset);
                         lines.extend(block_lines);
                     }
                 }
