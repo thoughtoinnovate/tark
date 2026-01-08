@@ -113,11 +113,15 @@ impl ClaudeProvider {
     }
 
     /// Create thinking config for models that support it
-    fn create_thinking_config(&self) -> Option<ThinkingConfig> {
-        if self.supports_extended_thinking() {
+    ///
+    /// Only returns Some when:
+    /// 1. The model supports extended thinking
+    /// 2. settings.enabled is true (controlled via /think command)
+    fn create_thinking_config(&self, settings: &super::ThinkSettings) -> Option<ThinkingConfig> {
+        if settings.enabled && self.supports_extended_thinking() {
             Some(ThinkingConfig {
                 thinking_type: "enabled".to_string(),
-                budget_tokens: 10000,
+                budget_tokens: settings.budget_tokens,
             })
         } else {
             None
@@ -164,6 +168,17 @@ impl LlmProvider for ClaudeProvider {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse> {
+        // Default: thinking off
+        self.chat_with_thinking(messages, tools, &super::ThinkSettings::off())
+            .await
+    }
+
+    async fn chat_with_thinking(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        settings: &super::ThinkSettings,
+    ) -> Result<LlmResponse> {
         let (system, claude_messages) = self.convert_messages(messages);
 
         let mut request = ClaudeRequest {
@@ -173,7 +188,7 @@ impl LlmProvider for ClaudeProvider {
             messages: claude_messages,
             tools: None,
             stream: None, // Non-streaming
-            thinking: self.create_thinking_config(),
+            thinking: self.create_thinking_config(settings),
         };
 
         if let Some(tools) = tools {
@@ -241,6 +256,25 @@ impl LlmProvider for ClaudeProvider {
         callback: StreamCallback,
         interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<LlmResponse> {
+        // Default: thinking off
+        self.chat_streaming_with_thinking(
+            messages,
+            tools,
+            callback,
+            interrupt_check,
+            &super::ThinkSettings::off(),
+        )
+        .await
+    }
+
+    async fn chat_streaming_with_thinking(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        settings: &super::ThinkSettings,
+    ) -> Result<LlmResponse> {
         use futures::StreamExt;
         use tokio::time::{timeout, Duration};
 
@@ -256,7 +290,7 @@ impl LlmProvider for ClaudeProvider {
             messages: claude_messages,
             tools: None,
             stream: Some(true), // Enable streaming
-            thinking: self.create_thinking_config(),
+            thinking: self.create_thinking_config(settings),
         };
 
         if let Some(tools) = tools {

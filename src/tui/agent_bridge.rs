@@ -293,6 +293,9 @@ impl AgentBridge {
         let mut agent = ChatAgent::with_mode(provider, tools, mode.into())
             .with_max_iterations(config.agent.max_iterations);
 
+        // Set thinking configuration
+        agent.set_thinking_config(config.thinking.clone());
+
         // Restore session messages if any
         if !current_session.messages.is_empty() {
             agent.restore_from_session(&current_session);
@@ -605,6 +608,29 @@ impl AgentBridge {
     /// Update max context tokens (when switching models)
     pub fn set_max_context_tokens(&mut self, max: usize) {
         self.agent.set_max_context_tokens(max);
+    }
+
+    /// Set the thinking/reasoning level by name
+    ///
+    /// Level names are defined in config.thinking.levels
+    /// "off" disables thinking
+    pub fn set_think_level(&mut self, level_name: String) {
+        self.agent.set_think_level(level_name);
+    }
+
+    /// Get the current thinking level name
+    pub fn think_level(&self) -> &str {
+        self.agent.think_level()
+    }
+
+    /// Check if thinking is enabled (any level other than "off")
+    pub fn is_thinking_enabled(&self) -> bool {
+        self.agent.is_thinking_enabled()
+    }
+
+    /// Get the thinking configuration
+    pub fn thinking_config(&self) -> &crate::config::ThinkingConfig {
+        &self.config.thinking
     }
 
     /// Get total cost from current session

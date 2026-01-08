@@ -5,7 +5,7 @@
 use super::ConversationContext;
 use crate::llm::{
     ContentPart, LlmProvider, LlmResponse, Message, MessageContent, Role, StreamCallback,
-    StreamEvent,
+    StreamEvent, ThinkSettings,
 };
 use crate::tools::{AgentMode, ToolRegistry};
 use crate::transport::update_status;
@@ -285,6 +285,11 @@ pub struct ChatAgent {
     context: ConversationContext,
     max_iterations: usize,
     mode: AgentMode,
+    /// Thinking/reasoning level name for LLM requests
+    /// "off" means disabled, other values are looked up in thinking_config
+    think_level: String,
+    /// Thinking configuration (levels and their settings)
+    thinking_config: crate::config::ThinkingConfig,
 }
 
 impl ChatAgent {
@@ -303,7 +308,37 @@ impl ChatAgent {
             context,
             max_iterations: 10,
             mode,
+            think_level: "off".to_string(), // Off by default, enabled via /think command
+            thinking_config: crate::config::ThinkingConfig::default(),
         }
+    }
+
+    /// Set the thinking configuration
+    pub fn set_thinking_config(&mut self, config: crate::config::ThinkingConfig) {
+        self.thinking_config = config;
+    }
+
+    /// Set the thinking/reasoning level by name
+    ///
+    /// Level names are defined in thinking_config.levels
+    /// "off" disables thinking
+    pub fn set_think_level(&mut self, level_name: String) {
+        self.think_level = level_name;
+    }
+
+    /// Get the current thinking level name
+    pub fn think_level(&self) -> &str {
+        &self.think_level
+    }
+
+    /// Check if thinking is enabled (any level other than "off")
+    pub fn is_thinking_enabled(&self) -> bool {
+        self.think_level != "off"
+    }
+
+    /// Resolve think settings from current config
+    fn resolve_think_settings(&self) -> ThinkSettings {
+        ThinkSettings::resolve(&self.think_level, &self.thinking_config)
     }
 
     pub fn with_max_iterations(mut self, max: usize) -> Self {
@@ -1418,13 +1453,15 @@ impl ChatAgent {
 
             // Call LLM with streaming - callbacks fire in real-time during this await
             let interrupt_check_ref: &(dyn Fn() -> bool + Send + Sync) = &interrupt_check;
+            let think_settings = self.resolve_think_settings();
             let response = self
                 .llm
-                .chat_streaming(
+                .chat_streaming_with_thinking(
                     self.context.messages(),
                     Some(&tool_definitions),
                     callback,
                     Some(interrupt_check_ref),
+                    &think_settings,
                 )
                 .await;
 

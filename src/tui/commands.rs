@@ -20,6 +20,12 @@ pub enum CommandResult {
     ChangeMode(AgentModeChange),
     /// Toggle a setting
     Toggle(ToggleSetting),
+    /// Set think level for LLM reasoning (level name from config)
+    SetThinkLevel(String),
+    /// Toggle think mode (off <-> default level from config)
+    ToggleThink,
+    /// Show think level help (invalid level entered)
+    ShowThinkHelp(String),
     /// Show help text
     ShowHelp(String),
     /// Show statistics
@@ -271,8 +277,8 @@ pub enum AgentModeChange {
 /// Settings that can be toggled
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToggleSetting {
-    /// Thinking/verbose mode
-    Thinking,
+    /// Toggle display of thinking blocks in UI (doesn't affect LLM behavior)
+    ThinkingDisplay,
 }
 
 /// A registered command
@@ -506,10 +512,21 @@ impl CommandHandler {
             requires_editor: false,
         });
 
+        // Thinking/reasoning commands
+        self.register(Command {
+            name: "think".to_string(),
+            description: "Control LLM thinking/reasoning mode".to_string(),
+            usage: "/think [off|low|medium|high]".to_string(),
+            category: CommandCategory::Utility,
+            requires_args: false,
+            requires_editor: false,
+        });
+        self.add_alias("reason", "think");
+
         // Utility commands
         self.register(Command {
             name: "thinking".to_string(),
-            description: "Toggle verbose/thinking mode".to_string(),
+            description: "Toggle display of thinking blocks in UI".to_string(),
             usage: "/thinking".to_string(),
             category: CommandCategory::Utility,
             requires_args: false,
@@ -801,8 +818,25 @@ impl CommandHandler {
             "build" => CommandResult::ChangeMode(AgentModeChange::Build),
             "review" => CommandResult::ChangeMode(AgentModeChange::Review),
 
+            // Think command - controls LLM reasoning
+            // Level validation happens in app.rs where we have access to config
+            "think" => {
+                if args.is_empty() {
+                    // Toggle: cycles off <-> default level
+                    CommandResult::ToggleThink
+                } else {
+                    let level = args.to_lowercase();
+                    if level == "off" || level == "disable" || level == "none" {
+                        CommandResult::SetThinkLevel("off".to_string())
+                    } else {
+                        // Pass the level name to be validated against config
+                        CommandResult::SetThinkLevel(level)
+                    }
+                }
+            }
+
             // Utility commands
-            "thinking" => CommandResult::Toggle(ToggleSetting::Thinking),
+            "thinking" => CommandResult::Toggle(ToggleSetting::ThinkingDisplay),
             "stats" => CommandResult::ShowStats,
             "cost" => CommandResult::ShowCost,
             "compact" => CommandResult::Compact,
@@ -1181,20 +1215,51 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_thinking_toggle() {
+    fn test_execute_thinking_display_toggle() {
         let handler = CommandHandler::new();
         assert_eq!(
             handler.execute("/thinking"),
-            CommandResult::Toggle(ToggleSetting::Thinking)
+            CommandResult::Toggle(ToggleSetting::ThinkingDisplay)
         );
         assert_eq!(
             handler.execute("/verbose"),
-            CommandResult::Toggle(ToggleSetting::Thinking)
+            CommandResult::Toggle(ToggleSetting::ThinkingDisplay)
         );
         assert_eq!(
             handler.execute("/debug"),
-            CommandResult::Toggle(ToggleSetting::Thinking)
+            CommandResult::Toggle(ToggleSetting::ThinkingDisplay)
         );
+    }
+
+    #[test]
+    fn test_execute_think_command() {
+        let handler = CommandHandler::new();
+        // Toggle (no args)
+        assert_eq!(handler.execute("/think"), CommandResult::ToggleThink);
+        // Specific levels (now string-based, validation happens in app.rs)
+        assert_eq!(
+            handler.execute("/think high"),
+            CommandResult::SetThinkLevel("high".to_string())
+        );
+        assert_eq!(
+            handler.execute("/think medium"),
+            CommandResult::SetThinkLevel("medium".to_string())
+        );
+        assert_eq!(
+            handler.execute("/think low"),
+            CommandResult::SetThinkLevel("low".to_string())
+        );
+        assert_eq!(
+            handler.execute("/think off"),
+            CommandResult::SetThinkLevel("off".to_string())
+        );
+        // Custom levels work too (validation in app.rs)
+        assert_eq!(
+            handler.execute("/think ultra"),
+            CommandResult::SetThinkLevel("ultra".to_string())
+        );
+        // Alias
+        assert_eq!(handler.execute("/reason"), CommandResult::ToggleThink);
     }
 
     #[test]

@@ -48,8 +48,11 @@ pub struct AppState {
     pub should_quit: bool,
     /// Current agent mode
     pub mode: AgentMode,
-    /// Whether thinking/verbose mode is enabled
-    pub thinking_mode: bool,
+    /// Whether to display thinking blocks in UI (controlled by /thinking)
+    pub thinking_display: bool,
+    /// Current think level name for LLM reasoning (controlled by /think)
+    /// "off" means disabled, other values are looked up in config.thinking.levels
+    pub think_level: String,
     /// Whether connected to an editor (Neovim)
     pub editor_connected: bool,
     /// Terminal size (cols, rows)
@@ -185,7 +188,8 @@ impl Default for AppState {
         Self {
             should_quit: false,
             mode: AgentMode::default(),
-            thinking_mode: true, // Enable thinking mode by default to show thinking blocks
+            thinking_display: true,         // Show thinking blocks by default
+            think_level: "off".to_string(), // LLM thinking off by default (cost savings)
             editor_connected: false,
             terminal_size: (0, 0),
             input_mode: InputMode::default(),
@@ -2634,18 +2638,104 @@ impl TuiApp {
                 self.apply_mode_change(new_mode);
             }
             CommandResult::Toggle(setting) => match setting {
-                ToggleSetting::Thinking => {
-                    self.state.thinking_mode = !self.state.thinking_mode;
+                ToggleSetting::ThinkingDisplay => {
+                    // Toggle display of thinking blocks in UI (doesn't affect LLM behavior)
+                    self.state.thinking_display = !self.state.thinking_display;
                     self.state.status_message = Some(format!(
-                        "Thinking mode: {}",
-                        if self.state.thinking_mode {
-                            "enabled"
+                        "Thinking blocks: {}",
+                        if self.state.thinking_display {
+                            "visible"
                         } else {
-                            "disabled"
+                            "hidden"
                         }
                     ));
                 }
             },
+            CommandResult::SetThinkLevel(level_name) => {
+                // Validate level against config from bridge
+                if level_name == "off" {
+                    // Disable thinking
+                    if let Some(ref mut bridge) = self.agent_bridge {
+                        bridge.set_think_level("off".to_string());
+                    }
+                    self.state.think_level = "off".to_string();
+                    self.state.status_message = Some("Think mode: off".to_string());
+                } else if let Some(ref bridge) = self.agent_bridge {
+                    let thinking_config = bridge.thinking_config();
+                    if thinking_config.get_level(&level_name).is_some() {
+                        // Valid level from config
+                        // Set the level (we need to reborrow as mutable)
+                        let level_to_set = level_name.clone();
+                        if let Some(ref mut b) = self.agent_bridge {
+                            b.set_think_level(level_to_set);
+                        }
+                        self.state.think_level = level_name.clone();
+                        self.state.status_message = Some(format!("Think mode: {} 🧠", level_name));
+                    } else {
+                        // Invalid level - show help with available levels
+                        let levels = thinking_config.levels_for_intellisense();
+                        let level_list: String = levels
+                            .iter()
+                            .map(|(name, desc)| format!("  {} - {}", name, desc))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        self.state.message_list.push(ChatMessage::system(format!(
+                            "Unknown think level: '{}'\n\nAvailable levels:\n{}\n\nUsage: /think <level>",
+                            level_name, level_list
+                        )));
+                    }
+                } else {
+                    self.state.status_message = Some("LLM not configured".to_string());
+                }
+            }
+            CommandResult::ToggleThink => {
+                // Toggle think mode: off <-> default level from config
+                if let Some(ref bridge) = self.agent_bridge {
+                    let thinking_config = bridge.thinking_config().clone();
+                    let new_level = if self.state.think_level == "off" {
+                        // Use "medium" as default toggle level, or first available level
+                        if thinking_config.get_level("medium").is_some() {
+                            "medium".to_string()
+                        } else {
+                            thinking_config
+                                .level_names()
+                                .first()
+                                .map(|s: &&str| s.to_string())
+                                .unwrap_or_else(|| "off".to_string())
+                        }
+                    } else {
+                        "off".to_string()
+                    };
+                    // Set the level (we need to reborrow as mutable)
+                    let level_to_set = new_level.clone();
+                    if let Some(ref mut b) = self.agent_bridge {
+                        b.set_think_level(level_to_set);
+                    }
+                    self.state.think_level = new_level.clone();
+                    self.state.status_message = Some(format!(
+                        "Think mode: {} {}",
+                        new_level,
+                        if new_level != "off" { "🧠" } else { "" }
+                    ));
+                } else {
+                    self.state.status_message = Some("LLM not configured".to_string());
+                }
+            }
+            CommandResult::ShowThinkHelp(invalid_level) => {
+                // Show help with available levels
+                if let Some(ref bridge) = self.agent_bridge {
+                    let levels = bridge.thinking_config().levels_for_intellisense();
+                    let level_list: String = levels
+                        .iter()
+                        .map(|(name, desc)| format!("  {} - {}", name, desc))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.state.message_list.push(ChatMessage::system(format!(
+                        "Unknown think level: '{}'\n\nAvailable levels:\n{}\n\nUsage: /think <level>",
+                        invalid_level, level_list
+                    )));
+                }
+            }
             CommandResult::ShowHelp(help_text) => {
                 // Add help as a system message
                 self.state.message_list.push(ChatMessage::system(help_text));
@@ -4383,8 +4473,8 @@ impl TuiApp {
                     }
                     AgentEvent::ThinkingChunk(chunk) => {
                         // Handle thinking content (Requirements 9.1, 9.3)
-                        // Only display if thinking_mode is enabled
-                        if self.state.thinking_mode {
+                        // Only display if thinking_display is enabled
+                        if self.state.thinking_display {
                             if let Some(last_msg) =
                                 self.state.message_list.messages_mut().last_mut()
                             {
@@ -4396,7 +4486,7 @@ impl TuiApp {
                                 }
                             }
                         }
-                        // Note: When thinking_mode is disabled, thinking content is silently ignored
+                        // Note: When thinking_display is disabled, thinking content is silently ignored
                     }
                     AgentEvent::ToolCallStarted { tool, args } => {
                         // Update status bar with current tool (Requirement 4.6)
@@ -4500,7 +4590,7 @@ impl TuiApp {
 
                                 // Update the streaming message with final content
                                 // If we have thinking content, wrap it in tags for collapsible rendering
-                                if !thinking_content.is_empty() && self.state.thinking_mode {
+                                if !thinking_content.is_empty() && self.state.thinking_display {
                                     last_msg.content = format!(
                                         "<thinking>\n{}\n</thinking>\n\n{}",
                                         thinking_content, info.text
@@ -4758,7 +4848,7 @@ impl TuiApp {
         let focused = self.state.focused_component;
         let pending_key = self.keybindings.pending_key();
         let agent_mode = self.state.mode;
-        let thinking_mode = self.state.thinking_mode;
+        let think_level = self.state.think_level.clone();
         let status_message = self.state.status_message.take();
         let editor_connected = self.state.editor_connected;
         let llm_configured = self.state.llm_configured;
@@ -4968,7 +5058,7 @@ impl TuiApp {
                 AgentMode::Plan => ("◇ Plan", Color::Yellow),
                 AgentMode::Review => ("◈ Review", Color::Cyan),
             };
-            let thinking_str = if thinking_mode { " 🧠" } else { "" };
+            let thinking_str = if think_level != "off" { " 🧠" } else { "" };
             let connection_str = if editor_connected {
                 ("◉ nvim", Color::Green)
             } else {
@@ -5105,7 +5195,7 @@ mod tests {
         let state = AppState::new();
         assert!(!state.should_quit);
         assert_eq!(state.mode, AgentMode::Build);
-        assert!(state.thinking_mode); // Thinking mode enabled by default
+        assert!(state.thinking_display); // Thinking display enabled by default
         assert!(!state.editor_connected);
         assert_eq!(state.input_mode, InputMode::Insert); // Start in insert mode
         assert_eq!(state.focused_component, FocusedComponent::Input);

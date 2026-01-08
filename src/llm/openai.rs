@@ -227,15 +227,19 @@ impl OpenAiProvider {
         result
     }
 
-    /// Check if the model supports reasoning (o1/o3 models)
+    /// Check if the model supports reasoning (o1/o3/o4 models)
     fn supports_reasoning(&self) -> bool {
-        self.model.starts_with("o1") || self.model.starts_with("o3")
+        self.model.starts_with("o1") || self.model.starts_with("o3") || self.model.starts_with("o4")
     }
 
-    /// Get reasoning effort for o1/o3 models
-    fn get_reasoning_effort(&self) -> Option<String> {
-        if self.supports_reasoning() {
-            Some("medium".to_string())
+    /// Get reasoning effort for o1/o3/o4 models
+    ///
+    /// Only returns Some when:
+    /// 1. The model supports reasoning
+    /// 2. settings.enabled is true (controlled via /think command)
+    fn get_reasoning_effort(&self, settings: &super::ThinkSettings) -> Option<String> {
+        if settings.enabled && self.supports_reasoning() && !settings.reasoning_effort.is_empty() {
+            Some(settings.reasoning_effort.clone())
         } else {
             None
         }
@@ -534,6 +538,17 @@ impl LlmProvider for OpenAiProvider {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse> {
+        // Default: thinking off
+        self.chat_with_thinking(messages, tools, &super::ThinkSettings::off())
+            .await
+    }
+
+    async fn chat_with_thinking(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        settings: &super::ThinkSettings,
+    ) -> Result<LlmResponse> {
         let openai_messages = self.convert_messages(messages);
 
         let mut request = OpenAiRequest {
@@ -544,7 +559,7 @@ impl LlmProvider for OpenAiProvider {
             tool_choice: None,
             stream: None, // Non-streaming
             stream_options: None,
-            reasoning_effort: self.get_reasoning_effort(),
+            reasoning_effort: self.get_reasoning_effort(settings),
         };
 
         if let Some(tools) = tools {
@@ -618,6 +633,25 @@ impl LlmProvider for OpenAiProvider {
         callback: StreamCallback,
         interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<LlmResponse> {
+        // Default: thinking off
+        self.chat_streaming_with_thinking(
+            messages,
+            tools,
+            callback,
+            interrupt_check,
+            &super::ThinkSettings::off(),
+        )
+        .await
+    }
+
+    async fn chat_streaming_with_thinking(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        settings: &super::ThinkSettings,
+    ) -> Result<LlmResponse> {
         use futures::StreamExt;
         use tokio::time::{timeout, Duration};
 
@@ -636,7 +670,7 @@ impl LlmProvider for OpenAiProvider {
             stream_options: Some(StreamOptions {
                 include_usage: true,
             }), // Get usage stats at end
-            reasoning_effort: self.get_reasoning_effort(),
+            reasoning_effort: self.get_reasoning_effort(settings),
         };
 
         if let Some(tools) = tools {

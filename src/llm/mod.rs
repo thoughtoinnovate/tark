@@ -42,6 +42,21 @@ pub trait LlmProvider: Send + Sync {
         tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse>;
 
+    /// Send a chat completion request with thinking settings (non-streaming)
+    ///
+    /// When `settings.enabled` is true and the model supports it,
+    /// extended thinking/reasoning will be used with the specified effort.
+    async fn chat_with_thinking(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        settings: &ThinkSettings,
+    ) -> Result<LlmResponse> {
+        // Default: ignore thinking settings and call regular chat
+        let _ = settings;
+        self.chat(messages, tools).await
+    }
+
     /// Send a streaming chat completion request
     ///
     /// The callback is invoked for each chunk as it arrives from the LLM.
@@ -56,6 +71,28 @@ pub trait LlmProvider: Send + Sync {
         callback: StreamCallback,
         interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<LlmResponse> {
+        self.chat_streaming_with_thinking(
+            messages,
+            tools,
+            callback,
+            interrupt_check,
+            &ThinkSettings::off(),
+        )
+        .await
+    }
+
+    /// Send a streaming chat completion request with thinking settings
+    ///
+    /// When `settings.enabled` is true and the model supports it,
+    /// extended thinking/reasoning will be used with the specified effort.
+    async fn chat_streaming_with_thinking(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        settings: &ThinkSettings,
+    ) -> Result<LlmResponse> {
         // Allow callers (TUI/agent) to interrupt even when using the fallback
         // non-streaming implementation.
         if let Some(check) = interrupt_check {
@@ -68,7 +105,7 @@ pub trait LlmProvider: Send + Sync {
         }
 
         // Default: fall back to non-streaming and emit complete response
-        let response = self.chat(messages, tools).await?;
+        let response = self.chat_with_thinking(messages, tools, settings).await?;
 
         // Emit the response as a single chunk
         if let Some(text) = response.text() {

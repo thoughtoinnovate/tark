@@ -224,43 +224,94 @@ impl Default for ToolsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThinkingConfig {
-    /// Enable thinking by default
-    pub enabled: bool,
-    /// Maximum token budget allowed (cost protection)
-    pub max_budget_tokens: u32,
-    /// Fallback reasoning effort for OpenAI o1/o3: "low", "medium", "high"
-    pub fallback_reasoning_effort: String,
+    /// Default level to use (must match a key in `levels`)
+    pub default_level: String,
     /// Maximum visible lines for thinking block in UI
     pub max_visible_lines: usize,
     /// Automatically collapse thinking block after response complete
     pub auto_collapse: bool,
-    /// Per-model overrides (model_id -> settings)
-    #[serde(default)]
-    pub models: HashMap<String, ModelThinkingOverride>,
+    /// Configurable thinking levels (e.g., "low", "medium", "high", "ultra")
+    #[serde(default = "ThinkingConfig::default_levels")]
+    pub levels: HashMap<String, ThinkLevel>,
+}
+
+impl ThinkingConfig {
+    /// Get default thinking levels
+    fn default_levels() -> HashMap<String, ThinkLevel> {
+        let mut levels = HashMap::new();
+        levels.insert(
+            "low".to_string(),
+            ThinkLevel {
+                description: "Quick reasoning, fast responses".to_string(),
+                budget_tokens: 2_000,
+                reasoning_effort: "low".to_string(),
+            },
+        );
+        levels.insert(
+            "medium".to_string(),
+            ThinkLevel {
+                description: "Balanced reasoning".to_string(),
+                budget_tokens: 10_000,
+                reasoning_effort: "medium".to_string(),
+            },
+        );
+        levels.insert(
+            "high".to_string(),
+            ThinkLevel {
+                description: "Deep reasoning for complex tasks".to_string(),
+                budget_tokens: 50_000,
+                reasoning_effort: "high".to_string(),
+            },
+        );
+        levels
+    }
+
+    /// Get a level by name (case-insensitive)
+    pub fn get_level(&self, name: &str) -> Option<&ThinkLevel> {
+        self.levels.get(&name.to_lowercase())
+    }
+
+    /// Get all level names sorted alphabetically
+    pub fn level_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.levels.keys().map(|s| s.as_str()).collect();
+        names.sort();
+        names
+    }
+
+    /// Get levels with descriptions for intellisense
+    pub fn levels_for_intellisense(&self) -> Vec<(String, String)> {
+        let mut items: Vec<(String, String)> = self
+            .levels
+            .iter()
+            .map(|(name, level)| (name.clone(), level.description.clone()))
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        // Add "off" as first option
+        items.insert(0, ("off".to_string(), "Disable thinking".to_string()));
+        items
+    }
 }
 
 impl Default for ThinkingConfig {
     fn default() -> Self {
         Self {
-            enabled: false,            // Opt-in (cost protection)
-            max_budget_tokens: 50_000, // ~$0.75 safety cap
-            fallback_reasoning_effort: "medium".to_string(),
+            default_level: "off".to_string(), // Off by default (cost protection)
             max_visible_lines: 6,
             auto_collapse: false,
-            models: HashMap::new(),
+            levels: Self::default_levels(),
         }
     }
 }
 
-/// Per-model thinking configuration override
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ModelThinkingOverride {
-    /// Override token budget (for Claude, Gemini)
-    pub budget_tokens: Option<u32>,
-    /// Override reasoning effort (for OpenAI o1/o3)
-    pub reasoning_effort: Option<String>,
-    /// Disable thinking for this model even if supported
-    pub disabled: Option<bool>,
+/// A configurable thinking level
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkLevel {
+    /// Human-readable description for intellisense
+    pub description: String,
+    /// Token budget for Claude/Gemini (thinking tokens)
+    pub budget_tokens: u32,
+    /// Reasoning effort for OpenAI o-series: "low", "medium", "high"
+    pub reasoning_effort: String,
 }
 
 impl Config {
