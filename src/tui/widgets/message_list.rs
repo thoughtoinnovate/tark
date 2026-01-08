@@ -1150,7 +1150,19 @@ fn render_collapsible_block(
     // Render content if expanded
     if is_expanded {
         let border_style = Style::default().fg(border_color);
+        let scroll_style = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM);
 
+        // Max visible lines for thinking blocks (compact display)
+        let max_visible_lines: usize = if block.block_type() == BlockType::Thinking {
+            5
+        } else {
+            usize::MAX // No limit for tool blocks
+        };
+
+        // First, collect all wrapped content lines
+        let mut all_content_lines: Vec<(String, Style)> = Vec::new();
         for content_line in block.content() {
             // Use red for error content lines that start with ✗
             let base_style = if block.has_error && content_line.starts_with('✗') {
@@ -1164,11 +1176,57 @@ fn render_collapsible_block(
             // Wrap long lines to fit within available width
             let wrapped_lines = wrap_text_simple(content_line, content_width);
             for wrapped in wrapped_lines {
-                // Render with basic markdown styling for thinking blocks
-                let styled_spans = if block.block_type() == BlockType::Thinking {
-                    render_thinking_markdown(&wrapped, base_style)
+                all_content_lines.push((wrapped, base_style));
+            }
+        }
+
+        let total_lines = all_content_lines.len();
+        let is_thinking = block.block_type() == BlockType::Thinking;
+
+        // For thinking blocks with more content than max_visible_lines, show limited view
+        if is_thinking && total_lines > max_visible_lines {
+            // Show scroll indicator at top
+            lines.push(Line::from(vec![
+                Span::styled("│ ", border_style),
+                Span::styled(
+                    format!("─── 🧠 {} lines total ───", total_lines),
+                    scroll_style,
+                ),
+            ]));
+
+            // Show last N lines (most recent thinking)
+            let start_idx = total_lines.saturating_sub(max_visible_lines);
+            let lines_above = start_idx;
+
+            if lines_above > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("│ ", border_style),
+                    Span::styled(
+                        format!("  ↑ {} more lines above", lines_above),
+                        scroll_style,
+                    ),
+                ]));
+            }
+
+            // Render visible content
+            for (wrapped, base_style) in all_content_lines.iter().skip(start_idx) {
+                let styled_spans = if is_thinking {
+                    render_thinking_markdown(wrapped, *base_style)
                 } else {
-                    vec![Span::styled(wrapped, base_style)]
+                    vec![Span::styled(wrapped.clone(), *base_style)]
+                };
+
+                let mut line_spans = vec![Span::styled("│ ", border_style)];
+                line_spans.extend(styled_spans);
+                lines.push(Line::from(line_spans));
+            }
+        } else {
+            // Show all content (either not thinking block or fits within limit)
+            for (wrapped, base_style) in &all_content_lines {
+                let styled_spans = if is_thinking {
+                    render_thinking_markdown(wrapped, *base_style)
+                } else {
+                    vec![Span::styled(wrapped.clone(), *base_style)]
                 };
 
                 let mut line_spans = vec![Span::styled("│ ", border_style)];
