@@ -1442,14 +1442,17 @@ fn format_content_owned_with_width(
         }
 
         // Unordered list (- or * at start)
-        if let Some(list_line) = format_list_item(line.to_string(), base_style) {
-            lines.push(list_line);
+        if let Some(list_lines) = format_list_item_wrapped(line.to_string(), base_style, wrap_width)
+        {
+            lines.extend(list_lines);
             continue;
         }
 
         // Numbered list (1. 2. etc)
-        if let Some(num_line) = format_numbered_list(line.to_string(), base_style) {
-            lines.push(num_line);
+        if let Some(num_lines) =
+            format_numbered_list_wrapped(line.to_string(), base_style, wrap_width)
+        {
+            lines.extend(num_lines);
             continue;
         }
 
@@ -1527,27 +1530,66 @@ fn format_header(line: String) -> Option<Line<'static>> {
     None
 }
 
-/// Format unordered list item (- or * at start)
-fn format_list_item(line: String, base_style: Style) -> Option<Line<'static>> {
+/// Format unordered list item with text wrapping (- or * at start)
+fn format_list_item_wrapped(
+    line: String,
+    base_style: Style,
+    wrap_width: usize,
+) -> Option<Vec<Line<'static>>> {
     let trimmed = line.trim_start();
     let indent = line.len() - trimmed.len();
     let indent_str = "  ".repeat(indent / 2);
 
     if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
         let text = trimmed[2..].to_string();
-        let formatted = format_inline_owned(text, base_style);
-        let mut spans = vec![
-            Span::raw(indent_str),
-            Span::styled("  • ", Style::default().fg(Color::Yellow)),
-        ];
-        spans.extend(formatted.spans);
-        return Some(Line::from(spans));
+
+        // Calculate prefix width: indent + "  • "
+        let prefix_width = indent_str.len() + 4;
+        let continuation_indent = " ".repeat(prefix_width);
+
+        // Wrap the text content
+        let text_wrap_width = wrap_width.saturating_sub(prefix_width);
+
+        let wrapped = if text_wrap_width > 0 {
+            wrap_text(&text, text_wrap_width)
+        } else {
+            vec![text]
+        };
+
+        let mut result = Vec::new();
+        for (i, wrapped_line) in wrapped.into_iter().enumerate() {
+            let formatted = format_inline_owned(wrapped_line, base_style);
+            if i == 0 {
+                // First line: include bullet
+                let mut spans = vec![
+                    Span::raw(indent_str.clone()),
+                    Span::styled("  • ", Style::default().fg(Color::Yellow)),
+                ];
+                spans.extend(formatted.spans);
+                result.push(Line::from(spans));
+            } else {
+                // Continuation lines: just indent
+                let mut spans = vec![Span::raw(continuation_indent.clone())];
+                spans.extend(formatted.spans);
+                result.push(Line::from(spans));
+            }
+        }
+        return Some(result);
     }
     None
 }
 
-/// Format numbered list item (1. 2. etc)
-fn format_numbered_list(line: String, base_style: Style) -> Option<Line<'static>> {
+/// Format unordered list item (- or * at start) - non-wrapping version for tests
+fn format_list_item(line: String, base_style: Style) -> Option<Line<'static>> {
+    format_list_item_wrapped(line, base_style, 0).map(|mut v| v.remove(0))
+}
+
+/// Format numbered list item with text wrapping (1. 2. etc)
+fn format_numbered_list_wrapped(
+    line: String,
+    base_style: Style,
+    wrap_width: usize,
+) -> Option<Vec<Line<'static>>> {
     let trimmed = line.trim_start();
     let indent = line.len() - trimmed.len();
     let indent_str = "  ".repeat(indent / 2);
@@ -1557,19 +1599,48 @@ fn format_numbered_list(line: String, base_style: Style) -> Option<Line<'static>
         let num_part = &trimmed[..dot_pos];
         if num_part.chars().all(|c| c.is_ascii_digit()) {
             let text = trimmed[dot_pos + 2..].to_string();
-            let formatted = format_inline_owned(text, base_style);
-            let mut spans = vec![
-                Span::raw(indent_str),
-                Span::styled(
-                    format!("  {}. ", num_part),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ];
-            spans.extend(formatted.spans);
-            return Some(Line::from(spans));
+
+            // Calculate prefix width: indent + "  N. "
+            let prefix = format!("  {}. ", num_part);
+            let prefix_width = indent_str.len() + prefix.len();
+            let continuation_indent = " ".repeat(prefix_width);
+
+            // Wrap the text content
+            let text_wrap_width = wrap_width.saturating_sub(prefix_width);
+
+            let wrapped = if text_wrap_width > 0 {
+                wrap_text(&text, text_wrap_width)
+            } else {
+                vec![text]
+            };
+
+            let mut result = Vec::new();
+            for (i, wrapped_line) in wrapped.into_iter().enumerate() {
+                let formatted = format_inline_owned(wrapped_line, base_style);
+                if i == 0 {
+                    // First line: include number
+                    let mut spans = vec![
+                        Span::raw(indent_str.clone()),
+                        Span::styled(prefix.clone(), Style::default().fg(Color::Yellow)),
+                    ];
+                    spans.extend(formatted.spans);
+                    result.push(Line::from(spans));
+                } else {
+                    // Continuation lines: just indent
+                    let mut spans = vec![Span::raw(continuation_indent.clone())];
+                    spans.extend(formatted.spans);
+                    result.push(Line::from(spans));
+                }
+            }
+            return Some(result);
         }
     }
     None
+}
+
+/// Format numbered list item (1. 2. etc) - non-wrapping version for tests
+fn format_numbered_list(line: String, base_style: Style) -> Option<Line<'static>> {
+    format_numbered_list_wrapped(line, base_style, 0).map(|mut v| v.remove(0))
 }
 
 /// Format inline markdown with owned strings
