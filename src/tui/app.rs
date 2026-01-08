@@ -1897,6 +1897,16 @@ impl TuiApp {
                 }
                 Ok(true)
             }
+            Action::ScrollBlockUp => {
+                // Scroll up within the most recent thinking block
+                self.scroll_thinking_block_up();
+                Ok(true)
+            }
+            Action::ScrollBlockDown => {
+                // Scroll down within the most recent thinking block
+                self.scroll_thinking_block_down();
+                Ok(true)
+            }
             Action::ToggleAttachmentDropdown => {
                 self.state.attachment_dropdown_state.toggle();
                 Ok(true)

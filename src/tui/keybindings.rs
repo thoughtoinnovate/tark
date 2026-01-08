@@ -86,6 +86,10 @@ pub enum Action {
     // Collapsible block actions
     /// Toggle collapsible block under cursor (Enter in messages)
     ToggleBlock,
+    /// Scroll up within thinking block ([ key in messages)
+    ScrollBlockUp,
+    /// Scroll down within thinking block (] key in messages)
+    ScrollBlockDown,
 
     // Attachment dropdown actions
     /// Toggle attachment dropdown
@@ -385,6 +389,10 @@ impl KeybindingHandler {
 
             // Enter key - context-dependent (toggle block in messages, toggle section in panel)
             (KeyCode::Enter, KeyModifiers::NONE) => Some(Action::ToggleBlock),
+
+            // Scroll within thinking block ([ for up, ] for down)
+            (KeyCode::Char('['), KeyModifiers::NONE) => Some(Action::ScrollBlockUp),
+            (KeyCode::Char(']'), KeyModifiers::NONE) => Some(Action::ScrollBlockDown),
 
             // Escape
             (KeyCode::Esc, KeyModifiers::NONE) => Some(self.handle_escape(Action::Cancel)),
