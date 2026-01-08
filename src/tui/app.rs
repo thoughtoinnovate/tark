@@ -2641,6 +2641,10 @@ impl TuiApp {
                 ToggleSetting::ThinkingDisplay => {
                     // Toggle display of thinking blocks in UI (doesn't affect LLM behavior)
                     self.state.thinking_display = !self.state.thinking_display;
+                    // Update the message list to reflect the toggle
+                    self.state
+                        .message_list
+                        .set_show_thinking(self.state.thinking_display);
                     self.state.status_message = Some(format!(
                         "Thinking blocks: {}",
                         if self.state.thinking_display {

@@ -155,7 +155,12 @@ impl ChatMessage {
 
     /// Calculate the number of lines this message will take
     /// This must match the rendering logic in render_message_with_blocks
-    pub fn line_count(&self, width: u16, block_state: &CollapsibleBlockState) -> usize {
+    pub fn line_count(
+        &self,
+        width: u16,
+        block_state: &CollapsibleBlockState,
+        show_thinking: bool,
+    ) -> usize {
         if width == 0 {
             return 1;
         }
@@ -169,6 +174,7 @@ impl ChatMessage {
             width,
             block_state,
             dummy_username,
+            show_thinking,
         );
 
         rendered_lines.len()
@@ -281,7 +287,7 @@ impl TextSelection {
 }
 
 /// Message list widget with scroll state
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MessageList {
     /// Messages in the list
     messages: Vec<ChatMessage>,
@@ -301,6 +307,25 @@ pub struct MessageList {
     last_width: u16,
     /// Cached total lines (invalidated on content change)
     cached_total_lines: Option<usize>,
+    /// Whether to display thinking blocks (controlled by /thinking command)
+    show_thinking: bool,
+}
+
+impl Default for MessageList {
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            scroll_offset: 0,
+            selected: None,
+            visible_height: 0,
+            block_state: CollapsibleBlockState::new(),
+            cursor_pos: TextPosition::default(),
+            selection: TextSelection::new(),
+            last_width: 0,
+            cached_total_lines: None,
+            show_thinking: true, // Show thinking blocks by default
+        }
+    }
 }
 
 impl MessageList {
@@ -321,6 +346,7 @@ impl MessageList {
             selection: TextSelection::new(),
             last_width: 0,
             cached_total_lines: None,
+            show_thinking: true, // Show thinking blocks by default
         }
     }
 
@@ -386,11 +412,24 @@ impl MessageList {
         self.visible_height = height;
     }
 
+    /// Set whether to display thinking blocks
+    pub fn set_show_thinking(&mut self, show: bool) {
+        if self.show_thinking != show {
+            self.show_thinking = show;
+            self.cached_total_lines = None; // Invalidate cache
+        }
+    }
+
+    /// Get whether thinking blocks are displayed
+    pub fn show_thinking(&self) -> bool {
+        self.show_thinking
+    }
+
     /// Calculate total content height in lines
     fn total_lines(&self, width: u16) -> usize {
         self.messages
             .iter()
-            .map(|m| m.line_count(width, &self.block_state))
+            .map(|m| m.line_count(width, &self.block_state, self.show_thinking))
             .sum()
     }
 
@@ -1285,6 +1324,7 @@ fn render_message_with_blocks(
     width: u16,
     block_state: &CollapsibleBlockState,
     username: &str,
+    show_thinking: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
@@ -1311,7 +1351,8 @@ fn render_message_with_blocks(
     lines.push(Line::from(Span::styled(header, header_style)));
 
     // Render thinking_content as a collapsible block if present (Requirements 9.1, 9.3)
-    if message.role == Role::Assistant && !message.thinking_content.is_empty() {
+    // Only render if show_thinking is enabled (controlled by /thinking command)
+    if show_thinking && message.role == Role::Assistant && !message.thinking_content.is_empty() {
         let thinking_block_id = format!("{}-thinking-stream", message.id);
         let thinking_content: Vec<String> = message
             .thinking_content
@@ -1349,6 +1390,10 @@ fn render_message_with_blocks(
                     lines.extend(content_lines);
                 }
                 ContentSegment::Block(block) => {
+                    // Skip thinking blocks if show_thinking is disabled
+                    if !show_thinking && block.block_type() == BlockType::Thinking {
+                        continue;
+                    }
                     let is_expanded = block_state.is_expanded(block.id(), block.block_type());
                     let block_lines = render_collapsible_block(block, is_expanded, width);
                     lines.extend(block_lines);
@@ -1360,8 +1405,8 @@ fn render_message_with_blocks(
         let message_id = message.id.to_string();
         let parsed = ParsedMessageContent::parse(&message.content, &[], &message_id);
 
-        if parsed.has_thinking() {
-            // Render with collapsible blocks
+        if parsed.has_thinking() && show_thinking {
+            // Render with collapsible blocks (only if show_thinking enabled)
             for segment in &parsed.segments {
                 match segment {
                     ContentSegment::Text(text) => {
@@ -1378,10 +1423,31 @@ fn render_message_with_blocks(
                         lines.extend(content_lines);
                     }
                     ContentSegment::Block(block) => {
+                        // Skip thinking blocks if show_thinking is disabled
+                        if !show_thinking && block.block_type() == BlockType::Thinking {
+                            continue;
+                        }
                         let is_expanded = block_state.is_expanded(block.id(), block.block_type());
                         let block_lines = render_collapsible_block(block, is_expanded, width);
                         lines.extend(block_lines);
                     }
+                }
+            }
+        } else if parsed.has_thinking() && !show_thinking {
+            // Has thinking but display is disabled - render only text segments
+            for segment in &parsed.segments {
+                if let ContentSegment::Text(text) = segment {
+                    let content_style = if is_selected {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default()
+                    };
+                    let content_lines = format_content_owned_with_width(
+                        text.clone(),
+                        content_style,
+                        width as usize,
+                    );
+                    lines.extend(content_lines);
                 }
             }
         } else {
@@ -1950,6 +2016,7 @@ impl<'a> MessageListWidget<'a> {
         let mut all_lines: Vec<Line<'static>> = Vec::new();
         let block_state = &self.message_list.block_state;
         let username = &self.username;
+        let show_thinking = self.message_list.show_thinking;
         for (idx, message) in self.message_list.messages.iter().enumerate() {
             let is_selected = self.message_list.selected == Some(idx);
             // Use the new render function that supports collapsible blocks
@@ -1960,6 +2027,7 @@ impl<'a> MessageListWidget<'a> {
                 inner.width,
                 block_state,
                 username,
+                show_thinking,
             );
             all_lines.extend(message_lines);
         }
@@ -2451,7 +2519,7 @@ mod property_tests {
             let block_state = CollapsibleBlockState::new();
 
             for message in &messages {
-                let lines = render_message_with_blocks(message, false, 80, &block_state, &username);
+                let lines = render_message_with_blocks(message, false, 80, &block_state, &username, true);
 
                 // The first line should be the header with icon and name
                 prop_assert!(!lines.is_empty(), "Message should produce at least one line");
@@ -2516,7 +2584,7 @@ mod property_tests {
             let fallback_username = "You";
 
             for message in messages.iter().filter(|m| m.role == Role::User) {
-                let lines = render_message_with_blocks(message, false, 80, &block_state, fallback_username);
+                let lines = render_message_with_blocks(message, false, 80, &block_state, fallback_username, true);
 
                 prop_assert!(!lines.is_empty(), "Message should produce at least one line");
 
