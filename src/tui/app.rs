@@ -4589,19 +4589,14 @@ impl TuiApp {
                             if last_msg.role == super::widgets::Role::Assistant
                                 && last_msg.is_streaming
                             {
-                                // Save thinking content before overwriting
-                                let thinking_content = last_msg.thinking_content.clone();
-
                                 // Update the streaming message with final content
-                                // If we have thinking content, wrap it in tags for collapsible rendering
-                                if !thinking_content.is_empty() && self.state.thinking_display {
-                                    last_msg.content = format!(
-                                        "<thinking>\n{}\n</thinking>\n\n{}",
-                                        thinking_content, info.text
-                                    );
-                                } else {
-                                    last_msg.content = info.text.clone();
-                                }
+                                // IMPORTANT: Do NOT embed thinking_content in content!
+                                // - thinking_content is for UI display only (shown in ThinkingBlock)
+                                // - content is what gets saved to session and sent to LLM
+                                // - Embedding thinking would increase context size unnecessarily
+                                last_msg.content = info.text.clone();
+                                // Note: thinking_content is already populated during streaming
+                                // and will be displayed separately by the ThinkingBlock widget
                                 last_msg.is_streaming = false;
 
                                 // Update tool call info from the response if we have detailed logs
