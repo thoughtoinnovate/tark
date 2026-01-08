@@ -2471,13 +2471,10 @@ impl TuiApp {
     /// Uses [ key in normal mode when focused on messages
     fn scroll_thinking_block_up(&mut self) {
         // Find the most recent assistant message with thinking content
-        if let Some(msg) = self
-            .state
-            .message_list
-            .messages()
-            .iter()
-            .rev()
-            .find(|m| m.role == super::widgets::Role::Assistant && !m.thinking_content.is_empty())
+        if let Some(msg) =
+            self.state.message_list.messages().iter().rev().find(|m| {
+                m.role == super::widgets::Role::Assistant && !m.thinking_content.is_empty()
+            })
         {
             let block_id = format!("{}-thinking-stream", msg.id);
             self.state
@@ -2492,13 +2489,10 @@ impl TuiApp {
     /// Uses ] key in normal mode when focused on messages
     fn scroll_thinking_block_down(&mut self) {
         // Find the most recent assistant message with thinking content
-        if let Some(msg) = self
-            .state
-            .message_list
-            .messages()
-            .iter()
-            .rev()
-            .find(|m| m.role == super::widgets::Role::Assistant && !m.thinking_content.is_empty())
+        if let Some(msg) =
+            self.state.message_list.messages().iter().rev().find(|m| {
+                m.role == super::widgets::Role::Assistant && !m.thinking_content.is_empty()
+            })
         {
             let block_id = format!("{}-thinking-stream", msg.id);
             // Calculate max scroll offset (total lines - visible lines)
