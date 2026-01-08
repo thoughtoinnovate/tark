@@ -489,6 +489,7 @@ impl CopilotProvider {
 
             // Show progress every 5 polls (roughly every 15-25 seconds depending on interval)
             poll_count += 1;
+            #[allow(clippy::manual_is_multiple_of)] // is_multiple_of is unstable
             if !self.silent && poll_count % 5 == 0 {
                 let elapsed = start.elapsed().as_secs();
                 eprint!("\r⏳ Still waiting... ({}s elapsed)  ", elapsed);
