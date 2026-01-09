@@ -8,6 +8,9 @@
 
 use std::io::{self, Stdout};
 use std::panic;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::{
     event::{
@@ -40,6 +43,100 @@ const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦
 
 /// Interval between spinner frame updates (milliseconds)
 const SPINNER_INTERVAL_MS: u64 = 80;
+
+/// Global force quit flag - set by signal handler on double Ctrl+C
+static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
+
+/// Global interrupt flag - set by signal handler on first Ctrl+C
+static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Counter for Ctrl+C presses (for signal handler)
+static CTRL_C_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Timestamp of last Ctrl+C press (for double-tap detection)
+static LAST_CTRL_C: AtomicU64 = AtomicU64::new(0);
+
+/// Time window for double Ctrl+C detection (milliseconds)
+const DOUBLE_CTRL_C_WINDOW_MS: u64 = 2000;
+
+/// Check if force quit has been requested (double Ctrl+C)
+pub fn is_force_quit_requested() -> bool {
+    FORCE_QUIT.load(Ordering::SeqCst)
+}
+
+/// Check if interrupt was requested via signal handler
+pub fn is_interrupt_requested() -> bool {
+    INTERRUPT_REQUESTED.load(Ordering::SeqCst)
+}
+
+/// Clear the interrupt flag (after handling it)
+pub fn clear_interrupt_flag() {
+    INTERRUPT_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+/// Install the global Ctrl+C signal handler
+///
+/// This sets up a handler that runs independently of the event loop:
+/// - First Ctrl+C: Sets interrupt flag, shows message
+/// - Second Ctrl+C within 2 seconds: Force exits the process
+///
+/// This MUST be called before entering the main event loop.
+pub fn install_signal_handler() {
+    let result = ctrlc::set_handler(move || {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let last = LAST_CTRL_C.swap(now, Ordering::SeqCst);
+        let count = CTRL_C_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+
+        if now - last < DOUBLE_CTRL_C_WINDOW_MS && count >= 2 {
+            // Double Ctrl+C detected - force quit immediately
+            // This runs in signal handler context, so we use _exit for safety
+            eprintln!("\n⚡ Force quit (double Ctrl+C)");
+
+            // Try to restore terminal state before exiting
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::LeaveAlternateScreen,
+                crossterm::event::DisableMouseCapture
+            );
+
+            std::process::exit(130); // 128 + SIGINT(2)
+        } else {
+            // First Ctrl+C - set interrupt flag
+            INTERRUPT_REQUESTED.store(true, Ordering::SeqCst);
+            FORCE_QUIT.store(true, Ordering::SeqCst);
+            eprintln!("\n⚠️  Interrupt requested. Press Ctrl+C again to force quit.");
+        }
+    });
+
+    if let Err(e) = result {
+        tracing::warn!("Failed to install Ctrl+C handler: {}", e);
+    }
+}
+
+/// Record a Ctrl+C press and check if it's a double-tap
+/// Returns true if this is a double-tap (force quit requested)
+/// Note: This is for keyboard event handling, the signal handler is primary
+pub fn record_ctrl_c() -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let last = LAST_CTRL_C.swap(now, Ordering::SeqCst);
+
+    if now - last < DOUBLE_CTRL_C_WINDOW_MS {
+        // Double Ctrl+C detected - force quit
+        FORCE_QUIT.store(true, Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
+}
 
 /// Application state for the TUI
 #[derive(Debug)]
@@ -124,6 +221,8 @@ pub struct AppState {
     pub auth_dialog: super::widgets::AuthDialog,
     /// Flag indicating compact operation is pending
     pub compact_pending: bool,
+    /// Questionnaire popup state (for ask_user tool)
+    pub questionnaire: super::widgets::QuestionnaireState,
 }
 
 /// State for tab completion
@@ -225,6 +324,7 @@ impl Default for AppState {
             panel_update_pending: false,
             compact_pending: false,
             auth_dialog: super::widgets::AuthDialog::default(),
+            questionnaire: super::widgets::QuestionnaireState::default(),
         }
     }
 }
@@ -619,6 +719,8 @@ pub struct TuiApp {
     username: String,
     /// Prompt history for navigating previous inputs (Requirements 14.3)
     prompt_history: super::prompt_history::PromptHistory,
+    /// Receiver for interaction requests from agent tools (questionnaire popups)
+    interaction_rx: Option<crate::tools::InteractionReceiver>,
 }
 
 impl TuiApp {
@@ -640,6 +742,9 @@ impl TuiApp {
         // Set up panic hook before initializing terminal
         Self::install_panic_hook();
 
+        // Install Ctrl+C signal handler for force quit
+        install_signal_handler();
+
         let terminal = Self::setup_terminal()?;
         let mut state = AppState::new();
         let events = EventHandler::new();
@@ -659,20 +764,21 @@ impl TuiApp {
         // Initialize prompt history (Requirements 14.3)
         let prompt_history = super::prompt_history::PromptHistory::for_workspace(&working_dir);
 
-        let (agent_bridge, llm_configured, llm_error) = match AgentBridge::new(working_dir) {
-            Ok(bridge) => (Some(bridge), true, None),
-            Err(e) => {
-                let error_msg = format!(
-                    "To configure an LLM provider, set one of the following environment variables:\n\
-                    • OPENAI_API_KEY - for OpenAI (GPT-4, etc.)\n\
-                    • ANTHROPIC_API_KEY - for Claude\n\
-                    • Or configure Ollama for local models\n\n\
-                    Error: {}",
-                    e
-                );
-                (None, false, Some(error_msg))
-            }
-        };
+        let (agent_bridge, llm_configured, llm_error, interaction_rx) =
+            match AgentBridge::new_with_interaction(working_dir) {
+                Ok((bridge, rx)) => (Some(bridge), true, None, Some(rx)),
+                Err(e) => {
+                    let error_msg = format!(
+                        "To configure an LLM provider, set one of the following environment variables:\n\
+                        • OPENAI_API_KEY - for OpenAI (GPT-4, etc.)\n\
+                        • ANTHROPIC_API_KEY - for Claude\n\
+                        • Or configure Ollama for local models\n\n\
+                        Error: {}",
+                        e
+                    );
+                    (None, false, Some(error_msg), None)
+                }
+            };
 
         state.llm_configured = llm_configured;
         state.llm_error = llm_error;
@@ -688,6 +794,7 @@ impl TuiApp {
             pending_request: None,
             username,
             prompt_history,
+            interaction_rx,
         };
 
         // Initialize panel data from AgentBridge (Requirements 5.1)
@@ -703,6 +810,9 @@ impl TuiApp {
     pub fn with_config(config: TuiConfig) -> anyhow::Result<Self> {
         // Set up panic hook before initializing terminal
         Self::install_panic_hook();
+
+        // Install Ctrl+C signal handler for force quit
+        install_signal_handler();
 
         let terminal = Self::setup_terminal()?;
         let mut state = AppState::with_config(config);
@@ -723,20 +833,21 @@ impl TuiApp {
         // Initialize prompt history (Requirements 14.3)
         let prompt_history = super::prompt_history::PromptHistory::for_workspace(&working_dir);
 
-        let (agent_bridge, llm_configured, llm_error) = match AgentBridge::new(working_dir) {
-            Ok(bridge) => (Some(bridge), true, None),
-            Err(e) => {
-                let error_msg = format!(
-                    "To configure an LLM provider, set one of the following environment variables:\n\
-                    • OPENAI_API_KEY - for OpenAI (GPT-4, etc.)\n\
-                    • ANTHROPIC_API_KEY - for Claude\n\
-                    • Or configure Ollama for local models\n\n\
-                    Error: {}",
-                    e
-                );
-                (None, false, Some(error_msg))
-            }
-        };
+        let (agent_bridge, llm_configured, llm_error, interaction_rx) =
+            match AgentBridge::new_with_interaction(working_dir) {
+                Ok((bridge, rx)) => (Some(bridge), true, None, Some(rx)),
+                Err(e) => {
+                    let error_msg = format!(
+                        "To configure an LLM provider, set one of the following environment variables:\n\
+                        • OPENAI_API_KEY - for OpenAI (GPT-4, etc.)\n\
+                        • ANTHROPIC_API_KEY - for Claude\n\
+                        • Or configure Ollama for local models\n\n\
+                        Error: {}",
+                        e
+                    );
+                    (None, false, Some(error_msg), None)
+                }
+            };
 
         state.llm_configured = llm_configured;
         state.llm_error = llm_error;
@@ -752,6 +863,7 @@ impl TuiApp {
             pending_request: None,
             username,
             prompt_history,
+            interaction_rx,
         };
 
         // Initialize panel data from AgentBridge (Requirements 5.1)
@@ -775,6 +887,9 @@ impl TuiApp {
         // Set up panic hook before initializing terminal
         Self::install_panic_hook();
 
+        // Install Ctrl+C signal handler for force quit
+        install_signal_handler();
+
         let terminal = Self::setup_terminal()?;
         let mut state = AppState::with_config(config);
         let events = EventHandler::new();
@@ -794,14 +909,11 @@ impl TuiApp {
         // Initialize prompt history (Requirements 14.3)
         let prompt_history = super::prompt_history::PromptHistory::for_workspace(&working_dir);
 
-        let (agent_bridge, llm_configured, llm_error) = match AgentBridge::with_provider(
-            working_dir,
-            provider,
-            model,
-        ) {
-            Ok(bridge) => (Some(bridge), true, None),
-            Err(e) => {
-                let error_msg = format!(
+        let (agent_bridge, llm_configured, llm_error, interaction_rx) =
+            match AgentBridge::with_provider_and_interaction(working_dir, provider, model) {
+                Ok((bridge, rx)) => (Some(bridge), true, None, Some(rx)),
+                Err(e) => {
+                    let error_msg = format!(
                         "To configure an LLM provider, set one of the following environment variables:\n\
                         • OPENAI_API_KEY - for OpenAI (GPT-4, etc.)\n\
                         • ANTHROPIC_API_KEY - for Claude\n\
@@ -810,9 +922,9 @@ impl TuiApp {
                         Error: {}",
                         e
                     );
-                (None, false, Some(error_msg))
-            }
-        };
+                    (None, false, Some(error_msg), None)
+                }
+            };
 
         state.llm_configured = llm_configured;
         state.llm_error = llm_error;
@@ -828,6 +940,7 @@ impl TuiApp {
             pending_request: None,
             username,
             prompt_history,
+            interaction_rx,
         };
 
         // Initialize panel data from AgentBridge (Requirements 5.1)
@@ -842,6 +955,14 @@ impl TuiApp {
     /// Get the current configuration
     pub fn config(&self) -> &TuiConfig {
         self.state.config()
+    }
+
+    /// Set the interaction receiver for handling tool requests like questionnaires
+    ///
+    /// This should be called after creating the TuiApp to enable the `ask_user` tool
+    /// to display questionnaire popups.
+    pub fn set_interaction_receiver(&mut self, rx: crate::tools::InteractionReceiver) {
+        self.interaction_rx = Some(rx);
     }
 
     /// Get the detected system username
@@ -1349,6 +1470,12 @@ impl TuiApp {
             }
         }
 
+        // Handle questionnaire input if active (ask_user tool)
+        if self.state.questionnaire.is_active() {
+            let consumed = self.state.questionnaire.handle_key(key);
+            return Ok(consumed);
+        }
+
         // Handle picker input first if picker is visible (Requirements 6.4, 12.1, 12.2)
         if self.state.picker.is_visible() {
             return self.handle_picker_key(key);
@@ -1374,12 +1501,15 @@ impl TuiApp {
     }
 
     /// Handle key events when file dropdown is visible
+    ///
+    /// Note: Uses arrow keys only for navigation (not j/k) because the dropdown
+    /// has a filter input where users need to type any character including j/k.
     fn handle_file_dropdown_key(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.state.file_dropdown.select_previous();
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.state.file_dropdown.select_next();
             }
             KeyCode::Esc => {
@@ -3227,12 +3357,23 @@ impl TuiApp {
     ///
     /// When `quit_if_idle` is true (Ctrl+C), quits if no operation is running.
     /// When `quit_if_idle` is false (/interrupt command), just shows a message.
+    ///
+    /// Double Ctrl+C within 2 seconds forces immediate quit (for stuck states).
     fn handle_interrupt_with_quit(&mut self, quit_if_idle: bool) {
+        // Check for double Ctrl+C (force quit)
+        if quit_if_idle && record_ctrl_c() {
+            // Double Ctrl+C - force quit immediately
+            tracing::warn!("Double Ctrl+C detected - forcing quit");
+            self.state.quit();
+            return;
+        }
+
         if self.state.agent_processing {
             // Agent is processing - interrupt it (Requirements 8.1, 8.2)
             if let Some(ref bridge) = self.agent_bridge {
                 bridge.interrupt();
-                self.state.status_message = Some("⚠️ Interrupting...".to_string());
+                self.state.status_message =
+                    Some("⚠️ Interrupting... (Press Ctrl+C again to force quit)".to_string());
 
                 // The AgentEvent::Interrupted will be received in poll_agent_events
                 // which will handle displaying partial response (Requirement 8.3)
@@ -3963,16 +4104,18 @@ impl TuiApp {
                 // Note: active_picker_type is now managed by handle_picker_confirm
                 // for the two-step flow
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            // Navigation uses arrow keys only (not j/k/g/G) because picker has
+            // filter input where users need to type any character
+            KeyCode::Up => {
                 self.state.picker.select_previous();
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.state.picker.select_next();
             }
-            KeyCode::Home | KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::NONE) => {
+            KeyCode::Home => {
                 self.state.picker.select_first();
             }
-            KeyCode::End | KeyCode::Char('G') => {
+            KeyCode::End => {
                 self.state.picker.select_last();
             }
             KeyCode::Backspace => {
@@ -4242,7 +4385,7 @@ impl TuiApp {
             self.state.message_list.scroll_to_bottom(width);
         }
 
-        while !self.state.should_quit {
+        while !self.state.should_quit && !is_force_quit_requested() {
             // Process any pending message queuing
             self.process_pending_async();
 
@@ -4260,6 +4403,9 @@ impl TuiApp {
 
             // Poll for agent events (non-blocking)
             let agent_events_processed = self.poll_agent_events();
+
+            // Poll for interaction requests from tools (e.g., ask_user questionnaire)
+            let interaction_request_received = self.poll_interaction_requests();
 
             // Update spinner if processing
             let needs_spinner_update = self.state.update_spinner_if_needed();
@@ -4290,9 +4436,11 @@ impl TuiApp {
                 if agent_events_processed
                     || needs_spinner_update
                     || auth_visibility_changed
+                    || interaction_request_received
                     || self.state.auth_dialog.is_visible()
+                    || self.state.questionnaire.is_active()
                 {
-                    // Re-render for agent updates, spinner animation, or auth dialog
+                    // Re-render for agent updates, spinner animation, auth dialog, or questionnaire
                     self.render()?;
                 }
             }
@@ -4438,9 +4586,12 @@ impl TuiApp {
             });
 
             // Poll events and render while LLM is working
-            while !done_flag.load(Ordering::SeqCst) {
+            while !done_flag.load(Ordering::SeqCst) && !is_force_quit_requested() {
                 // Poll for agent events (streaming chunks)
                 let events_processed = self.poll_agent_events();
+
+                // Poll for interaction requests (ask_user questionnaire popup)
+                let interaction_received = self.poll_interaction_requests();
 
                 // Update spinner
                 let spinner_updated = self.state.update_spinner_if_needed();
@@ -4454,12 +4605,24 @@ impl TuiApp {
                     if needs_redraw {
                         self.render()?;
                     }
-                } else if events_processed || spinner_updated {
+                } else if events_processed
+                    || spinner_updated
+                    || interaction_received
+                    || self.state.questionnaire.is_active()
+                {
                     self.render()?;
                 }
 
                 // Small yield to let the spawned task make progress
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+
+            // Check if force quit was requested
+            if is_force_quit_requested() {
+                tracing::warn!("Force quit requested during LLM processing");
+                self.state.quit();
+                // Don't wait for the handle - just restore bridge and exit
+                // The spawned task will be cancelled when we exit
             }
 
             // Get the result and restore the bridge
@@ -4893,6 +5056,37 @@ impl TuiApp {
         processed
     }
 
+    /// Poll for interaction requests from agent tools
+    ///
+    /// This handles requests from tools like `ask_user` that need to display
+    /// a popup and wait for user input.
+    ///
+    /// Returns true if a request was received and the questionnaire was opened.
+    fn poll_interaction_requests(&mut self) -> bool {
+        if let Some(ref mut rx) = self.interaction_rx {
+            // Try to receive without blocking
+            match rx.try_recv() {
+                Ok(request) => {
+                    match request {
+                        crate::tools::InteractionRequest::Questionnaire { data, responder } => {
+                            // Open the questionnaire popup
+                            self.state.questionnaire.open(data, responder);
+                            return true;
+                        }
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    // No requests pending
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    // Channel closed, clear it
+                    self.interaction_rx = None;
+                }
+            }
+        }
+        false
+    }
+
     /// Render the UI
     ///
     /// Enhanced layout structure (Requirements 1.1, 1.2, 1.3, 2.1-2.4, 9.1-9.7):
@@ -5206,6 +5400,13 @@ impl TuiApp {
             if self.state.auth_dialog.is_visible() {
                 let auth_widget = super::widgets::AuthDialogWidget::new(&self.state.auth_dialog);
                 frame.render_widget(auth_widget, area);
+            }
+
+            // Render questionnaire overlay if active (ask_user tool)
+            if self.state.questionnaire.is_active() {
+                let questionnaire_widget =
+                    super::widgets::QuestionnaireWidget::new(&self.state.questionnaire);
+                frame.render_widget(questionnaire_widget, area);
             }
 
             // Render command dropdown overlay if visible (above input area)

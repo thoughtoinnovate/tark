@@ -1,6 +1,6 @@
 [package]
 name = "tark-cli"
-version = "0.4.5"
+version = "0.5.0"
 edition = "2021"
 description = "AI-powered CLI agent with LSP server for code completion, hover, diagnostics, and chat"
 authors = ["tark contributors"]
@@ -56,6 +56,9 @@ grep-searcher = "0.1"
 # Config
 toml = "0.8"
 directories = "5"
+
+# Signal handling (for Ctrl+C force quit)
+ctrlc = "3.4"
 
 # Utilities
 url = "2"

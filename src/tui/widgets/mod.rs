@@ -32,5 +32,7 @@ pub use status_bar::StatusBar;
 pub use thinking_block::{ThinkingBlock, ThinkingBlockManager, ThinkingBlockWidget};
 pub use tool_block::{ToolBlock, ToolBlockManager, ToolBlockWidget, ToolStatus};
 mod auth_dialog;
+mod questionnaire;
 pub use auth_dialog::{AuthDialog, AuthDialogWidget, AuthStatus};
 pub use file_dropdown::{FileDropdown, FileDropdownItem, FileDropdownWidget};
+pub use questionnaire::{QuestionnaireState, QuestionnaireWidget};

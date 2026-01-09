@@ -843,6 +843,7 @@ impl LlmProvider for CopilotProvider {
             .header("Editor-Plugin-Version", "copilot/0.3.0")
             .header("Copilot-Integration-Id", "vscode-chat")
             .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
             .json(&request)
             .send()
             .await

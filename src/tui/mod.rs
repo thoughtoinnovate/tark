@@ -54,6 +54,7 @@ pub use widgets::{
     CollapsibleBlock, CollapsibleBlockState, ContentSegment, ContextInfo, EnhancedPanelData,
     EnhancedPanelSection, EnhancedPanelWidget, FileItem, InputWidget, MessageList,
     NotificationLevel, PanelDataProvider, PanelSection, PanelSectionState, PanelWidget,
-    ParsedMessageContent, Picker, PickerItem, PickerWidget, Role, SectionItem, SessionInfo,
-    StatusBar, TaskItem, TaskStatus as PanelTaskStatus, ToolCallInfo,
+    ParsedMessageContent, Picker, PickerItem, PickerWidget, QuestionnaireState,
+    QuestionnaireWidget, Role, SectionItem, SessionInfo, StatusBar, TaskItem,
+    TaskStatus as PanelTaskStatus, ToolCallInfo,
 };

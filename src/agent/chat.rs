@@ -48,6 +48,7 @@ Available tools:
 - read_files: Read MULTIPLE files at once
 - read_file: Read a single file
 - propose_change: 📋 Show a DIFF preview without applying (great for suggesting changes!)
+- ask_user: 💬 Ask user structured questions via popup (single-select, multi-select, free-text)
 
 You do NOT have: write_file, patch_file, delete_file, shell
 
@@ -100,11 +101,16 @@ When user asks for changes, use `propose_change` to show what the diff would loo
 
 ❌ If asked to actually APPLY changes: suggest /build mode
 
+💬 ASK_USER: When you need user input (choices, preferences, confirmations), use ask_user tool!
+- Don't ask questions in chat - use the tool for a popup dialog
+- Supports: single_select, multi_select, free_text question types
+
 ✅ ALWAYS:
 - For significant asks, start with an execution plan checklist
 - Try 3+ search patterns before saying "not found"
 - Show what you DID find
-- Use propose_change to show diffs when suggesting code changes"#
+- Use propose_change to show diffs when suggesting code changes
+- Use ask_user tool when you need user choices/input"#
             .to_string(),
 
         AgentMode::Review => r#"You are an AI coding assistant in REVIEW MODE.
@@ -128,6 +134,7 @@ Available tools:
 - patch_file: Apply targeted edits
 - delete_file: Delete files
 - shell: Execute shell commands
+- ask_user: 💬 Ask user structured questions via popup (single-select, multi-select, free-text)
 
 🔬 UNDERSTANDING CODE BEFORE CHANGING:
 1. Use list_symbols to understand file structure
@@ -139,6 +146,10 @@ IMPORTANT: For each action that modifies files or runs commands:
 1. Explain what you're about to do
 2. Show the exact changes/command
 3. Wait for user confirmation before proceeding
+
+💬 ASK_USER: When you need user input (choices, confirmations), use ask_user tool!
+- Don't ask questions in chat text - use the tool for a popup dialog
+- Supports: single_select, multi_select, free_text question types
 
 Be thorough and cautious. Explain implications of changes."#
             .to_string(),
@@ -169,6 +180,7 @@ Available tools:
 - patch_file: Apply targeted edits
 - delete_file: Delete files
 - shell: Execute shell commands
+- ask_user: 💬 Ask user structured questions via popup (single-select, multi-select, free-text)
 
 🔬 CODE UNDERSTANDING (use before modifying):
 - list_symbols: See all functions/types in a file
@@ -215,20 +227,31 @@ Safe shell commands (OK to run):
 - make, cmake
 - docker commands (with caution)
 
+💬 ASK_USER TOOL - ALWAYS USE THIS FOR QUESTIONS:
+⚠️ IMPORTANT: When you need ANY user input, ALWAYS use the ask_user tool instead of asking in chat!
+- Use for: choices, confirmations, preferences, configuration, yes/no questions
+- You can ask MULTIPLE questions in sequence - they appear one at a time
+- Question types: single_select (pick one), multi_select (pick many), free_text (type answer)
+- User can press Esc to cancel and answer via chat instead
+
+Example - Instead of asking "Which language do you prefer?" in chat, call:
+ask_user with questions: [{type: "single_select", text: "Which language?", options: [...]}]
+
 ❌ NEVER DO THIS:
 - Say "I couldn't find X" without trying multiple search patterns
-- Ask clarifying questions before searching
 - Explain what you're going to do instead of doing it
 - Give up after one failed search
 - Say you "can't create diagrams" - YOU CAN with Mermaid/PlantUML!
 - Run dangerous shell commands (they will be blocked anyway)
+- Ask questions in chat text - USE ask_user tool instead!
 
 ✅ ALWAYS DO THIS:
 - Try 3+ different search patterns before concluding something doesn't exist
 - Show what you DID find, even if it's not exactly what was asked
 - Create diagrams using Mermaid when asked for visual representations
 - Suggest next steps based on what you discovered
-- Be cautious with shell commands - prefer read-only commands when possible"#
+- Be cautious with shell commands - prefer read-only commands when possible
+- Use ask_user for structured choices instead of asking in chat when appropriate"#
                 .to_string()
         }
     };

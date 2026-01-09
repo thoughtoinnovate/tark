@@ -224,12 +224,25 @@ pub struct AgentBridge {
     usage_tracker: Option<UsageTracker>,
     /// In-memory usage log for current session (fallback when SQLite fails)
     session_usage: Vec<(String, String, f64)>, // (provider, model, cost)
+    /// Sender for interaction requests (ask_user tool)
+    interaction_tx: Option<crate::tools::InteractionSender>,
 }
 
 impl AgentBridge {
     /// Create a new agent bridge
     pub fn new(working_dir: PathBuf) -> Result<Self> {
-        Self::with_provider(working_dir, None, None)
+        let (bridge, _rx) = Self::with_provider_and_interaction(working_dir, None, None)?;
+        Ok(bridge)
+    }
+
+    /// Create a new agent bridge and return the interaction receiver
+    ///
+    /// The interaction receiver should be passed to TuiApp to enable
+    /// the `ask_user` tool to display questionnaire popups.
+    pub fn new_with_interaction(
+        working_dir: PathBuf,
+    ) -> Result<(Self, crate::tools::InteractionReceiver)> {
+        Self::with_provider_and_interaction(working_dir, None, None)
     }
 
     /// Create a new agent bridge with optional provider and model overrides
@@ -241,6 +254,20 @@ impl AgentBridge {
         provider_override: Option<String>,
         model_override: Option<String>,
     ) -> Result<Self> {
+        let (bridge, _rx) =
+            Self::with_provider_and_interaction(working_dir, provider_override, model_override)?;
+        Ok(bridge)
+    }
+
+    /// Create a new agent bridge with optional provider/model overrides and return interaction receiver
+    ///
+    /// The interaction receiver should be passed to TuiApp to enable
+    /// the `ask_user` tool to display questionnaire popups.
+    pub fn with_provider_and_interaction(
+        working_dir: PathBuf,
+        provider_override: Option<String>,
+        model_override: Option<String>,
+    ) -> Result<(Self, crate::tools::InteractionReceiver)> {
         let config = Config::load().unwrap_or_default();
         let storage = TarkStorage::new(&working_dir)?;
 
@@ -285,9 +312,16 @@ impl AgentBridge {
         // Get mode from session
         let mode = AgentMode::from(current_session.mode.as_str());
 
-        // Create tool registry for mode
-        let tools =
-            ToolRegistry::for_mode(working_dir.clone(), mode.into(), config.tools.shell_enabled);
+        // Create interaction channel for ask_user tool
+        let (interaction_tx, interaction_rx) = crate::tools::interaction_channel();
+
+        // Create tool registry for mode with interaction channel
+        let tools = ToolRegistry::for_mode_with_interaction(
+            working_dir.clone(),
+            mode.into(),
+            config.tools.shell_enabled,
+            Some(interaction_tx.clone()),
+        );
 
         // Create agent
         let mut agent = ChatAgent::with_mode(provider, tools, mode.into())
@@ -319,20 +353,24 @@ impl AgentBridge {
             );
         }
 
-        Ok(Self {
-            agent,
-            working_dir,
-            storage,
-            current_session,
-            provider_name,
-            model_name,
-            mode,
-            interrupt_flag: Arc::new(AtomicBool::new(false)),
-            is_processing: Arc::new(AtomicBool::new(false)),
-            config,
-            usage_tracker,
-            session_usage: Vec::new(),
-        })
+        Ok((
+            Self {
+                agent,
+                working_dir,
+                storage,
+                current_session,
+                provider_name,
+                model_name,
+                mode,
+                interrupt_flag: Arc::new(AtomicBool::new(false)),
+                is_processing: Arc::new(AtomicBool::new(false)),
+                config,
+                usage_tracker,
+                session_usage: Vec::new(),
+                interaction_tx: Some(interaction_tx),
+            },
+            interaction_rx,
+        ))
     }
 
     /// Get the current provider name
@@ -1175,11 +1213,12 @@ impl AgentBridge {
         // Update session
         self.current_session.mode = mode.to_string();
 
-        // Create new tool registry for mode
-        let tools = ToolRegistry::for_mode(
+        // Create new tool registry for mode with existing interaction channel
+        let tools = ToolRegistry::for_mode_with_interaction(
             self.working_dir.clone(),
             mode.into(),
             self.config.tools.shell_enabled,
+            self.interaction_tx.clone(),
         );
 
         // Update agent mode
@@ -1373,10 +1412,11 @@ impl AgentBridge {
 
         // Update mode from session
         self.mode = AgentMode::from(session.mode.as_str());
-        let tools = ToolRegistry::for_mode(
+        let tools = ToolRegistry::for_mode_with_interaction(
             self.working_dir.clone(),
             self.mode.into(),
             self.config.tools.shell_enabled,
+            self.interaction_tx.clone(),
         );
         self.agent.update_mode(tools, self.mode.into());
 

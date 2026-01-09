@@ -6,6 +6,7 @@ mod file_ops;
 mod file_search;
 mod grep;
 mod lsp_tools;
+pub mod questionnaire;
 mod shell;
 
 pub use file_ops::{
@@ -17,6 +18,9 @@ pub use grep::{FindReferencesTool, GrepTool};
 pub use lsp_tools::{
     set_lsp_proxy_port, CallHierarchyTool, CodeAnalyzer, FindAllReferencesTool, GetSignatureTool,
     GoToDefinitionTool, ListSymbolsTool,
+};
+pub use questionnaire::{
+    interaction_channel, AskUserTool, InteractionReceiver, InteractionRequest, InteractionSender,
 };
 pub use shell::ShellTool;
 
@@ -109,6 +113,19 @@ impl ToolRegistry {
 
     /// Create a registry for a specific agent mode
     pub fn for_mode(working_dir: PathBuf, mode: AgentMode, shell_enabled: bool) -> Self {
+        Self::for_mode_with_interaction(working_dir, mode, shell_enabled, None)
+    }
+
+    /// Create a registry for a specific agent mode with optional interaction channel
+    ///
+    /// When `interaction_tx` is provided, the `ask_user` tool is registered and can
+    /// be used by the agent to ask structured questions to the user via TUI popup.
+    pub fn for_mode_with_interaction(
+        working_dir: PathBuf,
+        mode: AgentMode,
+        shell_enabled: bool,
+        interaction_tx: Option<InteractionSender>,
+    ) -> Self {
         let mut registry = Self::new(working_dir.clone());
 
         tracing::debug!("Creating tool registry for mode: {:?}", mode);
@@ -128,6 +145,12 @@ impl ToolRegistry {
         registry.register(Arc::new(FindAllReferencesTool::new(working_dir.clone()))); // Find all usages
         registry.register(Arc::new(CallHierarchyTool::new(working_dir.clone()))); // Trace call flow
         registry.register(Arc::new(GetSignatureTool::new(working_dir.clone()))); // Get function signature
+
+        // Ask user tool (available in all modes when interaction channel is provided)
+        if interaction_tx.is_some() {
+            registry.register(Arc::new(AskUserTool::new(interaction_tx)));
+            tracing::debug!("Registered: ask_user (interaction channel provided)");
+        }
 
         // Write tools (only in Build and Review modes)
         if mode != AgentMode::Plan {
