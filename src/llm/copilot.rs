@@ -767,6 +767,13 @@ impl LlmProvider for CopilotProvider {
         true
     }
 
+    fn supports_native_thinking(&self) -> bool {
+        // Copilot uses OpenAI models - some like o1/o3 support reasoning
+        // but Copilot API may not expose the reasoning_effort parameter
+        // For now, return false until we can verify Copilot API support
+        false
+    }
+
     async fn chat_streaming(
         &self,
         messages: &[Message],

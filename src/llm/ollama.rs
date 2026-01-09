@@ -138,6 +138,13 @@ impl LlmProvider for OllamaProvider {
         "ollama"
     }
 
+    fn supports_native_thinking(&self) -> bool {
+        // Ollama models generally don't have native thinking/reasoning APIs
+        // Some models like deepseek-r1 may output thinking in <think> tags
+        // but this is model-specific, not API-level support
+        false
+    }
+
     async fn chat(
         &self,
         messages: &[Message],
