@@ -137,6 +137,16 @@ impl LlmProvider for GeminiProvider {
         self.model.contains("thinking")
     }
 
+    async fn supports_native_thinking_async(&self) -> bool {
+        // Try models.dev first for future-proof detection
+        let db = super::models_db();
+        if db.supports_reasoning("google", &self.model).await {
+            return true;
+        }
+        // Fallback to hardcoded check
+        self.model.contains("thinking")
+    }
+
     async fn chat(
         &self,
         messages: &[Message],

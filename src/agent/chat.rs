@@ -12,8 +12,17 @@ use crate::transport::update_status;
 use anyhow::Result;
 use std::sync::Arc;
 
-/// Generate system prompt based on agent mode and thinking capability
-fn get_system_prompt(mode: AgentMode, supports_native_thinking: bool) -> String {
+/// Generate system prompt based on agent mode, thinking capability, and thinking state
+///
+/// # Arguments
+/// * `mode` - The agent mode (Build, Plan, Review, Ask)
+/// * `supports_native_thinking` - Whether the model has native thinking API support
+/// * `thinking_enabled` - Whether thinking is enabled via /think command
+fn get_system_prompt(
+    mode: AgentMode,
+    supports_native_thinking: bool,
+    thinking_enabled: bool,
+) -> String {
     let base_prompt = match mode {
         AgentMode::Plan => r#"You are an AI coding assistant in PLAN MODE (READ-ONLY).
 
@@ -224,8 +233,11 @@ Safe shell commands (OK to run):
         }
     };
 
-    // Add Chain of Thought instructions for models without native thinking
-    if !supports_native_thinking {
+    // Add Chain of Thought instructions ONLY when:
+    // 1. Thinking is enabled via /think command AND
+    // 2. Model doesn't support native thinking (needs prompt-based thinking)
+    // For models with native thinking, the API parameters handle it
+    if thinking_enabled && !supports_native_thinking {
         format!(
             "{}\n\n\
             ⚙️ THINKING PROCESS:\n\
@@ -300,7 +312,8 @@ impl ChatAgent {
     pub fn with_mode(llm: Arc<dyn LlmProvider>, tools: ToolRegistry, mode: AgentMode) -> Self {
         let mut context = ConversationContext::new();
         let supports_thinking = llm.supports_native_thinking();
-        context.add_system(get_system_prompt(mode, supports_thinking));
+        // Thinking is off by default, so pass false here
+        context.add_system(get_system_prompt(mode, supports_thinking, false));
 
         Self {
             llm,
@@ -322,8 +335,46 @@ impl ChatAgent {
     ///
     /// Level names are defined in thinking_config.levels
     /// "off" disables thinking
-    pub fn set_think_level(&mut self, level_name: String) {
+    ///
+    /// This also refreshes the system prompt to add/remove thinking instructions
+    /// based on the new level and model capabilities
+    pub async fn set_think_level(&mut self, level_name: String) {
         self.think_level = level_name;
+        // Refresh system prompt based on new thinking state
+        self.refresh_system_prompt_async().await;
+    }
+
+    /// Set think level with sync prompt refresh
+    ///
+    /// This uses the sync fallback for capability detection
+    /// (hardcoded model checks rather than models.dev query)
+    pub fn set_think_level_sync(&mut self, level_name: String) {
+        self.think_level = level_name;
+        // Refresh system prompt using sync capability check
+        self.refresh_system_prompt();
+    }
+
+    /// Refresh system prompt based on current thinking state (async version)
+    ///
+    /// This queries models.dev for accurate capability detection
+    pub async fn refresh_system_prompt_async(&mut self) {
+        let supports_thinking = self.llm.supports_native_thinking_async().await;
+        let thinking_enabled = self.is_thinking_enabled();
+        let new_prompt = get_system_prompt(self.mode, supports_thinking, thinking_enabled);
+        self.context.update_system_prompt(&new_prompt);
+        tracing::debug!(
+            "System prompt refreshed: thinking_enabled={}, supports_native={}",
+            thinking_enabled,
+            supports_thinking
+        );
+    }
+
+    /// Refresh system prompt (sync version, uses fallback capability check)
+    pub fn refresh_system_prompt(&mut self) {
+        let supports_thinking = self.llm.supports_native_thinking();
+        let thinking_enabled = self.is_thinking_enabled();
+        let new_prompt = get_system_prompt(self.mode, supports_thinking, thinking_enabled);
+        self.context.update_system_prompt(&new_prompt);
     }
 
     /// Get the current thinking level name
@@ -358,8 +409,12 @@ impl ChatAgent {
         self.mode = mode;
         // Update the system prompt in context (replace the first system message)
         let supports_thinking = self.llm.supports_native_thinking();
-        self.context
-            .update_system_prompt(&get_system_prompt(mode, supports_thinking));
+        let thinking_enabled = self.is_thinking_enabled();
+        self.context.update_system_prompt(&get_system_prompt(
+            mode,
+            supports_thinking,
+            thinking_enabled,
+        ));
     }
 
     /// Update just the LLM provider while preserving conversation history
@@ -417,7 +472,8 @@ impl ChatAgent {
     pub fn clear_history(&mut self) {
         // Get the current system prompt
         let supports_thinking = self.llm.supports_native_thinking();
-        let system_prompt = get_system_prompt(self.mode, supports_thinking);
+        let thinking_enabled = self.is_thinking_enabled();
+        let system_prompt = get_system_prompt(self.mode, supports_thinking, thinking_enabled);
 
         // Clear and reinitialize with system prompt
         self.context.clear();
@@ -430,7 +486,8 @@ impl ChatAgent {
     pub fn restore_from_session(&mut self, session: &crate::storage::ChatSession) {
         // Clear existing history
         let supports_thinking = self.llm.supports_native_thinking();
-        let system_prompt = get_system_prompt(self.mode, supports_thinking);
+        let thinking_enabled = self.is_thinking_enabled();
+        let system_prompt = get_system_prompt(self.mode, supports_thinking, thinking_enabled);
         self.context.clear();
         self.context.add_system(system_prompt);
 
@@ -1021,8 +1078,12 @@ impl ChatAgent {
     pub fn reset(&mut self) {
         self.context.clear();
         let supports_thinking = self.llm.supports_native_thinking();
-        self.context
-            .add_system(get_system_prompt(self.mode, supports_thinking));
+        let thinking_enabled = self.is_thinking_enabled();
+        self.context.add_system(get_system_prompt(
+            self.mode,
+            supports_thinking,
+            thinking_enabled,
+        ));
     }
 
     /// Process a user message with interrupt checking

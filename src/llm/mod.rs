@@ -29,10 +29,19 @@ pub trait LlmProvider: Send + Sync {
     /// Get the provider name
     fn name(&self) -> &str;
 
-    /// Check if the provider/model supports native extended thinking
+    /// Check if the provider/model supports native extended thinking (sync version)
     /// Default returns false; providers with native thinking should override
+    /// This is used as a fallback when async check is not possible
     fn supports_native_thinking(&self) -> bool {
         false
+    }
+
+    /// Check if the provider/model supports native extended thinking (async version)
+    /// This queries models.dev for capability detection, falling back to sync check
+    /// Override this in providers to add models.dev lookup
+    async fn supports_native_thinking_async(&self) -> bool {
+        // Default: fall back to sync check
+        self.supports_native_thinking()
     }
 
     /// Send a chat completion request (non-streaming)

@@ -200,6 +200,26 @@ impl LlmProvider for OpenRouterProvider {
             || self.model.contains("deepseek-r1")
     }
 
+    async fn supports_native_thinking_async(&self) -> bool {
+        // OpenRouter routes to various providers, try to detect the underlying model
+        // Try models.dev first - model format is usually "provider/model-name"
+        let db = super::models_db();
+        // Try with openrouter as provider
+        if db.supports_reasoning("openrouter", &self.model).await {
+            return true;
+        }
+        // Try extracting provider/model from the openrouter model string
+        if let Some(slash_idx) = self.model.find('/') {
+            let provider = &self.model[..slash_idx];
+            let model_name = &self.model[slash_idx + 1..];
+            if db.supports_reasoning(provider, model_name).await {
+                return true;
+            }
+        }
+        // Fallback to hardcoded check
+        self.supports_native_thinking()
+    }
+
     async fn chat(
         &self,
         messages: &[Message],

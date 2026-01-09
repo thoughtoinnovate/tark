@@ -163,6 +163,16 @@ impl LlmProvider for ClaudeProvider {
         self.supports_extended_thinking()
     }
 
+    async fn supports_native_thinking_async(&self) -> bool {
+        // Try models.dev first for future-proof detection
+        let db = super::models_db();
+        if db.supports_reasoning("anthropic", &self.model).await {
+            return true;
+        }
+        // Fallback to hardcoded check
+        self.supports_extended_thinking()
+    }
+
     async fn chat(
         &self,
         messages: &[Message],

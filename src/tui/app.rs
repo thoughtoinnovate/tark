@@ -2711,7 +2711,8 @@ impl TuiApp {
                 if level_name == "off" {
                     // Disable thinking
                     if let Some(ref mut bridge) = self.agent_bridge {
-                        bridge.set_think_level("off".to_string());
+                        // Use sync version since handle_command is sync
+                        bridge.set_think_level_sync("off".to_string());
                     }
                     self.state.think_level = "off".to_string();
                     self.state.status_message = Some("Think mode: off".to_string());
@@ -2722,7 +2723,8 @@ impl TuiApp {
                         // Set the level (we need to reborrow as mutable)
                         let level_to_set = level_name.clone();
                         if let Some(ref mut b) = self.agent_bridge {
-                            b.set_think_level(level_to_set);
+                            // Use sync version since handle_command is sync
+                            b.set_think_level_sync(level_to_set);
                         }
                         self.state.think_level = level_name.clone();
                         self.state.status_message = Some(format!("Think mode: {} 🧠", level_name));
@@ -2764,7 +2766,8 @@ impl TuiApp {
                     // Set the level (we need to reborrow as mutable)
                     let level_to_set = new_level.clone();
                     if let Some(ref mut b) = self.agent_bridge {
-                        b.set_think_level(level_to_set);
+                        // Use sync version since handle_command is sync
+                        b.set_think_level_sync(level_to_set);
                     }
                     self.state.think_level = new_level.clone();
                     self.state.status_message = Some(format!(

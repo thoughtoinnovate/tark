@@ -774,6 +774,22 @@ impl LlmProvider for CopilotProvider {
         false
     }
 
+    async fn supports_native_thinking_async(&self) -> bool {
+        // Copilot uses GitHub's proxy to OpenAI models
+        // Try models.dev to detect underlying model capabilities
+        let db = super::models_db();
+        // First try as copilot provider
+        if db.supports_reasoning("copilot", &self.model).await {
+            return true;
+        }
+        // Try as openai since copilot uses OpenAI models under the hood
+        if db.supports_reasoning("openai", &self.model).await {
+            return true;
+        }
+        // Fallback - currently false as Copilot API doesn't expose reasoning
+        false
+    }
+
     async fn chat_streaming(
         &self,
         messages: &[Message],

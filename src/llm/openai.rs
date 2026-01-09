@@ -227,9 +227,14 @@ impl OpenAiProvider {
         result
     }
 
-    /// Check if the model supports reasoning (o1/o3/o4 models)
+    /// Check if the model supports reasoning (o1/o3/o4/gpt-5 models)
+    /// This is a sync fallback check - prefer supports_native_thinking_async() when possible
     fn supports_reasoning(&self) -> bool {
-        self.model.starts_with("o1") || self.model.starts_with("o3") || self.model.starts_with("o4")
+        self.model.starts_with("o1")
+            || self.model.starts_with("o3")
+            || self.model.starts_with("o4")
+            || self.model.contains("-thinking") // gpt-5.1-thinking, gpt-5.2-thinking
+            || self.model.starts_with("gpt-5") // All GPT-5.x support adaptive reasoning
     }
 
     /// Get reasoning effort for o1/o3/o4 models
@@ -530,6 +535,16 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn supports_native_thinking(&self) -> bool {
+        self.supports_reasoning()
+    }
+
+    async fn supports_native_thinking_async(&self) -> bool {
+        // Try models.dev first for future-proof detection
+        let db = super::models_db();
+        if db.supports_reasoning("openai", &self.model).await {
+            return true;
+        }
+        // Fallback to hardcoded check for offline/missing models
         self.supports_reasoning()
     }
 

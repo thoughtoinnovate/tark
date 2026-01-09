@@ -19,24 +19,21 @@ pub struct OllamaProvider {
     model: String,
 }
 
+/// Model info returned from Ollama's /api/tags endpoint
+#[derive(Debug, Clone, Deserialize)]
+pub struct OllamaModelInfo {
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub modified_at: String,
+}
+
 impl OllamaProvider {
     /// Create a new Ollama provider
     ///
-    /// Requires either OLLAMA_BASE_URL or OLLAMA_MODEL to be set.
-    /// This ensures users explicitly configure Ollama rather than
-    /// accidentally falling back to it.
+    /// Auto-detects Ollama on localhost:11434 or uses OLLAMA_BASE_URL/OLLAMA_MODEL env vars.
     pub fn new() -> Result<Self> {
-        let has_base_url = env::var("OLLAMA_BASE_URL").is_ok();
-        let has_model = env::var("OLLAMA_MODEL").is_ok();
-
-        // Require explicit configuration to use Ollama
-        if !has_base_url && !has_model {
-            anyhow::bail!(
-                "Ollama not configured. Set OLLAMA_BASE_URL or OLLAMA_MODEL environment variable, \
-                or ensure Ollama is running locally with: ollama serve"
-            );
-        }
-
         let base_url =
             env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
         let model = env::var("OLLAMA_MODEL").unwrap_or_else(|_| "codellama".to_string());
@@ -56,6 +53,50 @@ impl OllamaProvider {
     pub fn with_model(mut self, model: &str) -> Self {
         self.model = model.to_string();
         self
+    }
+
+    /// Check if Ollama is running and reachable
+    pub async fn is_available(&self) -> bool {
+        let url = format!("{}/api/tags", self.base_url);
+        match self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+        {
+            Ok(resp) => resp.status().is_success(),
+            Err(_) => false,
+        }
+    }
+
+    /// List available models from Ollama's /api/tags endpoint
+    pub async fn list_models(&self) -> Result<Vec<OllamaModelInfo>> {
+        let url = format!("{}/api/tags", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .context("Failed to connect to Ollama - is it running? Try: ollama serve")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            anyhow::bail!("Ollama API error ({})", status);
+        }
+
+        #[derive(Deserialize)]
+        struct TagsResponse {
+            models: Vec<OllamaModelInfo>,
+        }
+
+        let resp: TagsResponse = response
+            .json()
+            .await
+            .context("Failed to parse Ollama response")?;
+
+        Ok(resp.models)
     }
 
     fn convert_messages(&self, messages: &[Message]) -> Vec<OllamaMessage> {
@@ -142,6 +183,16 @@ impl LlmProvider for OllamaProvider {
         // Ollama models generally don't have native thinking/reasoning APIs
         // Some models like deepseek-r1 may output thinking in <think> tags
         // but this is model-specific, not API-level support
+        false
+    }
+
+    async fn supports_native_thinking_async(&self) -> bool {
+        // Check models.dev for ollama model capabilities
+        let db = super::models_db();
+        if db.supports_reasoning("ollama", &self.model).await {
+            return true;
+        }
+        // Ollama models generally use prompt-based thinking, not API-level
         false
     }
 

@@ -522,7 +522,29 @@ impl AgentBridge {
                 ]
             }
             "ollama" | "local" => {
-                // Fallback to hardcoded list (Ollama API doesn't have list_models)
+                // Try to fetch installed models from Ollama API
+                if let Ok(provider) = crate::llm::OllamaProvider::new() {
+                    if let Ok(models) = provider.list_models().await {
+                        if !models.is_empty() {
+                            let mut result: Vec<(String, String, String)> = models
+                                .into_iter()
+                                .map(|m| {
+                                    let size_gb = m.size as f64 / 1_000_000_000.0;
+                                    let desc = if size_gb > 0.1 {
+                                        format!("{:.1} GB", size_gb)
+                                    } else {
+                                        "Local model".into()
+                                    };
+                                    (m.name.clone(), m.name, desc)
+                                })
+                                .collect();
+                            // Sort by model name
+                            result.sort_by(|a, b| a.1.cmp(&b.1));
+                            return result;
+                        }
+                    }
+                }
+                // Fallback to hardcoded list if Ollama is not running
                 vec![
                     (
                         "llama3.2".into(),
@@ -614,8 +636,15 @@ impl AgentBridge {
     ///
     /// Level names are defined in config.thinking.levels
     /// "off" disables thinking
-    pub fn set_think_level(&mut self, level_name: String) {
-        self.agent.set_think_level(level_name);
+    ///
+    /// This is async because it queries models.dev for capability detection
+    pub async fn set_think_level(&mut self, level_name: String) {
+        self.agent.set_think_level(level_name).await;
+    }
+
+    /// Set think level without refreshing system prompt (sync version)
+    pub fn set_think_level_sync(&mut self, level_name: String) {
+        self.agent.set_think_level_sync(level_name);
     }
 
     /// Get the current thinking level name
