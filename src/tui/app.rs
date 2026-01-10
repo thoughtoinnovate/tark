@@ -704,11 +704,16 @@ impl AppState {
     ///
     /// Requirements: 11.7
     pub fn confirm_attachment_delete(&mut self) -> Option<String> {
-        let idx = self.attachment_dropdown_state.confirm_delete()?;
+        // Peek at pending delete index without consuming (validate before mutating)
+        let idx = self.attachment_dropdown_state.pending_delete?;
 
+        // Validate bounds before mutating any state
         if idx >= self.attachments.len() {
             return None;
         }
+
+        // Now safe to consume the pending_delete state
+        self.attachment_dropdown_state.confirm_delete();
 
         let removed = self.attachments.remove(idx);
         let filename = removed.filename.clone();
@@ -6711,6 +6716,38 @@ mod tests {
         // Cancel again should still be no-op
         state.cancel_attachment_delete();
         assert_eq!(state.attachments.len(), 1);
+    }
+
+    /// Test that confirm with out-of-bounds pending_delete preserves state.
+    ///
+    /// **Validates: Requirement 11.7** - State mutations only occur after validation
+    ///
+    /// Regression test: Previously, confirm_delete() would clear pending_delete
+    /// before bounds checking, losing state even when no deletion occurred.
+    #[test]
+    fn test_confirm_preserves_state_on_invalid_index() {
+        let mut state = AppState::new();
+
+        // Add one attachment
+        state.attachments.push(create_test_attachment("file1.txt"));
+
+        // Manually set pending_delete to an out-of-bounds index
+        // (simulating a race condition where attachment was removed elsewhere)
+        state.attachment_dropdown_state.pending_delete = Some(5);
+        assert!(state.attachment_dropdown_state.has_pending_delete());
+
+        // Confirm should return None (invalid index)
+        let removed = state.confirm_attachment_delete();
+        assert!(removed.is_none());
+
+        // Attachment should be preserved
+        assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.attachments[0].filename, "file1.txt");
+
+        // CRITICAL: pending_delete state should be preserved (not cleared)
+        // because no mutation actually occurred
+        assert!(state.attachment_dropdown_state.has_pending_delete());
+        assert_eq!(state.attachment_dropdown_state.pending_delete, Some(5));
     }
 
     #[test]
