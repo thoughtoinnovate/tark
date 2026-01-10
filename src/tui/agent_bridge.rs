@@ -240,6 +240,8 @@ pub struct AgentBridge {
     interaction_tx: Option<crate::tools::InteractionSender>,
     /// Current trust level for risky operations
     trust_level: crate::tools::TrustLevel,
+    /// Plan service for managing execution plans (session-scoped)
+    plan_service: Arc<crate::services::PlanService>,
 }
 
 impl AgentBridge {
@@ -332,12 +334,19 @@ impl AgentBridge {
         // Create interaction channel for ask_user tool
         let (interaction_tx, interaction_rx) = crate::tools::interaction_channel();
 
-        // Create tool registry for mode with interaction channel
-        let tools = ToolRegistry::for_mode_with_interaction(
+        // Create plan service for this session
+        let plan_service = Arc::new(crate::services::PlanService::new(
+            TarkStorage::new(&working_dir)?,
+            current_session.id.clone(),
+        ));
+
+        // Create tool registry for mode with interaction channel and plan service
+        let tools = ToolRegistry::for_mode_with_services(
             working_dir.clone(),
             mode.into(),
             config.tools.shell_enabled,
             Some(interaction_tx.clone()),
+            Some(plan_service.clone()),
         );
 
         // Create agent
@@ -386,6 +395,7 @@ impl AgentBridge {
                 session_usage: Vec::new(),
                 interaction_tx: Some(interaction_tx),
                 trust_level,
+                plan_service,
             },
             interaction_rx,
         ))
@@ -1234,12 +1244,13 @@ impl AgentBridge {
         // Update session
         self.current_session.mode = mode.to_string();
 
-        // Create new tool registry for mode with existing interaction channel
-        let tools = ToolRegistry::for_mode_with_interaction(
+        // Create new tool registry for mode with plan service
+        let tools = ToolRegistry::for_mode_with_services(
             self.working_dir.clone(),
             mode.into(),
             self.config.tools.shell_enabled,
             self.interaction_tx.clone(),
+            Some(self.plan_service.clone()),
         );
 
         // Update agent mode
@@ -1395,6 +1406,11 @@ impl AgentBridge {
     /// Get mutable storage reference
     pub fn storage_mut(&mut self) -> &mut TarkStorage {
         &mut self.storage
+    }
+
+    /// Get plan service reference (for plan operations)
+    pub fn plan_service(&self) -> Arc<crate::services::PlanService> {
+        self.plan_service.clone()
     }
 
     /// Get the current trust level

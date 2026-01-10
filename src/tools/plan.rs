@@ -321,14 +321,28 @@ impl Tool for MarkTaskDoneTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::TarkStorage;
+    use crate::storage::{ChatSession, TarkStorage};
     use tempfile::TempDir;
+
+    fn create_test_service(temp: &TempDir) -> (Arc<PlanService>, String) {
+        let storage = TarkStorage::new(temp.path()).unwrap();
+        // Create a test session
+        let session = ChatSession::new();
+        storage.save_session(&session).unwrap();
+        let session_id = session.id.clone();
+        (
+            Arc::new(PlanService::new(
+                TarkStorage::new(temp.path()).unwrap(),
+                session_id.clone(),
+            )),
+            session_id,
+        )
+    }
 
     #[tokio::test]
     async fn test_save_plan_tool() {
         let temp = TempDir::new().unwrap();
-        let storage = TarkStorage::new(temp.path()).unwrap();
-        let service = Arc::new(PlanService::new(storage));
+        let (service, _) = create_test_service(&temp);
         let tool = SavePlanTool::new(service.clone());
 
         let params = json!({
@@ -357,8 +371,7 @@ mod tests {
     #[tokio::test]
     async fn test_mark_task_done_tool() {
         let temp = TempDir::new().unwrap();
-        let storage = TarkStorage::new(temp.path()).unwrap();
-        let service = Arc::new(PlanService::new(storage));
+        let (service, _) = create_test_service(&temp);
 
         // Create a plan first
         let mut plan = ExecutionPlan::new("Test", "Test");
@@ -387,8 +400,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_plan_empty_tasks() {
         let temp = TempDir::new().unwrap();
-        let storage = TarkStorage::new(temp.path()).unwrap();
-        let service = Arc::new(PlanService::new(storage));
+        let (service, _) = create_test_service(&temp);
         let tool = SavePlanTool::new(service);
 
         let params = json!({

@@ -1528,6 +1528,42 @@ impl TuiApp {
             return Ok(true);
         }
 
+        // Handle plan picker input if visible
+        if self.state.plan_picker.is_visible() {
+            use super::widgets::PlanAction;
+            match key.code {
+                KeyCode::Esc => {
+                    self.state.plan_picker.hide();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.state.plan_picker.select_up();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.state.plan_picker.select_down();
+                }
+                KeyCode::Tab => {
+                    self.state.plan_picker.toggle_tab();
+                }
+                KeyCode::Enter => {
+                    if let Some(action) = self.state.plan_picker.confirm() {
+                        self.handle_plan_action(action);
+                    }
+                }
+                KeyCode::Char('a') => {
+                    if let Some(action) = self.state.plan_picker.archive() {
+                        self.handle_plan_action(action);
+                    }
+                }
+                KeyCode::Char('e') => {
+                    if let Some(action) = self.state.plan_picker.export() {
+                        self.handle_plan_action(action);
+                    }
+                }
+                _ => {}
+            }
+            return Ok(true);
+        }
+
         // Handle trust level selector if visible
         if self.state.trust_level_selector.visible {
             if let Some(new_level) = self.state.trust_level_selector.handle_key(key) {
@@ -3336,9 +3372,10 @@ impl TuiApp {
                     .as_ref()
                     .map(|bridge| {
                         let storage = bridge.storage();
-                        let active = storage.list_execution_plans().unwrap_or_default();
+                        let session_id = bridge.session_id();
+                        let active = storage.list_execution_plans(session_id).unwrap_or_default();
                         let archived = storage.list_archived_plans().unwrap_or_default();
-                        let current_id = storage.get_current_plan_id();
+                        let current_id = storage.get_current_plan_id(session_id);
                         (active, archived, current_id)
                     })
                     .unwrap_or_default();
@@ -5564,6 +5601,12 @@ impl TuiApp {
                 self.state.trust_level_selector.render(frame, area);
             }
 
+            // Render plan picker overlay if visible
+            if self.state.plan_picker.is_visible() {
+                use super::widgets::PlanPickerWidget;
+                frame.render_widget(PlanPickerWidget::new(&self.state.plan_picker), area);
+            }
+
             // Render command dropdown overlay if visible (above input area)
             if self.state.command_dropdown.is_visible() {
                 use super::widgets::CommandDropdownWidget;
@@ -5596,6 +5639,110 @@ impl TuiApp {
     /// Check if the application should quit
     pub fn should_quit(&self) -> bool {
         self.state.should_quit
+    }
+
+    /// Handle plan picker actions
+    fn handle_plan_action(&mut self, action: super::widgets::PlanAction) {
+        use super::widgets::PlanAction;
+
+        match action {
+            PlanAction::Switch(plan_id) => {
+                // Set as current plan (only in Plan mode)
+                if let Some(bridge) = &self.agent_bridge {
+                    let session_id = bridge.session_id().to_string();
+                    let storage = bridge.storage();
+                    if let Err(e) = storage.set_current_plan(&session_id, &plan_id) {
+                        self.state.status_message = Some(format!("Failed to switch plan: {}", e));
+                    } else {
+                        self.state.status_message = Some(format!("Switched to plan: {}", plan_id));
+                    }
+                }
+                self.state.plan_picker.hide();
+            }
+            PlanAction::View(plan_id) => {
+                // Show plan details in chat
+                if let Some(bridge) = &self.agent_bridge {
+                    let session_id = bridge.session_id().to_string();
+                    let storage = bridge.storage();
+                    match storage.load_execution_plan(&session_id, &plan_id) {
+                        Ok(plan) => {
+                            let md = plan.to_markdown();
+                            self.state.message_list.push(ChatMessage::system(format!(
+                                "**Plan: {}**\n\n{}",
+                                plan.title, md
+                            )));
+                        }
+                        Err(e) => {
+                            self.state.status_message = Some(format!("Failed to load plan: {}", e));
+                        }
+                    }
+                }
+                self.state.plan_picker.hide();
+            }
+            PlanAction::Archive(plan_id) => {
+                // Archive the plan
+                if let Some(bridge) = &self.agent_bridge {
+                    let session_id = bridge.session_id().to_string();
+                    let storage = bridge.storage();
+                    match storage.archive_plan(&session_id, &plan_id) {
+                        Ok(path) => {
+                            self.state.status_message =
+                                Some(format!("Plan archived to: {}", path.display()));
+                            // Refresh the picker
+                            let active = storage
+                                .list_execution_plans(&session_id)
+                                .unwrap_or_default();
+                            let archived = storage.list_archived_plans().unwrap_or_default();
+                            let current_id = storage.get_current_plan_id(&session_id);
+                            self.state.plan_picker.show(
+                                active,
+                                archived,
+                                current_id,
+                                self.state.mode == AgentMode::Plan,
+                            );
+                        }
+                        Err(e) => {
+                            self.state.status_message =
+                                Some(format!("Failed to archive plan: {}", e));
+                        }
+                    }
+                }
+            }
+            PlanAction::Export(plan_id) => {
+                // Export plan as markdown
+                if let Some(bridge) = &self.agent_bridge {
+                    let session_id = bridge.session_id().to_string();
+                    let storage = bridge.storage();
+                    let working_dir = bridge.working_dir().to_path_buf();
+                    match storage.load_execution_plan(&session_id, &plan_id) {
+                        Ok(plan) => {
+                            let md = plan.to_markdown();
+                            // Save to a file in the workspace
+                            let export_path = working_dir.join(format!("{}.md", plan_id));
+                            match std::fs::write(&export_path, &md) {
+                                Ok(_) => {
+                                    self.state.status_message = Some(format!(
+                                        "Plan exported to: {}",
+                                        export_path.display()
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.state.status_message =
+                                        Some(format!("Failed to export plan: {}", e));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.state.status_message = Some(format!("Failed to load plan: {}", e));
+                        }
+                    }
+                }
+                self.state.plan_picker.hide();
+            }
+            PlanAction::Close => {
+                self.state.plan_picker.hide();
+            }
+        }
     }
 }
 

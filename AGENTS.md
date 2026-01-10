@@ -108,6 +108,7 @@ tark/
 - **Run all checks before committing** (see [Pre-Commit Checklist](#pre-commit-checklist-)):
   ```bash
   # Rust checks
+  cargo fmt --all
   cargo fmt --all -- --check
   cargo clippy --all-targets --all-features -- -D warnings
   cargo test --all-features
@@ -532,4 +533,3 @@ git stash list  # Should be empty or only intentional WIP
 - Read the README.md for user-facing documentation
 - Look at GitHub Actions for CI/CD details
 - Check issues/PRs for context on decisions
-

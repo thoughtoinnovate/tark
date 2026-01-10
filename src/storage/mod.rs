@@ -132,12 +132,19 @@ impl TarkStorage {
         std::fs::create_dir_all(project_root.join("mcp"))?;
         std::fs::create_dir_all(project_root.join("plugins"))?;
         std::fs::create_dir_all(project_root.join("sessions"))?;
-        std::fs::create_dir_all(project_root.join("sessions").join("plans"))?;
+        std::fs::create_dir_all(project_root.join("archives").join("plans"))?;
 
-        Ok(Self {
+        let storage = Self {
             project_root,
             global,
-        })
+        };
+
+        // Migrate existing flat session files to directory structure
+        if let Err(e) = storage.migrate_sessions() {
+            tracing::warn!("Failed to migrate sessions: {}", e);
+        }
+
+        Ok(storage)
     }
 
     /// Get the project .tark directory
@@ -252,14 +259,105 @@ impl TarkStorage {
         self.project_root.join("sessions")
     }
 
+    /// Get directory for a specific session
+    pub fn session_dir(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir().join(session_id)
+    }
+
     /// Get current session ID file path
     fn current_session_file(&self) -> PathBuf {
         self.sessions_dir().join("current")
     }
 
+    /// Migrate flat session files to directory structure
+    /// Called on startup to handle existing sessions
+    pub fn migrate_sessions(&self) -> Result<()> {
+        let sessions_dir = self.sessions_dir();
+        if !sessions_dir.exists() {
+            return Ok(());
+        }
+
+        // Find flat session files (*.json directly in sessions/)
+        let entries: Vec<_> = std::fs::read_dir(&sessions_dir)?
+            .flatten()
+            .filter(|e| {
+                let path = e.path();
+                path.is_file() && path.extension().map(|ext| ext == "json").unwrap_or(false)
+            })
+            .collect();
+
+        for entry in entries {
+            let path = entry.path();
+            let file_name = path.file_stem().and_then(|s| s.to_str());
+
+            if let Some(session_id) = file_name {
+                // Skip if it's not a valid session file (e.g., current)
+                if session_id == "current" {
+                    continue;
+                }
+
+                // Read the session
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(session) = serde_json::from_str::<ChatSession>(&content) {
+                        // Create session directory
+                        let session_dir = self.session_dir(&session.id);
+                        std::fs::create_dir_all(&session_dir)?;
+
+                        // Write to new location
+                        let new_path = session_dir.join("session.json");
+                        std::fs::write(&new_path, &content)?;
+
+                        // Create plans directory for this session
+                        std::fs::create_dir_all(session_dir.join("plans"))?;
+
+                        // Remove old flat file
+                        std::fs::remove_file(&path)?;
+
+                        tracing::info!("Migrated session {} to directory structure", session.id);
+                    }
+                }
+            }
+        }
+
+        // Migrate global plans to current session if any exist
+        let global_plans_dir = self.sessions_dir().join("plans");
+        if global_plans_dir.exists() && global_plans_dir.is_dir() {
+            // Get current session to migrate plans to
+            if let Some(current_id) = self.get_current_session_id() {
+                let target_plans_dir = self.session_dir(&current_id).join("plans");
+                std::fs::create_dir_all(&target_plans_dir)?;
+
+                // Move plan files
+                if let Ok(entries) = std::fs::read_dir(&global_plans_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            let file_name = path.file_name().unwrap();
+                            let target = target_plans_dir.join(file_name);
+                            std::fs::rename(&path, &target)?;
+                        }
+                    }
+                }
+
+                // Remove empty global plans dir
+                let _ = std::fs::remove_dir(&global_plans_dir);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Save a chat session
     pub fn save_session(&self, session: &ChatSession) -> Result<PathBuf> {
-        let path = self.sessions_dir().join(format!("{}.json", session.id));
+        // Create session directory
+        let session_dir = self.session_dir(&session.id);
+        std::fs::create_dir_all(&session_dir)?;
+
+        // Create plans subdirectory
+        std::fs::create_dir_all(session_dir.join("plans"))?;
+
+        // Save session.json in the directory
+        let path = session_dir.join("session.json");
         let content = serde_json::to_string_pretty(session)?;
         std::fs::write(&path, content)?;
 
@@ -271,9 +369,21 @@ impl TarkStorage {
 
     /// Load a chat session by ID
     pub fn load_session(&self, id: &str) -> Result<ChatSession> {
-        let path = self.sessions_dir().join(format!("{}.json", id));
-        let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&content).context("Failed to parse session")
+        // Try new directory structure first
+        let dir_path = self.session_dir(id).join("session.json");
+        if dir_path.exists() {
+            let content = std::fs::read_to_string(&dir_path)?;
+            return serde_json::from_str(&content).context("Failed to parse session");
+        }
+
+        // Fall back to flat file (for backwards compatibility)
+        let flat_path = self.sessions_dir().join(format!("{}.json", id));
+        if flat_path.exists() {
+            let content = std::fs::read_to_string(&flat_path)?;
+            return serde_json::from_str(&content).context("Failed to parse session");
+        }
+
+        Err(anyhow::anyhow!("Session not found: {}", id))
     }
 
     /// Get the current session ID
@@ -316,7 +426,24 @@ impl TarkStorage {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map(|e| e == "json").unwrap_or(false) {
+
+                // Check for directory-based sessions (new format)
+                if path.is_dir() {
+                    let session_file = path.join("session.json");
+                    if session_file.exists() {
+                        if let Ok(content) = std::fs::read_to_string(&session_file) {
+                            if let Ok(session) = serde_json::from_str::<ChatSession>(&content) {
+                                sessions.push(SessionMeta::from(&session));
+                            }
+                        }
+                    }
+                }
+                // Also check for flat files (backwards compatibility)
+                else if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    // Skip "current" pointer file
+                    if path.file_stem().map(|s| s == "current").unwrap_or(false) {
+                        continue;
+                    }
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(session) = serde_json::from_str::<ChatSession>(&content) {
                             sessions.push(SessionMeta::from(&session));
@@ -340,9 +467,16 @@ impl TarkStorage {
 
     /// Delete a session
     pub fn delete_session(&self, id: &str) -> Result<()> {
-        let path = self.sessions_dir().join(format!("{}.json", id));
-        if path.exists() {
-            std::fs::remove_file(path)?;
+        // Try directory-based session first
+        let session_dir = self.session_dir(id);
+        if session_dir.exists() {
+            std::fs::remove_dir_all(session_dir)?;
+        } else {
+            // Fall back to flat file
+            let path = self.sessions_dir().join(format!("{}.json", id));
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
         }
 
         // If this was the current session, clear the pointer
@@ -353,80 +487,114 @@ impl TarkStorage {
         Ok(())
     }
 
-    // ========== Execution Plans ==========
+    // ========== Execution Plans (Session-Scoped) ==========
 
-    /// Get execution plans directory
-    fn execution_plans_dir(&self) -> PathBuf {
-        self.project_root.join("sessions").join("plans")
+    /// Get execution plans directory for a session
+    pub fn execution_plans_dir(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("plans")
     }
 
-    /// Get current plan file path
-    fn current_plan_file(&self) -> PathBuf {
-        self.execution_plans_dir().join("current")
+    /// Get current plan file path for a session
+    fn current_plan_file(&self, session_id: &str) -> PathBuf {
+        self.execution_plans_dir(session_id).join("current")
     }
 
-    /// Save an execution plan
-    pub fn save_execution_plan(&self, plan: &ExecutionPlan) -> Result<PathBuf> {
-        let path = self.execution_plans_dir().join(format!("{}.json", plan.id));
-        let content = serde_json::to_string_pretty(plan)?;
+    /// Save an execution plan (session-scoped)
+    pub fn save_execution_plan(&self, session_id: &str, plan: &ExecutionPlan) -> Result<PathBuf> {
+        let plans_dir = self.execution_plans_dir(session_id);
+        std::fs::create_dir_all(&plans_dir)?;
+
+        let path = plans_dir.join(format!("{}.md", plan.id));
+        let content = plan.to_markdown();
         std::fs::write(&path, content)?;
 
         // Update current plan pointer if this is an active plan
         if plan.status == PlanStatus::Active || plan.status == PlanStatus::Draft {
-            std::fs::write(self.current_plan_file(), &plan.id)?;
+            std::fs::write(self.current_plan_file(session_id), &plan.id)?;
         }
 
         Ok(path)
     }
 
-    /// Load an execution plan by ID
-    pub fn load_execution_plan(&self, id: &str) -> Result<ExecutionPlan> {
-        let path = self.execution_plans_dir().join(format!("{}.json", id));
-        let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&content).context("Failed to parse execution plan")
+    /// Load an execution plan by ID (session-scoped)
+    pub fn load_execution_plan(&self, session_id: &str, id: &str) -> Result<ExecutionPlan> {
+        // Try markdown format first (new)
+        let md_path = self
+            .execution_plans_dir(session_id)
+            .join(format!("{}.md", id));
+        if md_path.exists() {
+            let content = std::fs::read_to_string(&md_path)?;
+            return ExecutionPlan::from_markdown(&content);
+        }
+
+        // Fall back to JSON format (legacy)
+        let json_path = self
+            .execution_plans_dir(session_id)
+            .join(format!("{}.json", id));
+        if json_path.exists() {
+            let content = std::fs::read_to_string(&json_path)?;
+            return serde_json::from_str(&content).context("Failed to parse execution plan");
+        }
+
+        Err(anyhow::anyhow!("Plan not found: {}", id))
     }
 
-    /// Get the current plan ID
-    pub fn get_current_plan_id(&self) -> Option<String> {
-        let path = self.current_plan_file();
+    /// Get the current plan ID for a session
+    pub fn get_current_plan_id(&self, session_id: &str) -> Option<String> {
+        let path = self.current_plan_file(session_id);
         std::fs::read_to_string(path)
             .ok()
             .map(|s| s.trim().to_string())
     }
 
-    /// Set the current plan ID
-    pub fn set_current_plan(&self, id: &str) -> Result<()> {
-        std::fs::write(self.current_plan_file(), id)?;
+    /// Set the current plan ID for a session
+    pub fn set_current_plan(&self, session_id: &str, id: &str) -> Result<()> {
+        let plans_dir = self.execution_plans_dir(session_id);
+        std::fs::create_dir_all(&plans_dir)?;
+        std::fs::write(self.current_plan_file(session_id), id)?;
         Ok(())
     }
 
-    /// Clear current plan pointer
-    pub fn clear_current_plan(&self) -> Result<()> {
-        let path = self.current_plan_file();
+    /// Clear current plan pointer for a session
+    pub fn clear_current_plan(&self, session_id: &str) -> Result<()> {
+        let path = self.current_plan_file(session_id);
         if path.exists() {
             std::fs::remove_file(path)?;
         }
         Ok(())
     }
 
-    /// Load the current execution plan
-    pub fn load_current_execution_plan(&self) -> Result<ExecutionPlan> {
-        if let Some(id) = self.get_current_plan_id() {
-            self.load_execution_plan(&id)
+    /// Load the current execution plan for a session
+    pub fn load_current_execution_plan(&self, session_id: &str) -> Result<ExecutionPlan> {
+        if let Some(id) = self.get_current_plan_id(session_id) {
+            self.load_execution_plan(session_id, &id)
         } else {
             Err(anyhow::anyhow!("No active plan"))
         }
     }
 
-    /// List all execution plans
-    pub fn list_execution_plans(&self) -> Result<Vec<PlanMeta>> {
-        let dir = self.execution_plans_dir();
+    /// List all execution plans for a session
+    pub fn list_execution_plans(&self, session_id: &str) -> Result<Vec<PlanMeta>> {
+        let dir = self.execution_plans_dir(session_id);
         let mut plans = Vec::new();
+
+        if !dir.exists() {
+            return Ok(plans);
+        }
 
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                let ext = path.extension().and_then(|e| e.to_str());
+
+                // Support both .md (new) and .json (legacy)
+                if ext == Some("md") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(plan) = ExecutionPlan::from_markdown(&content) {
+                            plans.push(PlanMeta::from(&plan));
+                        }
+                    }
+                } else if ext == Some("json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(plan) = serde_json::from_str::<ExecutionPlan>(&content) {
                             plans.push(PlanMeta::from(&plan));
@@ -442,15 +610,25 @@ impl TarkStorage {
     }
 
     /// Delete an execution plan
-    pub fn delete_execution_plan(&self, id: &str) -> Result<()> {
-        let path = self.execution_plans_dir().join(format!("{}.json", id));
-        if path.exists() {
-            std::fs::remove_file(path)?;
+    pub fn delete_execution_plan(&self, session_id: &str, id: &str) -> Result<()> {
+        // Try both formats
+        let md_path = self
+            .execution_plans_dir(session_id)
+            .join(format!("{}.md", id));
+        let json_path = self
+            .execution_plans_dir(session_id)
+            .join(format!("{}.json", id));
+
+        if md_path.exists() {
+            std::fs::remove_file(md_path)?;
+        }
+        if json_path.exists() {
+            std::fs::remove_file(json_path)?;
         }
 
         // If this was the current plan, clear the pointer
-        if self.get_current_plan_id().as_deref() == Some(id) {
-            let _ = std::fs::remove_file(self.current_plan_file());
+        if self.get_current_plan_id(session_id).as_deref() == Some(id) {
+            let _ = std::fs::remove_file(self.current_plan_file(session_id));
         }
 
         Ok(())
@@ -465,23 +643,23 @@ impl TarkStorage {
 
     /// Archive a plan (move to archives, keep max 5)
     ///
-    /// Moves the plan from sessions/plans/ to archives/plans/,
+    /// Moves the plan from session plans to archives/plans/,
     /// then prunes old archives to keep only the 5 most recent.
-    pub fn archive_plan(&self, id: &str) -> Result<PathBuf> {
+    pub fn archive_plan(&self, session_id: &str, id: &str) -> Result<PathBuf> {
         let archive_dir = self.archives_plans_dir();
         std::fs::create_dir_all(&archive_dir)?;
 
         // Load the plan
-        let mut plan = self.load_execution_plan(id)?;
+        let mut plan = self.load_execution_plan(session_id, id)?;
         plan.status = PlanStatus::Completed;
 
-        // Save to archive location
-        let archive_path = archive_dir.join(format!("{}.json", plan.id));
-        let content = serde_json::to_string_pretty(&plan)?;
+        // Save to archive location as markdown
+        let archive_path = archive_dir.join(format!("{}.md", plan.id));
+        let content = plan.to_markdown();
         std::fs::write(&archive_path, content)?;
 
         // Delete from active plans
-        self.delete_execution_plan(id)?;
+        self.delete_execution_plan(session_id, id)?;
 
         // Prune old archives (keep max 5)
         self.prune_archived_plans(5)?;
@@ -499,10 +677,9 @@ impl TarkStorage {
         let mut archives: Vec<_> = std::fs::read_dir(&archive_dir)?
             .flatten()
             .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "json")
-                    .unwrap_or(false)
+                let path = e.path();
+                let ext = path.extension().and_then(|s| s.to_str());
+                ext == Some("md") || ext == Some("json")
             })
             .filter_map(|e| {
                 let meta = e.metadata().ok()?;
@@ -534,7 +711,16 @@ impl TarkStorage {
         if let Ok(entries) = std::fs::read_dir(&archive_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                let ext = path.extension().and_then(|e| e.to_str());
+
+                // Support both .md (new) and .json (legacy)
+                if ext == Some("md") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(plan) = ExecutionPlan::from_markdown(&content) {
+                            plans.push(PlanMeta::from(&plan));
+                        }
+                    }
+                } else if ext == Some("json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(plan) = serde_json::from_str::<ExecutionPlan>(&content) {
                             plans.push(PlanMeta::from(&plan));
@@ -551,9 +737,21 @@ impl TarkStorage {
 
     /// Load an archived plan by ID
     pub fn load_archived_plan(&self, id: &str) -> Result<ExecutionPlan> {
-        let path = self.archives_plans_dir().join(format!("{}.json", id));
-        let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&content).context("Failed to parse archived plan")
+        // Try markdown first
+        let md_path = self.archives_plans_dir().join(format!("{}.md", id));
+        if md_path.exists() {
+            let content = std::fs::read_to_string(&md_path)?;
+            return ExecutionPlan::from_markdown(&content);
+        }
+
+        // Fall back to JSON
+        let json_path = self.archives_plans_dir().join(format!("{}.json", id));
+        if json_path.exists() {
+            let content = std::fs::read_to_string(&json_path)?;
+            return serde_json::from_str(&content).context("Failed to parse archived plan");
+        }
+
+        Err(anyhow::anyhow!("Archived plan not found: {}", id))
     }
 
     // ========== Plans (project-level only) ==========
@@ -1827,54 +2025,63 @@ impl ExecutionPlan {
         self.updated_at = Utc::now();
     }
 
-    /// Format plan as markdown checklist
+    /// Format plan as markdown with YAML frontmatter
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
 
-        md.push_str(&format!("# {}\n\n", self.title));
-        md.push_str(&format!("**Status:** {:?}\n", self.status));
-
-        let (done, total) = self.progress();
+        // YAML frontmatter
+        md.push_str("---\n");
+        md.push_str(&format!("id: {}\n", self.id));
+        md.push_str(&format!("title: \"{}\"\n", self.title.replace('"', "\\\"")));
         md.push_str(&format!(
-            "**Progress:** {}/{} ({:.0}%)\n\n",
-            done,
-            total,
-            if total > 0 {
-                (done as f64 / total as f64) * 100.0
-            } else {
-                0.0
-            }
+            "status: {}\n",
+            format!("{:?}", self.status).to_lowercase()
         ));
+        md.push_str(&format!("created: {}\n", self.created_at.to_rfc3339()));
+        md.push_str(&format!("updated: {}\n", self.updated_at.to_rfc3339()));
+        if let Some(ref session_id) = self.session_id {
+            md.push_str(&format!("session_id: {}\n", session_id));
+        }
+        md.push_str(&format!("current_task: {}\n", self.current_task_index));
+        md.push_str(&format!(
+            "current_subtask: {}\n",
+            self.current_subtask_index
+        ));
+        md.push_str("---\n\n");
 
+        // Title and description
+        md.push_str(&format!("# {}\n\n", self.title));
+        if !self.original_prompt.is_empty() {
+            md.push_str(&format!("{}\n\n", self.original_prompt));
+        }
+
+        // Tasks section
         md.push_str("## Tasks\n\n");
 
-        for (i, task) in self.tasks.iter().enumerate() {
+        for task in &self.tasks {
             let checkbox = match task.status {
                 TaskStatus::Completed | TaskStatus::Skipped => "[x]",
+                TaskStatus::InProgress => "[-]",
                 _ => "[ ]",
             };
-            md.push_str(&format!("{}. {} {}\n", i + 1, checkbox, task.description));
+            md.push_str(&format!("- {} {}\n", checkbox, task.description));
 
-            for (j, subtask) in task.subtasks.iter().enumerate() {
+            for subtask in &task.subtasks {
                 let sub_checkbox = match subtask.status {
                     TaskStatus::Completed | TaskStatus::Skipped => "[x]",
+                    TaskStatus::InProgress => "[-]",
                     _ => "[ ]",
                 };
-                md.push_str(&format!(
-                    "   {}.{}. {} {}\n",
-                    i + 1,
-                    j + 1,
-                    sub_checkbox,
-                    subtask.description
-                ));
+                md.push_str(&format!("  - {} {}\n", sub_checkbox, subtask.description));
             }
         }
 
+        // Notes/Refinements section
         if !self.refinements.is_empty() {
-            md.push_str("\n## Refinements\n\n");
+            md.push_str("\n## Notes\n\n");
             for r in &self.refinements {
                 md.push_str(&format!(
-                    "- {} ({})\n",
+                    "- {} _({})\n",
                     r.description,
                     r.timestamp.format("%Y-%m-%d %H:%M")
                 ));
@@ -1882,6 +2089,197 @@ impl ExecutionPlan {
         }
 
         md
+    }
+
+    /// Parse plan from markdown with YAML frontmatter
+    pub fn from_markdown(content: &str) -> Result<Self> {
+        // Split frontmatter and body
+        let content = content.trim();
+        if !content.starts_with("---") {
+            return Err(anyhow::anyhow!("Missing YAML frontmatter"));
+        }
+
+        let parts: Vec<&str> = content.splitn(3, "---").collect();
+        if parts.len() < 3 {
+            return Err(anyhow::anyhow!("Invalid frontmatter format"));
+        }
+
+        let frontmatter = parts[1].trim();
+        let body = parts[2].trim();
+
+        // Parse frontmatter
+        let mut id = String::new();
+        let mut title = String::new();
+        let mut status = PlanStatus::Draft;
+        let mut created_at = Utc::now();
+        let mut updated_at = Utc::now();
+        let mut session_id: Option<String> = None;
+        let mut current_task_index = 0usize;
+        let mut current_subtask_index = 0usize;
+
+        for line in frontmatter.lines() {
+            let line = line.trim();
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+                match key {
+                    "id" => id = value.to_string(),
+                    "title" => title = value.to_string(),
+                    "status" => {
+                        status = match value.to_lowercase().as_str() {
+                            "draft" => PlanStatus::Draft,
+                            "active" => PlanStatus::Active,
+                            "paused" => PlanStatus::Paused,
+                            "completed" => PlanStatus::Completed,
+                            "abandoned" => PlanStatus::Abandoned,
+                            _ => PlanStatus::Draft,
+                        };
+                    }
+                    "created" => {
+                        created_at = DateTime::parse_from_rfc3339(value)
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(|_| Utc::now());
+                    }
+                    "updated" => {
+                        updated_at = DateTime::parse_from_rfc3339(value)
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(|_| Utc::now());
+                    }
+                    "session_id" => session_id = Some(value.to_string()),
+                    "current_task" => current_task_index = value.parse().unwrap_or(0),
+                    "current_subtask" => current_subtask_index = value.parse().unwrap_or(0),
+                    _ => {}
+                }
+            }
+        }
+
+        // Parse body for tasks
+        let mut tasks = Vec::new();
+        let mut refinements = Vec::new();
+        let mut original_prompt = String::new();
+        let mut in_tasks = false;
+        let mut in_notes = false;
+        let mut current_task: Option<PlanTask> = None;
+
+        for line in body.lines() {
+            let line_trimmed = line.trim();
+
+            // Skip title line (starts with #)
+            if line_trimmed.starts_with("# ") {
+                continue;
+            }
+
+            // Detect sections
+            if line_trimmed == "## Tasks" {
+                in_tasks = true;
+                in_notes = false;
+                continue;
+            }
+            if line_trimmed == "## Notes" {
+                in_tasks = false;
+                in_notes = true;
+                // Save pending task
+                if let Some(task) = current_task.take() {
+                    tasks.push(task);
+                }
+                continue;
+            }
+
+            // Parse task lines
+            if in_tasks {
+                // Subtask: "  - [x] Description" (check BEFORE main task since trimmed subtask matches main task pattern)
+                if (line.starts_with("  - [") || line.starts_with("    - ["))
+                    && current_task.is_some()
+                {
+                    let (status, desc) = Self::parse_checkbox_line(line_trimmed);
+                    if let Some(ref mut task) = current_task {
+                        task.subtasks.push(PlanSubtask {
+                            id: format!("{}_sub_{}", task.id, task.subtasks.len() + 1),
+                            description: desc,
+                            status,
+                            notes: None,
+                        });
+                    }
+                }
+                // Main task: "- [x] Description" or "- [ ] Description" (no leading whitespace)
+                else if line.starts_with("- [") {
+                    // Save previous task
+                    if let Some(task) = current_task.take() {
+                        tasks.push(task);
+                    }
+
+                    let (status, desc) = Self::parse_checkbox_line(line_trimmed);
+                    current_task = Some(PlanTask {
+                        id: format!("task_{}", tasks.len() + 1),
+                        description: desc,
+                        status,
+                        subtasks: Vec::new(),
+                        notes: None,
+                    });
+                }
+            } else if in_notes {
+                // Parse refinement: "- Description _(timestamp)"
+                if line_trimmed.starts_with("- ") {
+                    let desc = line_trimmed.trim_start_matches("- ");
+                    // Try to extract timestamp from end
+                    let (desc_part, timestamp) = if let Some(idx) = desc.rfind(" _(") {
+                        let ts_str = desc[idx + 3..].trim_end_matches(')');
+                        let ts = chrono::NaiveDateTime::parse_from_str(ts_str, "%Y-%m-%d %H:%M")
+                            .map(|dt| dt.and_utc())
+                            .unwrap_or_else(|_| Utc::now());
+                        (desc[..idx].to_string(), ts)
+                    } else {
+                        (desc.to_string(), Utc::now())
+                    };
+                    refinements.push(PlanRefinement {
+                        timestamp,
+                        description: desc_part,
+                    });
+                }
+            } else if !line_trimmed.is_empty() && !line_trimmed.starts_with('#') {
+                // Capture original prompt (text before ## Tasks)
+                if !original_prompt.is_empty() {
+                    original_prompt.push('\n');
+                }
+                original_prompt.push_str(line_trimmed);
+            }
+        }
+
+        // Don't forget the last task
+        if let Some(task) = current_task {
+            tasks.push(task);
+        }
+
+        Ok(Self {
+            id,
+            title,
+            original_prompt,
+            status,
+            created_at,
+            updated_at,
+            tasks,
+            current_task_index,
+            current_subtask_index,
+            session_id,
+            refinements,
+        })
+    }
+
+    /// Parse a checkbox line like "- [x] Description" or "- [ ] Description"
+    fn parse_checkbox_line(line: &str) -> (TaskStatus, String) {
+        let line = line.trim().trim_start_matches("- ");
+        if let Some(rest) = line
+            .strip_prefix("[x]")
+            .or_else(|| line.strip_prefix("[X]"))
+        {
+            (TaskStatus::Completed, rest.trim().to_string())
+        } else if let Some(rest) = line.strip_prefix("[-]") {
+            (TaskStatus::InProgress, rest.trim().to_string())
+        } else if let Some(rest) = line.strip_prefix("[ ]") {
+            (TaskStatus::Pending, rest.trim().to_string())
+        } else {
+            (TaskStatus::Pending, line.to_string())
+        }
     }
 }
 

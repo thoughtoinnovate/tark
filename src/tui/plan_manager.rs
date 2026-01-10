@@ -15,6 +15,8 @@ pub struct PlanManager {
     current_plan: Option<ExecutionPlan>,
     /// Storage backend
     storage: Option<TarkStorage>,
+    /// Current session ID
+    session_id: Option<String>,
     /// List of modified files during plan execution
     modified_files: Vec<String>,
     /// Auto-diff mode enabled
@@ -33,6 +35,7 @@ impl PlanManager {
         Self {
             current_plan: None,
             storage: None,
+            session_id: None,
             modified_files: Vec::new(),
             auto_diff: false,
         }
@@ -40,14 +43,24 @@ impl PlanManager {
 
     /// Initialize with storage backend
     pub fn with_storage(mut self, workspace_dir: impl AsRef<Path>) -> Result<Self> {
-        self.storage = Some(TarkStorage::new(workspace_dir)?);
-        // Try to load current plan
-        if let Some(ref storage) = self.storage {
-            if let Ok(plan) = storage.load_current_execution_plan() {
+        let storage = TarkStorage::new(workspace_dir)?;
+        // Get current session ID
+        let session_id = storage.get_current_session_id();
+        self.storage = Some(storage);
+        self.session_id = session_id.clone();
+
+        // Try to load current plan if we have a session
+        if let (Some(ref storage), Some(ref sid)) = (&self.storage, &session_id) {
+            if let Ok(plan) = storage.load_current_execution_plan(sid) {
                 self.current_plan = Some(plan);
             }
         }
         Ok(self)
+    }
+
+    /// Set the session ID
+    pub fn set_session_id(&mut self, session_id: String) {
+        self.session_id = Some(session_id);
     }
 
     /// Get the current plan
@@ -78,26 +91,28 @@ impl PlanManager {
 
     /// Load a plan by ID
     pub fn load_plan(&mut self, id: &str) -> Result<()> {
-        if let Some(ref storage) = self.storage {
-            let plan = storage.load_execution_plan(id)?;
+        if let (Some(ref storage), Some(ref session_id)) = (&self.storage, &self.session_id) {
+            let plan = storage.load_execution_plan(session_id, id)?;
             self.current_plan = Some(plan);
-            storage.set_current_plan(id)?;
+            storage.set_current_plan(session_id, id)?;
         }
         Ok(())
     }
 
     /// Save the current plan
     pub fn save_current_plan(&self) -> Result<()> {
-        if let (Some(ref storage), Some(ref plan)) = (&self.storage, &self.current_plan) {
-            storage.save_execution_plan(plan)?;
+        if let (Some(ref storage), Some(ref plan), Some(ref session_id)) =
+            (&self.storage, &self.current_plan, &self.session_id)
+        {
+            storage.save_execution_plan(session_id, plan)?;
         }
         Ok(())
     }
 
     /// List all plans
     pub fn list_plans(&self) -> Result<Vec<PlanMeta>> {
-        if let Some(ref storage) = self.storage {
-            storage.list_execution_plans()
+        if let (Some(ref storage), Some(ref session_id)) = (&self.storage, &self.session_id) {
+            storage.list_execution_plans(session_id)
         } else {
             Ok(Vec::new())
         }
@@ -105,8 +120,8 @@ impl PlanManager {
 
     /// Delete a plan
     pub fn delete_plan(&mut self, id: &str) -> Result<()> {
-        if let Some(ref storage) = self.storage {
-            storage.delete_execution_plan(id)?;
+        if let (Some(ref storage), Some(ref session_id)) = (&self.storage, &self.session_id) {
+            storage.delete_execution_plan(session_id, id)?;
             // Clear current if it was the deleted plan
             if self.current_plan.as_ref().map(|p| p.id.as_str()) == Some(id) {
                 self.current_plan = None;

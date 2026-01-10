@@ -1372,7 +1372,19 @@ async fn list_plans(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             .into_response();
     };
 
-    match storage.list_execution_plans() {
+    // Get current session ID
+    let session_id = match storage.get_current_session_id() {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No active session" })),
+            )
+                .into_response();
+        }
+    };
+
+    match storage.list_execution_plans(&session_id) {
         Ok(plans) => (StatusCode::OK, Json(plans)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1392,7 +1404,19 @@ async fn get_current_plan(State(state): State<Arc<AppState>>) -> impl IntoRespon
             .into_response();
     };
 
-    match storage.load_current_execution_plan() {
+    // Get current session ID
+    let session_id = match storage.get_current_session_id() {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No active session" })),
+            )
+                .into_response();
+        }
+    };
+
+    match storage.load_current_execution_plan(&session_id) {
         Ok(plan) => (StatusCode::OK, Json(plan)).into_response(),
         Err(e) => (
             StatusCode::NOT_FOUND,
@@ -1429,7 +1453,20 @@ async fn create_plan(
             .into_response();
     };
 
+    // Get current session ID
+    let session_id = match storage.get_current_session_id() {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No active session" })),
+            )
+                .into_response();
+        }
+    };
+
     let mut plan = crate::storage::ExecutionPlan::new(&req.title, &req.original_prompt);
+    plan.session_id = Some(session_id.clone());
 
     // Add tasks and subtasks
     for task in &req.tasks {
@@ -1440,12 +1477,7 @@ async fn create_plan(
         }
     }
 
-    // Associate with current session
-    if let Ok(session) = storage.load_current_session() {
-        plan.session_id = Some(session.id);
-    }
-
-    match storage.save_execution_plan(&plan) {
+    match storage.save_execution_plan(&session_id, &plan) {
         Ok(_) => {
             tracing::info!("Created plan: {} ({})", plan.title, plan.id);
             (StatusCode::OK, Json(plan)).into_response()
@@ -1485,7 +1517,19 @@ async fn update_plan(
             .into_response();
     };
 
-    let mut plan = match storage.load_execution_plan(&req.plan_id) {
+    // Get current session ID
+    let session_id = match storage.get_current_session_id() {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No active session" })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut plan = match storage.load_execution_plan(&session_id, &req.plan_id) {
         Ok(p) => p,
         Err(e) => {
             return (
@@ -1521,7 +1565,7 @@ async fn update_plan(
         plan.current_subtask_index = idx;
     }
 
-    match storage.save_execution_plan(&plan) {
+    match storage.save_execution_plan(&session_id, &plan) {
         Ok(_) => {
             tracing::info!("Updated plan: {}", plan.id);
             (StatusCode::OK, Json(plan)).into_response()
@@ -1559,7 +1603,19 @@ async fn update_task_status(
             .into_response();
     };
 
-    let mut plan = match storage.load_execution_plan(&req.plan_id) {
+    // Get current session ID
+    let session_id = match storage.get_current_session_id() {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No active session" })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut plan = match storage.load_execution_plan(&session_id, &req.plan_id) {
         Ok(p) => p,
         Err(e) => {
             return (
@@ -1609,10 +1665,10 @@ async fn update_task_status(
     if plan.is_complete() && plan.status == crate::storage::PlanStatus::Active {
         plan.status = crate::storage::PlanStatus::Completed;
         // Clear current plan pointer since it's done
-        let _ = storage.clear_current_plan();
+        let _ = storage.clear_current_plan(&session_id);
     }
 
-    match storage.save_execution_plan(&plan) {
+    match storage.save_execution_plan(&session_id, &plan) {
         Ok(_) => {
             tracing::info!(
                 "Updated task status: plan={}, task={}, subtask={:?}, status={:?}",
@@ -1650,7 +1706,19 @@ async fn delete_plan(
             .into_response();
     };
 
-    match storage.delete_execution_plan(&req.plan_id) {
+    // Get current session ID
+    let session_id = match storage.get_current_session_id() {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No active session" })),
+            )
+                .into_response();
+        }
+    };
+
+    match storage.delete_execution_plan(&session_id, &req.plan_id) {
         Ok(()) => {
             tracing::info!("Deleted plan: {}", req.plan_id);
             (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
