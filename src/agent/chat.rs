@@ -730,6 +730,9 @@ impl ChatAgent {
                     content,
                     timestamp: chrono::Utc::now(),
                     tool_call_id: m.tool_call_id.clone(),
+                    tool_calls: Vec::new(),
+                    thinking_content: None,
+                    segments: Vec::new(),
                 })
             })
             .collect()
@@ -1583,19 +1586,22 @@ impl ChatAgent {
     /// * `on_text` - Callback for each text chunk from the assistant
     /// * `on_thinking` - Callback for each thinking/reasoning chunk
     /// * `on_tool_call` - Callback when a tool call starts (name, args preview)
-    pub async fn chat_streaming<F, T, K, C>(
+    /// * `on_tool_complete` - Callback when a tool call completes (name, result preview, success)
+    pub async fn chat_streaming<F, T, K, C, D>(
         &mut self,
         user_message: &str,
         interrupt_check: F,
         on_text: T,
         on_thinking: K,
         on_tool_call: C,
+        on_tool_complete: D,
     ) -> Result<AgentResponse>
     where
         F: Fn() -> bool + Send + Sync,
         T: Fn(String) + Send + Sync + 'static,
         K: Fn(String) + Send + Sync + 'static,
         C: Fn(String, String) + Send + Sync + 'static,
+        D: Fn(String, String, bool) + Send + Sync + 'static,
     {
         // Wrap callbacks in Arc so they can be shared with the streaming callback
         let on_text = std::sync::Arc::new(on_text);
@@ -1813,8 +1819,11 @@ impl ChatAgent {
                         tool_call_log.push(ToolCallLog {
                             tool: call.name.clone(),
                             args: call.arguments.clone(),
-                            result_preview: preview,
+                            result_preview: preview.clone(),
                         });
+
+                        // Notify that tool completed immediately
+                        on_tool_complete(call.name.clone(), preview, result.success);
 
                         self.context.add_tool_result(&call.id, &result.output);
                     }
@@ -1871,8 +1880,11 @@ impl ChatAgent {
                         tool_call_log.push(ToolCallLog {
                             tool: call.name.clone(),
                             args: call.arguments.clone(),
-                            result_preview: preview,
+                            result_preview: preview.clone(),
                         });
+
+                        // Notify that tool completed immediately
+                        on_tool_complete(call.name.clone(), preview, result.success);
 
                         self.context.add_tool_result(&call.id, &result.output);
                     }

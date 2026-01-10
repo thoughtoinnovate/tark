@@ -42,6 +42,8 @@ pub struct StatusBar {
     pub thinking_mode: bool,
     /// Active plan progress (completed, total)
     pub plan_progress: Option<(usize, usize)>,
+    /// Contextual keybinding hints (shown based on current context)
+    pub keybind_hints: String,
 }
 
 impl Default for StatusBar {
@@ -59,6 +61,7 @@ impl Default for StatusBar {
             session_name: None,
             thinking_mode: false,
             plan_progress: None,
+            keybind_hints: String::new(),
         }
     }
 }
@@ -179,6 +182,11 @@ impl StatusBar {
     /// Update plan progress
     pub fn set_plan_progress(&mut self, progress: Option<(usize, usize)>) {
         self.plan_progress = progress;
+    }
+
+    /// Set contextual keybinding hints
+    pub fn set_keybind_hints(&mut self, hints: impl Into<String>) {
+        self.keybind_hints = hints.into();
     }
 }
 
@@ -385,15 +393,33 @@ impl Widget for StatusBarWidget<'_> {
 
         // Calculate remaining space for right-aligned content
         let left_content_len: usize = spans.iter().map(|s| s.content.len()).sum();
+
+        // Keybind hints (right side, before connection)
+        let hints_content = if !self.status.keybind_hints.is_empty() {
+            format!(" {} │", self.status.keybind_hints)
+        } else {
+            String::new()
+        };
+        let hints_len = hints_content.chars().count();
+
         let right_content = format!(" {} {} ", connection_icon, connection_text);
         let right_content_len = right_content.len();
 
         let padding = (area.width as usize)
             .saturating_sub(left_content_len)
+            .saturating_sub(hints_len)
             .saturating_sub(right_content_len);
 
         if padding > 0 {
             spans.push(Span::raw(" ".repeat(padding)));
+        }
+
+        // Add keybind hints (dimmed, right-aligned)
+        if !hints_content.is_empty() {
+            spans.push(Span::styled(
+                hints_content,
+                Style::default().fg(Color::DarkGray),
+            ));
         }
 
         spans.push(Span::styled(

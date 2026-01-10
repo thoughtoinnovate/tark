@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -21,6 +22,26 @@ use super::collapsible::{
     BlockType, CollapsibleBlock, CollapsibleBlockState, ContentSegment, ParsedMessageContent,
     ToolCallInfo,
 };
+
+// ============================================================================
+// Message Segment (for interleaved tool/text rendering)
+// ============================================================================
+
+/// A segment of message content for interleaved rendering.
+///
+/// During streaming, segments are built in chronological order as TextChunk
+/// and ToolCallStarted events arrive. This preserves the natural flow of
+/// text interspersed with tool executions.
+///
+/// Tool segments use indices into `tool_call_info` to avoid data duplication
+/// and ensure a single source of truth for tool state.
+#[derive(Debug, Clone)]
+pub enum MessageSegment {
+    /// Text content from the assistant
+    Text(String),
+    /// Reference to a tool in tool_call_info by index
+    ToolRef(usize),
+}
 
 /// Role of a message sender
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -79,7 +100,7 @@ pub struct ChatMessage {
     pub id: Uuid,
     /// Role of the sender
     pub role: Role,
-    /// Message content
+    /// Message content (kept for persistence/backward compatibility)
     pub content: String,
     /// Thinking content (for assistant messages when thinking mode is enabled)
     /// Requirements: 9.1, 9.3
@@ -90,8 +111,11 @@ pub struct ChatMessage {
     pub is_streaming: bool,
     /// Tool calls associated with this message (for assistant messages)
     pub tool_calls: Vec<String>,
-    /// Detailed tool call info for collapsible block rendering
+    /// Detailed tool call info for collapsible block rendering (backward compat)
     pub tool_call_info: Vec<ToolCallInfo>,
+    /// Interleaved segments built during streaming.
+    /// This preserves the chronological order of text and tool executions.
+    pub segments: Vec<MessageSegment>,
 }
 
 impl ChatMessage {
@@ -106,6 +130,7 @@ impl ChatMessage {
             is_streaming: false,
             tool_calls: Vec::new(),
             tool_call_info: Vec::new(),
+            segments: Vec::new(),
         }
     }
 
@@ -168,7 +193,7 @@ impl ChatMessage {
         // Use the actual rendering function to get accurate line count
         // This ensures line_count always matches what render_message_with_blocks produces
         let dummy_username = "User";
-        let rendered_lines = render_message_with_blocks(
+        let result = render_message_with_blocks(
             self,
             false, // is_selected doesn't affect line count
             width,
@@ -177,7 +202,7 @@ impl ChatMessage {
             show_thinking,
         );
 
-        rendered_lines.len()
+        result.lines.len()
     }
 }
 
@@ -286,6 +311,16 @@ impl TextSelection {
     }
 }
 
+/// Block click target info
+/// Target for block click handling
+#[derive(Debug, Clone)]
+pub struct BlockClickTarget {
+    /// Block ID for toggling
+    pub block_id: String,
+    /// Block type
+    pub block_type: BlockType,
+}
+
 /// Message list widget with scroll state
 #[derive(Debug)]
 pub struct MessageList {
@@ -309,6 +344,8 @@ pub struct MessageList {
     cached_total_lines: Option<usize>,
     /// Whether to display thinking blocks (controlled by /thinking command)
     show_thinking: bool,
+    /// Map of line numbers to clickable block targets (updated during render)
+    block_click_targets: std::collections::HashMap<usize, BlockClickTarget>,
 }
 
 impl Default for MessageList {
@@ -324,6 +361,7 @@ impl Default for MessageList {
             last_width: 0,
             cached_total_lines: None,
             show_thinking: true, // Show thinking blocks by default
+            block_click_targets: std::collections::HashMap::new(),
         }
     }
 }
@@ -347,6 +385,7 @@ impl MessageList {
             last_width: 0,
             cached_total_lines: None,
             show_thinking: true, // Show thinking blocks by default
+            block_click_targets: std::collections::HashMap::new(),
         }
     }
 
@@ -363,6 +402,141 @@ impl MessageList {
     /// Toggle a collapsible block's expanded state
     pub fn toggle_block(&mut self, block_id: &str, block_type: BlockType) {
         self.block_state.toggle(block_id, block_type);
+    }
+
+    /// Clear all block click targets (called before rendering)
+    pub fn clear_block_click_targets(&mut self) {
+        self.block_click_targets.clear();
+    }
+
+    /// Register a block click target at a specific line
+    pub fn add_block_click_target(&mut self, line: usize, block_id: String, block_type: BlockType) {
+        self.block_click_targets.insert(
+            line,
+            BlockClickTarget {
+                block_id,
+                block_type,
+            },
+        );
+    }
+
+    /// Get block click target at a specific line (if any)
+    pub fn get_block_at_line(&self, line: usize) -> Option<&BlockClickTarget> {
+        self.block_click_targets.get(&line)
+    }
+
+    /// Toggle block at a specific line (returns true if a block was toggled)
+    pub fn toggle_block_at_line(&mut self, line: usize) -> bool {
+        if let Some(target) = self.block_click_targets.get(&line).cloned() {
+            self.block_state.toggle(&target.block_id, target.block_type);
+            // Also set this block as focused for scrolling
+            if self
+                .block_state
+                .is_expanded(&target.block_id, target.block_type)
+            {
+                self.block_state.set_focused_block(Some(target.block_id));
+            } else {
+                // If collapsing, clear focus
+                self.block_state.set_focused_block(None);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the currently focused block ID
+    pub fn focused_block(&self) -> Option<&str> {
+        self.block_state.focused_block()
+    }
+
+    /// Clear block focus
+    pub fn clear_block_focus(&mut self) {
+        self.block_state.set_focused_block(None);
+    }
+
+    /// Focus the next block in the message list (expands it if collapsed)
+    /// Returns true if focus changed
+    pub fn focus_next_block(&mut self) -> bool {
+        // Get all block IDs from click targets
+        let mut block_ids: Vec<(usize, String, BlockType)> = self
+            .block_click_targets
+            .iter()
+            .map(|(line, target)| (*line, target.block_id.clone(), target.block_type))
+            .collect();
+        block_ids.sort_by_key(|(line, _, _)| *line);
+
+        if block_ids.is_empty() {
+            return false;
+        }
+
+        let current_focus = self.block_state.focused_block().map(|s| s.to_string());
+
+        let (next_id, next_type) = if let Some(ref current) = current_focus {
+            // Find current position and get next
+            let current_idx = block_ids
+                .iter()
+                .position(|(_, id, _)| id == current)
+                .unwrap_or(0);
+            let next_idx = (current_idx + 1) % block_ids.len();
+            (block_ids[next_idx].1.clone(), block_ids[next_idx].2)
+        } else {
+            // No current focus, focus first block
+            (block_ids[0].1.clone(), block_ids[0].2)
+        };
+
+        // Expand the block if collapsed
+        if !self.block_state.is_expanded(&next_id, next_type) {
+            self.block_state.set(&next_id, true);
+        }
+
+        self.block_state.set_focused_block(Some(next_id));
+        true
+    }
+
+    /// Focus the previous block in the message list (expands it if collapsed)
+    /// Returns true if focus changed
+    pub fn focus_prev_block(&mut self) -> bool {
+        // Get all block IDs from click targets
+        let mut block_ids: Vec<(usize, String, BlockType)> = self
+            .block_click_targets
+            .iter()
+            .map(|(line, target)| (*line, target.block_id.clone(), target.block_type))
+            .collect();
+        block_ids.sort_by_key(|(line, _, _)| *line);
+
+        if block_ids.is_empty() {
+            return false;
+        }
+
+        let current_focus = self.block_state.focused_block().map(|s| s.to_string());
+
+        let (prev_id, prev_type) = if let Some(ref current) = current_focus {
+            // Find current position and get previous
+            let current_idx = block_ids
+                .iter()
+                .position(|(_, id, _)| id == current)
+                .unwrap_or(0);
+            // Wrap around to last if at first
+            let prev_idx = if current_idx == 0 {
+                block_ids.len() - 1
+            } else {
+                current_idx - 1
+            };
+            (block_ids[prev_idx].1.clone(), block_ids[prev_idx].2)
+        } else {
+            // No current focus, focus last block
+            let last = block_ids.last().unwrap();
+            (last.1.clone(), last.2)
+        };
+
+        // Expand the block if collapsed
+        if !self.block_state.is_expanded(&prev_id, prev_type) {
+            self.block_state.set(&prev_id, true);
+        }
+
+        self.block_state.set_focused_block(Some(prev_id));
+        true
     }
 
     /// Add a message to the list
@@ -1100,6 +1274,7 @@ fn render_collapsible_block(
     is_expanded: bool,
     width: u16,
     scroll_offset: usize,
+    is_focused: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
@@ -1129,24 +1304,56 @@ fn render_collapsible_block(
     } else {
         block.block_type().icon()
     };
+    let focus_prefix = if is_focused { "»" } else { " " };
+    // Use box corner only when expanded, plain style when collapsed (matches tool inline)
+    let box_prefix = if is_expanded { "╭── " } else { "" };
     let header_text = match block.block_type() {
-        BlockType::Thinking => format!("╭── {} {} {} ", indicator, icon, block.header()),
+        BlockType::Thinking => format!(
+            "{}{}{} {} {} ",
+            focus_prefix,
+            box_prefix,
+            indicator,
+            icon,
+            block.header()
+        ),
         BlockType::Tool => {
             if block.has_error {
+                // Failed tools: warning icon + FAILED label
                 format!(
-                    "╭── {} {} Tool: {} [FAILED] ",
+                    "{}{}{} ⚠️ {} FAILED ",
+                    focus_prefix,
+                    box_prefix,
+                    indicator,
+                    block.header()
+                )
+            } else {
+                // Normal tools: gear icon + human-readable action
+                format!(
+                    "{}{}{} {} {} ",
+                    focus_prefix,
+                    box_prefix,
                     indicator,
                     icon,
                     block.header()
                 )
-            } else {
-                format!("╭── {} {} Tool: {} ", indicator, icon, block.header())
             }
         }
     };
 
+    // Apply focus styling if focused (cyan and bold)
+    let effective_header_style = if is_focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        header_style
+    };
+
     // Pad header to create a box effect
-    lines.push(Line::from(Span::styled(header_text, header_style)));
+    lines.push(Line::from(Span::styled(
+        header_text,
+        effective_header_style,
+    )));
 
     // Render content if expanded
     if is_expanded {
@@ -1154,12 +1361,13 @@ fn render_collapsible_block(
         let scroll_style = Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM);
+        // Padding for alignment when focused (» adds one char to header)
+        let align_pad = if is_focused { " " } else { "" };
 
-        // Max visible lines for thinking blocks (compact display)
-        let max_visible_lines: usize = if block.block_type() == BlockType::Thinking {
-            5
-        } else {
-            usize::MAX // No limit for tool blocks
+        // Max visible lines before scrolling is enabled
+        let max_visible_lines: usize = match block.block_type() {
+            BlockType::Thinking => 5, // Compact for thinking
+            BlockType::Tool => 12,    // More lines for tool output, then scroll
         };
 
         // First, collect all wrapped content lines
@@ -1184,15 +1392,25 @@ fn render_collapsible_block(
         let total_lines = all_content_lines.len();
         let is_thinking = block.block_type() == BlockType::Thinking;
 
-        // For thinking blocks with more content than max_visible_lines, show limited view
-        if is_thinking && total_lines > max_visible_lines {
+        // For blocks with more content than max_visible_lines, show scrollable view
+        if total_lines > max_visible_lines {
             // Calculate visible window based on scroll offset
-            // scroll_offset=0 means show from the end (most recent)
-            // As scroll_offset increases, we show earlier content
             let max_scroll = total_lines.saturating_sub(max_visible_lines);
             let effective_scroll = scroll_offset.min(max_scroll);
-            let start_idx = max_scroll.saturating_sub(effective_scroll);
-            let end_idx = (start_idx + max_visible_lines).min(total_lines);
+
+            // Different scroll behavior based on block type:
+            // - Thinking: scroll_offset=0 shows END (most recent), increases show earlier
+            // - Tool: scroll_offset=0 shows START (beginning), increases show later
+            let (start_idx, end_idx) = if is_thinking {
+                let start = max_scroll.saturating_sub(effective_scroll);
+                let end = (start + max_visible_lines).min(total_lines);
+                (start, end)
+            } else {
+                // Tool blocks: start from beginning, scroll down to see more
+                let start = effective_scroll;
+                let end = (start + max_visible_lines).min(total_lines);
+                (start, end)
+            };
 
             let lines_above = start_idx;
             let lines_below = total_lines.saturating_sub(end_idx);
@@ -1200,11 +1418,8 @@ fn render_collapsible_block(
             // Show "more above" indicator
             if lines_above > 0 {
                 lines.push(Line::from(vec![
-                    Span::styled("│ ", border_style),
-                    Span::styled(
-                        format!("  ↑ {} more above (scroll up)", lines_above),
-                        scroll_style,
-                    ),
+                    Span::styled(format!("{}│ ", align_pad), border_style),
+                    Span::styled(format!("  ↑ {} more above ([)", lines_above), scroll_style),
                 ]));
             }
 
@@ -1220,7 +1435,7 @@ fn render_collapsible_block(
                     vec![Span::styled(wrapped.clone(), *base_style)]
                 };
 
-                let mut line_spans = vec![Span::styled("│ ", border_style)];
+                let mut line_spans = vec![Span::styled(format!("{}│ ", align_pad), border_style)];
                 line_spans.extend(styled_spans);
                 lines.push(Line::from(line_spans));
             }
@@ -1228,11 +1443,8 @@ fn render_collapsible_block(
             // Show "more below" indicator
             if lines_below > 0 {
                 lines.push(Line::from(vec![
-                    Span::styled("│ ", border_style),
-                    Span::styled(
-                        format!("  ↓ {} more below (scroll down)", lines_below),
-                        scroll_style,
-                    ),
+                    Span::styled(format!("{}│ ", align_pad), border_style),
+                    Span::styled(format!("  ↓ {} more below (])", lines_below), scroll_style),
                 ]));
             }
         } else {
@@ -1244,7 +1456,7 @@ fn render_collapsible_block(
                     vec![Span::styled(wrapped.clone(), *base_style)]
                 };
 
-                let mut line_spans = vec![Span::styled("│ ", border_style)];
+                let mut line_spans = vec![Span::styled(format!("{}│ ", align_pad), border_style)];
                 line_spans.extend(styled_spans);
                 lines.push(Line::from(line_spans));
             }
@@ -1252,7 +1464,7 @@ fn render_collapsible_block(
 
         // Adaptive closing border (matches content width)
         let border_width = width.saturating_sub(2) as usize;
-        let closing_border = format!("╰{}", "─".repeat(border_width.min(60)));
+        let closing_border = format!("{}╰{}", align_pad, "─".repeat(border_width.min(60)));
         lines.push(Line::from(Span::styled(closing_border, border_style)));
     }
 
@@ -1381,6 +1593,13 @@ fn render_thinking_markdown(text: &str, base_style: Style) -> Vec<Span<'static>>
     spans
 }
 
+/// Result of rendering a message, includes lines and clickable block positions
+struct RenderResult {
+    lines: Vec<Line<'static>>,
+    /// Block click targets: (line_offset_within_message, block_id, block_type)
+    click_targets: Vec<(usize, String, BlockType)>,
+}
+
 /// Render a message with collapsible blocks for assistant messages
 ///
 /// For assistant messages, this parses the content to extract thinking
@@ -1398,8 +1617,9 @@ fn render_message_with_blocks(
     block_state: &CollapsibleBlockState,
     username: &str,
     show_thinking: bool,
-) -> Vec<Line<'static>> {
+) -> RenderResult {
     let mut lines = Vec::new();
+    let mut click_targets: Vec<(usize, String, BlockType)> = Vec::new();
 
     // Header line with role icon and name
     let header_style = if is_selected {
@@ -1436,14 +1656,122 @@ fn render_message_with_blocks(
             CollapsibleBlock::thinking(thinking_block_id.clone(), thinking_content);
         let is_expanded = block_state.is_expanded(&thinking_block_id, BlockType::Thinking);
         let scroll_offset = block_state.scroll_offset(&thinking_block_id);
-        let block_lines =
-            render_collapsible_block(&thinking_block, is_expanded, width, scroll_offset);
+        let is_focused = block_state.is_focused(&thinking_block_id);
+        // Track click target at current line position (before adding block lines)
+        click_targets.push((lines.len(), thinking_block_id.clone(), BlockType::Thinking));
+        let block_lines = render_collapsible_block(
+            &thinking_block,
+            is_expanded,
+            width,
+            scroll_offset,
+            is_focused,
+        );
         lines.extend(block_lines);
     }
 
-    // For assistant messages, parse and render with collapsible blocks
-    if message.role == Role::Assistant && !message.tool_call_info.is_empty() {
-        // Parse the message content
+    // For assistant messages, use segments if available (inline tool display)
+    if message.role == Role::Assistant && !message.segments.is_empty() {
+        // Use interleaved segments built during streaming
+        let content_style = if is_selected {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+
+        let message_id = message.id.to_string();
+        let mut thinking_block_counter = 0;
+
+        for segment in message.segments.iter() {
+            match segment {
+                MessageSegment::Text(text) => {
+                    // Parse thinking blocks from text (for OpenAI and other providers that embed thinking in text)
+                    // Use ParsedMessageContent to properly extract and render thinking blocks
+                    let parsed = ParsedMessageContent::parse(text, &[], &message_id);
+
+                    for content_segment in &parsed.segments {
+                        match content_segment {
+                            ContentSegment::Text(remaining_text) => {
+                                if !remaining_text.is_empty() {
+                                    let content_lines = format_content_owned_with_width(
+                                        remaining_text.clone(),
+                                        content_style,
+                                        width as usize,
+                                    );
+                                    lines.extend(content_lines);
+                                }
+                            }
+                            ContentSegment::Block(block) => {
+                                // Render thinking blocks if show_thinking is enabled
+                                if show_thinking && block.block_type() == BlockType::Thinking {
+                                    // Use unique ID for this thinking block
+                                    let thinking_id = format!(
+                                        "{}-inline-thinking-{}",
+                                        message_id, thinking_block_counter
+                                    );
+                                    thinking_block_counter += 1;
+                                    let is_expanded =
+                                        block_state.is_expanded(&thinking_id, BlockType::Thinking);
+                                    let scroll_offset = block_state.scroll_offset(&thinking_id);
+                                    let is_focused = block_state.is_focused(&thinking_id);
+                                    // Track click target at current line position
+                                    click_targets.push((
+                                        lines.len(),
+                                        thinking_id.clone(),
+                                        BlockType::Thinking,
+                                    ));
+                                    // Create a new block with our tracking ID
+                                    let thinking_block = CollapsibleBlock::thinking(
+                                        thinking_id,
+                                        block.content().to_vec(),
+                                    );
+                                    let block_lines = render_collapsible_block(
+                                        &thinking_block,
+                                        is_expanded,
+                                        width,
+                                        scroll_offset,
+                                        is_focused,
+                                    );
+                                    lines.extend(block_lines);
+                                }
+                            }
+                        }
+                    }
+                }
+                MessageSegment::ToolRef(idx) => {
+                    // Dereference to get actual tool info
+                    if let Some(tool_info) = message.tool_call_info.get(*idx) {
+                        // Use the stored block_id from tool_info (single source of truth)
+                        let block_id = &tool_info.block_id;
+                        let is_expanded = block_state.is_expanded(block_id, BlockType::Tool);
+
+                        // Track click target at current line position
+                        click_targets.push((lines.len(), block_id.clone(), BlockType::Tool));
+
+                        let is_focused = block_state.is_focused(block_id);
+
+                        if is_expanded {
+                            // Render expanded box format
+                            let tool_block = create_tool_block_from_info(tool_info, block_id);
+                            let scroll_offset = block_state.scroll_offset(block_id);
+                            let block_lines = render_collapsible_block(
+                                &tool_block,
+                                true,
+                                width,
+                                scroll_offset,
+                                is_focused,
+                            );
+                            lines.extend(block_lines);
+                        } else {
+                            // Render collapsed inline format (single line)
+                            let inline_line = render_tool_inline(tool_info, width, is_focused);
+                            lines.push(inline_line);
+                        }
+                    }
+                }
+            }
+        }
+    } else if message.role == Role::Assistant && !message.tool_call_info.is_empty() {
+        // Fallback: use ParsedMessageContent for legacy/non-streaming path
         let message_id = message.id.to_string();
         let parsed =
             ParsedMessageContent::parse(&message.content, &message.tool_call_info, &message_id);
@@ -1469,10 +1797,18 @@ fn render_message_with_blocks(
                     if !show_thinking && block.block_type() == BlockType::Thinking {
                         continue;
                     }
+                    // Track click target at current line position
+                    click_targets.push((lines.len(), block.id().to_string(), block.block_type()));
                     let is_expanded = block_state.is_expanded(block.id(), block.block_type());
                     let scroll_offset = block_state.scroll_offset(block.id());
-                    let block_lines =
-                        render_collapsible_block(block, is_expanded, width, scroll_offset);
+                    let is_focused = block_state.is_focused(block.id());
+                    let block_lines = render_collapsible_block(
+                        block,
+                        is_expanded,
+                        width,
+                        scroll_offset,
+                        is_focused,
+                    );
                     lines.extend(block_lines);
                 }
             }
@@ -1504,10 +1840,22 @@ fn render_message_with_blocks(
                         if !show_thinking && block.block_type() == BlockType::Thinking {
                             continue;
                         }
+                        // Track click target at current line position
+                        click_targets.push((
+                            lines.len(),
+                            block.id().to_string(),
+                            block.block_type(),
+                        ));
                         let is_expanded = block_state.is_expanded(block.id(), block.block_type());
                         let scroll_offset = block_state.scroll_offset(block.id());
-                        let block_lines =
-                            render_collapsible_block(block, is_expanded, width, scroll_offset);
+                        let is_focused = block_state.is_focused(block.id());
+                        let block_lines = render_collapsible_block(
+                            block,
+                            is_expanded,
+                            width,
+                            scroll_offset,
+                            is_focused,
+                        );
                         lines.extend(block_lines);
                     }
                 }
@@ -1579,7 +1927,10 @@ fn render_message_with_blocks(
     // Add spacing
     lines.push(Line::from(""));
 
-    lines
+    RenderResult {
+        lines,
+        click_targets,
+    }
 }
 
 /// Wrap text to fit within a given width using word boundaries
@@ -2091,16 +2442,27 @@ impl<'a> MessageListWidget<'a> {
             return;
         }
 
+        // Clear click targets before rendering
+        self.message_list.clear_block_click_targets();
+
         // Collect all lines from all messages, using collapsible block rendering
         let mut all_lines: Vec<Line<'static>> = Vec::new();
+        let mut accumulated_lines = 0usize;
         let block_state = &self.message_list.block_state;
         let username = &self.username;
         let show_thinking = self.message_list.show_thinking;
-        for (idx, message) in self.message_list.messages.iter().enumerate() {
-            let is_selected = self.message_list.selected == Some(idx);
+        // Collect messages and their render results first (to avoid borrow issues)
+        let messages_snapshot: Vec<_> = self.message_list.messages.iter().enumerate().collect();
+        let selected = self.message_list.selected;
+
+        // Collect click targets to add after iteration
+        let mut click_targets_to_add: Vec<(usize, String, BlockType)> = Vec::new();
+
+        for (idx, message) in messages_snapshot {
+            let is_selected = selected == Some(idx);
             // Use the new render function that supports collapsible blocks
             // Pass username for display name formatting (Requirements 2.2, 2.3)
-            let message_lines = render_message_with_blocks(
+            let result = render_message_with_blocks(
                 message,
                 is_selected,
                 inner.width,
@@ -2108,7 +2470,20 @@ impl<'a> MessageListWidget<'a> {
                 username,
                 show_thinking,
             );
-            all_lines.extend(message_lines);
+
+            // Collect click targets with adjusted line offsets
+            for (line_offset, block_id, block_type) in result.click_targets {
+                click_targets_to_add.push((accumulated_lines + line_offset, block_id, block_type));
+            }
+
+            accumulated_lines += result.lines.len();
+            all_lines.extend(result.lines);
+        }
+
+        // Register all click targets
+        for (line, block_id, block_type) in click_targets_to_add {
+            self.message_list
+                .add_block_click_target(line, block_id, block_type);
         }
 
         // Apply scroll offset
@@ -2186,9 +2561,21 @@ impl<'a> MessageListWidget<'a> {
 
             if cursor_pos.line >= visible_start && cursor_pos.line < visible_end {
                 let cursor_screen_row = (cursor_pos.line - scroll_offset) as u16;
+
+                // Visual line indicator: show `│` at left edge of cursor line
+                // This helps users know which line they're on in Normal mode
+                let y = inner.y + cursor_screen_row;
+                if y < inner.y + inner.height {
+                    // Add a subtle left-edge indicator for the cursor line
+                    if let Some(cell) = buf.cell_mut((inner.x, y)) {
+                        cell.set_symbol("│");
+                        cell.set_fg(Color::Cyan);
+                    }
+                }
+
+                // Also highlight the cursor character position
                 let cursor_col = cursor_pos.col.min(inner.width.saturating_sub(1) as usize) as u16;
                 let x = inner.x + cursor_col;
-                let y = inner.y + cursor_screen_row;
                 if x < inner.x + inner.width && y < inner.y + inner.height {
                     if let Some(cell) = buf.cell_mut((x, y)) {
                         cell.set_bg(Color::Cyan);
@@ -2235,6 +2622,283 @@ impl<'a> MessageListWidget<'a> {
 impl Widget for MessageListWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         self.render(area, buf);
+    }
+}
+
+// ============================================================================
+// Inline Tool Rendering Helpers
+// ============================================================================
+
+/// Create a CollapsibleBlock from ToolCallInfo for expanded rendering
+fn create_tool_block_from_info(tool_info: &ToolCallInfo, block_id: &str) -> CollapsibleBlock {
+    // Build content with args and result
+    let mut content: Vec<String> = Vec::new();
+
+    // Format args as key=value pairs
+    if let Some(obj) = tool_info.args.as_object() {
+        for (key, value) in obj {
+            let value_str = match value {
+                serde_json::Value::String(s) => s.clone(),
+                _ => value.to_string(),
+            };
+            content.push(format!("  {}: {}", key, truncate_str(&value_str, 60)));
+        }
+        if !obj.is_empty() {
+            content.push(String::new()); // Empty line separator
+        }
+    }
+
+    // Add result preview lines
+    for line in tool_info.result_preview.lines() {
+        content.push(format!("  {}", line));
+    }
+
+    // Use human-readable action as the header
+    let header = format_tool_action(&tool_info.tool, &tool_info.args);
+    CollapsibleBlock::tool(block_id.to_string(), header, content)
+}
+
+/// Render a tool as a single inline line (collapsed format)
+///
+/// Format (success): `▶ ⚙️ tool_action  →  ✓ summary  │  preview...`
+/// Format (running): `▶ ⚙️ tool_action  →  ⏳ Running...`
+/// Format (error):   `▶ ⚠️ tool_action FAILED  →  error message...`
+/// When focused (for scrolling), adds a visual indicator `»`
+fn render_tool_inline(tool_info: &ToolCallInfo, width: u16, is_focused: bool) -> Line<'static> {
+    let tool_display = format_tool_action(&tool_info.tool, &tool_info.args);
+    let is_error = tool_info.is_error();
+    let is_running = tool_info.result_preview == "⏳ Running...";
+
+    // For errors, use warning icon and red styling
+    if is_error {
+        let error_preview = tool_info
+            .error
+            .as_ref()
+            .map(|e| truncate_str(e, 50))
+            .unwrap_or_else(|| truncate_str(&tool_info.result_preview, 50));
+
+        return Line::from(vec![
+            Span::styled("▶ ⚠️ ", Style::default().fg(Color::Red)),
+            Span::styled(tool_display, Style::default().fg(Color::Red)),
+            Span::styled(
+                " FAILED",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  →  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(error_preview, Style::default().fg(Color::Red)),
+        ]);
+    }
+
+    let (status_icon, status_style) = if is_running {
+        ("⏳", Style::default().fg(Color::Yellow))
+    } else {
+        ("✓", Style::default().fg(Color::Green))
+    };
+
+    let summary = extract_summary(&tool_info.result_preview, &tool_info.tool);
+
+    // Calculate available width for preview
+    // "▶ ⚙️ " (5) + tool_display + "  →  " (5) + status + summary + "  │  " (5) + preview
+    let fixed_chars = 5 + 5 + status_icon.chars().count() + 1 + 5;
+    let tool_display_len = tool_display.chars().count();
+    let summary_len = summary.chars().count();
+    let used = fixed_chars + tool_display_len + summary_len;
+    let preview_width = if (used + 10) < width as usize {
+        (width as usize).saturating_sub(used).min(60)
+    } else {
+        0
+    };
+
+    let preview = if preview_width > 5 && !is_running {
+        let first_line = tool_info
+            .result_preview
+            .lines()
+            .find(|l| !l.is_empty() && !l.starts_with("shell>"))
+            .unwrap_or("");
+        truncate_str(first_line, preview_width)
+    } else {
+        String::new()
+    };
+
+    // Build the line spans - add focus indicator if focused
+    let focus_indicator = if is_focused { "»" } else { " " };
+    let focus_style = if is_focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let mut spans = vec![
+        Span::styled(focus_indicator, focus_style),
+        Span::styled("▶ 🔧 ", Style::default().fg(Color::Magenta)),
+        Span::styled(tool_display, Style::default()),
+        Span::styled("  →  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{} ", status_icon), status_style),
+        Span::styled(summary, Style::default().fg(Color::Gray)),
+    ];
+
+    if !preview.is_empty() {
+        spans.push(Span::styled("  │  ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(preview, Style::default().fg(Color::DarkGray)));
+    }
+
+    Line::from(spans)
+}
+
+/// Format a tool action in human-readable form
+///
+/// Shell tools show `$ command`, others show key parameters
+fn format_tool_action(tool: &str, args: &serde_json::Value) -> String {
+    match tool {
+        "shell" | "safe_shell" | "execute" => {
+            let cmd = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("...");
+            format!("$ {}", truncate_str(cmd, 50))
+        }
+        "grep" | "ripgrep" => {
+            let pattern = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("...");
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            format!("grep \"{}\" in {}", truncate_str(pattern, 20), path)
+        }
+        "read_file" | "file_preview" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("...");
+            let start = args.get("start_line").and_then(|v| v.as_u64());
+            let end = args.get("end_line").and_then(|v| v.as_u64());
+            if let (Some(s), Some(e)) = (start, end) {
+                format!("read {}:{}-{}", path, s, e)
+            } else {
+                format!("read {}", path)
+            }
+        }
+        "read_files" => {
+            let paths = args.get("paths").and_then(|v| v.as_array());
+            if let Some(p) = paths {
+                let count = p.len();
+                format!("read {} files", count)
+            } else {
+                "read files".to_string()
+            }
+        }
+        "write_file" | "patch_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("...");
+            format!("{} {}", tool.replace('_', " "), path)
+        }
+        "delete_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("...");
+            format!("delete {}", path)
+        }
+        "list_directory" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            format!("ls {}", path)
+        }
+        "file_search" => {
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("...");
+            format!("find \"{}\"", truncate_str(query, 30))
+        }
+        "codebase_overview" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            format!("overview {}", path)
+        }
+        "find_references" | "find_all_references" => {
+            let pattern = args
+                .get("pattern")
+                .or_else(|| args.get("symbol"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("...");
+            format!("refs \"{}\"", truncate_str(pattern, 30))
+        }
+        "list_symbols" => {
+            let file = args
+                .get("file")
+                .or_else(|| args.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("...");
+            format!("symbols {}", file)
+        }
+        "go_to_definition" => {
+            let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("...");
+            format!("goto {}", truncate_str(symbol, 30))
+        }
+        "call_hierarchy" => {
+            let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("...");
+            format!("calls {}", truncate_str(symbol, 30))
+        }
+        "get_signature" => {
+            let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("...");
+            format!("sig {}", truncate_str(symbol, 30))
+        }
+        "ask_user" => {
+            let question = args
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("...");
+            format!("ask: {}", truncate_str(question, 40))
+        }
+        "propose_change" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("...");
+            format!("propose {}", path)
+        }
+        _ => tool.replace('_', " "),
+    }
+}
+
+/// Extract a concise summary from the result preview
+fn extract_summary(result_preview: &str, tool: &str) -> String {
+    if result_preview == "⏳ Running..." {
+        return "Running...".to_string();
+    }
+
+    // For shell commands, extract exit code
+    if tool == "shell" || tool == "safe_shell" || tool == "execute" {
+        if result_preview.contains("Exit: 0") || result_preview.contains("exit: 0") {
+            return "Exit: 0".to_string();
+        } else if let Some(line) = result_preview.lines().find(|l| l.contains("Exit:")) {
+            if let Some(code) = line.split("Exit:").nth(1) {
+                return format!("Exit:{}", code.split_whitespace().next().unwrap_or("?"));
+            }
+        }
+    }
+
+    // Count output lines
+    let line_count = result_preview.lines().count();
+    if line_count > 1 {
+        return format!("{} lines", line_count);
+    }
+
+    // Count matches for grep-like tools
+    if tool == "grep" || tool == "ripgrep" || tool.contains("find") {
+        let match_count = result_preview
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with("shell>"))
+            .count();
+        if match_count > 0 {
+            return format!(
+                "{} match{}",
+                match_count,
+                if match_count == 1 { "" } else { "es" }
+            );
+        }
+    }
+
+    // Default: truncate first line
+    let first_line = result_preview.lines().next().unwrap_or("");
+    truncate_str(first_line, 20)
+}
+
+/// Truncate a string to max_len, adding ellipsis if needed
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
+        format!("{}…", truncated)
     }
 }
 
@@ -2598,13 +3262,13 @@ mod property_tests {
             let block_state = CollapsibleBlockState::new();
 
             for message in &messages {
-                let lines = render_message_with_blocks(message, false, 80, &block_state, &username, true);
+                let result = render_message_with_blocks(message, false, 80, &block_state, &username, true);
 
                 // The first line should be the header with icon and name
-                prop_assert!(!lines.is_empty(), "Message should produce at least one line");
+                prop_assert!(!result.lines.is_empty(), "Message should produce at least one line");
 
                 // Convert the first line to a string for checking
-                let header_line = &lines[0];
+                let header_line = &result.lines[0];
                 let header_text: String = header_line.spans.iter()
                     .map(|span| span.content.as_ref())
                     .collect();
@@ -2663,11 +3327,11 @@ mod property_tests {
             let fallback_username = "You";
 
             for message in messages.iter().filter(|m| m.role == Role::User) {
-                let lines = render_message_with_blocks(message, false, 80, &block_state, fallback_username, true);
+                let result = render_message_with_blocks(message, false, 80, &block_state, fallback_username, true);
 
-                prop_assert!(!lines.is_empty(), "Message should produce at least one line");
+                prop_assert!(!result.lines.is_empty(), "Message should produce at least one line");
 
-                let header_line = &lines[0];
+                let header_line = &result.lines[0];
                 let header_text: String = header_line.spans.iter()
                     .map(|span| span.content.as_ref())
                     .collect();
@@ -2886,5 +3550,74 @@ code block
         assert!(all_text.contains("bold"));
         assert!(all_text.contains("List item"));
         assert!(all_text.contains("quote"));
+    }
+
+    #[test]
+    fn test_focus_next_block_empty() {
+        let mut list = MessageList::new();
+        // No blocks registered, should return false
+        assert!(!list.focus_next_block());
+    }
+
+    #[test]
+    fn test_focus_prev_block_empty() {
+        let mut list = MessageList::new();
+        // No blocks registered, should return false
+        assert!(!list.focus_prev_block());
+    }
+
+    #[test]
+    fn test_focus_block_with_targets() {
+        let mut list = MessageList::new();
+
+        // Register some block targets
+        list.add_block_click_target(5, "block-1".to_string(), BlockType::Tool);
+        list.add_block_click_target(10, "block-2".to_string(), BlockType::Thinking);
+        list.add_block_click_target(15, "block-3".to_string(), BlockType::Tool);
+
+        // Focus next should work and focus first block
+        assert!(list.focus_next_block());
+        assert_eq!(list.focused_block(), Some("block-1"));
+
+        // Block should be expanded
+        assert!(list.block_state().is_expanded("block-1", BlockType::Tool));
+
+        // Focus next again should move to second block
+        assert!(list.focus_next_block());
+        assert_eq!(list.focused_block(), Some("block-2"));
+
+        // Focus prev should go back to first
+        assert!(list.focus_prev_block());
+        assert_eq!(list.focused_block(), Some("block-1"));
+
+        // Clear focus
+        list.clear_block_focus();
+        assert!(list.focused_block().is_none());
+    }
+
+    #[test]
+    fn test_focus_block_wrap_around() {
+        let mut list = MessageList::new();
+
+        // Register two blocks
+        list.add_block_click_target(5, "block-1".to_string(), BlockType::Tool);
+        list.add_block_click_target(10, "block-2".to_string(), BlockType::Tool);
+
+        // Focus first
+        assert!(list.focus_next_block());
+        assert_eq!(list.focused_block(), Some("block-1"));
+
+        // Focus second
+        assert!(list.focus_next_block());
+        assert_eq!(list.focused_block(), Some("block-2"));
+
+        // Focus next should wrap to first
+        assert!(list.focus_next_block());
+        assert_eq!(list.focused_block(), Some("block-1"));
+
+        // Focus prev should wrap to last
+        list.clear_block_focus();
+        assert!(list.focus_prev_block());
+        assert_eq!(list.focused_block(), Some("block-2"));
     }
 }

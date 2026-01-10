@@ -90,6 +90,22 @@ pub enum Action {
     ScrollBlockUp,
     /// Scroll down within thinking block (] key in messages)
     ScrollBlockDown,
+    /// Focus next block in message (n key in messages)
+    FocusNextBlock,
+    /// Focus previous block in message (N key in messages)
+    FocusPrevBlock,
+    /// Expand block at cursor (zo in messages)
+    ExpandBlock,
+    /// Collapse block at cursor (zc in messages)
+    CollapseBlock,
+    /// Expand all blocks in message (zO in messages)
+    ExpandAllBlocks,
+    /// Collapse all blocks in message (zC in messages)
+    CollapseAllBlocks,
+    /// Clear block focus (Esc when block focused)
+    ClearBlockFocus,
+    /// Show help popup (? key)
+    ShowHelp,
 
     // Attachment dropdown actions
     /// Toggle attachment dropdown
@@ -346,8 +362,13 @@ impl KeybindingHandler {
             // Delete attachment (d key in normal mode)
             (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Action::DeleteAttachment),
 
-            // Reject/cancel action (n key)
-            (KeyCode::Char('n'), KeyModifiers::NONE) => Some(Action::Reject),
+            // Block navigation (vim search-like n/N)
+            (KeyCode::Char('n'), KeyModifiers::NONE) => Some(Action::FocusNextBlock),
+            (KeyCode::Char('N'), KeyModifiers::SHIFT) => Some(Action::FocusPrevBlock),
+
+            // Help popup (? key - works with or without shift modifier reported)
+            (KeyCode::Char('?'), KeyModifiers::SHIFT)
+            | (KeyCode::Char('?'), KeyModifiers::NONE) => Some(Action::ShowHelp),
 
             // Multi-key sequences
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
@@ -394,7 +415,7 @@ impl KeybindingHandler {
             (KeyCode::Char('['), KeyModifiers::NONE) => Some(Action::ScrollBlockUp),
             (KeyCode::Char(']'), KeyModifiers::NONE) => Some(Action::ScrollBlockDown),
 
-            // Escape
+            // Escape - cancel / clear block focus
             (KeyCode::Esc, KeyModifiers::NONE) => Some(self.handle_escape(Action::Cancel)),
 
             _ => None,
@@ -454,10 +475,16 @@ impl KeybindingHandler {
                 KeyCode::Char('g') => Some(Action::GoToTop),
                 _ => None,
             },
-            'z' => match key.code {
-                KeyCode::Char('o') => Some(Action::ExpandSection),
-                KeyCode::Char('c') => Some(Action::CollapseSection),
-                KeyCode::Char('a') => Some(Action::ToggleSection),
+            // Vim-style fold commands for blocks
+            'z' => match (key.code, key.modifiers) {
+                // zo - expand block at cursor
+                (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Action::ExpandBlock),
+                // zc - collapse block at cursor
+                (KeyCode::Char('c'), KeyModifiers::NONE) => Some(Action::CollapseBlock),
+                // zO - expand all blocks in message
+                (KeyCode::Char('O'), KeyModifiers::SHIFT) => Some(Action::ExpandAllBlocks),
+                // zC - collapse all blocks in message
+                (KeyCode::Char('C'), KeyModifiers::SHIFT) => Some(Action::CollapseAllBlocks),
                 _ => None,
             },
             _ => None,
@@ -613,26 +640,33 @@ mod tests {
     }
 
     #[test]
-    fn test_z_sequences() {
+    fn test_z_fold_sequences() {
         let mut handler = KeybindingHandler::new();
 
-        // zo - expand section
+        // z-sequences re-enabled for vim-style fold commands
+        // zo - expand block at cursor
         handler.handle_normal_mode(make_key_event(KeyCode::Char('z'), KeyModifiers::NONE));
         let action =
             handler.handle_normal_mode(make_key_event(KeyCode::Char('o'), KeyModifiers::NONE));
-        assert_eq!(action, Some(Action::ExpandSection));
+        assert_eq!(action, Some(Action::ExpandBlock));
 
-        // zc - collapse section
+        // zc - collapse block at cursor
         handler.handle_normal_mode(make_key_event(KeyCode::Char('z'), KeyModifiers::NONE));
         let action =
             handler.handle_normal_mode(make_key_event(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert_eq!(action, Some(Action::CollapseSection));
+        assert_eq!(action, Some(Action::CollapseBlock));
 
-        // za - toggle section
+        // zO - expand all blocks
         handler.handle_normal_mode(make_key_event(KeyCode::Char('z'), KeyModifiers::NONE));
         let action =
-            handler.handle_normal_mode(make_key_event(KeyCode::Char('a'), KeyModifiers::NONE));
-        assert_eq!(action, Some(Action::ToggleSection));
+            handler.handle_normal_mode(make_key_event(KeyCode::Char('O'), KeyModifiers::SHIFT));
+        assert_eq!(action, Some(Action::ExpandAllBlocks));
+
+        // zC - collapse all blocks
+        handler.handle_normal_mode(make_key_event(KeyCode::Char('z'), KeyModifiers::NONE));
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::Char('C'), KeyModifiers::SHIFT));
+        assert_eq!(action, Some(Action::CollapseAllBlocks));
     }
 
     #[test]
@@ -776,10 +810,10 @@ mod tests {
             handler.handle_normal_mode(make_key_event(KeyCode::Char('y'), KeyModifiers::NONE));
         assert_eq!(action, Some(Action::CopySelection));
 
-        // n for reject
+        // n for focus next block (like vim search navigation)
         let action =
             handler.handle_normal_mode(make_key_event(KeyCode::Char('n'), KeyModifiers::NONE));
-        assert_eq!(action, Some(Action::Reject));
+        assert_eq!(action, Some(Action::FocusNextBlock));
     }
 
     #[test]
@@ -894,5 +928,35 @@ mod tests {
         let action =
             handler.handle_normal_mode(make_key_event(KeyCode::BackTab, KeyModifiers::CONTROL));
         assert_eq!(action, Some(Action::CycleModePrev));
+    }
+
+    #[test]
+    fn test_help_popup_keybinding() {
+        let mut handler = KeybindingHandler::new();
+
+        // ? with SHIFT modifier triggers ShowHelp
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::Char('?'), KeyModifiers::SHIFT));
+        assert_eq!(action, Some(Action::ShowHelp));
+
+        // ? with NONE modifier also triggers ShowHelp (terminal compatibility)
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(action, Some(Action::ShowHelp));
+    }
+
+    #[test]
+    fn test_block_navigation_keys() {
+        let mut handler = KeybindingHandler::new();
+
+        // n for focus next block
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(action, Some(Action::FocusNextBlock));
+
+        // N (Shift+n) for focus previous block
+        let action =
+            handler.handle_normal_mode(make_key_event(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert_eq!(action, Some(Action::FocusPrevBlock));
     }
 }

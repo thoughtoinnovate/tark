@@ -8,6 +8,7 @@ mod attachment_bar;
 pub mod collapsible;
 mod command_dropdown;
 mod file_dropdown;
+mod help_popup;
 mod input;
 mod message_list;
 pub mod panel;
@@ -26,7 +27,7 @@ pub use collapsible::{
 };
 pub use command_dropdown::{CommandDropdown, CommandDropdownItem, CommandDropdownWidget};
 pub use input::{InputWidget, InputWidgetRenderer};
-pub use message_list::{ChatMessage, MessageList, MessageListWidget, Role};
+pub use message_list::{ChatMessage, MessageList, MessageListWidget, MessageSegment, Role};
 pub use panel::{
     ContextInfo, CostBreakdownEntry, EnhancedPanelData, EnhancedPanelSection, EnhancedPanelWidget,
     FileItem, NotificationLevel, PanelDataProvider, PanelNavMode, PanelSection, PanelSectionState,
@@ -41,4 +42,5 @@ mod auth_dialog;
 mod questionnaire;
 pub use auth_dialog::{AuthDialog, AuthDialogWidget, AuthStatus};
 pub use file_dropdown::{FileDropdown, FileDropdownItem, FileDropdownWidget};
+pub use help_popup::{HelpPopup, HelpPopupState};
 pub use questionnaire::{QuestionnaireState, QuestionnaireWidget};

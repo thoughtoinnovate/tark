@@ -157,7 +157,7 @@ impl ToolBlock {
     pub fn display_header(&self) -> String {
         let indicator = if self.expanded { "▼" } else { "▶" };
         let status_icon = self.status.icon();
-        format!("{} ⚙️ {} Tool: {}", indicator, status_icon, self.tool_name)
+        format!("{} 🔧 {} Tool: {}", indicator, status_icon, self.tool_name)
     }
 
     /// Get the number of visible lines

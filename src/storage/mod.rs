@@ -1643,6 +1643,48 @@ impl ChatSession {
             content: content.to_string(),
             timestamp: Utc::now(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
+            thinking_content: None,
+            segments: Vec::new(),
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Add a message with tool calls (for assistant messages with tool history)
+    pub fn add_message_with_tools(
+        &mut self,
+        role: &str,
+        content: &str,
+        tool_calls: Vec<ToolCallRecord>,
+    ) {
+        self.messages.push(SessionMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            timestamp: Utc::now(),
+            tool_call_id: None,
+            tool_calls,
+            thinking_content: None,
+            segments: Vec::new(),
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Add a complete assistant message with all metadata
+    pub fn add_assistant_message_full(
+        &mut self,
+        content: &str,
+        tool_calls: Vec<ToolCallRecord>,
+        thinking_content: Option<String>,
+        segments: Vec<SegmentRecord>,
+    ) {
+        self.messages.push(SessionMessage {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            timestamp: Utc::now(),
+            tool_call_id: None,
+            tool_calls,
+            thinking_content,
+            segments,
         });
         self.updated_at = Utc::now();
     }
@@ -1654,8 +1696,28 @@ impl ChatSession {
             content: content.to_string(),
             timestamp: Utc::now(),
             tool_call_id: Some(tool_call_id.to_string()),
+            tool_calls: Vec::new(),
+            thinking_content: None,
+            segments: Vec::new(),
         });
         self.updated_at = Utc::now();
+    }
+
+    /// Update the last assistant message with full metadata
+    ///
+    /// Called after TUI has built the complete message with segments and thinking
+    pub fn update_last_assistant_metadata(
+        &mut self,
+        thinking_content: Option<String>,
+        segments: Vec<SegmentRecord>,
+    ) {
+        if let Some(last) = self.messages.last_mut() {
+            if last.role == "assistant" {
+                last.thinking_content = thinking_content;
+                last.segments = segments;
+                self.updated_at = Utc::now();
+            }
+        }
     }
 
     /// Clear messages but keep settings and accumulated cost
@@ -1674,6 +1736,29 @@ impl Default for ChatSession {
     }
 }
 
+/// A tool call record for persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    /// Tool name (e.g., "ripgrep", "read_file")
+    pub tool: String,
+    /// Tool arguments as JSON
+    pub args: serde_json::Value,
+    /// Preview of the tool result
+    pub result_preview: String,
+    /// Error message if the tool failed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Segment record for preserving message structure order
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SegmentRecord {
+    /// Text content segment with its actual content
+    Text(String),
+    /// Tool reference by index into tool_calls
+    Tool(usize),
+}
+
 /// A message in a chat session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMessage {
@@ -1682,6 +1767,15 @@ pub struct SessionMessage {
     pub timestamp: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Tool calls made during this message (for assistant messages)
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tool_calls: Vec<ToolCallRecord>,
+    /// Thinking/reasoning content (for assistant messages)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub thinking_content: Option<String>,
+    /// Segment order to preserve interleaved display
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub segments: Vec<SegmentRecord>,
 }
 
 /// Session metadata for listing

@@ -10,7 +10,7 @@ use crate::agent::{AgentResponse, ChatAgent, ToolCallLog};
 use crate::config::Config;
 use crate::llm;
 use crate::storage::usage::UsageTracker;
-use crate::storage::{ChatSession, ModelPreference, TarkStorage};
+use crate::storage::{ChatSession, ModelPreference, TarkStorage, ToolCallRecord};
 use crate::tools::{AgentMode as ToolAgentMode, ToolRegistry};
 use anyhow::Result;
 use std::path::PathBuf;
@@ -872,9 +872,22 @@ impl AgentBridge {
 
         match result {
             Ok(response) => {
-                // Add assistant response to session
-                self.current_session
-                    .add_message("assistant", &response.text);
+                // Add assistant response to session with tool call history
+                let tool_calls: Vec<ToolCallRecord> = response
+                    .tool_call_log
+                    .iter()
+                    .map(|log| ToolCallRecord {
+                        tool: log.tool.clone(),
+                        args: log.args.clone(),
+                        result_preview: log.result_preview.clone(),
+                        error: None,
+                    })
+                    .collect();
+                self.current_session.add_message_with_tools(
+                    "assistant",
+                    &response.text,
+                    tool_calls,
+                );
 
                 // Update token counts and log usage
                 if let Some(usage) = &response.usage {
@@ -985,10 +998,43 @@ impl AgentBridge {
             });
         };
 
+        // Create channel for tool completion events
+        let (tool_complete_tx, mut tool_complete_rx) =
+            tokio::sync::mpsc::channel::<AgentEvent>(100);
+        let event_tx_for_complete = event_tx.clone();
+
+        // Spawn task to forward tool completion events
+        tokio::spawn(async move {
+            while let Some(event) = tool_complete_rx.recv().await {
+                let _ = event_tx_for_complete.send(event).await;
+            }
+        });
+
+        let on_tool_complete = move |name: String, result_preview: String, success: bool| {
+            if success {
+                let _ = tool_complete_tx.try_send(AgentEvent::ToolCallCompleted {
+                    tool: name,
+                    result_preview,
+                });
+            } else {
+                let _ = tool_complete_tx.try_send(AgentEvent::ToolCallFailed {
+                    tool: name,
+                    error: result_preview,
+                });
+            }
+        };
+
         // Send to agent with streaming callbacks
         let result = self
             .agent
-            .chat_streaming(message, interrupt_check, on_text, on_thinking, on_tool_call)
+            .chat_streaming(
+                message,
+                interrupt_check,
+                on_text,
+                on_thinking,
+                on_tool_call,
+                on_tool_complete,
+            )
             .await;
 
         // Clear processing flag
@@ -1000,9 +1046,22 @@ impl AgentBridge {
                 if response.text.contains("interrupted") {
                     let _ = event_tx.send(AgentEvent::Interrupted).await;
                 } else {
-                    // Add assistant response to session
-                    self.current_session
-                        .add_message("assistant", &response.text);
+                    // Add assistant response to session with tool call history
+                    let tool_calls: Vec<ToolCallRecord> = response
+                        .tool_call_log
+                        .iter()
+                        .map(|log| ToolCallRecord {
+                            tool: log.tool.clone(),
+                            args: log.args.clone(),
+                            result_preview: log.result_preview.clone(),
+                            error: None,
+                        })
+                        .collect();
+                    self.current_session.add_message_with_tools(
+                        "assistant",
+                        &response.text,
+                        tool_calls,
+                    );
 
                     // Update token counts and calculate cost
                     if let Some(usage) = &response.usage {
@@ -1542,6 +1601,20 @@ impl AgentBridge {
             })
             .collect()
     }
+
+    /// Update the last assistant message with metadata from TUI
+    ///
+    /// Called after streaming completes to persist thinking_content and segment order
+    pub fn update_last_message_metadata(
+        &mut self,
+        thinking_content: Option<String>,
+        segments: Vec<crate::storage::SegmentRecord>,
+    ) {
+        self.current_session
+            .update_last_assistant_metadata(thinking_content, segments);
+        // Persist the segment order and thinking content to disk
+        let _ = self.storage.save_session(&self.current_session);
+    }
 }
 
 /// Session message info for display
@@ -1700,20 +1773,69 @@ mod tests {
 
 impl AgentBridge {
     /// Convert session messages to ChatMessages for display in the TUI
+    ///
+    /// Reconstructs tool_call_info and segments from persisted tool_calls
     pub fn get_chat_messages(&self) -> Vec<super::widgets::ChatMessage> {
+        use super::widgets::{ChatMessage, MessageSegment, Role, ToolCallInfo};
+
         self.current_session
             .messages
             .iter()
             .map(|m| {
                 let role = match m.role.as_str() {
-                    "user" => super::widgets::Role::User,
-                    "assistant" => super::widgets::Role::Assistant,
-                    "system" => super::widgets::Role::System,
-                    "tool" => super::widgets::Role::Tool,
-                    _ => super::widgets::Role::System,
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    "system" => Role::System,
+                    "tool" => Role::Tool,
+                    _ => Role::System,
                 };
 
-                super::widgets::ChatMessage::new(role, m.content.clone())
+                let mut msg = ChatMessage::new(role, m.content.clone());
+
+                // Reconstruct tool_call_info from persisted tool_calls
+                if role == Role::Assistant && !m.tool_calls.is_empty() {
+                    for tc in &m.tool_calls {
+                        let info = ToolCallInfo::new(
+                            tc.tool.clone(),
+                            tc.args.clone(),
+                            tc.result_preview.clone(),
+                        );
+                        msg.tool_call_info.push(info);
+                    }
+                }
+
+                // Restore thinking_content if present
+                if let Some(ref thinking) = m.thinking_content {
+                    msg.thinking_content = thinking.clone();
+                }
+
+                // Reconstruct segments from persisted order (preserves interleaving)
+                if role == Role::Assistant {
+                    msg.segments.clear();
+                    if !m.segments.is_empty() {
+                        // Use persisted segment order with actual text content
+                        for seg in &m.segments {
+                            match seg {
+                                crate::storage::SegmentRecord::Text(text) => {
+                                    msg.segments.push(MessageSegment::Text(text.clone()));
+                                }
+                                crate::storage::SegmentRecord::Tool(idx) => {
+                                    msg.segments.push(MessageSegment::ToolRef(*idx));
+                                }
+                            }
+                        }
+                    } else if !m.tool_calls.is_empty() {
+                        // Fallback for old sessions without segment data: text first, then tools
+                        if !m.content.is_empty() {
+                            msg.segments.push(MessageSegment::Text(m.content.clone()));
+                        }
+                        for idx in 0..m.tool_calls.len() {
+                            msg.segments.push(MessageSegment::ToolRef(idx));
+                        }
+                    }
+                }
+
+                msg
             })
             .collect()
     }
@@ -1744,6 +1866,9 @@ mod property_tests {
                 content,
                 timestamp: chrono::Utc::now(),
                 tool_call_id: None,
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                segments: Vec::new(),
             })
     }
 
@@ -2566,6 +2691,9 @@ mod provider_model_property_tests {
                 content,
                 timestamp: chrono::Utc::now(),
                 tool_call_id: None,
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                segments: Vec::new(),
             })
     }
 

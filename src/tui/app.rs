@@ -32,9 +32,9 @@ use super::config::TuiConfig;
 use super::events::{Event, EventHandler};
 use super::keybindings::{Action, FocusedComponent, InputMode, KeybindingHandler};
 use super::widgets::{
-    AttachmentDropdownState, ChatMessage, CommandDropdown, EnhancedPanelData, EnhancedPanelWidget,
-    InputWidget, MessageList, MessageListWidget, PanelSectionState, PanelWidget, Picker,
-    PickerItem, PickerWidget,
+    AttachmentDropdownState, BlockType, ChatMessage, CommandDropdown, EnhancedPanelData,
+    EnhancedPanelWidget, InputWidget, MessageList, MessageListWidget, MessageSegment,
+    PanelSectionState, PanelWidget, Picker, PickerItem, PickerWidget,
 };
 use tokio::sync::mpsc;
 
@@ -231,6 +231,8 @@ pub struct AppState {
     pub plan_picker: super::widgets::PlanPickerState,
     /// Active plan progress for status bar
     pub plan_progress: Option<(usize, usize)>,
+    /// Help popup state
+    pub help_popup: super::widgets::HelpPopupState,
 }
 
 /// State for tab completion
@@ -337,6 +339,7 @@ impl Default for AppState {
             approval_card: super::widgets::ApprovalCardState::default(),
             plan_picker: super::widgets::PlanPickerState::default(),
             plan_progress: None,
+            help_popup: super::widgets::HelpPopupState::default(),
         }
     }
 }
@@ -1564,6 +1567,17 @@ impl TuiApp {
             return Ok(true);
         }
 
+        // Handle help popup if visible
+        if self.state.help_popup.is_visible() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') => {
+                    self.state.help_popup.hide();
+                }
+                _ => {}
+            }
+            return Ok(true);
+        }
+
         // Handle trust level selector if visible
         if self.state.trust_level_selector.visible {
             if let Some(new_level) = self.state.trust_level_selector.handle_key(key) {
@@ -1792,6 +1806,12 @@ impl TuiApp {
                     let inner_row = row.saturating_sub(1); // Account for border
                     let scroll_offset = self.state.message_list.scroll_offset();
                     let content_line = scroll_offset + inner_row as usize;
+
+                    // Check if click is on a collapsible block header - toggle it
+                    if self.state.message_list.toggle_block_at_line(content_line) {
+                        // Block was toggled, no further action needed
+                        return Ok(true);
+                    }
 
                     // Set cursor position (don't start selection until drag)
                     self.state
@@ -2043,8 +2063,10 @@ impl TuiApp {
                 Ok(false)
             }
             Action::ToggleCostBreakdown => {
-                // Toggle cost breakdown display
-                self.state.status_message = Some("Cost breakdown: Not implemented".to_string());
+                // Toggle cost breakdown display (only when panel is focused)
+                if self.state.focused_component == FocusedComponent::Panel {
+                    self.state.status_message = Some("Cost breakdown: Not implemented".to_string());
+                }
                 Ok(true)
             }
             Action::InterruptNoQuit => {
@@ -2102,6 +2124,10 @@ impl TuiApp {
                 // Close attachment dropdown if open
                 if self.state.attachment_dropdown_state.is_open() {
                     self.state.attachment_dropdown_state.close();
+                } else if self.state.message_list.focused_block().is_some() {
+                    // Clear block focus first (Esc when block is focused)
+                    self.state.message_list.clear_block_focus();
+                    self.state.status_message = Some("Block focus cleared".to_string());
                 } else if self.state.input_mode == InputMode::Visual {
                     // Exit visual mode and clear selection
                     self.state.message_list.clear_text_selection();
@@ -2164,13 +2190,65 @@ impl TuiApp {
                 Ok(true)
             }
             Action::ScrollBlockUp => {
-                // Scroll up within the most recent thinking block
+                // Scroll up within the focused block
                 self.scroll_thinking_block_up();
                 Ok(true)
             }
             Action::ScrollBlockDown => {
-                // Scroll down within the most recent thinking block
+                // Scroll down within the focused block
                 self.scroll_thinking_block_down();
+                Ok(true)
+            }
+            Action::FocusNextBlock => {
+                // Cycle focus to next expanded block in the message
+                if self.state.message_list.focus_next_block() {
+                    if let Some(block_id) = self.state.message_list.focused_block() {
+                        self.state.status_message = Some(format!("Focused: {}", block_id));
+                    }
+                } else {
+                    self.state.status_message = Some("No expanded blocks to focus".to_string());
+                }
+                Ok(true)
+            }
+            Action::ClearBlockFocus => {
+                self.state.message_list.clear_block_focus();
+                self.state.status_message = Some("Block focus cleared".to_string());
+                Ok(true)
+            }
+            Action::FocusPrevBlock => {
+                // Cycle focus to previous block in the message
+                if self.state.message_list.focus_prev_block() {
+                    if let Some(block_id) = self.state.message_list.focused_block() {
+                        self.state.status_message = Some(format!("Focused: {}", block_id));
+                    }
+                } else {
+                    self.state.status_message = Some("No blocks to focus".to_string());
+                }
+                Ok(true)
+            }
+            Action::ExpandBlock => {
+                // Expand block at cursor (zo)
+                self.handle_expand_block_at_cursor();
+                Ok(true)
+            }
+            Action::CollapseBlock => {
+                // Collapse block at cursor (zc)
+                self.handle_collapse_block_at_cursor();
+                Ok(true)
+            }
+            Action::ExpandAllBlocks => {
+                // Expand all blocks in current message (zO)
+                self.handle_expand_all_blocks();
+                Ok(true)
+            }
+            Action::CollapseAllBlocks => {
+                // Collapse all blocks in current message (zC)
+                self.handle_collapse_all_blocks();
+                Ok(true)
+            }
+            Action::ShowHelp => {
+                // Toggle contextual help popup
+                self.state.help_popup.toggle();
                 Ok(true)
             }
             Action::ToggleAttachmentDropdown => {
@@ -2746,7 +2824,21 @@ impl TuiApp {
     ///
     /// Uses [ key in normal mode when focused on messages
     fn scroll_thinking_block_up(&mut self) {
-        // Find the most recent assistant message with thinking content
+        // First try to scroll the focused block
+        if let Some(block_id) = self
+            .state
+            .message_list
+            .focused_block()
+            .map(|s| s.to_string())
+        {
+            self.state
+                .message_list
+                .block_state_mut()
+                .scroll_up(&block_id);
+            return;
+        }
+
+        // Fallback: Find the most recent assistant message with thinking content
         if let Some(msg) =
             self.state.message_list.messages().iter().rev().find(|m| {
                 m.role == super::widgets::Role::Assistant && !m.thinking_content.is_empty()
@@ -2760,11 +2852,26 @@ impl TuiApp {
         }
     }
 
-    /// Scroll down within the most recent thinking block
+    /// Scroll down within the focused or most recent block
     ///
     /// Uses ] key in normal mode when focused on messages
     fn scroll_thinking_block_down(&mut self) {
-        // Find the most recent assistant message with thinking content
+        // First try to scroll the focused block
+        if let Some(block_id) = self
+            .state
+            .message_list
+            .focused_block()
+            .map(|s| s.to_string())
+        {
+            // Use a reasonable max offset
+            self.state
+                .message_list
+                .block_state_mut()
+                .scroll_down(&block_id, 1000); // Max offset, will be bounded
+            return;
+        }
+
+        // Fallback: Find the most recent assistant message with thinking content
         if let Some(msg) =
             self.state.message_list.messages().iter().rev().find(|m| {
                 m.role == super::widgets::Role::Assistant && !m.thinking_content.is_empty()
@@ -3417,6 +3524,11 @@ impl TuiApp {
     /// Handle toggle block action (Enter key in messages area)
     ///
     /// Toggles the collapsible block under the cursor when focused on messages.
+    /// Priority:
+    /// 1. If a block is focused, toggle that block
+    /// 2. Else find block at cursor line, toggle that block
+    /// 3. If no block found, show helpful status message
+    ///
     /// In panel, toggles the focused section.
     /// In input, enters insert mode.
     ///
@@ -3424,12 +3536,64 @@ impl TuiApp {
     fn handle_toggle_block(&mut self) {
         match self.state.focused_component {
             FocusedComponent::Messages => {
-                // Toggle collapsible block in message list
-                // For now, we don't track cursor position within messages,
-                // so this is a placeholder for future implementation
-                // TODO: Track cursor position and toggle block under cursor
+                // Priority 1: If a block is already focused, toggle it
+                if let Some(block_id) = self
+                    .state
+                    .message_list
+                    .focused_block()
+                    .map(|s| s.to_string())
+                {
+                    // Determine block type by checking if it's a tool block ID
+                    // Tool block IDs are UUIDs, thinking block IDs contain "-thinking" or "-inline-thinking-"
+                    let block_type = if block_id.contains("-thinking") {
+                        BlockType::Thinking
+                    } else {
+                        BlockType::Tool
+                    };
+                    self.state.message_list.toggle_block(&block_id, block_type);
+                    let is_expanded = self
+                        .state
+                        .message_list
+                        .block_state()
+                        .is_expanded(&block_id, block_type);
+                    self.state.status_message = Some(format!(
+                        "Block {}",
+                        if is_expanded { "expanded" } else { "collapsed" }
+                    ));
+                    return;
+                }
+
+                // Priority 2: Find block at cursor line
+                let cursor_line = self.state.message_list.cursor_pos().line;
+                if let Some(target) = self
+                    .state
+                    .message_list
+                    .get_block_at_line(cursor_line)
+                    .cloned()
+                {
+                    self.state
+                        .message_list
+                        .toggle_block(&target.block_id, target.block_type);
+                    // Focus the toggled block for scrolling
+                    self.state
+                        .message_list
+                        .block_state_mut()
+                        .set_focused_block(Some(target.block_id.clone()));
+                    let is_expanded = self
+                        .state
+                        .message_list
+                        .block_state()
+                        .is_expanded(&target.block_id, target.block_type);
+                    self.state.status_message = Some(format!(
+                        "Block {}",
+                        if is_expanded { "expanded" } else { "collapsed" }
+                    ));
+                    return;
+                }
+
+                // Priority 3: No block at cursor
                 self.state.status_message =
-                    Some("Toggle block (cursor tracking pending)".to_string());
+                    Some("No block at cursor. Use n to focus a block.".to_string());
             }
             FocusedComponent::Panel => {
                 // Toggle the focused panel section
@@ -3439,6 +3603,204 @@ impl TuiApp {
                 // Enter insert mode when pressing Enter on input
                 self.state.set_input_mode(InputMode::Insert);
             }
+        }
+    }
+
+    /// Handle expand block at cursor (zo - vim fold open)
+    fn handle_expand_block_at_cursor(&mut self) {
+        if self.state.focused_component != FocusedComponent::Messages {
+            return;
+        }
+        // Priority 1: If a block is focused, expand it
+        if let Some(block_id) = self
+            .state
+            .message_list
+            .focused_block()
+            .map(|s| s.to_string())
+        {
+            self.state
+                .message_list
+                .block_state_mut()
+                .set(&block_id, true);
+            self.state.status_message = Some("Block expanded".to_string());
+            return;
+        }
+
+        // Priority 2: Find block at cursor line
+        let cursor_line = self.state.message_list.cursor_pos().line;
+        if let Some(target) = self
+            .state
+            .message_list
+            .get_block_at_line(cursor_line)
+            .cloned()
+        {
+            self.state
+                .message_list
+                .block_state_mut()
+                .set(&target.block_id, true);
+            self.state
+                .message_list
+                .block_state_mut()
+                .set_focused_block(Some(target.block_id));
+            self.state.status_message = Some("Block expanded".to_string());
+            return;
+        }
+
+        self.state.status_message = Some("No block at cursor".to_string());
+    }
+
+    /// Handle collapse block at cursor (zc - vim fold close)
+    fn handle_collapse_block_at_cursor(&mut self) {
+        if self.state.focused_component != FocusedComponent::Messages {
+            return;
+        }
+        // Priority 1: If a block is focused, collapse it
+        if let Some(block_id) = self
+            .state
+            .message_list
+            .focused_block()
+            .map(|s| s.to_string())
+        {
+            self.state
+                .message_list
+                .block_state_mut()
+                .set(&block_id, false);
+            self.state.status_message = Some("Block collapsed".to_string());
+            return;
+        }
+
+        // Priority 2: Find block at cursor line
+        let cursor_line = self.state.message_list.cursor_pos().line;
+        if let Some(target) = self
+            .state
+            .message_list
+            .get_block_at_line(cursor_line)
+            .cloned()
+        {
+            self.state
+                .message_list
+                .block_state_mut()
+                .set(&target.block_id, false);
+            self.state.status_message = Some("Block collapsed".to_string());
+            return;
+        }
+
+        self.state.status_message = Some("No block at cursor".to_string());
+    }
+
+    /// Handle expand all blocks (zO - vim fold open all)
+    fn handle_expand_all_blocks(&mut self) {
+        if self.state.focused_component != FocusedComponent::Messages {
+            return;
+        }
+        // Find the last assistant message with blocks
+        let msg_idx = self.state.message_list.selected().unwrap_or_else(|| {
+            self.state
+                .message_list
+                .messages()
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, m)| {
+                    m.role == super::widgets::Role::Assistant
+                        && (!m.tool_call_info.is_empty() || !m.thinking_content.is_empty())
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(self.state.message_list.len().saturating_sub(1))
+        });
+
+        if let Some(msg) = self.state.message_list.messages().get(msg_idx) {
+            let mut count = 0;
+            // Collect block IDs first to avoid borrow issues
+            let tool_block_ids: Vec<String> = msg
+                .tool_call_info
+                .iter()
+                .map(|t| t.block_id.clone())
+                .collect();
+            let message_id = msg.id.to_string();
+
+            // Expand all tool blocks
+            for block_id in &tool_block_ids {
+                self.state
+                    .message_list
+                    .block_state_mut()
+                    .set(block_id, true);
+                count += 1;
+            }
+            // Expand thinking blocks
+            for i in 0..5 {
+                let thinking_id = format!("{}-inline-thinking-{}", message_id, i);
+                self.state
+                    .message_list
+                    .block_state_mut()
+                    .set(&thinking_id, true);
+            }
+            let legacy_thinking_id = format!("{}-thinking", message_id);
+            self.state
+                .message_list
+                .block_state_mut()
+                .set(&legacy_thinking_id, true);
+
+            self.state.status_message = Some(format!("Expanded {} blocks", count));
+        }
+    }
+
+    /// Handle collapse all blocks (zC - vim fold close all)
+    fn handle_collapse_all_blocks(&mut self) {
+        if self.state.focused_component != FocusedComponent::Messages {
+            return;
+        }
+        // Find the last assistant message with blocks
+        let msg_idx = self.state.message_list.selected().unwrap_or_else(|| {
+            self.state
+                .message_list
+                .messages()
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, m)| {
+                    m.role == super::widgets::Role::Assistant
+                        && (!m.tool_call_info.is_empty() || !m.thinking_content.is_empty())
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(self.state.message_list.len().saturating_sub(1))
+        });
+
+        if let Some(msg) = self.state.message_list.messages().get(msg_idx) {
+            let mut count = 0;
+            // Collect block IDs first to avoid borrow issues
+            let tool_block_ids: Vec<String> = msg
+                .tool_call_info
+                .iter()
+                .map(|t| t.block_id.clone())
+                .collect();
+            let message_id = msg.id.to_string();
+
+            // Collapse all tool blocks
+            for block_id in &tool_block_ids {
+                self.state
+                    .message_list
+                    .block_state_mut()
+                    .set(block_id, false);
+                count += 1;
+            }
+            // Collapse thinking blocks
+            for i in 0..5 {
+                let thinking_id = format!("{}-inline-thinking-{}", message_id, i);
+                self.state
+                    .message_list
+                    .block_state_mut()
+                    .set(&thinking_id, false);
+            }
+            let legacy_thinking_id = format!("{}-thinking", message_id);
+            self.state
+                .message_list
+                .block_state_mut()
+                .set(&legacy_thinking_id, false);
+
+            // Clear focus when collapsing all
+            self.state.message_list.clear_block_focus();
+            self.state.status_message = Some(format!("Collapsed {} blocks", count));
         }
     }
 
@@ -4849,7 +5211,18 @@ impl TuiApp {
                             if last_msg.role == super::widgets::Role::Assistant
                                 && last_msg.is_streaming
                             {
+                                // Keep content for persistence/backward compat
                                 last_msg.content.push_str(&chunk);
+
+                                // Build interleaved segments for inline tool display
+                                match last_msg.segments.last_mut() {
+                                    Some(MessageSegment::Text(ref mut text)) => {
+                                        text.push_str(&chunk);
+                                    }
+                                    _ => {
+                                        last_msg.segments.push(MessageSegment::Text(chunk));
+                                    }
+                                }
 
                                 // Request auto-scroll on next render (after visible_height is updated)
                                 self.state.auto_scroll_pending = true;
@@ -4882,13 +5255,28 @@ impl TuiApp {
                         // This will be rendered as a collapsible Tool_Block
                         if let Some(last_msg) = self.state.message_list.messages_mut().last_mut() {
                             if last_msg.role == super::widgets::Role::Assistant {
-                                // Create ToolCallInfo with empty result (will be updated on completion)
+                                // Create ToolCallInfo with auto-generated block_id
                                 let tool_info = super::widgets::ToolCallInfo::new(
                                     tool.clone(),
                                     args.clone(),
                                     "⏳ Running...", // Placeholder until completion
                                 );
+
+                                // Get the block_id before moving tool_info
+                                let block_id = tool_info.block_id.clone();
+
+                                // Store tool info (single source of truth)
+                                let tool_idx = last_msg.tool_call_info.len();
                                 last_msg.tool_call_info.push(tool_info);
+
+                                // Add reference to segment for inline display
+                                last_msg.segments.push(MessageSegment::ToolRef(tool_idx));
+
+                                // Expand this tool block while running (use stored block_id)
+                                self.state
+                                    .message_list
+                                    .block_state_mut()
+                                    .set(&block_id, true);
                             }
                         }
                     }
@@ -4901,29 +5289,39 @@ impl TuiApp {
                         self.state.status_message = Some(format!("✓ {} completed", tool));
 
                         // Update the tool call info with the result (Requirement 4.3)
+                        // Segments use ToolRef, so updating tool_call_info is sufficient
                         if let Some(last_msg) = self.state.message_list.messages_mut().last_mut() {
                             if last_msg.role == super::widgets::Role::Assistant {
                                 // Find the matching tool call and update its result
-                                if let Some(tool_info) =
-                                    last_msg.tool_call_info.iter_mut().rev().find(|t| {
-                                        t.tool == tool && t.result_preview == "⏳ Running..."
-                                    })
-                                {
-                                    let mut final_preview = result_preview.clone();
-                                    if tool == "shell" || tool == "execute" {
-                                        if let Some(cmd) =
-                                            tool_info.args.get("command").and_then(|v| v.as_str())
-                                        {
-                                            final_preview =
-                                                format!("shell> {}\n{}", cmd, final_preview);
+                                let mut matched_block_id = None;
+                                for t in last_msg.tool_call_info.iter_mut().rev() {
+                                    if t.tool == tool && t.result_preview == "⏳ Running..." {
+                                        let mut final_preview = result_preview.clone();
+                                        if tool == "shell" || tool == "execute" {
+                                            if let Some(cmd) =
+                                                t.args.get("command").and_then(|v| v.as_str())
+                                            {
+                                                final_preview =
+                                                    format!("shell> {}\n{}", cmd, final_preview);
+                                            }
                                         }
+                                        // Truncate result preview if too long
+                                        t.result_preview = if final_preview.len() > 500 {
+                                            format!("{}...", &final_preview[..497])
+                                        } else {
+                                            final_preview
+                                        };
+                                        matched_block_id = Some(t.block_id.clone());
+                                        break;
                                     }
-                                    // Truncate result preview if too long
-                                    tool_info.result_preview = if final_preview.len() > 500 {
-                                        format!("{}...", &final_preview[..497])
-                                    } else {
-                                        final_preview
-                                    };
+                                }
+
+                                // Collapse the tool block after completion using stored block_id
+                                if let Some(block_id) = matched_block_id {
+                                    self.state
+                                        .message_list
+                                        .block_state_mut()
+                                        .set(&block_id, false);
                                 }
                             }
                         }
@@ -4935,26 +5333,27 @@ impl TuiApp {
                         self.state.status_message = Some(format!("✗ {} failed", tool));
 
                         // Update the tool call info with the error (red styling in ToolBlock)
+                        // Segments use ToolRef, so updating tool_call_info is sufficient
                         if let Some(last_msg) = self.state.message_list.messages_mut().last_mut() {
                             if last_msg.role == super::widgets::Role::Assistant {
                                 // Find the matching tool call and update with error
-                                if let Some(tool_info) =
-                                    last_msg.tool_call_info.iter_mut().rev().find(|t| {
-                                        t.tool == tool && t.result_preview == "⏳ Running..."
-                                    })
-                                {
-                                    // Set error message (will be displayed in red)
-                                    tool_info.error = Some(error.clone());
-                                    let mut final_error = format!("Error: {}", error);
-                                    if tool == "shell" || tool == "execute" {
-                                        if let Some(cmd) =
-                                            tool_info.args.get("command").and_then(|v| v.as_str())
-                                        {
-                                            final_error =
-                                                format!("shell> {}\n{}", cmd, final_error);
+                                for t in last_msg.tool_call_info.iter_mut().rev() {
+                                    if t.tool == tool && t.result_preview == "⏳ Running..." {
+                                        // Set error message (will be displayed in red)
+                                        t.error = Some(error.clone());
+                                        let mut final_error = format!("Error: {}", error);
+                                        if tool == "shell" || tool == "execute" {
+                                            if let Some(cmd) =
+                                                t.args.get("command").and_then(|v| v.as_str())
+                                            {
+                                                final_error =
+                                                    format!("shell> {}\n{}", cmd, final_error);
+                                            }
                                         }
+                                        t.result_preview = final_error;
+                                        // Keep block expanded for errors (don't collapse)
+                                        break;
                                     }
-                                    tool_info.result_preview = final_error;
                                 }
                             }
                         }
@@ -4970,7 +5369,7 @@ impl TuiApp {
                             if last_msg.role == super::widgets::Role::Assistant
                                 && last_msg.is_streaming
                             {
-                                // Update the streaming message with final content
+                                // Update the streaming message with final content for persistence
                                 // IMPORTANT: Do NOT embed thinking_content in content!
                                 // - thinking_content is for UI display only (shown in ThinkingBlock)
                                 // - content is what gets saved to session and sent to LLM
@@ -4980,19 +5379,51 @@ impl TuiApp {
                                 // and will be displayed separately by the ThinkingBlock widget
                                 last_msg.is_streaming = false;
 
-                                // Update tool call info from the response if we have detailed logs
-                                // This ensures we have the complete tool call information
-                                if !info.tool_call_log.is_empty()
-                                    && last_msg.tool_call_info.is_empty()
-                                {
+                                // DON'T replace segments! They have the correct interleaved order.
+                                // Only backfill if segments are empty (non-streaming path like attachments)
+                                if last_msg.segments.is_empty() {
+                                    // Backfill with text first, then tools (non-interleaved fallback)
+                                    if !info.text.is_empty() {
+                                        last_msg
+                                            .segments
+                                            .push(MessageSegment::Text(info.text.clone()));
+                                    }
+
+                                    // Update tool call info from the response if we have detailed logs
                                     for log in &info.tool_call_log {
-                                        last_msg.tool_call_info.push(
-                                            super::widgets::ToolCallInfo::new(
-                                                log.tool.clone(),
-                                                log.args.clone(),
-                                                log.result_preview.clone(),
-                                            ),
+                                        let tool_idx = last_msg.tool_call_info.len();
+                                        let tool_info = super::widgets::ToolCallInfo::new(
+                                            log.tool.clone(),
+                                            log.args.clone(),
+                                            log.result_preview.clone(),
                                         );
+                                        last_msg.tool_call_info.push(tool_info);
+                                        last_msg.segments.push(MessageSegment::ToolRef(tool_idx));
+                                    }
+                                } else if !info.tool_call_log.is_empty() {
+                                    // We have segments - update existing tool_call_info with final results
+                                    // Collect block_ids to collapse (to avoid borrow issues)
+                                    let mut blocks_to_collapse: Vec<String> = Vec::new();
+
+                                    for log in &info.tool_call_log {
+                                        // Find matching tool that's still "Running..."
+                                        for t in last_msg.tool_call_info.iter_mut() {
+                                            if t.tool == log.tool
+                                                && t.result_preview == "⏳ Running..."
+                                            {
+                                                t.result_preview = log.result_preview.clone();
+                                                blocks_to_collapse.push(t.block_id.clone());
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    // Collapse the blocks after updating
+                                    for block_id in blocks_to_collapse {
+                                        self.state
+                                            .message_list
+                                            .block_state_mut()
+                                            .set(&block_id, false);
                                     }
                                 }
 
@@ -5002,15 +5433,55 @@ impl TuiApp {
 
                         // If no streaming message was found, add a new one with tool info
                         if !found_streaming {
-                            let mut msg = ChatMessage::assistant(info.text);
+                            let mut msg = ChatMessage::assistant(info.text.clone());
+                            // Build segments for this non-streaming message
+                            if !info.text.is_empty() {
+                                msg.segments.push(MessageSegment::Text(info.text));
+                            }
                             for log in &info.tool_call_log {
-                                msg.tool_call_info.push(super::widgets::ToolCallInfo::new(
+                                let tool_idx = msg.tool_call_info.len();
+                                let tool_info = super::widgets::ToolCallInfo::new(
                                     log.tool.clone(),
                                     log.args.clone(),
                                     log.result_preview.clone(),
-                                ));
+                                );
+                                msg.tool_call_info.push(tool_info);
+                                msg.segments.push(MessageSegment::ToolRef(tool_idx));
                             }
                             self.state.message_list.push(msg);
+                        }
+
+                        // Update persisted message with segments and thinking content
+                        // This preserves the interleaved order for session restore
+                        if let Some(last_msg) = self.state.message_list.messages().last() {
+                            if last_msg.role == super::widgets::Role::Assistant {
+                                // Convert segments to SegmentRecord format
+                                // Each text segment stores its actual content for proper interleaving
+                                let segment_records: Vec<crate::storage::SegmentRecord> = last_msg
+                                    .segments
+                                    .iter()
+                                    .map(|s| match s {
+                                        MessageSegment::Text(text) => {
+                                            crate::storage::SegmentRecord::Text(text.clone())
+                                        }
+                                        MessageSegment::ToolRef(idx) => {
+                                            crate::storage::SegmentRecord::Tool(*idx)
+                                        }
+                                    })
+                                    .collect();
+
+                                // Get thinking content if any
+                                let thinking = if last_msg.thinking_content.is_empty() {
+                                    None
+                                } else {
+                                    Some(last_msg.thinking_content.clone())
+                                };
+
+                                // Update the persisted message
+                                if let Some(ref mut bridge) = self.agent_bridge {
+                                    bridge.update_last_message_metadata(thinking, segment_records);
+                                }
+                            }
                         }
 
                         self.state.agent_processing = false;
@@ -5305,6 +5776,9 @@ impl TuiApp {
         // Check if auto-scroll is pending (need to check before draw closure)
         let auto_scroll_pending = self.state.auto_scroll_pending;
 
+        // Compute contextual keybind hints before closure (to avoid borrow issues)
+        let keybind_hints = self.get_contextual_keybind_hints();
+
         self.terminal.draw(|frame| {
             let area = frame.area();
 
@@ -5568,6 +6042,27 @@ impl TuiApp {
                 Style::default().fg(Color::White),
             ));
 
+            // Add contextual keybinding hints (right-aligned)
+            if !keybind_hints.is_empty() {
+                // Calculate padding for right alignment
+                let current_len: usize = status_spans.iter().map(|s| s.content.len()).sum();
+                let hints_len = keybind_hints.len() + 3; // " │ " + hints
+                let available = chat_chunks[1].width as usize;
+                let padding = available.saturating_sub(current_len + hints_len);
+
+                if padding > 0 {
+                    status_spans.push(ratatui::text::Span::raw(" ".repeat(padding)));
+                }
+                status_spans.push(ratatui::text::Span::styled(
+                    "│",
+                    Style::default().fg(Color::Gray),
+                ));
+                status_spans.push(ratatui::text::Span::styled(
+                    format!(" {} ", keybind_hints),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+
             let status = Paragraph::new(ratatui::text::Line::from(status_spans))
                 .style(Style::default().bg(Color::DarkGray));
             frame.render_widget(status, chat_chunks[1]);
@@ -5623,6 +6118,13 @@ impl TuiApp {
                 let file_dropdown_widget =
                     FileDropdownWidget::new(&self.state.file_dropdown, cursor_area);
                 frame.render_widget(file_dropdown_widget, area);
+            }
+
+            // Render help popup overlay if visible
+            if self.state.help_popup.is_visible() {
+                use super::widgets::HelpPopup;
+                let help_widget = HelpPopup::new(focused, input_mode);
+                frame.render_widget(help_widget, area);
             }
         })?;
 
@@ -5742,6 +6244,35 @@ impl TuiApp {
             PlanAction::Close => {
                 self.state.plan_picker.hide();
             }
+        }
+    }
+
+    /// Get contextual keybinding hints based on current state
+    ///
+    /// Returns compact hints relevant to current focus and mode
+    fn get_contextual_keybind_hints(&self) -> String {
+        // If there's a focused block, show block-specific hints
+        if self.state.message_list.focused_block().is_some() {
+            return "[/]:scroll f:next Esc:unfocus".to_string();
+        }
+
+        // Context-based hints
+        match self.state.focused_component {
+            FocusedComponent::Messages => {
+                if self.state.input_mode == InputMode::Visual {
+                    "y:copy Esc:exit".to_string()
+                } else {
+                    "i:insert Enter:expand ?:help".to_string()
+                }
+            }
+            FocusedComponent::Input => {
+                if self.state.input_mode == InputMode::Insert {
+                    "Esc:normal ⏎:send @:files /:cmd".to_string()
+                } else {
+                    "i:insert j/k:history ?:help".to_string()
+                }
+            }
+            FocusedComponent::Panel => "-:back j/k:nav Enter:drill ?:help".to_string(),
         }
     }
 }

@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use uuid::Uuid;
 
 // ============================================================================
 // Block Types (Requirements 7.1, 8.1)
@@ -25,15 +26,15 @@ impl BlockType {
     pub fn icon(&self) -> &'static str {
         match self {
             BlockType::Thinking => "🧠",
-            BlockType::Tool => "⚙️",
+            BlockType::Tool => "🔧",
         }
     }
 
     /// Get the default expanded state for this block type
-    /// Thinking blocks default to expanded, Tool blocks default to collapsed
+    /// Both Thinking and Tool blocks default to collapsed for cleaner UI
     pub fn default_expanded(&self) -> bool {
         match self {
-            BlockType::Thinking => true,
+            BlockType::Thinking => false,
             BlockType::Tool => false,
         }
     }
@@ -283,10 +284,12 @@ pub struct ToolCallInfo {
     pub result_preview: String,
     /// Error message if the tool failed (Requirements 7.2)
     pub error: Option<String>,
+    /// Unique block ID for expand/collapse state tracking
+    pub block_id: String,
 }
 
 impl ToolCallInfo {
-    /// Create a new tool call info
+    /// Create a new tool call info with auto-generated block_id
     pub fn new(
         tool: impl Into<String>,
         args: serde_json::Value,
@@ -297,6 +300,7 @@ impl ToolCallInfo {
             args,
             result_preview: result_preview.into(),
             error: None,
+            block_id: Uuid::new_v4().to_string(),
         }
     }
 
@@ -311,6 +315,7 @@ impl ToolCallInfo {
             args,
             result_preview: String::new(),
             error: Some(error.into()),
+            block_id: Uuid::new_v4().to_string(),
         }
     }
 
@@ -432,7 +437,9 @@ impl ParsedMessageContent {
                     }
 
                     // Check if it's a thinking tag (case-insensitive)
-                    if tag.to_lowercase() == "<thinking>" {
+                    // Support both <thinking> and <think> for different models
+                    let tag_lower = tag.to_lowercase();
+                    if tag_lower == "<thinking>" || tag_lower == "<think>" {
                         is_thinking_tag = true;
                         in_thinking = true;
                         // Save current text before thinking block
@@ -468,7 +475,9 @@ impl ParsedMessageContent {
                     }
 
                     // Check if it's a closing thinking tag
-                    if tag.to_lowercase() == "</thinking>" {
+                    // Support both </thinking> and </think>
+                    let tag_lower = tag.to_lowercase();
+                    if tag_lower == "</thinking>" || tag_lower == "</think>" {
                         // End of thinking block
                         in_thinking = false;
 
@@ -665,12 +674,13 @@ mod tests {
     #[test]
     fn test_block_type_icon() {
         assert_eq!(BlockType::Thinking.icon(), "🧠");
-        assert_eq!(BlockType::Tool.icon(), "⚙️");
+        assert_eq!(BlockType::Tool.icon(), "🔧");
     }
 
     #[test]
     fn test_block_type_default_expanded() {
-        assert!(BlockType::Thinking.default_expanded());
+        // Both thinking and tool blocks default to collapsed
+        assert!(!BlockType::Thinking.default_expanded());
         assert!(!BlockType::Tool.default_expanded());
     }
 
@@ -687,7 +697,7 @@ mod tests {
         assert_eq!(block.block_type(), BlockType::Thinking);
         assert_eq!(block.header(), "Thinking");
         assert_eq!(block.content().len(), 2);
-        assert!(block.is_expanded()); // Thinking defaults to expanded
+        assert!(!block.is_expanded()); // Thinking defaults to collapsed
     }
 
     #[test]
@@ -696,7 +706,7 @@ mod tests {
 
         assert_eq!(block.block_type(), BlockType::Thinking);
         assert_eq!(block.header(), "Thinking");
-        assert!(block.is_expanded());
+        assert!(!block.is_expanded()); // Defaults to collapsed
     }
 
     #[test]
@@ -711,24 +721,26 @@ mod tests {
     #[test]
     fn test_collapsible_block_display_header() {
         let mut thinking = CollapsibleBlock::thinking("t1", vec![]);
-        assert_eq!(thinking.display_header(), "▼ 🧠 Thinking");
-        thinking.toggle();
+        // Thinking defaults to collapsed
         assert_eq!(thinking.display_header(), "▶ 🧠 Thinking");
+        thinking.toggle();
+        assert_eq!(thinking.display_header(), "▼ 🧠 Thinking");
 
         let mut tool = CollapsibleBlock::tool("t2", "grep", vec![]);
-        assert_eq!(tool.display_header(), "▶ ⚙️ Tool: grep");
+        // Tool defaults to collapsed, icon is now 🔧
+        assert_eq!(tool.display_header(), "▶ 🔧 Tool: grep");
         tool.toggle();
-        assert_eq!(tool.display_header(), "▼ ⚙️ Tool: grep");
+        assert_eq!(tool.display_header(), "▼ 🔧 Tool: grep");
     }
 
     #[test]
     fn test_collapsible_block_toggle() {
         let mut block = CollapsibleBlock::thinking("t1", vec![]);
+        assert!(!block.is_expanded()); // Defaults to collapsed
+        block.toggle();
         assert!(block.is_expanded());
         block.toggle();
         assert!(!block.is_expanded());
-        block.toggle();
-        assert!(block.is_expanded());
     }
 
     #[test]
@@ -742,14 +754,14 @@ mod tests {
             ],
         );
 
-        // Expanded: header + 3 content lines + closing border = 5
-        assert!(block.is_expanded());
-        assert_eq!(block.visible_lines(), 5);
-
-        // Collapsed: header only = 1
-        block.toggle();
+        // Collapsed by default: header only = 1
         assert!(!block.is_expanded());
         assert_eq!(block.visible_lines(), 1);
+
+        // Expanded: header + 3 content lines + closing border = 5
+        block.toggle();
+        assert!(block.is_expanded());
+        assert_eq!(block.visible_lines(), 5);
     }
 
     #[test]
@@ -763,10 +775,8 @@ mod tests {
     fn test_collapsible_block_state_default_values() {
         let state = CollapsibleBlockState::new();
 
-        // Thinking blocks default to expanded
-        assert!(state.is_expanded("unknown-thinking", BlockType::Thinking));
-
-        // Tool blocks default to collapsed
+        // Both thinking and tool blocks default to collapsed
+        assert!(!state.is_expanded("unknown-thinking", BlockType::Thinking));
         assert!(!state.is_expanded("unknown-tool", BlockType::Tool));
     }
 
@@ -785,13 +795,13 @@ mod tests {
     fn test_collapsible_block_state_toggle() {
         let mut state = CollapsibleBlockState::new();
 
-        // Toggle a thinking block (default expanded -> collapsed)
-        state.toggle("think-1", BlockType::Thinking);
-        assert!(!state.is_expanded("think-1", BlockType::Thinking));
-
-        // Toggle again (collapsed -> expanded)
+        // Toggle a thinking block (default collapsed -> expanded)
         state.toggle("think-1", BlockType::Thinking);
         assert!(state.is_expanded("think-1", BlockType::Thinking));
+
+        // Toggle again (expanded -> collapsed)
+        state.toggle("think-1", BlockType::Thinking);
+        assert!(!state.is_expanded("think-1", BlockType::Thinking));
 
         // Toggle a tool block (default collapsed -> expanded)
         state.toggle("tool-1", BlockType::Tool);
@@ -802,12 +812,12 @@ mod tests {
     fn test_collapsible_block_state_remove() {
         let mut state = CollapsibleBlockState::new();
 
-        state.set("block-1", false);
-        assert!(!state.is_expanded("block-1", BlockType::Thinking));
+        state.set("block-1", true);
+        assert!(state.is_expanded("block-1", BlockType::Thinking));
 
         state.remove("block-1");
-        // Should revert to default (Thinking = expanded)
-        assert!(state.is_expanded("block-1", BlockType::Thinking));
+        // Should revert to default (Thinking = collapsed)
+        assert!(!state.is_expanded("block-1", BlockType::Thinking));
     }
 
     #[test]
@@ -1148,9 +1158,9 @@ mod proptests {
                 "Thinking block should contain the thinking content. Expected '{}' in '{}'",
                 thinking_content.trim(), block_content);
 
-            // Thinking block should default to expanded
-            prop_assert!(thinking_blocks[0].is_expanded(),
-                "Thinking block should default to expanded");
+            // Thinking block should default to collapsed
+            prop_assert!(!thinking_blocks[0].is_expanded(),
+                "Thinking block should default to collapsed");
 
             // Block ID should contain the message ID
             prop_assert!(thinking_blocks[0].id().contains(&message_id),
@@ -1235,7 +1245,7 @@ mod proptests {
                 "Display header should contain 'Tool:' prefix");
 
             // Display header should contain the tool icon
-            prop_assert!(display_header.contains("⚙️"),
+            prop_assert!(display_header.contains("🔧"),
                 "Display header should contain tool icon");
         }
     }
