@@ -1,0 +1,112 @@
+version: '3.8'
+
+# Super minimal tark Docker images
+# - Minimal (default): ~15MB scratch-based, binary + certs only
+# - Alpine: ~30MB, includes shell and curl for debugging
+
+services:
+  # ==========================================================================
+  # Minimal Image (scratch-based, ~15MB) - For macOS / Windows
+  # ==========================================================================
+  tark:
+    image: ghcr.io/thoughtoinnovate/tark:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tark-server
+    ports:
+      - "8765:8765"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+    volumes:
+      - ${PWD:-/tmp}:/workspace:rw
+    working_dir: /workspace
+    restart: unless-stopped
+    # No healthcheck - scratch image has no shell/curl
+    profiles:
+      - default
+      - macos
+      - windows
+
+  # ==========================================================================
+  # Minimal Image (scratch-based) - For Linux (host network)
+  # ==========================================================================
+  tark-linux:
+    image: ghcr.io/thoughtoinnovate/tark:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tark-server
+    network_mode: host
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_HOST=http://127.0.0.1:11434
+    volumes:
+      - ${PWD:-/tmp}:/workspace:rw
+    working_dir: /workspace
+    restart: unless-stopped
+    profiles:
+      - linux
+
+  # ==========================================================================
+  # Alpine Image (~30MB) - For debugging, has shell and curl
+  # ==========================================================================
+  tark-alpine:
+    image: ghcr.io/thoughtoinnovate/tark:alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.alpine
+    container_name: tark-server
+    ports:
+      - "8765:8765"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+    volumes:
+      - ${PWD:-/tmp}:/workspace:rw
+    working_dir: /workspace
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    profiles:
+      - alpine
+      - debug
+
+  # ==========================================================================
+  # Alpine Image (Linux host network)
+  # ==========================================================================
+  tark-alpine-linux:
+    image: ghcr.io/thoughtoinnovate/tark:alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.alpine
+    container_name: tark-server
+    network_mode: host
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_HOST=http://127.0.0.1:11434
+    volumes:
+      - ${PWD:-/tmp}:/workspace:rw
+    working_dir: /workspace
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    profiles:
+      - alpine-linux

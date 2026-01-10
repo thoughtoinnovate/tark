@@ -1,0 +1,51 @@
+# MCP (Model Context Protocol) Server Configuration
+# Place in ~/.config/tark/mcp/servers.toml for global, or .tark/mcp/servers.toml for project
+#
+# MCP servers extend tark with additional tools. They run as separate processes
+# and communicate via stdin/stdout using the MCP protocol.
+#
+# See: https://modelcontextprotocol.io/
+
+# Example: Filesystem MCP server
+[servers.filesystem]
+name = "Filesystem Tools"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
+enabled = true
+capabilities = ["read_file", "write_file", "list_directory"]
+
+# Example: GitHub MCP server
+[servers.github]
+name = "GitHub Integration"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_TOKEN = "" }  # Set your token here or use env var
+enabled = false
+capabilities = ["create_issue", "list_issues", "create_pr"]
+
+# Example: Database MCP server
+[servers.postgres]
+name = "PostgreSQL"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-postgres"]
+env = { DATABASE_URL = "postgresql://localhost/mydb" }
+enabled = false
+capabilities = ["query", "list_tables", "describe_table"]
+
+# Example: Custom MCP server
+[servers.custom]
+name = "My Custom Tools"
+command = "./my-mcp-server"
+args = ["--config", ".tark/mcp/custom-config.json"]
+enabled = false
+capabilities = ["custom_tool_1", "custom_tool_2"]
+
+# Example: Brave Search MCP server
+[servers.brave_search]
+name = "Brave Search"
+command = "npx"
+args = ["-y", "@anthropic-ai/mcp-server-brave-search"]
+env = { BRAVE_API_KEY = "" }
+enabled = false
+capabilities = ["web_search", "local_search"]
+

@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Cache key version - increment to bust cache
+  CACHE_VERSION: v2
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      
+      - name: Run tests
+        run: cargo test --all-features
+
+  # Build only on Linux for regular CI (fast feedback)
+  # Full multi-platform builds happen in release.yml
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      
+      - name: Build
+        run: cargo build --release
+      
+      - name: Check binary size
+        run: |
+          BINARY="target/release/tark"
+          SIZE=$(ls -l "$BINARY" | awk '{print $5}')
+          SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
+          echo "Binary size: ${SIZE_MB} MB"
+          strip "$BINARY" 2>/dev/null || true
+          STRIPPED_SIZE=$(ls -l "$BINARY" | awk '{print $5}')
+          STRIPPED_MB=$(echo "scale=2; $STRIPPED_SIZE / 1048576" | bc)
+          echo "Stripped size: ${STRIPPED_MB} MB"
+          if [ "$STRIPPED_SIZE" -gt 31457280 ]; then
+            echo "::warning::Binary size (${STRIPPED_MB}MB) exceeds 30MB threshold"
+          fi
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  neovim-tests:
+    name: Neovim Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
+      
+      - name: Verify Neovim version
+        run: |
+          nvim --version
+          # Require Neovim 0.8.0+ for plenary.nvim compatibility
+          VERSION=$(nvim --version | head -1 | grep -oP 'v\K[0-9]+\.[0-9]+')
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          MINOR=$(echo $VERSION | cut -d. -f2)
+          if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 8 ]; then
+            echo "Error: Neovim 0.8.0+ required, found $VERSION"
+            exit 1
+          fi
+          echo "✓ Neovim $VERSION meets minimum requirement (0.8.0+)"
+      
+      - name: Install plenary.nvim
+        run: |
+          # Ensure Neovim data directory exists
+          mkdir -p "$HOME/.local/share/nvim"
+          PLENARY_DIR="$HOME/.local/share/nvim/plenary.nvim"
+          if [ ! -d "$PLENARY_DIR" ]; then
+            echo "Installing plenary.nvim..."
+            git clone --depth=1 https://github.com/nvim-lua/plenary.nvim "$PLENARY_DIR"
+          else
+            echo "plenary.nvim already installed"
+          fi
+      
+      - name: Run Neovim tests
+        run: |
+          nvim --headless -u tests/minimal_init.lua \
+            -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
+

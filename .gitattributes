@@ -1,0 +1,34 @@
+# Git attributes for tark
+# These files are excluded from `git archive` exports
+# Note: Plugin managers (lazy.nvim, packer) use `git clone`, not `git archive`,
+# so these files will still be downloaded. The repo is small (~1MB) so this is fine.
+
+# Development files - not needed for Neovim plugin users
+src/**              export-ignore
+tests/**            export-ignore
+.github/**          export-ignore
+examples/**         export-ignore
+
+# Build/config files - not needed for plugin users
+Cargo.toml          export-ignore
+Cargo.lock          export-ignore
+Makefile            export-ignore
+Dockerfile          export-ignore
+Dockerfile.alpine   export-ignore
+docker-compose.yml  export-ignore
+Cross.toml          export-ignore
+.luarc.json         export-ignore
+config/**           export-ignore
+
+# Documentation - keep README, exclude dev docs
+AGENTS.md           export-ignore
+CONTRIBUTING.md     export-ignore
+
+# Install script - might be useful
+# install.sh        (keep)
+
+# Essential for Neovim plugin (NOT ignored):
+# lua/**            - The plugin Lua code
+# plugin/**         - Auto-loading
+# README.md         - Documentation
+
