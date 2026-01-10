@@ -693,6 +693,43 @@ impl AppState {
     pub fn update_files(&mut self, files: Vec<super::widgets::FileItem>) {
         self.enhanced_panel_data.files = files;
     }
+
+    /// Confirm pending attachment deletion
+    ///
+    /// Removes the attachment at the pending delete index and adjusts selection.
+    /// Returns the filename of the removed attachment, or None if no deletion was pending.
+    ///
+    /// Requirements: 11.7
+    pub fn confirm_attachment_delete(&mut self) -> Option<String> {
+        let idx = self.attachment_dropdown_state.confirm_delete()?;
+
+        if idx >= self.attachments.len() {
+            return None;
+        }
+
+        let removed = self.attachments.remove(idx);
+        let filename = removed.filename.clone();
+
+        // Adjust selection if needed
+        if self.attachments.is_empty() {
+            self.attachment_dropdown_state.close();
+        } else if let Some(selected) = self.attachment_dropdown_state.selected_index {
+            if selected >= self.attachments.len() {
+                self.attachment_dropdown_state.selected_index = Some(self.attachments.len() - 1);
+            }
+        }
+
+        Some(filename)
+    }
+
+    /// Cancel pending attachment deletion
+    ///
+    /// Clears the pending delete state without removing any attachment.
+    ///
+    /// Requirements: 11.8
+    pub fn cancel_attachment_delete(&mut self) {
+        self.attachment_dropdown_state.cancel_delete();
+    }
 }
 
 /// Pending async message request
@@ -1634,6 +1671,21 @@ impl TuiApp {
         // Handle file dropdown keys if visible (works in any mode)
         if self.state.file_dropdown.is_visible() {
             return self.handle_file_dropdown_key(key);
+        }
+
+        // Handle attachment dropdown y/n keys when delete is pending
+        // Routes to Action::Confirm/Reject so those enum variants are reachable
+        // Requirements: 11.7 (confirm with y), 11.8 (cancel with n)
+        if self.state.attachment_dropdown_state.has_pending_delete() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    return self.handle_action(Action::Confirm);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    return self.handle_action(Action::Reject);
+                }
+                _ => {}
+            }
         }
 
         // Get action from keybinding handler
@@ -3822,23 +3874,8 @@ impl TuiApp {
     ///
     /// Requirements: 11.7
     fn handle_confirm_action(&mut self) {
-        if let Some(idx) = self.state.attachment_dropdown_state.confirm_delete() {
-            // Remove the attachment at the confirmed index
-            if idx < self.state.attachments.len() {
-                let removed = self.state.attachments.remove(idx);
-                self.state.status_message =
-                    Some(format!("Removed attachment: {}", removed.filename));
-
-                // Adjust selection if needed
-                if self.state.attachments.is_empty() {
-                    self.state.attachment_dropdown_state.close();
-                } else if let Some(selected) = self.state.attachment_dropdown_state.selected_index {
-                    if selected >= self.state.attachments.len() {
-                        self.state.attachment_dropdown_state.selected_index =
-                            Some(self.state.attachments.len() - 1);
-                    }
-                }
-            }
+        if let Some(filename) = self.state.confirm_attachment_delete() {
+            self.state.status_message = Some(format!("Removed attachment: {}", filename));
         }
     }
 
@@ -3848,7 +3885,7 @@ impl TuiApp {
     ///
     /// Requirements: 11.8
     fn handle_reject_action(&mut self) {
-        self.state.attachment_dropdown_state.cancel_delete();
+        self.state.cancel_attachment_delete();
     }
 
     /// Handle interrupt action (Ctrl+C or /interrupt command)
@@ -6356,6 +6393,168 @@ mod tests {
         state.set_focused_component(FocusedComponent::Input);
         assert_eq!(state.focused_component, FocusedComponent::Input);
         assert!(state.input_widget.is_focused());
+    }
+
+    // ========================================================================
+    // Attachment Delete Confirmation Tests (Requirements 11.7, 11.8)
+    // ========================================================================
+
+    /// Helper to create a test attachment with the given filename.
+    fn create_test_attachment(filename: &str) -> crate::tui::attachments::Attachment {
+        crate::tui::attachments::Attachment::new(
+            filename.to_string(),
+            crate::tui::attachments::AttachmentType::Text { language: None },
+            100,
+            crate::tui::attachments::AttachmentContent::Text("test content".to_string()),
+        )
+    }
+
+    /// Test that confirming an attachment delete removes the correct attachment.
+    ///
+    /// **Validates: Requirement 11.7** - Confirm action removes the pending attachment
+    #[test]
+    fn test_confirm_attachment_delete() {
+        let mut state = AppState::new();
+
+        // Add two attachments
+        state.attachments.push(create_test_attachment("file1.txt"));
+        state.attachments.push(create_test_attachment("file2.txt"));
+        assert_eq!(state.attachments.len(), 2);
+
+        // Open dropdown and select first item
+        state.attachment_dropdown_state.open();
+        state.attachment_dropdown_state.select_next(2);
+        assert_eq!(state.attachment_dropdown_state.selected(), Some(0));
+
+        // Request delete
+        state.attachment_dropdown_state.request_delete();
+        assert!(state.attachment_dropdown_state.has_pending_delete());
+
+        // Confirm delete
+        let removed = state.confirm_attachment_delete();
+        assert_eq!(removed, Some("file1.txt".to_string()));
+        assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.attachments[0].filename, "file2.txt");
+        assert!(!state.attachment_dropdown_state.has_pending_delete());
+    }
+
+    /// Test that canceling an attachment delete preserves the attachment.
+    ///
+    /// **Validates: Requirement 11.8** - Cancel action preserves the attachment
+    #[test]
+    fn test_cancel_attachment_delete() {
+        let mut state = AppState::new();
+
+        // Add an attachment
+        state.attachments.push(create_test_attachment("file1.txt"));
+        assert_eq!(state.attachments.len(), 1);
+
+        // Open dropdown and select
+        state.attachment_dropdown_state.open();
+        state.attachment_dropdown_state.select_next(1);
+
+        // Request delete
+        state.attachment_dropdown_state.request_delete();
+        assert!(state.attachment_dropdown_state.has_pending_delete());
+
+        // Cancel delete
+        state.cancel_attachment_delete();
+        assert!(!state.attachment_dropdown_state.has_pending_delete());
+        assert_eq!(state.attachments.len(), 1); // Attachment preserved
+        assert_eq!(state.attachments[0].filename, "file1.txt");
+    }
+
+    /// Test that confirming delete closes the dropdown when it becomes empty.
+    ///
+    /// **Validates: Requirement 11.7** - Dropdown closes when last attachment is deleted
+    #[test]
+    fn test_confirm_closes_dropdown_when_empty() {
+        let mut state = AppState::new();
+
+        // Add single attachment
+        state
+            .attachments
+            .push(create_test_attachment("only_file.txt"));
+
+        // Open dropdown and select
+        state.attachment_dropdown_state.open();
+        state.attachment_dropdown_state.select_next(1);
+        assert!(state.attachment_dropdown_state.is_open());
+
+        // Request and confirm delete
+        state.attachment_dropdown_state.request_delete();
+        let removed = state.confirm_attachment_delete();
+
+        assert_eq!(removed, Some("only_file.txt".to_string()));
+        assert!(state.attachments.is_empty());
+        assert!(!state.attachment_dropdown_state.is_open()); // Dropdown closed
+    }
+
+    /// Test that selection is adjusted when deleting the last item in the list.
+    ///
+    /// **Validates: Requirement 11.7** - Selection adjusts to valid index after delete
+    #[test]
+    fn test_confirm_adjusts_selection_when_deleting_last() {
+        let mut state = AppState::new();
+
+        // Add three attachments
+        state.attachments.push(create_test_attachment("file1.txt"));
+        state.attachments.push(create_test_attachment("file2.txt"));
+        state.attachments.push(create_test_attachment("file3.txt"));
+
+        // Open dropdown and select last item (index 2)
+        state.attachment_dropdown_state.open();
+        state.attachment_dropdown_state.select_next(3); // index 0
+        state.attachment_dropdown_state.select_next(3); // index 1
+        state.attachment_dropdown_state.select_next(3); // index 2
+        assert_eq!(state.attachment_dropdown_state.selected(), Some(2));
+
+        // Request and confirm delete of last item
+        state.attachment_dropdown_state.request_delete();
+        let removed = state.confirm_attachment_delete();
+
+        assert_eq!(removed, Some("file3.txt".to_string()));
+        assert_eq!(state.attachments.len(), 2);
+        // Selection should be adjusted to last valid index
+        assert_eq!(state.attachment_dropdown_state.selected(), Some(1));
+    }
+
+    /// Test that confirm returns None when no delete is pending.
+    ///
+    /// **Validates: Requirement 11.7** - Confirm is a no-op when nothing is pending
+    #[test]
+    fn test_confirm_without_pending_delete() {
+        let mut state = AppState::new();
+
+        // Add an attachment but don't request delete
+        state.attachments.push(create_test_attachment("file1.txt"));
+        state.attachment_dropdown_state.open();
+        state.attachment_dropdown_state.select_next(1);
+
+        // Confirm without pending delete should return None
+        let removed = state.confirm_attachment_delete();
+        assert!(removed.is_none());
+        assert_eq!(state.attachments.len(), 1); // Attachment preserved
+    }
+
+    /// Test that cancel is idempotent (safe to call when nothing is pending).
+    ///
+    /// **Validates: Requirement 11.8** - Cancel is safe to call multiple times
+    #[test]
+    fn test_cancel_is_idempotent() {
+        let mut state = AppState::new();
+
+        // Add an attachment
+        state.attachments.push(create_test_attachment("file1.txt"));
+
+        // Cancel without pending delete should be no-op
+        state.cancel_attachment_delete();
+        assert!(!state.attachment_dropdown_state.has_pending_delete());
+        assert_eq!(state.attachments.len(), 1);
+
+        // Cancel again should still be no-op
+        state.cancel_attachment_delete();
+        assert_eq!(state.attachments.len(), 1);
     }
 
     #[test]
