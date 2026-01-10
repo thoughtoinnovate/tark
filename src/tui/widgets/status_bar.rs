@@ -42,6 +42,8 @@ pub struct StatusBar {
     pub thinking_mode: bool,
     /// Active plan progress (completed, total)
     pub plan_progress: Option<(usize, usize)>,
+    /// Current task description (for Build mode with active plan)
+    pub current_task: Option<String>,
     /// Contextual keybinding hints (shown based on current context)
     pub keybind_hints: String,
 }
@@ -61,6 +63,7 @@ impl Default for StatusBar {
             session_name: None,
             thinking_mode: false,
             plan_progress: None,
+            current_task: None,
             keybind_hints: String::new(),
         }
     }
@@ -138,6 +141,12 @@ impl StatusBar {
         self
     }
 
+    /// Set current task description
+    pub fn with_current_task(mut self, task: Option<String>) -> Self {
+        self.current_task = task;
+        self
+    }
+
     /// Update the mode
     pub fn set_mode(&mut self, mode: AgentMode) {
         self.mode = mode;
@@ -182,6 +191,11 @@ impl StatusBar {
     /// Update plan progress
     pub fn set_plan_progress(&mut self, progress: Option<(usize, usize)>) {
         self.plan_progress = progress;
+    }
+
+    /// Update current task description
+    pub fn set_current_task(&mut self, task: Option<String>) {
+        self.current_task = task;
     }
 
     /// Set contextual keybinding hints
@@ -329,13 +343,31 @@ impl Widget for StatusBarWidget<'_> {
             Style::default().fg(Color::White),
         ));
 
-        // Plan progress (if active)
-        if let Some((completed, total)) = self.status.plan_progress {
-            spans.push(Span::styled("│", Style::default().fg(Color::Gray)));
-            spans.push(Span::styled(
-                format!(" Plan: {}/{} ", completed, total),
-                Style::default().fg(Color::Magenta),
-            ));
+        // Plan progress (if active) - only shown in Build mode
+        if self.status.mode == AgentMode::Build {
+            if let Some((completed, total)) = self.status.plan_progress {
+                spans.push(Span::styled("│", Style::default().fg(Color::Gray)));
+
+                // Show progress with optional current task
+                if let Some(ref task) = self.status.current_task {
+                    // Truncate task to fit (max 30 chars)
+                    let max_task_len = 30;
+                    let truncated_task = if task.len() > max_task_len {
+                        format!("{}…", &task[..max_task_len - 1])
+                    } else {
+                        task.clone()
+                    };
+                    spans.push(Span::styled(
+                        format!(" 📋 {}/{}: {} ", completed, total, truncated_task),
+                        Style::default().fg(Color::Magenta),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        format!(" 📋 {}/{} ", completed, total),
+                        Style::default().fg(Color::Magenta),
+                    ));
+                }
+            }
         }
 
         // Separator

@@ -1848,6 +1848,13 @@ pub struct PlanSubtask {
     pub notes: Option<String>,
 }
 
+impl PlanSubtask {
+    /// Check if subtask is complete
+    pub fn is_complete(&self) -> bool {
+        self.status == TaskStatus::Completed || self.status == TaskStatus::Skipped
+    }
+}
+
 /// A task in an execution plan
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanTask {
@@ -1857,6 +1864,9 @@ pub struct PlanTask {
     pub subtasks: Vec<PlanSubtask>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Files that will be modified by this task
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 impl PlanTask {
@@ -1911,7 +1921,8 @@ pub struct ExecutionPlan {
     pub id: String,
     /// Plan title/name
     pub title: String,
-    /// Original prompt that generated this plan
+    /// Original prompt that generated this plan (deprecated, use overview)
+    #[serde(default)]
     pub original_prompt: String,
     /// Plan status
     pub status: PlanStatus,
@@ -1931,6 +1942,26 @@ pub struct ExecutionPlan {
     /// Notes/refinements added to the plan
     #[serde(default)]
     pub refinements: Vec<PlanRefinement>,
+
+    // ===== V2 Schema Fields =====
+    /// High-level overview of what this plan accomplishes
+    #[serde(default)]
+    pub overview: String,
+    /// Architecture notes (components, data flow, dependencies)
+    #[serde(default)]
+    pub architecture: String,
+    /// Proposed changes summary (what will be modified and how)
+    #[serde(default)]
+    pub proposed_changes: String,
+    /// Acceptance criteria for plan completion
+    #[serde(default)]
+    pub acceptance_criteria: Vec<AcceptanceCriterion>,
+    /// Reference to the agent/model working on this plan
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentRef>,
+    /// Detected tech stack of the codebase
+    #[serde(default)]
+    pub stack: TechStack,
 }
 
 /// A refinement/modification to the plan
@@ -1938,6 +1969,41 @@ pub struct ExecutionPlan {
 pub struct PlanRefinement {
     pub timestamp: DateTime<Utc>,
     pub description: String,
+}
+
+/// Detected tech stack of the codebase
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TechStack {
+    /// Primary language (rust, python, typescript, go, java, etc.)
+    pub language: String,
+    /// Framework if detected (axum, fastapi, express, gin, spring, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+    /// UI library if detected (react, vue, svelte, tailwind, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_library: Option<String>,
+    /// Test command (cargo test, pytest, npm test, go test, bun test)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_command: Option<String>,
+    /// Build command (cargo build, npm run build, go build)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_command: Option<String>,
+}
+
+/// Reference to the agent working on this plan
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentRef {
+    /// Agent/model ID (e.g., "claude-sonnet-4-20250514")
+    pub id: String,
+    /// Agent display name (e.g., "Claude Sonnet 4")
+    pub name: String,
+}
+
+/// Acceptance criterion for plan completion
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptanceCriterion {
+    pub description: String,
+    pub met: bool,
 }
 
 impl ExecutionPlan {
@@ -1959,6 +2025,13 @@ impl ExecutionPlan {
             current_subtask_index: 0,
             session_id: None,
             refinements: Vec::new(),
+            // V2 fields
+            overview: String::new(),
+            architecture: String::new(),
+            proposed_changes: String::new(),
+            acceptance_criteria: Vec::new(),
+            agent: None,
+            stack: TechStack::default(),
         }
     }
 
@@ -1993,6 +2066,22 @@ impl ExecutionPlan {
             status: TaskStatus::Pending,
             subtasks: Vec::new(),
             notes: None,
+            files: Vec::new(),
+        });
+        self.updated_at = Utc::now();
+        self.tasks.last_mut().unwrap()
+    }
+
+    /// Add a task with associated files
+    pub fn add_task_with_files(&mut self, description: &str, files: Vec<String>) -> &mut PlanTask {
+        let task_id = format!("task_{}", self.tasks.len() + 1);
+        self.tasks.push(PlanTask {
+            id: task_id,
+            description: description.to_string(),
+            status: TaskStatus::Pending,
+            subtasks: Vec::new(),
+            notes: None,
+            files,
         });
         self.updated_at = Utc::now();
         self.tasks.last_mut().unwrap()
@@ -2141,32 +2230,107 @@ impl ExecutionPlan {
             "current_subtask: {}\n",
             self.current_subtask_index
         ));
+        // V2: Agent reference
+        if let Some(ref agent) = self.agent {
+            md.push_str(&format!("agent_id: {}\n", agent.id));
+            md.push_str(&format!(
+                "agent_name: \"{}\"\n",
+                agent.name.replace('"', "\\\"")
+            ));
+        }
+        // V2: Tech stack
+        if !self.stack.language.is_empty() {
+            md.push_str(&format!("stack_language: {}\n", self.stack.language));
+            if let Some(ref fw) = self.stack.framework {
+                md.push_str(&format!("stack_framework: {}\n", fw));
+            }
+            if let Some(ref ui) = self.stack.ui_library {
+                md.push_str(&format!("stack_ui: {}\n", ui));
+            }
+            if let Some(ref tc) = self.stack.test_command {
+                md.push_str(&format!("stack_test: {}\n", tc));
+            }
+            if let Some(ref bc) = self.stack.build_command {
+                md.push_str(&format!("stack_build: {}\n", bc));
+            }
+        }
         md.push_str("---\n\n");
 
-        // Title and description
+        // Title
         md.push_str(&format!("# {}\n\n", self.title));
-        if !self.original_prompt.is_empty() {
+
+        // V2: Overview section (preferred over original_prompt)
+        if !self.overview.is_empty() {
+            md.push_str("## Overview\n\n");
+            md.push_str(&self.overview);
+            md.push_str("\n\n");
+        } else if !self.original_prompt.is_empty() {
+            // Fallback to original_prompt for backwards compatibility
             md.push_str(&format!("{}\n\n", self.original_prompt));
+        }
+
+        // V2: Architecture section
+        if !self.architecture.is_empty() {
+            md.push_str("## Architecture\n\n");
+            md.push_str(&self.architecture);
+            md.push_str("\n\n");
+        }
+
+        // V2: Proposed Changes section
+        if !self.proposed_changes.is_empty() {
+            md.push_str("## Proposed Changes\n\n");
+            md.push_str(&self.proposed_changes);
+            md.push_str("\n\n");
         }
 
         // Tasks section
         md.push_str("## Tasks\n\n");
 
-        for task in &self.tasks {
+        for (i, task) in self.tasks.iter().enumerate() {
             let checkbox = match task.status {
                 TaskStatus::Completed | TaskStatus::Skipped => "[x]",
                 TaskStatus::InProgress => "[-]",
                 _ => "[ ]",
             };
-            md.push_str(&format!("- {} {}\n", checkbox, task.description));
+            md.push_str(&format!(
+                "- {} **{}.** {}\n",
+                checkbox,
+                i + 1,
+                task.description
+            ));
 
-            for subtask in &task.subtasks {
+            // V2: Files associated with task
+            if !task.files.is_empty() {
+                md.push_str(&format!("  - Files: {}\n", task.files.join(", ")));
+            }
+
+            for (j, subtask) in task.subtasks.iter().enumerate() {
                 let sub_checkbox = match subtask.status {
                     TaskStatus::Completed | TaskStatus::Skipped => "[x]",
                     TaskStatus::InProgress => "[-]",
                     _ => "[ ]",
                 };
-                md.push_str(&format!("  - {} {}\n", sub_checkbox, subtask.description));
+                md.push_str(&format!(
+                    "  - {} {}.{} {}\n",
+                    sub_checkbox,
+                    i + 1,
+                    j + 1,
+                    subtask.description
+                ));
+            }
+
+            // Task notes (audit trail for mark_task_done)
+            if let Some(ref notes) = task.notes {
+                md.push_str(&format!("  - Notes: {}\n", notes));
+            }
+        }
+
+        // V2: Acceptance Criteria section
+        if !self.acceptance_criteria.is_empty() {
+            md.push_str("\n## Acceptance Criteria\n\n");
+            for criterion in &self.acceptance_criteria {
+                let checkbox = if criterion.met { "[x]" } else { "[ ]" };
+                md.push_str(&format!("- {} {}\n", checkbox, criterion.description));
             }
         }
 
@@ -2210,6 +2374,9 @@ impl ExecutionPlan {
         let mut session_id: Option<String> = None;
         let mut current_task_index = 0usize;
         let mut current_subtask_index = 0usize;
+        // V2 frontmatter fields
+        let mut agent = AgentRef::default();
+        let mut stack = TechStack::default();
 
         for line in frontmatter.lines() {
             let line = line.trim();
@@ -2242,100 +2409,197 @@ impl ExecutionPlan {
                     "session_id" => session_id = Some(value.to_string()),
                     "current_task" => current_task_index = value.parse().unwrap_or(0),
                     "current_subtask" => current_subtask_index = value.parse().unwrap_or(0),
+                    // V2 frontmatter
+                    "agent_id" => agent.id = value.to_string(),
+                    "agent_name" => agent.name = value.to_string(),
+                    "stack_language" => stack.language = value.to_string(),
+                    "stack_framework" => stack.framework = Some(value.to_string()),
+                    "stack_ui" => stack.ui_library = Some(value.to_string()),
+                    "stack_test" => stack.test_command = Some(value.to_string()),
+                    "stack_build" => stack.build_command = Some(value.to_string()),
                     _ => {}
                 }
             }
         }
 
-        // Parse body for tasks
+        // Parse body for sections
         let mut tasks = Vec::new();
         let mut refinements = Vec::new();
+        let mut acceptance_criteria = Vec::new();
         let mut original_prompt = String::new();
-        let mut in_tasks = false;
-        let mut in_notes = false;
+        let mut overview = String::new();
+        let mut architecture = String::new();
+        let mut proposed_changes = String::new();
+
+        // Section tracking
+        #[derive(PartialEq)]
+        enum Section {
+            Preamble,
+            Overview,
+            Architecture,
+            ProposedChanges,
+            Tasks,
+            AcceptanceCriteria,
+            Notes,
+        }
+        let mut current_section = Section::Preamble;
         let mut current_task: Option<PlanTask> = None;
 
         for line in body.lines() {
             let line_trimmed = line.trim();
 
-            // Skip title line (starts with #)
-            if line_trimmed.starts_with("# ") {
+            // Skip title line (starts with single #)
+            if line_trimmed.starts_with("# ") && !line_trimmed.starts_with("## ") {
                 continue;
             }
 
-            // Detect sections
-            if line_trimmed == "## Tasks" {
-                in_tasks = true;
-                in_notes = false;
-                continue;
-            }
-            if line_trimmed == "## Notes" {
-                in_tasks = false;
-                in_notes = true;
-                // Save pending task
-                if let Some(task) = current_task.take() {
-                    tasks.push(task);
-                }
-                continue;
-            }
-
-            // Parse task lines
-            if in_tasks {
-                // Subtask: "  - [x] Description" (check BEFORE main task since trimmed subtask matches main task pattern)
-                if (line.starts_with("  - [") || line.starts_with("    - ["))
-                    && current_task.is_some()
-                {
-                    let (status, desc) = Self::parse_checkbox_line(line_trimmed);
-                    if let Some(ref mut task) = current_task {
-                        task.subtasks.push(PlanSubtask {
-                            id: format!("{}_sub_{}", task.id, task.subtasks.len() + 1),
-                            description: desc,
-                            status,
-                            notes: None,
-                        });
-                    }
-                }
-                // Main task: "- [x] Description" or "- [ ] Description" (no leading whitespace)
-                else if line.starts_with("- [") {
-                    // Save previous task
+            // Detect section headers
+            if line_trimmed.starts_with("## ") {
+                // Save pending task when leaving Tasks section
+                if current_section == Section::Tasks {
                     if let Some(task) = current_task.take() {
                         tasks.push(task);
                     }
+                }
 
-                    let (status, desc) = Self::parse_checkbox_line(line_trimmed);
-                    current_task = Some(PlanTask {
-                        id: format!("task_{}", tasks.len() + 1),
-                        description: desc,
-                        status,
-                        subtasks: Vec::new(),
-                        notes: None,
-                    });
+                current_section = match line_trimmed {
+                    "## Overview" => Section::Overview,
+                    "## Architecture" => Section::Architecture,
+                    "## Proposed Changes" => Section::ProposedChanges,
+                    "## Tasks" => Section::Tasks,
+                    "## Acceptance Criteria" => Section::AcceptanceCriteria,
+                    "## Notes" => Section::Notes,
+                    _ => current_section, // Unknown section, keep current
+                };
+                continue;
+            }
+
+            match current_section {
+                Section::Preamble => {
+                    // Text before any ## section is original_prompt (backwards compat)
+                    if !line_trimmed.is_empty() {
+                        if !original_prompt.is_empty() {
+                            original_prompt.push('\n');
+                        }
+                        original_prompt.push_str(line_trimmed);
+                    }
                 }
-            } else if in_notes {
-                // Parse refinement: "- Description _(timestamp)"
-                if line_trimmed.starts_with("- ") {
-                    let desc = line_trimmed.trim_start_matches("- ");
-                    // Try to extract timestamp from end
-                    let (desc_part, timestamp) = if let Some(idx) = desc.rfind(" _(") {
-                        let ts_str = desc[idx + 3..].trim_end_matches(')');
-                        let ts = chrono::NaiveDateTime::parse_from_str(ts_str, "%Y-%m-%d %H:%M")
-                            .map(|dt| dt.and_utc())
-                            .unwrap_or_else(|_| Utc::now());
-                        (desc[..idx].to_string(), ts)
-                    } else {
-                        (desc.to_string(), Utc::now())
-                    };
-                    refinements.push(PlanRefinement {
-                        timestamp,
-                        description: desc_part,
-                    });
+                Section::Overview => {
+                    if !line_trimmed.is_empty() {
+                        if !overview.is_empty() {
+                            overview.push('\n');
+                        }
+                        overview.push_str(line_trimmed);
+                    }
                 }
-            } else if !line_trimmed.is_empty() && !line_trimmed.starts_with('#') {
-                // Capture original prompt (text before ## Tasks)
-                if !original_prompt.is_empty() {
-                    original_prompt.push('\n');
+                Section::Architecture => {
+                    if !line_trimmed.is_empty() {
+                        if !architecture.is_empty() {
+                            architecture.push('\n');
+                        }
+                        architecture.push_str(line_trimmed);
+                    }
                 }
-                original_prompt.push_str(line_trimmed);
+                Section::ProposedChanges => {
+                    if !line_trimmed.is_empty() {
+                        if !proposed_changes.is_empty() {
+                            proposed_changes.push('\n');
+                        }
+                        proposed_changes.push_str(line_trimmed);
+                    }
+                }
+                Section::Tasks => {
+                    // Files line: "  - Files: file1, file2"
+                    if line.starts_with("  - Files:") && current_task.is_some() {
+                        let files_str = line.trim_start_matches("  - Files:").trim();
+                        if let Some(ref mut task) = current_task {
+                            task.files = files_str
+                                .split(", ")
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                        }
+                    }
+                    // Notes line: "  - Notes: ..."
+                    else if line.starts_with("  - Notes:") && current_task.is_some() {
+                        let notes_str = line.trim_start_matches("  - Notes:").trim();
+                        if let Some(ref mut task) = current_task {
+                            task.notes = Some(notes_str.to_string());
+                        }
+                    }
+                    // Subtask: "  - [x] 1.1 Description"
+                    else if (line.starts_with("  - [") || line.starts_with("    - ["))
+                        && current_task.is_some()
+                    {
+                        let (status, desc) = Self::parse_checkbox_line(line_trimmed);
+                        // Strip number prefix like "1.1 " if present
+                        let desc = Self::strip_number_prefix(&desc);
+                        if let Some(ref mut task) = current_task {
+                            task.subtasks.push(PlanSubtask {
+                                id: format!("{}_sub_{}", task.id, task.subtasks.len() + 1),
+                                description: desc,
+                                status,
+                                notes: None,
+                            });
+                        }
+                    }
+                    // Main task: "- [x] **1.** Description" or "- [x] Description"
+                    else if line.starts_with("- [") {
+                        // Save previous task
+                        if let Some(task) = current_task.take() {
+                            tasks.push(task);
+                        }
+
+                        let (status, desc) = Self::parse_checkbox_line(line_trimmed);
+                        // Strip bold number prefix like "**1.** " if present
+                        let desc = Self::strip_bold_number_prefix(&desc);
+                        current_task = Some(PlanTask {
+                            id: format!("task_{}", tasks.len() + 1),
+                            description: desc,
+                            status,
+                            subtasks: Vec::new(),
+                            notes: None,
+                            files: Vec::new(),
+                        });
+                    }
+                }
+                Section::AcceptanceCriteria => {
+                    // Parse: "- [x] Description" or "- [ ] Description"
+                    if line_trimmed.starts_with("- [") {
+                        let met =
+                            line_trimmed.starts_with("- [x]") || line_trimmed.starts_with("- [X]");
+                        let desc = line_trimmed
+                            .trim_start_matches("- [x]")
+                            .trim_start_matches("- [X]")
+                            .trim_start_matches("- [ ]")
+                            .trim();
+                        acceptance_criteria.push(AcceptanceCriterion {
+                            description: desc.to_string(),
+                            met,
+                        });
+                    }
+                }
+                Section::Notes => {
+                    // Parse refinement: "- Description _(timestamp)"
+                    if line_trimmed.starts_with("- ") {
+                        let desc = line_trimmed.trim_start_matches("- ");
+                        // Try to extract timestamp from end
+                        let (desc_part, timestamp) = if let Some(idx) = desc.rfind(" _(") {
+                            let ts_str = desc[idx + 3..].trim_end_matches(')');
+                            let ts =
+                                chrono::NaiveDateTime::parse_from_str(ts_str, "%Y-%m-%d %H:%M")
+                                    .map(|dt| dt.and_utc())
+                                    .unwrap_or_else(|_| Utc::now());
+                            (desc[..idx].to_string(), ts)
+                        } else {
+                            (desc.to_string(), Utc::now())
+                        };
+                        refinements.push(PlanRefinement {
+                            timestamp,
+                            description: desc_part,
+                        });
+                    }
+                }
             }
         }
 
@@ -2356,7 +2620,60 @@ impl ExecutionPlan {
             current_subtask_index,
             session_id,
             refinements,
+            // V2 fields
+            overview,
+            architecture,
+            proposed_changes,
+            acceptance_criteria,
+            agent: if agent.id.is_empty() && agent.name.is_empty() {
+                None
+            } else {
+                Some(agent)
+            },
+            stack,
         })
+    }
+
+    /// Strip bold number prefix like "**1.** " from task descriptions
+    fn strip_bold_number_prefix(desc: &str) -> String {
+        let desc = desc.trim();
+        if desc.starts_with("**") {
+            if let Some(end_idx) = desc.find(".**") {
+                let after = &desc[end_idx + 3..];
+                return after.trim().to_string();
+            }
+        }
+        desc.to_string()
+    }
+
+    /// Strip number prefix like "1.1 " from subtask descriptions
+    fn strip_number_prefix(desc: &str) -> String {
+        let desc = desc.trim();
+        // Match patterns like "1.1 ", "2.3 ", etc.
+        let mut chars = desc.chars().peekable();
+        let mut has_number = false;
+
+        // Skip leading digits
+        while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            chars.next();
+            has_number = true;
+        }
+
+        // Check for dot
+        if has_number && chars.peek() == Some(&'.') {
+            chars.next();
+            // Skip more digits after dot
+            while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                chars.next();
+            }
+            // Skip space
+            if chars.peek() == Some(&' ') {
+                chars.next();
+            }
+            return chars.collect::<String>().trim().to_string();
+        }
+
+        desc.to_string()
     }
 
     /// Parse a checkbox line like "- [x] Description" or "- [ ] Description"
@@ -2373,6 +2690,143 @@ impl ExecutionPlan {
             (TaskStatus::Pending, rest.trim().to_string())
         } else {
             (TaskStatus::Pending, line.to_string())
+        }
+    }
+
+    /// Format plan as clean markdown for display (no YAML frontmatter)
+    ///
+    /// Use this for previewing plans to users or showing in chat.
+    pub fn to_preview(&self) -> String {
+        let mut md = String::new();
+
+        // Title
+        md.push_str(&format!("# {}\n\n", self.title));
+
+        // Overview (preferred) or original_prompt (fallback)
+        if !self.overview.is_empty() {
+            md.push_str("## Overview\n\n");
+            md.push_str(&self.overview);
+            md.push_str("\n\n");
+        } else if !self.original_prompt.is_empty() {
+            md.push_str(&format!("{}\n\n", self.original_prompt));
+        }
+
+        // Architecture (if present)
+        if !self.architecture.is_empty() {
+            md.push_str("## Architecture\n\n");
+            md.push_str(&self.architecture);
+            md.push_str("\n\n");
+        }
+
+        // Proposed Changes (if present)
+        if !self.proposed_changes.is_empty() {
+            md.push_str("## Proposed Changes\n\n");
+            md.push_str(&self.proposed_changes);
+            md.push_str("\n\n");
+        }
+
+        // Tasks - numbered with checkboxes
+        md.push_str("## Tasks\n\n");
+        for (i, task) in self.tasks.iter().enumerate() {
+            let checkbox = if task.is_complete() { "[x]" } else { "[ ]" };
+            md.push_str(&format!(
+                "- {} **{}.** {}\n",
+                checkbox,
+                i + 1,
+                task.description
+            ));
+
+            if !task.files.is_empty() {
+                md.push_str(&format!("  - Files: {}\n", task.files.join(", ")));
+            }
+
+            for (j, subtask) in task.subtasks.iter().enumerate() {
+                let sub_cb = if subtask.is_complete() { "[x]" } else { "[ ]" };
+                md.push_str(&format!(
+                    "  - {} {}.{} {}\n",
+                    sub_cb,
+                    i + 1,
+                    j + 1,
+                    subtask.description
+                ));
+            }
+        }
+
+        // Acceptance Criteria (if present)
+        if !self.acceptance_criteria.is_empty() {
+            md.push_str("\n## Acceptance Criteria\n\n");
+            for criterion in &self.acceptance_criteria {
+                let cb = if criterion.met { "[x]" } else { "[ ]" };
+                md.push_str(&format!("- {} {}\n", cb, criterion.description));
+            }
+        }
+
+        md
+    }
+
+    /// Set the overview text
+    pub fn set_overview(&mut self, overview: &str) {
+        self.overview = overview.to_string();
+        self.updated_at = Utc::now();
+    }
+
+    /// Set the architecture text
+    pub fn set_architecture(&mut self, architecture: &str) {
+        self.architecture = architecture.to_string();
+        self.updated_at = Utc::now();
+    }
+
+    /// Set the proposed changes text
+    pub fn set_proposed_changes(&mut self, proposed_changes: &str) {
+        self.proposed_changes = proposed_changes.to_string();
+        self.updated_at = Utc::now();
+    }
+
+    /// Add an acceptance criterion
+    pub fn add_acceptance_criterion(&mut self, description: &str) {
+        self.acceptance_criteria.push(AcceptanceCriterion {
+            description: description.to_string(),
+            met: false,
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Mark an acceptance criterion as met
+    pub fn mark_criterion_met(&mut self, index: usize) {
+        if let Some(criterion) = self.acceptance_criteria.get_mut(index) {
+            criterion.met = true;
+            self.updated_at = Utc::now();
+        }
+    }
+
+    /// Set the agent reference
+    pub fn set_agent(&mut self, id: &str, name: &str) {
+        self.agent = Some(AgentRef {
+            id: id.to_string(),
+            name: name.to_string(),
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Set the tech stack
+    pub fn set_stack(&mut self, stack: TechStack) {
+        self.stack = stack;
+        self.updated_at = Utc::now();
+    }
+
+    /// Add files to a task
+    pub fn set_task_files(&mut self, task_index: usize, files: Vec<String>) {
+        if let Some(task) = self.tasks.get_mut(task_index) {
+            task.files = files;
+            self.updated_at = Utc::now();
+        }
+    }
+
+    /// Set notes on a task (for audit trail)
+    pub fn set_task_notes(&mut self, task_index: usize, notes: &str) {
+        if let Some(task) = self.tasks.get_mut(task_index) {
+            task.notes = Some(notes.to_string());
+            self.updated_at = Utc::now();
         }
     }
 }
@@ -2672,5 +3126,157 @@ mod tests {
         // But tokens should only reflect current context
         assert_eq!(session.input_tokens, 75);
         assert_eq!(session.output_tokens, 150);
+    }
+
+    #[test]
+    fn test_execution_plan_v2_markdown_roundtrip() {
+        // Create a V2 plan with all new fields
+        let mut plan = ExecutionPlan::new("Test Plan", "");
+        plan.set_overview("This is a comprehensive test plan for the new schema.");
+        plan.set_architecture("- Component A: handles X\n- Component B: handles Y");
+        plan.set_proposed_changes("1. Modify file A\n2. Add new file B");
+        plan.add_acceptance_criterion("All tests pass");
+        plan.add_acceptance_criterion("Documentation updated");
+        plan.set_agent("claude-sonnet-4", "Claude Sonnet 4");
+        plan.set_stack(TechStack {
+            language: "rust".to_string(),
+            framework: Some("axum".to_string()),
+            ui_library: None,
+            test_command: Some("cargo test".to_string()),
+            build_command: Some("cargo build --release".to_string()),
+        });
+
+        // Add tasks with files
+        plan.add_task_with_files(
+            "Implement feature X",
+            vec!["src/lib.rs".to_string(), "src/feature.rs".to_string()],
+        );
+        plan.add_subtask(0, "Create module structure");
+        plan.add_subtask(0, "Write unit tests");
+        plan.set_task_notes(0, "Completed with 100% coverage");
+        plan.complete_task(0);
+
+        plan.add_task("Update documentation");
+        plan.add_subtask(1, "Add README section");
+
+        // Serialize to markdown
+        let md = plan.to_markdown();
+
+        // Verify key sections are present
+        assert!(md.contains("## Overview"));
+        assert!(md.contains("comprehensive test plan"));
+        assert!(md.contains("## Architecture"));
+        assert!(md.contains("Component A"));
+        assert!(md.contains("## Proposed Changes"));
+        assert!(md.contains("Modify file A"));
+        assert!(md.contains("## Tasks"));
+        assert!(md.contains("Files: src/lib.rs, src/feature.rs"));
+        assert!(md.contains("Notes: Completed with 100% coverage"));
+        assert!(md.contains("## Acceptance Criteria"));
+        assert!(md.contains("All tests pass"));
+        assert!(md.contains("stack_language: rust"));
+        assert!(md.contains("agent_id: claude-sonnet-4"));
+
+        // Parse back
+        let parsed = ExecutionPlan::from_markdown(&md).unwrap();
+
+        // Verify roundtrip
+        assert_eq!(parsed.title, "Test Plan");
+        assert_eq!(parsed.overview, plan.overview);
+        assert_eq!(parsed.architecture, plan.architecture);
+        assert_eq!(parsed.proposed_changes, plan.proposed_changes);
+        assert_eq!(parsed.acceptance_criteria.len(), 2);
+        assert_eq!(parsed.acceptance_criteria[0].description, "All tests pass");
+        assert!(!parsed.acceptance_criteria[0].met);
+
+        // Agent
+        assert!(parsed.agent.is_some());
+        let agent = parsed.agent.unwrap();
+        assert_eq!(agent.id, "claude-sonnet-4");
+        assert_eq!(agent.name, "Claude Sonnet 4");
+
+        // Stack
+        assert_eq!(parsed.stack.language, "rust");
+        assert_eq!(parsed.stack.framework, Some("axum".to_string()));
+        assert_eq!(parsed.stack.test_command, Some("cargo test".to_string()));
+
+        // Tasks
+        assert_eq!(parsed.tasks.len(), 2);
+        assert_eq!(parsed.tasks[0].description, "Implement feature X");
+        assert_eq!(parsed.tasks[0].files, vec!["src/lib.rs", "src/feature.rs"]);
+        assert_eq!(
+            parsed.tasks[0].notes,
+            Some("Completed with 100% coverage".to_string())
+        );
+        assert_eq!(parsed.tasks[0].status, TaskStatus::Completed);
+        assert_eq!(parsed.tasks[0].subtasks.len(), 2);
+        assert_eq!(
+            parsed.tasks[0].subtasks[0].description,
+            "Create module structure"
+        );
+    }
+
+    #[test]
+    fn test_execution_plan_to_preview() {
+        let mut plan = ExecutionPlan::new("Preview Test", "");
+        plan.set_overview("Testing the preview output.");
+        plan.add_task("Task one");
+        plan.add_task("Task two");
+        plan.add_subtask(1, "Subtask 2.1");
+        plan.complete_task(0);
+        plan.add_acceptance_criterion("Works correctly");
+
+        let preview = plan.to_preview();
+
+        // Preview should NOT contain frontmatter
+        assert!(!preview.contains("---"));
+        assert!(!preview.contains("id:"));
+        assert!(!preview.contains("status:"));
+
+        // Should contain clean markdown
+        assert!(preview.contains("# Preview Test"));
+        assert!(preview.contains("## Overview"));
+        assert!(preview.contains("Testing the preview output"));
+        assert!(preview.contains("## Tasks"));
+        assert!(preview.contains("[x] **1.** Task one")); // Completed
+        assert!(preview.contains("[ ] **2.** Task two")); // Pending
+        assert!(preview.contains("2.1 Subtask 2.1"));
+        assert!(preview.contains("## Acceptance Criteria"));
+        assert!(preview.contains("Works correctly"));
+    }
+
+    #[test]
+    fn test_execution_plan_backwards_compat() {
+        // Test that old-style plans (with original_prompt, no Overview section) still work
+        let old_md = r#"---
+id: old_plan_123
+title: "Old Style Plan"
+status: draft
+created: 2025-01-01T00:00:00Z
+updated: 2025-01-01T00:00:00Z
+current_task: 0
+current_subtask: 0
+---
+
+# Old Style Plan
+
+This is the original prompt text without a section header.
+
+## Tasks
+
+- [ ] Do something
+- [ ] Do something else
+"#;
+
+        let plan = ExecutionPlan::from_markdown(old_md).unwrap();
+
+        assert_eq!(plan.title, "Old Style Plan");
+        assert_eq!(
+            plan.original_prompt,
+            "This is the original prompt text without a section header."
+        );
+        assert!(plan.overview.is_empty()); // No ## Overview section
+        assert_eq!(plan.tasks.len(), 2);
+        assert_eq!(plan.tasks[0].description, "Do something");
     }
 }

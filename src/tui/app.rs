@@ -231,6 +231,8 @@ pub struct AppState {
     pub plan_picker: super::widgets::PlanPickerState,
     /// Active plan progress for status bar
     pub plan_progress: Option<(usize, usize)>,
+    /// Current task description for status bar (Build mode only)
+    pub current_task: Option<String>,
     /// Help popup state
     pub help_popup: super::widgets::HelpPopupState,
 }
@@ -339,6 +341,7 @@ impl Default for AppState {
             approval_card: super::widgets::ApprovalCardState::default(),
             plan_picker: super::widgets::PlanPickerState::default(),
             plan_progress: None,
+            current_task: None,
             help_popup: super::widgets::HelpPopupState::default(),
         }
     }
@@ -1146,6 +1149,50 @@ impl TuiApp {
         }
     }
 
+    /// Refresh plan status for status bar display
+    ///
+    /// Updates `plan_progress` and `current_task` from the current active plan.
+    /// Should be called after:
+    /// - Agent processing completes
+    /// - Plan is switched
+    /// - Session changes
+    fn refresh_plan_status(&mut self) {
+        // Only relevant in Build mode
+        if self.state.mode != AgentMode::Build {
+            self.state.plan_progress = None;
+            self.state.current_task = None;
+            return;
+        }
+
+        if let Some(ref bridge) = self.agent_bridge {
+            let storage = bridge.storage();
+            let session_id = bridge.session_id();
+
+            // Try to load current plan
+            if let Some(plan_id) = storage.get_current_plan_id(session_id) {
+                if let Ok(plan) = storage.load_execution_plan(session_id, &plan_id) {
+                    let (completed, total) = plan.progress();
+                    self.state.plan_progress = Some((completed, total));
+
+                    // Get current task description
+                    self.state.current_task = plan.get_next_pending().map(|(t_idx, s_idx)| {
+                        let task = &plan.tasks[t_idx];
+                        if let Some(s) = s_idx {
+                            task.subtasks[s].description.clone()
+                        } else {
+                            task.description.clone()
+                        }
+                    });
+                    return;
+                }
+            }
+        }
+
+        // No plan or couldn't load
+        self.state.plan_progress = None;
+        self.state.current_task = None;
+    }
+
     /// Handle agent errors with user-friendly messages and suggestions
     ///
     /// Categorizes errors and provides helpful suggestions for resolution.
@@ -1571,6 +1618,30 @@ impl TuiApp {
         // Handle plan picker input if visible
         if self.state.plan_picker.is_visible() {
             use super::widgets::PlanAction;
+
+            // Check if in confirmation mode (agent was processing during switch attempt)
+            if self.state.plan_picker.is_confirming() {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        // Confirm: stop agent and switch plan
+                        if let Some(action) = self.state.plan_picker.confirm_pending_switch() {
+                            // Mark agent as not processing to stop the loop
+                            self.state.agent_processing = false;
+                            self.state.status_message =
+                                Some("Agent stopped. Switching plan...".to_string());
+                            self.handle_plan_action(action);
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        // Cancel: dismiss confirmation and return to picker
+                        self.state.plan_picker.cancel_pending_switch();
+                    }
+                    _ => {}
+                }
+                return Ok(true);
+            }
+
+            // Normal picker mode
             match key.code {
                 KeyCode::Esc => {
                     self.state.plan_picker.hide();
@@ -1586,6 +1657,31 @@ impl TuiApp {
                 }
                 KeyCode::Enter => {
                     if let Some(action) = self.state.plan_picker.confirm() {
+                        // Check if agent is processing and this is a Switch action
+                        if self.state.agent_processing {
+                            if let PlanAction::Switch(ref plan_id) = action {
+                                // Get plan title for confirmation dialog
+                                let plan_title = self
+                                    .agent_bridge
+                                    .as_ref()
+                                    .and_then(|bridge| {
+                                        let session_id = bridge.session_id();
+                                        bridge
+                                            .storage()
+                                            .load_execution_plan(session_id, plan_id)
+                                            .ok()
+                                            .map(|p| p.title)
+                                    })
+                                    .unwrap_or_else(|| plan_id.clone());
+
+                                // Show confirmation dialog
+                                self.state
+                                    .plan_picker
+                                    .request_switch_confirmation(plan_id.clone(), plan_title);
+                                return Ok(true);
+                            }
+                        }
+                        // Not processing or not a switch - proceed normally
                         self.handle_plan_action(action);
                     }
                 }
@@ -3539,14 +3635,9 @@ impl TuiApp {
                     })
                     .unwrap_or_default();
 
-                let is_plan_mode = self.state.mode == AgentMode::Plan;
-
-                self.state.plan_picker.show(
-                    active_plans,
-                    archived_plans,
-                    current_plan_id,
-                    is_plan_mode,
-                );
+                self.state
+                    .plan_picker
+                    .show(active_plans, archived_plans, current_plan_id);
             }
             // Diff commands
             CommandResult::ShowDiff(file) => {
@@ -5528,6 +5619,9 @@ impl TuiApp {
                             info.input_tokens + info.output_tokens
                         ));
 
+                        // Refresh plan status for status bar (task may have been completed)
+                        self.refresh_plan_status();
+
                         // Mark that panel needs update when bridge is restored
                         self.state.panel_update_pending = true;
 
@@ -6049,6 +6143,29 @@ impl TuiApp {
                 ));
             }
 
+            // Show plan progress in Build mode (with optional current task)
+            if self.state.mode == AgentMode::Build {
+                if let Some((completed, total)) = self.state.plan_progress {
+                    status_spans.push(ratatui::text::Span::raw("│"));
+                    let plan_str = if let Some(ref task) = self.state.current_task {
+                        // Truncate task to fit (max 25 chars)
+                        let max_len = 25;
+                        let truncated = if task.len() > max_len {
+                            format!("{}…", &task[..max_len - 1])
+                        } else {
+                            task.clone()
+                        };
+                        format!(" 📋 {}/{}: {} ", completed, total, truncated)
+                    } else {
+                        format!(" 📋 {}/{} ", completed, total)
+                    };
+                    status_spans.push(ratatui::text::Span::styled(
+                        plan_str,
+                        Style::default().fg(Color::Magenta),
+                    ));
+                }
+            }
+
             // Show loading spinner when agent is processing
             if agent_processing {
                 // Use the stateful spinner frame for smooth animation
@@ -6186,14 +6303,58 @@ impl TuiApp {
 
         match action {
             PlanAction::Switch(plan_id) => {
-                // Set as current plan (only in Plan mode)
-                if let Some(bridge) = &self.agent_bridge {
+                // Set as current plan, invalidate cache, and notify agent
+                if let Some(bridge) = &mut self.agent_bridge {
                     let session_id = bridge.session_id().to_string();
                     let storage = bridge.storage();
-                    if let Err(e) = storage.set_current_plan(&session_id, &plan_id) {
-                        self.state.status_message = Some(format!("Failed to switch plan: {}", e));
-                    } else {
-                        self.state.status_message = Some(format!("Switched to plan: {}", plan_id));
+                    let plan_service = bridge.plan_service();
+
+                    // Load plan to get title and preview
+                    let plan_result = storage.load_execution_plan(&session_id, &plan_id);
+
+                    match plan_result {
+                        Ok(plan) => {
+                            let plan_title = plan.title.clone();
+                            let (completed, total) = plan.progress();
+                            let preview = plan.to_preview();
+
+                            // Set as current plan in storage
+                            if let Err(e) = storage.set_current_plan(&session_id, &plan_id) {
+                                self.state.status_message =
+                                    Some(format!("Failed to switch plan: {}", e));
+                            } else {
+                                // Invalidate PlanService cache so agent picks up new plan
+                                plan_service.invalidate_cache_sync();
+
+                                self.state.status_message =
+                                    Some(format!("Switched to plan: {}", plan_title));
+
+                                // Inject a system message with full plan context
+                                self.state.message_list.push(ChatMessage::system(format!(
+                                    "📋 **Plan switched to: {}**\n\n\
+                                    Progress: {}/{} tasks complete\n\n\
+                                    {}\n\n\
+                                    Use `get_plan_status` to check progress, \
+                                    `mark_task_done` to track completion.",
+                                    plan_title, completed, total, preview
+                                )));
+
+                                // Update plan status for status bar
+                                self.state.plan_progress = Some((completed, total));
+                                self.state.current_task =
+                                    plan.get_next_pending().map(|(t_idx, s_idx)| {
+                                        let task = &plan.tasks[t_idx];
+                                        if let Some(s) = s_idx {
+                                            task.subtasks[s].description.clone()
+                                        } else {
+                                            task.description.clone()
+                                        }
+                                    });
+                            }
+                        }
+                        Err(e) => {
+                            self.state.status_message = Some(format!("Failed to load plan: {}", e));
+                        }
                     }
                 }
                 self.state.plan_picker.hide();
@@ -6233,12 +6394,7 @@ impl TuiApp {
                                 .unwrap_or_default();
                             let archived = storage.list_archived_plans().unwrap_or_default();
                             let current_id = storage.get_current_plan_id(&session_id);
-                            self.state.plan_picker.show(
-                                active,
-                                archived,
-                                current_id,
-                                self.state.mode == AgentMode::Plan,
-                            );
+                            self.state.plan_picker.show(active, archived, current_id);
                         }
                         Err(e) => {
                             self.state.status_message =

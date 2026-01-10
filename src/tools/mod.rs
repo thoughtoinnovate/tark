@@ -35,7 +35,9 @@ pub use lsp_tools::{
     set_lsp_proxy_port, CallHierarchyTool, CodeAnalyzer, FindAllReferencesTool, GetSignatureTool,
     GoToDefinitionTool, ListSymbolsTool,
 };
-pub use plan::{MarkTaskDoneTool, SavePlanTool};
+pub use plan::{
+    GetPlanStatusTool, MarkTaskDoneTool, PreviewPlanTool, SavePlanTool, UpdatePlanTool,
+};
 pub use questionnaire::{
     interaction_channel, ApprovalChoice, ApprovalPattern, ApprovalRequest, ApprovalResponse,
     AskUserTool, InteractionReceiver, InteractionRequest, InteractionSender, SuggestedPattern,
@@ -266,19 +268,28 @@ impl ToolRegistry {
                 tracing::debug!("Ask mode: registered safe_shell only");
             }
             AgentMode::Plan => {
-                // Plan mode: safe shell + propose_change + plan tools
+                // Plan mode: safe shell + propose_change + all plan tools
                 registry.register(Arc::new(SafeShellTool::new(working_dir.clone())));
                 registry.register(Arc::new(ProposeChangeTool::new(working_dir.clone())));
 
                 // Register plan tools if service is available
                 if let Some(ref service) = plan_service {
+                    // Preview plan (draft without saving)
+                    registry.register(Arc::new(PreviewPlanTool::new()));
+                    // Save plan (persist to storage)
                     registry.register(Arc::new(SavePlanTool::new(service.clone())));
+                    // Update existing plan
+                    registry.register(Arc::new(UpdatePlanTool::new(service.clone())));
+                    // Get current plan status
+                    registry.register(Arc::new(GetPlanStatusTool::new(service.clone())));
+                    // Mark tasks complete
                     registry.register(Arc::new(MarkTaskDoneTool::new(
                         service.clone(),
                         interaction_tx.as_ref().cloned(),
                     )));
                     tracing::debug!(
-                        "Plan mode: registered safe_shell, propose_change, save_plan, mark_task_done"
+                        "Plan mode: registered safe_shell, propose_change, preview_plan, \
+                        save_plan, update_plan, get_plan_status, mark_task_done"
                     );
                 } else {
                     tracing::debug!(
@@ -287,18 +298,23 @@ impl ToolRegistry {
                 }
             }
             AgentMode::Build => {
-                // Build mode: all write tools + mark_task_done for plan tracking
+                // Build mode: all write tools + plan tracking tools
                 registry.register(Arc::new(WriteFileTool::new(working_dir.clone())));
                 registry.register(Arc::new(PatchFileTool::new(working_dir.clone())));
                 registry.register(Arc::new(DeleteFileTool::new(working_dir.clone())));
 
-                // Register mark_task_done if plan service is available
+                // Register plan tracking tools if service is available
                 if let Some(ref service) = plan_service {
+                    // Get plan status (to check current task)
+                    registry.register(Arc::new(GetPlanStatusTool::new(service.clone())));
+                    // Mark tasks complete
                     registry.register(Arc::new(MarkTaskDoneTool::new(
                         service.clone(),
                         interaction_tx.as_ref().cloned(),
                     )));
-                    tracing::debug!("Build mode: registered mark_task_done for plan tracking");
+                    tracing::debug!(
+                        "Build mode: registered get_plan_status, mark_task_done for plan tracking"
+                    );
                 }
 
                 if shell_enabled {

@@ -351,7 +351,8 @@ impl AgentBridge {
 
         // Create agent
         let mut agent = ChatAgent::with_mode(provider, tools, mode.into())
-            .with_max_iterations(config.agent.max_iterations);
+            .with_max_iterations(config.agent.max_iterations)
+            .with_plan_service(plan_service.clone());
 
         // Set thinking configuration
         agent.set_thinking_config(config.thinking.clone());
@@ -1315,8 +1316,9 @@ impl AgentBridge {
         // Update agent mode
         self.agent.update_mode(tools, mode.into());
 
-        // Note: Trust level will be synced when the next message is sent
+        // Note: Trust level and plan context will be synced when the next message is sent
         // via send_message_streaming() which calls agent.set_trust_level()
+        // Plan context is auto-refreshed in the chat() method for Build mode
 
         // Check if mode has a saved preference and load it
         let has_preference = self.has_mode_preference(mode);
@@ -1470,6 +1472,22 @@ impl AgentBridge {
     /// Get plan service reference (for plan operations)
     pub fn plan_service(&self) -> Arc<crate::services::PlanService> {
         self.plan_service.clone()
+    }
+
+    /// Notify the agent that the active plan has changed
+    ///
+    /// This invalidates the cached plan context and refreshes the system prompt
+    /// so the agent knows to work on the new plan.
+    pub async fn notify_plan_switched(&mut self, plan_title: &str, plan_id: &str) {
+        // Refresh the agent's plan context from the plan service
+        self.agent.refresh_plan_context().await;
+
+        // Log the switch
+        tracing::info!("Plan switched to: {} ({})", plan_title, plan_id);
+
+        // Refresh system prompt to include new plan context
+        // The agent will see the new plan context in the next message
+        self.agent.refresh_system_prompt_async().await;
     }
 
     /// Get the current trust level

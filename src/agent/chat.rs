@@ -7,10 +7,115 @@ use crate::llm::{
     ContentPart, LlmProvider, LlmResponse, Message, MessageContent, Role, StreamCallback,
     StreamEvent, ThinkSettings,
 };
+use crate::services::PlanService;
+use crate::storage::ExecutionPlan;
 use crate::tools::{AgentMode, ToolRegistry};
 use crate::transport::update_status;
 use anyhow::Result;
 use std::sync::Arc;
+
+/// Lightweight plan context for system prompt injection in Build mode
+///
+/// This captures the essential information needed to keep the agent
+/// focused on the current plan task.
+#[derive(Debug, Clone)]
+pub struct PlanContext {
+    /// Plan title
+    pub title: String,
+    /// Completed tasks count
+    pub completed: usize,
+    /// Total tasks count
+    pub total: usize,
+    /// Current task index (0-based)
+    pub current_task_index: usize,
+    /// Current task description
+    pub current_task_description: String,
+    /// Files associated with current task
+    pub current_task_files: Vec<String>,
+    /// Remaining task descriptions (limited to 5)
+    pub remaining_tasks: Vec<String>,
+}
+
+impl PlanContext {
+    /// Create PlanContext from an ExecutionPlan
+    ///
+    /// Returns None if the plan has no pending tasks.
+    pub fn from_plan(plan: &ExecutionPlan) -> Option<Self> {
+        let (completed, total) = plan.progress();
+        let (task_idx, _subtask_idx) = plan.get_next_pending()?;
+        let task = plan.tasks.get(task_idx)?;
+
+        // Get remaining tasks (up to 5)
+        let remaining_tasks: Vec<_> = plan.tasks[task_idx..]
+            .iter()
+            .filter(|t| !t.is_complete())
+            .take(5)
+            .map(|t| t.description.clone())
+            .collect();
+
+        Some(Self {
+            title: plan.title.clone(),
+            completed,
+            total,
+            current_task_index: task_idx,
+            current_task_description: task.description.clone(),
+            current_task_files: task.files.clone(),
+            remaining_tasks,
+        })
+    }
+
+    /// Format plan context as markdown for system prompt injection
+    pub fn to_prompt_section(&self) -> String {
+        let mut section = format!(
+            r#"
+═══════════════════════════════════════════════════════════
+📋 ACTIVE PLAN: {}
+───────────────────────────────────────────────────────────
+Progress: {}/{} tasks complete
+
+🎯 CURRENT TASK (Task {}):
+{}"#,
+            self.title,
+            self.completed,
+            self.total,
+            self.current_task_index + 1,
+            self.current_task_description
+        );
+
+        if !self.current_task_files.is_empty() {
+            section.push_str(&format!(
+                "\n   Files: {}",
+                self.current_task_files.join(", ")
+            ));
+        }
+
+        if self.remaining_tasks.len() > 1 {
+            section.push_str("\n\n📝 Remaining Tasks:");
+            for (i, task) in self.remaining_tasks.iter().skip(1).enumerate() {
+                section.push_str(&format!(
+                    "\n   {}. {}",
+                    self.current_task_index + i + 2,
+                    task
+                ));
+            }
+        }
+
+        section.push_str(&format!(
+            r#"
+
+⚠️ PLAN EXECUTION RULES:
+1. Focus on the CURRENT TASK above
+2. When done, call mark_task_done(task_index={}, summary="...")
+3. Do NOT skip ahead to other tasks
+4. If blocked, explain why and use ask_user
+═══════════════════════════════════════════════════════════
+"#,
+            self.current_task_index
+        ));
+
+        section
+    }
+}
 
 /// Safely truncate a string at a character boundary
 ///
@@ -35,16 +140,18 @@ fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
 /// * `supports_native_thinking` - Whether the model has native thinking API support
 /// * `thinking_enabled` - Whether thinking is enabled via /think command
 /// * `trust_level` - Current trust level for risky operations (only shown in Build mode)
+/// * `plan_context` - Optional active plan context (only used in Build mode)
 fn get_system_prompt(
     mode: AgentMode,
     supports_native_thinking: bool,
     thinking_enabled: bool,
     trust_level: crate::tools::TrustLevel,
+    plan_context: Option<&PlanContext>,
 ) -> String {
     // Build status header so agent knows its current context
     // Only show trust level in Build mode where it has effect
     let status_header = if mode == AgentMode::Build {
-        format!(
+        let mut header = format!(
             r#"═══════════════════════════════════════════════════════════
 📊 CURRENT STATUS
 ───────────────────────────────────────────────────────────
@@ -57,7 +164,15 @@ Trust: {} - {}
             "full access, can modify files",
             trust_level.label(),
             trust_level.description()
-        )
+        );
+
+        // Inject plan context in Build mode if active
+        if let Some(ctx) = plan_context {
+            header.push_str(&ctx.to_prompt_section());
+            header.push('\n');
+        }
+
+        header
     } else {
         format!(
             r#"═══════════════════════════════════════════════════════════
@@ -83,10 +198,35 @@ Mode: {} ({})
 
 🚀 CRITICAL RULES:
 1. USE TOOLS IMMEDIATELY - Don't explain, just search and explore
-2. NEVER GIVE UP - If one search fails, try different patterns
-3. BE PERSISTENT - Try 3-4 different search strategies before saying "not found"
-4. CREATE PLANS - For significant asks, create a structured checklist
+2. DISCOVER FIRST - Before planning, understand the codebase thoroughly
+3. NEVER GIVE UP - Try 3-4 different search strategies before saying "not found"
+4. CREATE PLANS - Use `save_plan` for multi-step tasks
 5. 💬 NEVER ASK QUESTIONS IN CHAT TEXT - Use ask_user tool for ALL user input!
+
+═══════════════════════════════════════════════════════════
+🔍 DISCOVERY WORKFLOW - DO THIS BEFORE CREATING ANY PLAN
+═══════════════════════════════════════════════════════════
+
+Before creating a plan, you MUST understand the codebase:
+
+1. **Project Structure**: Use `list_directory` on root and key directories
+2. **Tech Stack Detection**: Look for config files (Cargo.toml, package.json, pyproject.toml, go.mod, pom.xml, build.sbt, build.zig, etc.)
+3. **Architecture Understanding**: Read main entry points, module structure, key abstractions
+4. **Coding Patterns**: Identify conventions (naming, error handling, logging, testing patterns)
+5. **Test Coverage**: Find test files/directories (tests/, __tests__/, *_test.*, *_spec.*)
+6. **Documentation**: Check for README.md, docs/, architecture docs
+
+DETECT THE TECH STACK (examples):
+- Rust: Cargo.toml → cargo build, cargo test
+- Python: pyproject.toml/requirements.txt → pip, pytest
+- TypeScript/JS: package.json → npm/yarn/pnpm/bun, jest/vitest
+- Go: go.mod → go build, go test
+- Java: pom.xml/build.gradle → maven/gradle, junit
+- Scala: build.sbt → sbt compile, sbt test
+- Zig: build.zig → zig build, zig test
+- Ruby: Gemfile → bundle, rspec
+- C/C++: Makefile/CMakeLists.txt → make, cmake
+- If unknown: use your knowledge to identify patterns
 
 Available tools:
 - codebase_overview: 🌟 USE THIS FIRST! Get project structure
@@ -104,12 +244,18 @@ Available tools:
 - propose_change: 📋 Show a DIFF preview without applying (great for suggesting changes!)
 - shell: 🔒 Safe read-only commands (git status, ls, cat, grep, version checks)
 - ask_user: 💬 Ask user structured questions via popup (single-select, multi-select, free-text)
-- save_plan: 📋 Create/update a structured execution plan with tasks and subtasks
+- save_plan: 📋 Create/update structured execution plans with tasks, subtasks, files
+- preview_plan: 👁️ Preview a plan before saving (for user review)
+- update_plan: ✏️ Modify an existing plan (add tasks, update sections)
+- get_plan_status: 📊 Check current plan progress
 - mark_task_done: ✅ Mark a task or subtask as completed
 
 You do NOT have: write_file, patch_file, delete_file (shell is limited to safe commands)
 
-📋 EXECUTION PLANS - USE `save_plan` TOOL:
+═══════════════════════════════════════════════════════════
+📋 EXECUTION PLANS - USE `save_plan` TOOL
+═══════════════════════════════════════════════════════════
+
 ⚠️ IMPORTANT: When user asks to "create a plan", "save plan", or requests task planning, ALWAYS use the `save_plan` tool!
 - DO NOT use `propose_change` to create markdown files for plans
 - DO NOT suggest creating docs/plan.md files
@@ -122,17 +268,23 @@ When to use `save_plan`:
 - Refactoring across files
 - Any request where sequence matters
 
-Example `save_plan` call:
+Example `save_plan` call with full schema:
 ```json
 {
   "title": "Add user authentication",
-  "description": "Implement JWT-based authentication system",
+  "overview": "Implement JWT-based authentication with login, logout, and middleware",
+  "architecture": "Add auth module under src/auth/, integrate with existing user model",
+  "proposed_changes": "New files: auth/mod.rs, auth/jwt.rs, auth/middleware.rs. Modified: routes.rs, user.rs",
+  "acceptance_criteria": ["Users can register", "Users can log in", "Protected routes require auth", "Tests pass"],
   "tasks": [
-    {"description": "Create User model and database schema"},
-    {"description": "Implement login endpoint", "subtasks": ["Validate credentials", "Generate JWT token"]},
-    {"description": "Add auth middleware"}
+    {"description": "Create User model and database schema", "files": ["src/models/user.rs", "migrations/"]},
+    {"description": "Implement login endpoint", "subtasks": ["Validate credentials", "Generate JWT token"], "files": ["src/auth/mod.rs"]},
+    {"description": "Add auth middleware", "files": ["src/auth/middleware.rs", "src/routes.rs"]}
   ],
-  "status": "draft"
+  "tech_stack_language": "rust",
+  "tech_stack_framework": "axum",
+  "tech_stack_test_command": "cargo test",
+  "tech_stack_build_command": "cargo build"
 }
 ```
 
@@ -181,8 +333,10 @@ Example - User says "help with plan to improve UX":
   ]
 
 ✅ ALWAYS:
+- DISCOVER the codebase before creating plans (list directories, read key files)
 - When user asks for a "plan" → use `save_plan` tool (NOT propose_change, NOT markdown files)
-- For significant asks, create an execution plan with `save_plan`
+- Include `overview`, `architecture`, `proposed_changes`, and `acceptance_criteria` in plans
+- Specify `files` for each task so Build mode knows what to modify
 - Try 3+ search patterns before saying "not found"
 - Show what you DID find
 - Use `propose_change` ONLY for code diffs (not for plans!)
@@ -276,6 +430,33 @@ Available tools:
 - shell: Execute shell commands
 - ask_user: 💬 Ask user structured questions via popup (single-select, multi-select, free-text)
 - mark_task_done: ✅ Mark a task as completed when following an execution plan
+- get_plan_status: 📊 Check current plan progress
+
+═══════════════════════════════════════════════════════════
+📋 PLAN EXECUTION WORKFLOW (when a plan is active)
+═══════════════════════════════════════════════════════════
+
+When an active plan is shown above, follow this workflow:
+
+1. **Focus on the current task** - Work on one task at a time
+2. **Use specified files** - If the task lists files, work on those specifically
+3. **Mark tasks done** - After completing each task, use `mark_task_done` with:
+   - `task_index`: 0-based index of the completed task
+   - `summary`: REQUIRED - Brief description of what was done (min 10 chars)
+   - `files_changed`: List of files that were modified
+4. **Work through ALL tasks** - Don't stop until the plan is complete
+5. **Run tests** - If the plan specifies a test command, run it after changes
+
+Example after completing a task:
+```json
+{
+  "task_index": 0,
+  "summary": "Implemented User model with id, email, password_hash fields and CRUD operations",
+  "files_changed": ["src/models/user.rs", "src/models/mod.rs"]
+}
+```
+
+The status bar shows plan progress (e.g., "📋 2/5: Add auth middleware").
 
 🔬 CODE UNDERSTANDING (use before modifying):
 - list_symbols: See all functions/types in a file
@@ -435,6 +616,10 @@ pub struct ChatAgent {
     think_level: String,
     /// Thinking configuration (levels and their settings)
     thinking_config: crate::config::ThinkingConfig,
+    /// Plan service for tracking execution plans (optional)
+    plan_service: Option<Arc<PlanService>>,
+    /// Cached plan context for Build mode system prompt injection
+    plan_context: Option<PlanContext>,
 }
 
 impl ChatAgent {
@@ -447,11 +632,13 @@ impl ChatAgent {
         let supports_thinking = llm.supports_native_thinking();
         let trust_level = crate::tools::TrustLevel::default();
         // Thinking is off by default, so pass false here
+        // No plan context at initialization
         context.add_system(get_system_prompt(
             mode,
             supports_thinking,
             false,
             trust_level,
+            None,
         ));
 
         Self {
@@ -463,7 +650,61 @@ impl ChatAgent {
             trust_level,
             think_level: "off".to_string(), // Off by default, enabled via /think command
             thinking_config: crate::config::ThinkingConfig::default(),
+            plan_service: None,
+            plan_context: None,
         }
+    }
+
+    /// Set the plan service for Build mode plan context injection
+    pub fn with_plan_service(mut self, service: Arc<PlanService>) -> Self {
+        self.plan_service = Some(service);
+        self
+    }
+
+    /// Set the plan service (mutable version for existing instances)
+    pub fn set_plan_service(&mut self, service: Arc<PlanService>) {
+        self.plan_service = Some(service);
+    }
+
+    /// Clear the plan service
+    pub fn clear_plan_service(&mut self) {
+        self.plan_service = None;
+        self.plan_context = None;
+    }
+
+    /// Refresh plan context from the plan service
+    ///
+    /// Call this before processing messages in Build mode to ensure
+    /// the system prompt includes current plan context.
+    pub async fn refresh_plan_context(&mut self) {
+        if self.mode != AgentMode::Build {
+            self.plan_context = None;
+            return;
+        }
+
+        if let Some(ref service) = self.plan_service {
+            if let Ok(Some(plan)) = service.get_current_plan().await {
+                self.plan_context = PlanContext::from_plan(&plan);
+
+                if let Some(ref ctx) = self.plan_context {
+                    tracing::debug!(
+                        "Plan context refreshed: {} - Task {}: {}",
+                        ctx.title,
+                        ctx.current_task_index + 1,
+                        ctx.current_task_description
+                    );
+                }
+            } else {
+                self.plan_context = None;
+            }
+        } else {
+            self.plan_context = None;
+        }
+    }
+
+    /// Get the current plan context (if any)
+    pub fn plan_context(&self) -> Option<&PlanContext> {
+        self.plan_context.as_ref()
     }
 
     /// Set the thinking configuration
@@ -498,6 +739,9 @@ impl ChatAgent {
     ///
     /// This queries models.dev for accurate capability detection
     pub async fn refresh_system_prompt_async(&mut self) {
+        // Refresh plan context first if in Build mode
+        self.refresh_plan_context().await;
+
         let supports_thinking = self.llm.supports_native_thinking_async().await;
         let thinking_enabled = self.is_thinking_enabled();
         let new_prompt = get_system_prompt(
@@ -505,18 +749,23 @@ impl ChatAgent {
             supports_thinking,
             thinking_enabled,
             self.trust_level,
+            self.plan_context.as_ref(),
         );
         self.context.update_system_prompt(&new_prompt);
         tracing::debug!(
-            "System prompt refreshed: mode={:?}, approval={:?}, thinking_enabled={}, supports_native={}",
+            "System prompt refreshed: mode={:?}, approval={:?}, thinking_enabled={}, supports_native={}, has_plan={}",
             self.mode,
             self.trust_level,
             thinking_enabled,
-            supports_thinking
+            supports_thinking,
+            self.plan_context.is_some()
         );
     }
 
     /// Refresh system prompt (sync version, uses fallback capability check)
+    ///
+    /// Note: This does NOT refresh plan context since that requires async.
+    /// Use refresh_system_prompt_async for full refresh including plan context.
     pub fn refresh_system_prompt(&mut self) {
         let supports_thinking = self.llm.supports_native_thinking();
         let thinking_enabled = self.is_thinking_enabled();
@@ -525,6 +774,7 @@ impl ChatAgent {
             supports_thinking,
             thinking_enabled,
             self.trust_level,
+            self.plan_context.as_ref(),
         );
         self.context.update_system_prompt(&new_prompt);
     }
@@ -559,6 +809,12 @@ impl ChatAgent {
         );
         self.tools = tools;
         self.mode = mode;
+
+        // Clear plan context when not in Build mode
+        if mode != AgentMode::Build {
+            self.plan_context = None;
+        }
+
         // Update the system prompt in context (replace the first system message)
         let supports_thinking = self.llm.supports_native_thinking();
         let thinking_enabled = self.is_thinking_enabled();
@@ -567,6 +823,7 @@ impl ChatAgent {
             supports_thinking,
             thinking_enabled,
             self.trust_level,
+            self.plan_context.as_ref(),
         ));
     }
 
@@ -647,6 +904,7 @@ impl ChatAgent {
             supports_thinking,
             thinking_enabled,
             self.trust_level,
+            self.plan_context.as_ref(),
         );
 
         // Clear and reinitialize with system prompt
@@ -666,6 +924,7 @@ impl ChatAgent {
             supports_thinking,
             thinking_enabled,
             self.trust_level,
+            self.plan_context.as_ref(),
         );
         self.context.clear();
         self.context.add_system(system_prompt);
@@ -936,6 +1195,13 @@ impl ChatAgent {
 
     /// Process a user message and return the agent's response
     pub async fn chat(&mut self, user_message: &str) -> Result<AgentResponse> {
+        // Refresh plan context for Build mode before processing
+        // This ensures the system prompt has current plan state
+        if self.mode == AgentMode::Build && self.plan_service.is_some() {
+            self.refresh_plan_context().await;
+            self.refresh_system_prompt();
+        }
+
         // Track if auto-compaction happens
         let mut auto_compacted = false;
 
@@ -1266,6 +1532,7 @@ impl ChatAgent {
             supports_thinking,
             thinking_enabled,
             self.trust_level,
+            self.plan_context.as_ref(),
         ));
     }
 

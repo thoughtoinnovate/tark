@@ -3,6 +3,28 @@
 //! Provides an abstraction layer between plan tools and storage,
 //! handling plan lifecycle, task tracking, and archiving.
 //! All operations are scoped to a specific session.
+//!
+//! # Architecture
+//!
+//! The `PlanService` sits between the TUI/agent and the `TarkStorage`:
+//!
+//! ```text
+//! ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+//! │  TUI/Agent  │ ──> │ PlanService  │ ──> │ TarkStorage │
+//! └─────────────┘     └──────────────┘     └─────────────┘
+//!                           │
+//!                           ├── Caches current plan ID
+//!                           ├── Session isolation
+//!                           └── Thread-safe (Arc<RwLock>)
+//! ```
+//!
+//! # Features
+//!
+//! - **Session-scoped**: Plans are isolated per session
+//! - **Cache invalidation**: Supports sync and async cache invalidation
+//! - **Plan switching**: Safe plan switching with cache updates
+//! - **Progress tracking**: Tracks task completion with audit trails
+//! - **Archiving**: Moves completed plans to archive with retention policy
 
 #![allow(dead_code)]
 
@@ -303,6 +325,38 @@ impl PlanService {
         storage.save_execution_plan(&self.session_id, &plan)?;
         Ok(plan)
     }
+
+    /// Invalidate the current plan cache (async version)
+    ///
+    /// Call this when the plan is switched externally (e.g., from TUI picker)
+    /// so the next `get_current_plan()` call will reload from storage.
+    pub async fn invalidate_cache(&self) {
+        let mut current = self.current_plan_id.write().await;
+        *current = None;
+    }
+
+    /// Invalidate the current plan cache (sync version)
+    ///
+    /// Uses try_write() for non-blocking cache invalidation.
+    /// Prefer this when called from sync context (e.g., TUI event handlers).
+    pub fn invalidate_cache_sync(&self) {
+        if let Ok(mut current) = self.current_plan_id.try_write() {
+            *current = None;
+        }
+    }
+
+    /// Switch to a different plan and return its details
+    ///
+    /// This is the preferred way to switch plans as it:
+    /// 1. Sets the plan as current in storage
+    /// 2. Updates the cached plan ID
+    /// 3. Returns the plan for immediate use (e.g., notification)
+    pub async fn switch_plan(&self, id: &str) -> Result<ExecutionPlan> {
+        // Set as current (verifies plan exists)
+        self.set_current_plan(id).await?;
+        // Load and return the plan
+        self.load_plan(id).await
+    }
 }
 
 #[cfg(test)]
@@ -395,5 +449,66 @@ mod tests {
         assert_eq!(plans1[0].id, plan1.id);
         assert_eq!(plans2.len(), 1);
         assert_eq!(plans2[0].id, plan2.id);
+    }
+
+    #[tokio::test]
+    async fn test_plan_service_cache_invalidation() {
+        let temp = TempDir::new().unwrap();
+        let (service, _) = create_test_service(&temp);
+
+        // Create and set a plan
+        let plan = service.create_plan("Test", "Test").await.unwrap();
+
+        // Cache should now have the plan ID
+        let current_id = service.get_current_plan_id().await;
+        assert_eq!(current_id, Some(plan.id.clone()));
+
+        // Invalidate cache (async)
+        service.invalidate_cache().await;
+
+        // Cache should reload from storage on next access
+        let current_id = service.get_current_plan_id().await;
+        assert_eq!(current_id, Some(plan.id));
+    }
+
+    #[tokio::test]
+    async fn test_plan_service_switch_plan() {
+        let temp = TempDir::new().unwrap();
+        let (service, _) = create_test_service(&temp);
+
+        // Create two plans - create_plan sets as current, so plan2 will be current after
+        let plan1 = service.create_plan("Plan 1", "First").await.unwrap();
+        let plan2 = service.create_plan("Plan 2", "Second").await.unwrap();
+
+        // Current should be plan2 (last created)
+        let current = service.get_current_plan().await.unwrap().unwrap();
+        assert_eq!(current.id, plan2.id);
+
+        // Switch back to plan1
+        let switched = service.switch_plan(&plan1.id).await.unwrap();
+        assert_eq!(switched.id, plan1.id);
+        assert_eq!(switched.title, "Plan 1");
+
+        // Current should now be plan1
+        let current = service.get_current_plan().await.unwrap().unwrap();
+        assert_eq!(current.id, plan1.id);
+    }
+
+    #[tokio::test]
+    async fn test_plan_service_archive_clears_current() {
+        let temp = TempDir::new().unwrap();
+        let (service, _) = create_test_service(&temp);
+
+        // Create and set a plan
+        let plan = service.create_plan("Archive Test", "").await.unwrap();
+        let current = service.get_current_plan().await.unwrap();
+        assert!(current.is_some());
+
+        // Archive it
+        service.archive_plan(&plan.id).await.unwrap();
+
+        // Current plan should be cleared
+        let current = service.get_current_plan().await.unwrap();
+        assert!(current.is_none());
     }
 }
