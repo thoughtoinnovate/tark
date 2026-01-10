@@ -1,5 +1,9 @@
 # External Agent Integration Architecture
 
+> **Status**: RFC / Proposal (not implemented)
+>
+> This document describes a potential future architecture. Module paths and file names below are illustrative and may not exist in the current codebase.
+
 ## Overview
 
 Tark serves as a **master orchestration layer** that can integrate with external CLI agents while providing a unified interface, consistent UX, and powerful orchestration capabilities.

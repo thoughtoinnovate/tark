@@ -27,7 +27,7 @@ This document helps AI coding agents understand the tark codebase and make effec
 **tark** is an AI-powered CLI agent with LSP server for Neovim. It provides:
 - Ghost text completions (like Cursor/Copilot)
 - Chat interface with file/shell tools
-- Multi-provider LLM support (OpenAI, Claude, Ollama)
+- Multi-provider LLM support (OpenAI, Claude, Gemini, Copilot, OpenRouter, Ollama)
 
 ## Architecture
 
@@ -40,10 +40,15 @@ tark/
 │   ├── completion/         # FIM (fill-in-middle) completions
 │   ├── config/             # Configuration management
 │   ├── diagnostics/        # Code analysis
-│   ├── llm/                # LLM provider implementations
+│   ├── llm/                # LLM providers + model DB
 │   │   ├── claude.rs       # Anthropic Claude
 │   │   ├── openai.rs       # OpenAI GPT
-│   │   └── ollama.rs       # Local Ollama
+│   │   ├── gemini.rs       # Google Gemini
+│   │   ├── copilot.rs      # GitHub Copilot
+│   │   ├── openrouter.rs   # OpenRouter
+│   │   ├── ollama.rs       # Local Ollama
+│   │   ├── models_db.rs    # models.dev integration
+│   │   └── types.rs        # Shared LLM types
 │   ├── lsp/                # LSP server implementation
 │   ├── storage/            # Persistent storage (.tark/)
 │   │   └── usage.rs        # Usage tracking with SQLite
@@ -64,8 +69,11 @@ tark/
 ├── lua/                    # Neovim plugin (Lua)
 │   └── tark/
 │       ├── init.lua        # Plugin entry point & setup
-│       ├── tui.lua         # TUI integration (socket RPC)
 │       ├── binary.lua      # Binary find/download/version
+│       ├── tui.lua         # TUI integration (socket RPC)
+│       ├── ghost.lua       # Ghost text completions
+│       ├── lsp.lua         # LSP integration helpers
+│       ├── statusline.lua  # Statusline helpers
 │       └── health.lua      # :checkhealth integration
 ├── plugin/
 │   └── tark.lua            # Command registration
@@ -125,8 +133,8 @@ tark/
 ### Versioning
 
 - **Keep versions in sync**:
-  - `Cargo.toml`: `version = "0.1.0"`
-  - `lua/tark/init.lua`: `M.version = '0.1.0'`
+  - `Cargo.toml`: `version = "x.y.z"`
+  - `lua/tark/init.lua`: `M.version = 'x.y.z'`
 - **Binary downloads are pinned** to plugin version (stable channel)
 
 ## Don'ts ❌
@@ -212,15 +220,15 @@ tark/
 
 ```bash
 # 1. Update versions
-# Cargo.toml: version = "0.2.0"
-# lua/tark/init.lua: M.version = '0.2.0'
+# Cargo.toml: version = "X.Y.Z"
+# lua/tark/init.lua: M.version = 'X.Y.Z'
 
 # 2. Commit
 git add -A
-git commit -m "chore: bump version to v0.2.0"
+git commit -m "chore: bump version to vX.Y.Z"
 
 # 3. Tag and push
-git tag v0.2.0
+git tag vX.Y.Z
 git push && git push --tags
 
 # GitHub Actions handles the rest!

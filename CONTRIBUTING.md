@@ -7,7 +7,7 @@ Thank you for your interest in contributing to tark! This guide will help you ge
 ### Prerequisites
 
 - **Rust** (1.70+): https://rustup.rs/
-- **Neovim** (0.9+): For testing the plugin
+- **Neovim** (0.8.0+): For testing the plugin (see `tests/README.md`)
 - **Docker** (optional): For testing Docker mode
 
 ### Clone and Build
@@ -206,13 +206,16 @@ src/
 └── transport/        # HTTP/CLI
 
 lua/tark/
-├── init.lua          # Plugin setup
-├── server.lua        # Server management
-├── chat.lua          # Chat UI
-├── ghost.lua         # Ghost text
+├── init.lua          # Plugin setup & user config
+├── binary.lua        # Binary find/download/version
+├── tui.lua           # TUI integration (socket RPC)
+├── ghost.lua         # Ghost text completions
 ├── lsp.lua           # LSP integration helpers
-├── lsp_server.lua    # LSP proxy HTTP server
-└── health.lua        # Health checks
+├── statusline.lua    # Statusline helpers
+└── health.lua        # :checkhealth integration
+
+plugin/
+└── tark.lua          # Neovim command registration
 ```
 
 ## Adding Features
@@ -293,7 +296,7 @@ This triggers:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
 
 ---
 

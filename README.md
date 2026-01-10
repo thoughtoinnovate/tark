@@ -75,10 +75,10 @@ export OPENAI_API_KEY="your-api-key"
 export ANTHROPIC_API_KEY="your-api-key"
 
 # Or for Google Gemini
-export GOOGLE_API_KEY="your-api-key"
+export GEMINI_API_KEY="your-api-key"
 
-# Or for GitHub Copilot (interactive auth)
-tark chat  # Then use /auth command
+# Or for GitHub Copilot (Device Flow OAuth)
+tark auth copilot
 
 # Or for local Ollama (no key needed)
 ollama serve
@@ -350,6 +350,14 @@ vim.o.statusline = "%f %m %= " .. require('tark.statusline').status_with_hl()
 | 󰚌 | Disabled | Ghost text disabled |
 |  | Error | Binary not found |
 
+## Docs
+
+- [Provider Setup (Copilot/Gemini/OpenRouter)](docs/NEW_PROVIDERS.md)
+- [Neovim Plugin Tests](tests/README.md)
+- [Contributing Guide](CONTRIBUTING.md)
+- [Architecture & Agent Guidelines](AGENTS.md)
+- [External Agent Integration (RFC)](docs/EXTERNAL_AGENTS_ARCHITECTURE.md)
+
 ## Architecture
 
 ```
@@ -381,11 +389,12 @@ vim.o.statusline = "%f %m %= " .. require('tark.statusline').status_with_hl()
 ## Security
 
 - API keys are **only** sent to official provider endpoints
-- No telemetry or data collection
-- Local Ollama option for fully offline usage
+- No telemetry; usage/cost tracking is stored locally (`.tark/usage.db`)
+- Model metadata/pricing fetched from [models.dev](https://models.dev) for capability detection (no API keys sent)
+- Local Ollama option for fully offline LLM usage
 - All binaries are built via GitHub Actions (transparent, auditable)
 - SHA256 checksums for all release artifacts
 
 ## License
 
-MIT
+Apache-2.0 - See [LICENSE](LICENSE) for details.
