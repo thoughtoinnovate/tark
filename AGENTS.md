@@ -2,6 +2,26 @@
 
 This document helps AI coding agents understand the tark codebase and make effective contributions.
 
+---
+
+## 🚨 CRITICAL: Developer Workflow Requirements
+
+**Before making ANY changes, read the [Developer Workflow](#developer-workflow-) section.**
+
+**Every code change MUST**:
+
+1. ✅ **Compile** - `cargo build --release` must pass
+2. ✅ **Be formatted** - `cargo fmt --all` must be run
+3. ✅ **Pass linting** - `cargo clippy` with zero warnings
+4. ✅ **Pass all tests** - `cargo test --all-features` must succeed
+5. ✅ **Include/update tests** - No code change without corresponding tests
+6. ✅ **Update documentation** - README.md, AGENTS.md, or doc comments for significant changes
+7. ✅ **Use clean git workflow** - Stash unrelated changes, commit logical units separately
+
+**See the [Pre-Commit Checklist](#pre-commit-checklist-) for the complete workflow.**
+
+---
+
 ## Project Overview
 
 **tark** is an AI-powered CLI agent with LSP server for Neovim. It provides:
@@ -83,7 +103,9 @@ tark/
 
 ### Testing
 
-- **Run all checks before committing**:
+- **Write tests for ALL code changes** - No exceptions
+- **Test-driven development** - Write failing test first, then fix
+- **Run all checks before committing** (see [Pre-Commit Checklist](#pre-commit-checklist-)):
   ```bash
   # Rust checks
   cargo fmt --all -- --check
@@ -94,6 +116,10 @@ tark/
   nvim --headless -u tests/minimal_init.lua \
     -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
   ```
+- **Coverage requirements**:
+  - New features → Unit tests + integration tests
+  - Bug fixes → Regression tests
+  - Refactors → Maintain existing test coverage
 
 ### Versioning
 
@@ -134,6 +160,9 @@ tark/
 - **Don't commit large binaries**
 - **Don't force push to main**
 - **Don't merge without CI passing**
+- **Don't commit multiple unrelated changes together** - Use `git stash` to separate logical units
+- **Don't commit without running all checks** - See [Pre-Commit Checklist](#pre-commit-checklist-)
+- **Don't skip tests** - Every commit must include or update tests
 
 ## Key Files to Understand
 
@@ -226,6 +255,19 @@ nvim --headless -u tests/minimal_init.lua \
   -c "PlenaryBustedFile tests/specs/init_spec.lua"
 ```
 
+## Developer Workflow 🔄
+
+**CRITICAL**: These guidelines are mandatory for all code changes. They ensure code quality, documentation accuracy, and system stability.
+
+### Core Principles
+
+1. **Documentation First** - After any significant change, update READMEs, functional docs, and architecture documentation
+2. **Test-Driven Development** - After any code change, update or add tests to cover the changes
+3. **Pre-Commit Validation** - Before committing, ensure code compiles, is properly formatted, and all tests pass
+4. **Clean Git History** - If there are multiple uncommitted changes, use `git stash` to manage them properly
+
+---
+
 ## After Every Code Change ⚡
 
 **IMPORTANT**: Follow this checklist after making any code changes.
@@ -236,82 +278,252 @@ nvim --headless -u tests/minimal_init.lua \
 cargo build --release
 ```
 
-### 2. Run All Checks
+**Why**: Compilation errors must be caught immediately, not in CI.
+
+### 2. Format and Lint Code
 
 ```bash
-# Format check
+# Format code (apply fixes)
+cargo fmt --all
+
+# Verify formatting
 cargo fmt --all -- --check
 
 # Linting (must pass with zero warnings)
 cargo clippy --all-targets --all-features -- -D warnings
+```
 
-# Rust tests
+**Why**: Consistent code style improves readability and maintainability.
+
+### 3. Write/Update Tests
+
+```bash
+# After ANY code change, ensure tests exist and pass
 cargo test --all-features
 
-# Neovim/Lua tests (if you modified lua/ files)
+# For Lua changes
 nvim --headless -u tests/minimal_init.lua \
   -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
 ```
 
-### 3. Fix Any Issues
+**Why**: Tests prevent regressions and document expected behavior.
 
-- **Format errors**: Run `cargo fmt --all`
-- **Clippy warnings**: Fix the code, don't just suppress
-- **Rust test failures**: Fix the failing tests
-- **Lua test failures**: Check `tests/specs/*.lua` for test expectations
+**Requirements**:
+- New features MUST have tests
+- Bug fixes MUST have regression tests
+- Refactors MUST maintain or improve test coverage
+- Changed APIs MUST update affected tests
 
 ### 4. Update Documentation
 
-If you changed:
-- **Config options** → Update `README.md`
-- **Commands** → Update `README.md` command tables
-- **Architecture** → Update `AGENTS.md`
-- **Public APIs** → Add/update doc comments
+**MANDATORY** for significant changes. If you changed:
 
-### 5. Update Version (if needed)
+| Change Type | Documentation to Update |
+|-------------|------------------------|
+| **Config options** | `README.md` configuration section |
+| **Commands** | `README.md` command tables |
+| **Architecture/Design** | `AGENTS.md` (this file) |
+| **Public APIs** | Add/update doc comments (`///` in Rust, `---` in Lua) |
+| **Features** | `README.md` features section |
+| **Breaking changes** | `README.md` + migration guide |
+| **Dependencies** | `README.md` requirements section |
+| **Build/Install** | `README.md` installation section |
+
+**Why**: Outdated documentation is worse than no documentation.
+
+### 5. Run All Checks Together
+
+Before committing, run the complete validation suite:
+
+```bash
+# One-liner for all checks
+cargo build --release && \
+cargo fmt --all -- --check && \
+cargo clippy --all-targets --all-features -- -D warnings && \
+cargo test --all-features
+```
+
+For Lua changes, also run:
+
+```bash
+nvim --headless -u tests/minimal_init.lua \
+  -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
+```
+
+### 6. Fix Any Issues
+
+- **Format errors**: Run `cargo fmt --all` to auto-fix
+- **Clippy warnings**: Fix the code, don't just suppress warnings
+- **Rust test failures**: Fix the failing tests or update test expectations
+- **Lua test failures**: Check `tests/specs/*.lua` for test expectations
+- **Compilation errors**: Fix immediately; don't commit broken code
+
+### 7. Update Version (if needed)
 
 For breaking changes or new features:
+
 ```bash
 # Update both files to same version
 # Cargo.toml: version = "0.X.0"
 # lua/tark/init.lua: M.version = '0.X.0'
 ```
 
-### 6. Commit with Conventional Message
+### 8. Clean Git Workflow
+
+**Before committing**:
 
 ```bash
+# If you have multiple uncommitted changes, use stash
+git stash push -m "description of changes"
+
+# Work on one logical change at a time
+git stash pop
+
+# Add and commit
 git add -A
 git commit -m "type: description"
 ```
 
-Types:
+**Commit message types**:
 - `feat:` - New feature
 - `fix:` - Bug fix
 - `docs:` - Documentation only
 - `refactor:` - Code change that neither fixes a bug nor adds a feature
-- `test:` - Adding tests
-- `chore:` - Maintenance tasks
+- `test:` - Adding/updating tests
+- `chore:` - Maintenance tasks (deps, config, etc.)
+- `perf:` - Performance improvements
+- `ci:` - CI/CD changes
 
-### 7. Push and Verify CI
+### 9. Push and Verify CI
 
 ```bash
 git push
 ```
 
-Then check GitHub Actions to ensure CI passes.
+Then check GitHub Actions to ensure CI passes. If CI fails:
+1. Fix the issue locally
+2. Run all checks again
+3. Commit the fix
+4. Push again
 
-### Quick Checklist
+---
+
+## Pre-Commit Checklist ✅
+
+**Use this before every commit**:
 
 ```
-□ Code compiles (cargo build)
-□ Format passes (cargo fmt --check)
-□ Clippy passes (cargo clippy -- -D warnings)
-□ Rust tests pass (cargo test)
-□ Lua tests pass (nvim --headless ... PlenaryBustedDirectory)
-□ Documentation updated (if needed)
-□ Versions synced (if needed)
+□ Code compiles (cargo build --release)
+□ Code formatted (cargo fmt --all)
+□ Format verified (cargo fmt --all -- --check)
+□ Clippy passes with zero warnings (cargo clippy -- -D warnings)
+□ Rust tests pass (cargo test --all-features)
+□ Lua tests pass (if applicable: nvim --headless ... PlenaryBustedDirectory)
+□ Tests added/updated for code changes
+□ Documentation updated (README.md, AGENTS.md, doc comments)
+□ Versions synced (if needed: Cargo.toml & lua/tark/init.lua)
+□ Git history clean (stashed unrelated changes)
 □ Conventional commit message
-□ CI passes after push
+□ Ready to push (CI will pass)
+```
+
+---
+
+## Workflow Examples
+
+### Example 1: Adding a New Feature
+
+```bash
+# 1. Stash unrelated work
+git stash push -m "WIP: other changes"
+
+# 2. Write code for new feature
+vim src/new_feature.rs
+
+# 3. Write tests
+vim tests/new_feature_test.rs
+
+# 4. Compile and test
+cargo build --release
+cargo test --all-features
+
+# 5. Format and lint
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+
+# 6. Update documentation
+vim README.md  # Add to features section
+vim AGENTS.md  # Update if architecture changed
+
+# 7. Verify all checks pass
+cargo build --release && \
+cargo fmt --all -- --check && \
+cargo clippy --all-targets --all-features -- -D warnings && \
+cargo test --all-features
+
+# 8. Commit
+git add -A
+git commit -m "feat: add new feature X"
+
+# 9. Push and verify CI
+git push
+```
+
+### Example 2: Fixing a Bug
+
+```bash
+# 1. Write regression test first (TDD)
+vim tests/bug_regression_test.rs
+cargo test  # Should fail
+
+# 2. Fix the bug
+vim src/buggy_module.rs
+
+# 3. Verify test passes
+cargo test --all-features
+
+# 4. Format, lint, and compile
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo build --release
+
+# 5. Update docs if needed
+vim README.md  # If user-visible behavior changed
+
+# 6. Commit
+git add -A
+git commit -m "fix: resolve issue with X causing Y"
+
+# 7. Push
+git push
+```
+
+### Example 3: Multiple Uncommitted Changes
+
+```bash
+# Current state: Multiple unrelated changes in working directory
+
+# 1. Review changes
+git status
+git diff
+
+# 2. Stash everything
+git stash push -m "all uncommitted work"
+
+# 3. Pop and commit one logical unit at a time
+git stash pop
+git add specific_files_for_feature_A
+git stash push -m "remaining work"
+git commit -m "feat: add feature A"
+
+# 4. Repeat for next change
+git stash pop
+git add specific_files_for_bugfix_B
+git stash push -m "remaining work"
+git commit -m "fix: resolve bug B"
+
+# 5. Continue until all work is committed
+git stash list  # Should be empty or only intentional WIP
 ```
 
 ## Getting Help
