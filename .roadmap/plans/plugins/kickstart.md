@@ -123,7 +123,7 @@ Verify:
 - [ ] Documentation updated for significant changes
 - [ ] Version synced if needed (Cargo.toml + lua/tark/init.lua)
 
-### 4. Final Commit
+### 4. Final Commit and Push
 
 After all reviews and fixes:
 
@@ -142,8 +142,19 @@ git commit -m "chore: post-implementation review fixes
 - Enrich documentation
 - Ensure AGENTS.md compliance"
 
-# Push
-git push origin main
+# Push to plugins branch
+git push origin plugins
+```
+
+### 5. Ready for PR
+
+After pushing to `plugins` branch, the implementation is ready for:
+- Code review
+- PR to merge into `main`
+
+```bash
+# Verify all commits are on plugins branch
+git log --oneline main..plugins
 ```
 
 ---
@@ -198,8 +209,28 @@ Execute these plans in strict sequence:
 Before starting, verify:
 - [ ] Can build the project: `cargo build --release`
 - [ ] Tests pass: `cargo test --all-features`
-- [ ] On main branch: `git branch`
 - [ ] Working tree clean: `git status`
+
+---
+
+## Branch Setup (REQUIRED)
+
+**All work MUST be done in a new branch named `plugins`.**
+
+```bash
+# Ensure you're on main and up to date
+git checkout main
+git pull origin main
+
+# Create and switch to plugins branch
+git checkout -b plugins
+
+# Verify you're on the plugins branch
+git branch
+# Should show: * plugins
+```
+
+All commits during execution go to the `plugins` branch. After all plans are complete and reviewed, the branch can be merged to main via PR.
 
 ---
 
