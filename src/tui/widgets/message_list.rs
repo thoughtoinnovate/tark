@@ -1030,36 +1030,37 @@ impl MessageList {
     }
 
     /// Get selected text content (returns empty string if no selection)
-    pub fn get_selected_text(&self, _width: u16) -> String {
+    ///
+    /// This builds the rendered text as it appears on screen and extracts
+    /// the selected portion based on line/column positions.
+    pub fn get_selected_text(&self, width: u16) -> String {
         if !self.selection.active {
             return String::new();
         }
 
-        // Build all lines and extract selected portion
-        let mut all_text = String::new();
-        for message in &self.messages {
-            if !all_text.is_empty() {
-                all_text.push('\n');
-            }
-            all_text.push_str(&message.content);
-        }
+        // Build rendered lines as plain text strings (matching what's displayed)
+        let rendered_lines = self.build_rendered_text_lines(width);
 
-        // This is a simplified implementation
-        // In practice, we'd need to map selection positions to actual content
-        let lines: Vec<&str> = all_text.lines().collect();
         let start = self.selection.start_pos();
         let end = self.selection.end_pos();
 
+        // Handle case where selection is beyond available lines
+        if start.line >= rendered_lines.len() {
+            return String::new();
+        }
+
         let mut result = String::new();
-        for (i, line) in lines.iter().enumerate() {
-            if i < start.line || i > end.line {
+        let end_line = end.line.min(rendered_lines.len().saturating_sub(1));
+
+        for (i, line) in rendered_lines.iter().enumerate() {
+            if i < start.line || i > end_line {
                 continue;
             }
 
             let line_chars: Vec<char> = line.chars().collect();
             let start_col = if i == start.line { start.col } else { 0 };
-            let end_col = if i == end.line {
-                end.col.min(line_chars.len())
+            let end_col = if i == end_line {
+                (end.col + 1).min(line_chars.len()) // +1 because selection end is inclusive
             } else {
                 line_chars.len()
             };
@@ -1072,10 +1073,58 @@ impl MessageList {
                     result.push('\n');
                 }
                 result.push_str(&selected);
+            } else if i > start.line && i < end_line {
+                // Include empty lines within selection
+                result.push('\n');
             }
         }
 
         result
+    }
+
+    /// Build plain text representation of rendered lines
+    ///
+    /// This creates a vector of strings representing what's actually displayed
+    /// on screen, so selection positions can be mapped correctly.
+    fn build_rendered_text_lines(&self, width: u16) -> Vec<String> {
+        let mut all_lines = Vec::new();
+
+        // Get username for headers (use default if not available)
+        let username = "You";
+
+        for message in &self.messages {
+            // Add header line
+            let display_name = match message.role {
+                Role::User => username.to_string(),
+                Role::Assistant => "Tark".to_string(),
+                _ => message.role.name().to_string(),
+            };
+            let timestamp = message.timestamp.format("%H:%M").to_string();
+            let header = format!("{} {} [{}]", message.role.icon(), display_name, timestamp);
+            all_lines.push(header);
+
+            // Add tool calls (if any)
+            for tool_call in &message.tool_calls {
+                all_lines.push(format!("  [tool: {}]", tool_call));
+            }
+
+            // Add content lines (with wrapping to match rendered width)
+            let content_width = width.saturating_sub(4) as usize; // Account for borders/padding
+            for line in message.content.lines() {
+                if line.is_empty() {
+                    all_lines.push(String::new());
+                } else {
+                    // Wrap long lines
+                    let wrapped = wrap_text_simple(line, content_width);
+                    all_lines.extend(wrapped);
+                }
+            }
+
+            // Add empty spacing line
+            all_lines.push(String::new());
+        }
+
+        all_lines
     }
 }
 
@@ -2634,26 +2683,27 @@ fn create_tool_block_from_info(tool_info: &ToolCallInfo, block_id: &str) -> Coll
     // Build content with args and result
     let mut content: Vec<String> = Vec::new();
 
-    // Format args as key=value pairs
+    // Format args as key=value pairs (no truncation - will be wrapped when rendered)
     if let Some(obj) = tool_info.args.as_object() {
         for (key, value) in obj {
             let value_str = match value {
                 serde_json::Value::String(s) => s.clone(),
                 _ => value.to_string(),
             };
-            content.push(format!("  {}: {}", key, truncate_str(&value_str, 60)));
+            // Don't truncate - let the renderer wrap long lines
+            content.push(format!("  {}: {}", key, value_str));
         }
         if !obj.is_empty() {
             content.push(String::new()); // Empty line separator
         }
     }
 
-    // Add result preview lines
+    // Add result preview lines (no truncation - will be wrapped when rendered)
     for line in tool_info.result_preview.lines() {
         content.push(format!("  {}", line));
     }
 
-    // Use human-readable action as the header
+    // Use human-readable action as the header (truncated for display)
     let header = format_tool_action(&tool_info.tool, &tool_info.args);
     CollapsibleBlock::tool(block_id.to_string(), header, content)
 }
@@ -2665,19 +2715,43 @@ fn create_tool_block_from_info(tool_info: &ToolCallInfo, block_id: &str) -> Coll
 /// Format (error):   `▶ ⚠️ tool_action FAILED  →  error message...`
 /// When focused (for scrolling), adds a visual indicator `»`
 fn render_tool_inline(tool_info: &ToolCallInfo, width: u16, is_focused: bool) -> Line<'static> {
-    let tool_display = format_tool_action(&tool_info.tool, &tool_info.args);
+    let tool_display_raw = format_tool_action(&tool_info.tool, &tool_info.args);
     let is_error = tool_info.is_error();
     let is_running = tool_info.result_preview == "⏳ Running...";
 
+    // Fixed prefix widths:
+    // focus_indicator (1) + "▶ 🔧 " (5) = 6 chars before tool_display
+    // For errors: focus_indicator (1) + "▶ ⚠️ " (5) + " FAILED" (7) + "  →  " (5) = 18 chars fixed
+    let prefix_width = 6;
+    let available_width = (width as usize).saturating_sub(prefix_width);
+
     // For errors, use warning icon and red styling
     if is_error {
+        // Error format: "▶ ⚠️ " (5) + tool_display + " FAILED" (7) + "  →  " (5) + error_preview
+        let error_fixed_chars = 5 + 7 + 5 + 1; // +1 for focus indicator
+        let max_tool_width = (width as usize)
+            .saturating_sub(error_fixed_chars + 10)
+            .min(50);
+        let tool_display = truncate_str(&tool_display_raw, max_tool_width);
+        let remaining =
+            (width as usize).saturating_sub(error_fixed_chars + tool_display.chars().count());
         let error_preview = tool_info
             .error
             .as_ref()
-            .map(|e| truncate_str(e, 50))
-            .unwrap_or_else(|| truncate_str(&tool_info.result_preview, 50));
+            .map(|e| truncate_str(e, remaining.max(10)))
+            .unwrap_or_else(|| truncate_str(&tool_info.result_preview, remaining.max(10)));
+
+        let focus_indicator = if is_focused { "»" } else { " " };
+        let focus_style = if is_focused {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
 
         return Line::from(vec![
+            Span::styled(focus_indicator, focus_style),
             Span::styled("▶ ⚠️ ", Style::default().fg(Color::Red)),
             Span::styled(tool_display, Style::default().fg(Color::Red)),
             Span::styled(
@@ -2697,14 +2771,26 @@ fn render_tool_inline(tool_info: &ToolCallInfo, width: u16, is_focused: bool) ->
 
     let summary = extract_summary(&tool_info.result_preview, &tool_info.tool);
 
-    // Calculate available width for preview
-    // "▶ ⚙️ " (5) + tool_display + "  →  " (5) + status + summary + "  │  " (5) + preview
-    let fixed_chars = 5 + 5 + status_icon.chars().count() + 1 + 5;
-    let tool_display_len = tool_display.chars().count();
+    // Calculate max width for tool_display to fit within line
+    // Layout: focus(1) + "▶ 🔧 "(5) + tool_display + "  →  "(5) + status(2) + summary
+    // Reserve space for status and arrow, truncate tool_display if needed
+    let fixed_overhead = 1 + 5 + 5 + 2; // focus + icon + arrow + status_icon + space
     let summary_len = summary.chars().count();
-    let used = fixed_chars + tool_display_len + summary_len;
+    let max_tool_width = (width as usize)
+        .saturating_sub(fixed_overhead + summary_len)
+        .min(available_width.saturating_sub(12)); // Leave room for arrow and status
+
+    let tool_display = if tool_display_raw.chars().count() > max_tool_width && max_tool_width > 3 {
+        truncate_str(&tool_display_raw, max_tool_width)
+    } else {
+        tool_display_raw
+    };
+
+    // Recalculate with actual tool_display length
+    let tool_display_len = tool_display.chars().count();
+    let used = fixed_overhead + tool_display_len + summary_len;
     let preview_width = if (used + 10) < width as usize {
-        (width as usize).saturating_sub(used).min(60)
+        (width as usize).saturating_sub(used + 5).min(60) // +5 for "  │  "
     } else {
         0
     };
@@ -3046,6 +3132,123 @@ mod tests {
 
         list.select_last();
         assert_eq!(list.selected(), None);
+    }
+
+    #[test]
+    fn test_get_selected_text_basic() {
+        let mut list = MessageList::new();
+        list.push(ChatMessage::user("Hello world"));
+        list.push(ChatMessage::assistant("Hi there!"));
+
+        // No selection initially
+        assert_eq!(list.get_selected_text(80), "");
+
+        // Start selection at position (0, 0) - header line
+        list.start_selection();
+        list.selection.anchor = TextPosition::new(0, 0);
+        list.selection.cursor = TextPosition::new(0, 5);
+
+        // Should have some text selected
+        let selected = list.get_selected_text(80);
+        assert!(!selected.is_empty(), "Should have selected text");
+    }
+
+    #[test]
+    fn test_get_selected_text_multiline() {
+        let mut list = MessageList::new();
+        list.push(ChatMessage::user("Line one\nLine two\nLine three"));
+
+        // Select across multiple lines
+        list.start_selection();
+        list.selection.anchor = TextPosition::new(1, 0); // Start of content
+        list.selection.cursor = TextPosition::new(2, 5);
+
+        let selected = list.get_selected_text(80);
+        // Should contain text from selected lines
+        assert!(!selected.is_empty(), "Should have multiline selected text");
+    }
+
+    #[test]
+    fn test_build_rendered_text_lines() {
+        let mut list = MessageList::new();
+        list.push(ChatMessage::user("Test content"));
+
+        let lines = list.build_rendered_text_lines(80);
+
+        // Should have at least header + content + spacing
+        assert!(
+            lines.len() >= 3,
+            "Should have header, content, and spacing lines"
+        );
+
+        // Header should contain role icon and name
+        assert!(lines[0].contains("👤"), "Header should contain user icon");
+        assert!(lines[0].contains("You"), "Header should contain username");
+    }
+
+    #[test]
+    fn test_render_tool_inline_truncates_long_commands() {
+        // Test that very long commands are truncated to fit within width
+        let long_command = format!(
+            "git ls-remote --exit-code --heads https://github.com/{}",
+            "x".repeat(200)
+        );
+        let tool_info = ToolCallInfo::new(
+            "safe_shell",
+            serde_json::json!({"command": long_command}),
+            "success",
+        );
+
+        // Render at a narrow width (80 chars)
+        let line = render_tool_inline(&tool_info, 80, false);
+
+        // The total character count should be less than 80
+        let total_chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        assert!(
+            total_chars <= 85,
+            "Line should fit within width (got {} chars)",
+            total_chars
+        );
+    }
+
+    #[test]
+    fn test_render_tool_inline_shows_full_short_commands() {
+        // Short commands should be displayed fully
+        let tool_info = ToolCallInfo::new(
+            "safe_shell",
+            serde_json::json!({"command": "ls"}),
+            "file1\nfile2",
+        );
+
+        let line = render_tool_inline(&tool_info, 120, false);
+
+        // The line should contain "$ ls"
+        let full_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            full_text.contains("$ ls"),
+            "Short command should be shown fully"
+        );
+    }
+
+    #[test]
+    fn test_render_tool_inline_error_truncates() {
+        // Test error case also truncates properly
+        let long_error = "x".repeat(200);
+        let tool_info = ToolCallInfo::with_error(
+            "safe_shell",
+            serde_json::json!({"command": "git ls-remote --exit-code --heads https://github.com/test"}),
+            long_error.clone(),
+        );
+
+        let line = render_tool_inline(&tool_info, 80, false);
+
+        // The total character count should be reasonable
+        let total_chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        assert!(
+            total_chars <= 90,
+            "Error line should fit within width (got {} chars)",
+            total_chars
+        );
     }
 }
 
