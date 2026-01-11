@@ -8,6 +8,7 @@ mod config;
 mod diagnostics;
 mod llm;
 mod lsp;
+mod plugins;
 mod services;
 mod storage;
 mod tools;
@@ -115,6 +116,12 @@ enum Commands {
         #[arg(long)]
         cleanup: Option<u32>,
     },
+
+    /// Plugin management commands
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
 }
 
 /// Auth subcommands
@@ -128,6 +135,47 @@ enum AuthCommands {
 
     /// Show authentication status for all providers
     Status,
+}
+
+/// Plugin subcommands
+#[derive(Subcommand)]
+enum PluginCommands {
+    /// List installed plugins
+    List,
+
+    /// Show plugin details
+    Info {
+        /// Plugin ID
+        plugin_id: String,
+    },
+
+    /// Install a plugin from a git repository
+    Add {
+        /// Git repository URL or local path
+        url: String,
+
+        /// Branch or tag (default: main)
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+
+    /// Uninstall a plugin
+    Remove {
+        /// Plugin ID
+        plugin_id: String,
+    },
+
+    /// Enable a disabled plugin
+    Enable {
+        /// Plugin ID
+        plugin_id: String,
+    },
+
+    /// Disable a plugin
+    Disable {
+        /// Plugin ID
+        plugin_id: String,
+    },
 }
 
 #[tokio::main]
@@ -229,6 +277,26 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
             transport::cli::run_usage(&working_dir, &format, cleanup).await?;
         }
+        Commands::Plugin { command } => match command {
+            PluginCommands::List => {
+                transport::plugin_cli::run_plugin_list().await?;
+            }
+            PluginCommands::Info { plugin_id } => {
+                transport::plugin_cli::run_plugin_info(&plugin_id).await?;
+            }
+            PluginCommands::Add { url, branch } => {
+                transport::plugin_cli::run_plugin_add(&url, &branch).await?;
+            }
+            PluginCommands::Remove { plugin_id } => {
+                transport::plugin_cli::run_plugin_remove(&plugin_id).await?;
+            }
+            PluginCommands::Enable { plugin_id } => {
+                transport::plugin_cli::run_plugin_enable(&plugin_id).await?;
+            }
+            PluginCommands::Disable { plugin_id } => {
+                transport::plugin_cli::run_plugin_disable(&plugin_id).await?;
+            }
+        },
     }
 
     Ok(())

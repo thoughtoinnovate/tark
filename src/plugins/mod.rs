@@ -20,12 +20,13 @@
 //! only grants capabilities that are declared and approved.
 
 #![allow(dead_code)]
+#![allow(unused_imports)]
 
 mod host;
 mod manifest;
 mod registry;
 
-pub use host::{PluginHost, PluginInstance};
+pub use host::PluginHost;
 pub use manifest::{PluginCapabilities, PluginManifest, PluginType};
 pub use registry::{InstalledPlugin, PluginRegistry};
 
