@@ -1805,9 +1805,9 @@ git commit -m "test(auth): add integration tests for Gemini OAuth
 
 ---
 
-## Phase 6: Update main.rs CLI Entry Point
+## Phase 6: Update main.rs CLI Entry Point ✅ DONE
 
-### Task 6.1: Update `src/main.rs`
+### Task 6.1: Update `src/main.rs` ✅ DONE
 
 **File**: `src/main.rs`
 
@@ -1830,7 +1830,7 @@ Then add the appropriate CLI subcommands and handlers.
 
 ---
 
-### Task 6.2: Commit Phase 6
+### Task 6.2: Commit Phase 6 ✅ DONE
 
 **Commands**:
 ```bash
@@ -1847,9 +1847,9 @@ git commit -m "feat(cli): add auth logout and auth status subcommands
 
 ---
 
-## Phase 7: Final Validation and Push
+## Phase 7: Final Validation and Push ✅ DONE
 
-### Task 7.1: Full Validation
+### Task 7.1: Full Validation ✅ DONE
 
 **Commands**:
 ```bash

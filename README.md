@@ -386,6 +386,43 @@ vim.o.statusline = "%f %m %= " .. require('tark.statusline').status_with_hl()
        └───────────────────────┘
 ```
 
+## Plugins
+
+Tark supports a WASM-based plugin system for extending functionality.
+
+### Plugin Management
+
+```bash
+# List installed plugins
+tark plugin list
+
+# Install a plugin from git
+tark plugin add https://github.com/user/tark-plugin
+
+# Show plugin details
+tark plugin info <plugin-id>
+
+# Enable/disable plugins
+tark plugin enable <plugin-id>
+tark plugin disable <plugin-id>
+
+# Uninstall a plugin
+tark plugin remove <plugin-id>
+```
+
+### Plugin Types
+
+| Type | Purpose |
+|------|---------|
+| `auth` | Add authentication methods (OAuth, API keys) |
+| `tool` | Add agent capabilities |
+| `provider` | Add LLM providers |
+| `hook` | Lifecycle event handlers |
+
+### Building Plugins
+
+See [Plugin SDK Documentation](docs/PLUGIN_SDK.md) for details on building plugins.
+
 ## Security
 
 - API keys are **only** sent to official provider endpoints
@@ -394,6 +431,7 @@ vim.o.statusline = "%f %m %= " .. require('tark.statusline').status_with_hl()
 - Local Ollama option for fully offline LLM usage
 - All binaries are built via GitHub Actions (transparent, auditable)
 - SHA256 checksums for all release artifacts
+- Plugins run in WASM sandbox with capability-based security
 
 ## License
 
