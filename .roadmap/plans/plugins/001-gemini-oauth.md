@@ -45,9 +45,17 @@ Required information to capture:
 
 ---
 
-## Phase 1: Create Auth Module Structure
+## Phase 1: Create Auth Module Structure ✅ DONE
 
-### Task 1.1: Create `src/llm/auth/mod.rs`
+### Task 1.1: Create `src/llm/auth/mod.rs` ✅ DONE
+
+### Task 1.2: Create `src/llm/auth/token_store.rs` ✅ DONE
+
+### Task 1.3: Create `src/llm/auth/gemini_oauth.rs` ✅ DONE
+
+### Task 1.4: Export auth module from `src/llm/mod.rs` ✅ DONE
+
+### Task 1.5: Commit Phase 1 ✅ DONE
 
 **File**: `src/llm/auth/mod.rs`
 
@@ -701,9 +709,11 @@ git commit -m "feat(auth): add DeviceFlowAuth trait and GeminiOAuth implementati
 
 ---
 
-## Phase 2: Generalize AuthDialog Widget
+## Phase 2: Generalize AuthDialog Widget ✅ DONE
 
-### Task 2.1: Refactor `src/tui/widgets/auth_dialog.rs`
+### Task 2.1: Refactor `src/tui/widgets/auth_dialog.rs` ✅ DONE
+
+### Task 2.2: Commit Phase 2 ✅ DONE
 
 **File**: `src/tui/widgets/auth_dialog.rs`
 
@@ -1181,9 +1191,15 @@ git commit -m "feat(tui): generalize AuthDialog for any OAuth provider
 
 ---
 
-## Phase 3: Add CLI Commands
+## Phase 3: Add CLI Commands ✅ DONE
 
-### Task 3.1: Update `src/transport/cli.rs`
+### Task 3.1: Update `src/transport/cli.rs` ✅ DONE
+
+### Task 3.2: Add logout support to `run_auth` ✅ DONE
+
+### Task 3.3: Update CLI help text ✅ DONE
+
+### Task 3.4: Commit Phase 3 ✅ DONE
 
 **File**: `src/transport/cli.rs`
 
@@ -1506,9 +1522,11 @@ git commit -m "feat(cli): add Gemini OAuth support to tark auth command
 
 ---
 
-## Phase 4: Integrate with GeminiProvider
+## Phase 4: Integrate with GeminiProvider ✅ DONE
 
-### Task 4.1: Update `src/llm/gemini.rs`
+### Task 4.1: Update `src/llm/gemini.rs` ✅ DONE
+
+### Task 4.2: Commit Phase 4 ✅ DONE
 
 **File**: `src/llm/gemini.rs`
 
@@ -1636,9 +1654,11 @@ git commit -m "feat(gemini): integrate OAuth credentials into GeminiProvider
 
 ---
 
-## Phase 5: Add Tests
+## Phase 5: Add Tests ✅ DONE
 
-### Task 5.1: Create test file `tests/gemini_auth.rs`
+### Task 5.1: Create test file `tests/gemini_auth.rs` ✅ DONE
+
+### Task 5.2: Commit Phase 5 ✅ DONE
 
 **File**: `tests/gemini_auth.rs`
 
