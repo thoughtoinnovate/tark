@@ -6,6 +6,7 @@
 //! - Chat agent with filesystem and shell tools
 //! - Support for multiple LLM providers (Claude, OpenAI)
 //! - Terminal UI (TUI) for standalone chat
+//! - Plugin system for extensibility
 
 pub mod agent;
 pub mod completion;
@@ -13,6 +14,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod llm;
 pub mod lsp;
+pub mod plugins;
 pub mod services;
 pub mod storage;
 pub mod tools;
