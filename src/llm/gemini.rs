@@ -25,16 +25,66 @@ pub struct GeminiProvider {
 }
 
 impl GeminiProvider {
+    /// Create a new GeminiProvider
+    ///
+    /// Credentials are resolved in this priority:
+    /// 1. GEMINI_API_KEY or GOOGLE_API_KEY environment variable
+    /// 2. OAuth token from `~/.local/share/tark/tokens/gemini.json`
+    /// 3. Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS)
+    ///
+    /// If no credentials are found, returns an error with setup instructions.
     pub fn new() -> Result<Self> {
-        let api_key =
-            env::var("GEMINI_API_KEY").context("GEMINI_API_KEY environment variable not set")?;
+        // Try API key first (highest priority)
+        if let Ok(api_key) = env::var("GEMINI_API_KEY").or_else(|_| env::var("GOOGLE_API_KEY")) {
+            return Ok(Self {
+                client: reqwest::Client::new(),
+                api_key,
+                model: "gemini-2.0-flash-exp".to_string(),
+                max_tokens: 8192,
+            });
+        }
 
-        Ok(Self {
-            client: reqwest::Client::new(),
-            api_key,
-            model: "gemini-2.0-flash-exp".to_string(),
-            max_tokens: 8192,
-        })
+        // Try OAuth token
+        let token_path = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("tark")
+            .join("tokens")
+            .join("gemini.json");
+
+        if token_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&token_path) {
+                if let Ok(stored) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(access_token) = stored["access_token"].as_str() {
+                        // Check if expired
+                        let expires_at = stored["expires_at"].as_u64().unwrap_or(0);
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        if expires_at > now + 300 {
+                            // Token valid for at least 5 more minutes
+                            return Ok(Self {
+                                client: reqwest::Client::new(),
+                                api_key: access_token.to_string(),
+                                model: "gemini-2.0-flash-exp".to_string(),
+                                max_tokens: 8192,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // No valid credentials found
+        anyhow::bail!(
+            "Gemini authentication required.\n\n\
+            Option 1 - OAuth (recommended):\n  \
+            tark auth gemini\n\n\
+            Option 2 - API Key:\n  \
+            export GEMINI_API_KEY=\"your-api-key\"\n  \
+            Get key: https://aistudio.google.com/apikey"
+        )
     }
 
     pub fn with_model(mut self, model: &str) -> Self {
