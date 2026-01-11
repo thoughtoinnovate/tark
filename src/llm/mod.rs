@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+pub mod auth;
 mod claude;
 mod copilot;
 mod gemini;
