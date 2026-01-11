@@ -39,9 +39,11 @@ This directory contains implementation plans that can be followed step-by-step.
 
 ## Other Plans
 
-| ID | Name | Status | Description |
-|----|------|--------|-------------|
-| - | [Steering Files](plans/001-steering-files-feature.md) | Ready | Steering files feature |
+| Name | Status | Description |
+|------|--------|-------------|
+| [Steering Files](plans/steering-files-feature.md) | Ready | Steering files feature |
+| [Icon Themes](plans/icon-themes.md) | Ready | Icon theme support |
+| [Diff Popup](plans/proposals-diff-popup.md) | Ready | Diff popup proposals |
 
 ## Plan Structure
 
