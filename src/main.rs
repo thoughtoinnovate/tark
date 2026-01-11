@@ -93,7 +93,11 @@ enum Commands {
 
     /// Authenticate with LLM providers
     Auth {
+        #[command(subcommand)]
+        command: Option<AuthCommands>,
+
         /// Provider to authenticate (copilot, openai, claude, gemini, openrouter, ollama)
+        #[arg(conflicts_with = "command")]
         provider: Option<String>,
     },
 
@@ -111,6 +115,19 @@ enum Commands {
         #[arg(long)]
         cleanup: Option<u32>,
     },
+}
+
+/// Auth subcommands
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Logout from a provider (clear stored tokens)
+    Logout {
+        /// Provider to logout from (copilot, gemini)
+        provider: String,
+    },
+
+    /// Show authentication status for all providers
+    Status,
 }
 
 #[tokio::main]
@@ -191,9 +208,17 @@ async fn main() -> Result<()> {
         Commands::Complete { file, line, col } => {
             transport::cli::run_complete(&file, line, col).await?;
         }
-        Commands::Auth { provider } => {
-            transport::cli::run_auth(provider.as_deref()).await?;
-        }
+        Commands::Auth { command, provider } => match command {
+            Some(AuthCommands::Logout { provider }) => {
+                transport::cli::run_auth_logout(&provider).await?;
+            }
+            Some(AuthCommands::Status) => {
+                transport::cli::run_auth_status().await?;
+            }
+            None => {
+                transport::cli::run_auth(provider.as_deref()).await?;
+            }
+        },
         Commands::Usage {
             format,
             cwd,
