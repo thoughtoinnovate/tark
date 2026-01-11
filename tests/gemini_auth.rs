@@ -76,16 +76,23 @@ async fn test_gemini_oauth_status_no_credentials() {
 
 #[tokio::test]
 async fn test_gemini_oauth_status_with_api_key() {
+    // Use a unique env var name to avoid conflicts with other tests
+    // Save and restore original value
+    let original = std::env::var("GEMINI_API_KEY").ok();
+
     // Set API key
-    std::env::set_var("GEMINI_API_KEY", "test_api_key");
+    std::env::set_var("GEMINI_API_KEY", "test_api_key_for_status_test");
 
     let auth = GeminiOAuth::new().unwrap();
     let status = auth.status().await;
 
-    assert_eq!(status, AuthStatus::ApiKey);
+    // Restore original value
+    match original {
+        Some(val) => std::env::set_var("GEMINI_API_KEY", val),
+        None => std::env::remove_var("GEMINI_API_KEY"),
+    }
 
-    // Clean up
-    std::env::remove_var("GEMINI_API_KEY");
+    assert_eq!(status, AuthStatus::ApiKey);
 }
 
 #[test]
