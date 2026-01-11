@@ -22,6 +22,7 @@ mod file_ops;
 mod file_search;
 mod grep;
 mod lsp_tools;
+mod mode_switch;
 pub mod questionnaire;
 mod shell;
 
@@ -35,6 +36,7 @@ pub use lsp_tools::{
     set_lsp_proxy_port, CallHierarchyTool, CodeAnalyzer, FindAllReferencesTool, GetSignatureTool,
     GoToDefinitionTool, ListSymbolsTool,
 };
+pub use mode_switch::ModeSwitchTool;
 pub use plan::{
     GetPlanStatusTool, MarkTaskDoneTool, PreviewPlanTool, SavePlanTool, UpdatePlanTool,
 };
@@ -257,7 +259,9 @@ impl ToolRegistry {
         // Ask user tool (available in all modes when interaction channel is provided)
         if let Some(ref tx) = interaction_tx {
             registry.register(Arc::new(AskUserTool::new(Some(tx.clone()))));
-            tracing::debug!("Registered: ask_user (interaction channel provided)");
+            // Mode switch tool - allows agent to request mode changes with user confirmation
+            registry.register(Arc::new(ModeSwitchTool::new(Some(tx.clone()))));
+            tracing::debug!("Registered: ask_user, switch_mode (interaction channel provided)");
         }
 
         // ===== Mode-specific tools =====

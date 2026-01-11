@@ -244,6 +244,7 @@ Available tools:
 - propose_change: 📋 Show a DIFF preview without applying (great for suggesting changes!)
 - shell: 🔒 Safe read-only commands (git status, ls, cat, grep, version checks)
 - ask_user: 💬 Ask user structured questions via popup (single-select, multi-select, free-text)
+- switch_mode: 🔄 Request mode switch (ask/plan/build) with user confirmation popup
 - save_plan: 📋 Create/update structured execution plans with tasks, subtasks, files
 - preview_plan: 👁️ Preview a plan before saving (for user review)
 - update_plan: ✏️ Modify an existing plan (add tasks, update sections)
@@ -369,6 +370,7 @@ Available tools:
 - grep: Fast regex search in file contents
 - shell: Limited safe commands only (git status, ls, cat, etc.)
 - ask_user: 💬 Ask user structured questions via popup
+- switch_mode: 🔄 Request mode switch (ask/plan/build) with user confirmation popup
 
 ⚠️ NOTE: You cannot write, patch, or delete files in Ask mode.
 Suggest the user switch to /build mode if changes are needed.
@@ -429,6 +431,7 @@ Available tools:
 - delete_file: Delete files
 - shell: Execute shell commands
 - ask_user: 💬 Ask user structured questions via popup (single-select, multi-select, free-text)
+- switch_mode: 🔄 Request mode switch (ask/plan/build) with user confirmation popup
 - mark_task_done: ✅ Mark a task as completed when following an execution plan
 - get_plan_status: 📊 Check current plan progress
 

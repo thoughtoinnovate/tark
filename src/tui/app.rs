@@ -235,6 +235,8 @@ pub struct AppState {
     pub current_task: Option<String>,
     /// Help popup state
     pub help_popup: super::widgets::HelpPopupState,
+    /// Pending mode switch (from switch_mode tool, applied after agent completes)
+    pub pending_mode_switch: Option<AgentMode>,
 }
 
 /// State for tab completion
@@ -343,6 +345,7 @@ impl Default for AppState {
             plan_progress: None,
             current_task: None,
             help_popup: super::widgets::HelpPopupState::default(),
+            pending_mode_switch: None,
         }
     }
 }
@@ -5421,6 +5424,40 @@ impl TuiApp {
                         self.state.current_tool = None;
                         self.state.status_message = Some(format!("✓ {} completed", tool));
 
+                        // Check if this is a mode switch confirmation
+                        if tool == "switch_mode"
+                            && result_preview.contains("MODE_SWITCH_CONFIRMED:")
+                        {
+                            // Parse the mode switch result
+                            if let Some(json_start) = result_preview.find("MODE_SWITCH_CONFIRMED:")
+                            {
+                                let json_str =
+                                    &result_preview[json_start + "MODE_SWITCH_CONFIRMED:".len()..];
+                                if let Some(json_end) = json_str.find('\n') {
+                                    let json_part = &json_str[..json_end];
+                                    if let Ok(parsed) =
+                                        serde_json::from_str::<serde_json::Value>(json_part)
+                                    {
+                                        if let Some(target_mode) =
+                                            parsed.get("target_mode").and_then(|v| v.as_str())
+                                        {
+                                            // Apply the mode switch
+                                            let new_mode = match target_mode {
+                                                "ask" => AgentMode::Ask,
+                                                "plan" => AgentMode::Plan,
+                                                "build" => AgentMode::Build,
+                                                _ => self.state.mode,
+                                            };
+                                            if new_mode != self.state.mode {
+                                                // Store mode switch to apply after agent completes
+                                                self.state.pending_mode_switch = Some(new_mode);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Update the tool call info with the result (Requirement 4.3)
                         // Segments use ToolRef, so updating tool_call_info is sufficient
                         if let Some(last_msg) = self.state.message_list.messages_mut().last_mut() {
@@ -5430,6 +5467,14 @@ impl TuiApp {
                                 for t in last_msg.tool_call_info.iter_mut().rev() {
                                     if t.tool == tool && t.result_preview == "⏳ Running..." {
                                         let mut final_preview = result_preview.clone();
+                                        // Strip MODE_SWITCH_CONFIRMED prefix for display
+                                        if final_preview.contains("MODE_SWITCH_CONFIRMED:") {
+                                            if let Some(display_start) = final_preview.find("\n\n")
+                                            {
+                                                final_preview =
+                                                    final_preview[display_start + 2..].to_string();
+                                            }
+                                        }
                                         if tool == "shell" || tool == "execute" {
                                             if let Some(cmd) =
                                                 t.args.get("command").and_then(|v| v.as_str())
@@ -5636,6 +5681,11 @@ impl TuiApp {
                         // Auto-scroll to bottom to show the complete response
                         let width = self.get_message_area_width();
                         self.state.message_list.scroll_to_bottom(width);
+
+                        // Apply pending mode switch (from switch_mode tool)
+                        if let Some(new_mode) = self.state.pending_mode_switch.take() {
+                            self.apply_mode_change(new_mode);
+                        }
 
                         // Process next queued message if any
                         self.process_next_queued_message();
