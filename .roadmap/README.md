@@ -4,9 +4,10 @@ This directory contains implementation plans that can be followed step-by-step.
 
 ## Active Plans
 
-| ID | Name | Status | Description |
-|----|------|--------|-------------|
-| 001 | [Gemini OAuth](plans/001-gemini-oauth.md) | Ready | Google OAuth device flow for Gemini authentication |
+| ID | Name | Status | Dependencies | Description |
+|----|------|--------|--------------|-------------|
+| 001 | [Gemini OAuth](plans/001-gemini-oauth.md) | Ready | None | Google OAuth device flow for Gemini authentication |
+| 002 | [Plugin Runtime](plans/002-plugin-runtime.md) | Ready | 001 | WASM-based plug-and-play plugin system |
 
 ## Plan Structure
 
