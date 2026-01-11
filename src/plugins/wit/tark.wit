@@ -1,0 +1,228 @@
+// tark.wit - WebAssembly Interface Types for tark plugins
+//
+// This file defines the contract between tark (host) and plugins (guest).
+// Plugins import interfaces they need and export interfaces they implement.
+
+package tark:plugin;
+
+// ============================================================================
+// Host-provided interfaces (plugins import these)
+// ============================================================================
+
+/// Persistent storage for plugin data
+interface storage {
+    /// Get a value by key
+    /// Returns None if key doesn't exist
+    get: func(key: string) -> option<string>;
+    
+    /// Set a value for a key
+    /// Overwrites existing value
+    set: func(key: string, value: string) -> result<_, string>;
+    
+    /// Delete a key
+    delete: func(key: string) -> result<_, string>;
+    
+    /// List all keys
+    list-keys: func() -> list<string>;
+}
+
+/// HTTP client for making requests
+interface http {
+    /// HTTP response
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: string,
+    }
+    
+    /// HTTP error
+    record http-error {
+        message: string,
+        status: option<u16>,
+    }
+    
+    /// Make a GET request
+    get: func(url: string, headers: list<tuple<string, string>>) 
+         -> result<http-response, http-error>;
+    
+    /// Make a POST request
+    post: func(url: string, body: string, headers: list<tuple<string, string>>) 
+          -> result<http-response, http-error>;
+}
+
+/// Environment variable access
+interface env {
+    /// Get an environment variable
+    /// Returns None if not set or not allowed
+    get: func(name: string) -> option<string>;
+}
+
+/// Logging
+interface log {
+    /// Log at debug level
+    debug: func(message: string);
+    
+    /// Log at info level
+    info: func(message: string);
+    
+    /// Log at warn level
+    warn: func(message: string);
+    
+    /// Log at error level
+    error: func(message: string);
+}
+
+// ============================================================================
+// Plugin-provided interfaces (plugins export these)
+// ============================================================================
+
+/// Authentication plugin interface
+interface auth-plugin {
+    /// Device code response for OAuth device flow
+    record device-code {
+        device-code: string,
+        user-code: string,
+        verification-url: string,
+        expires-in: u64,
+        interval: u64,
+    }
+    
+    /// Authentication status
+    enum auth-status {
+        not-authenticated,
+        authenticated,
+        expired,
+    }
+    
+    /// Poll result
+    variant poll-result {
+        pending,
+        success(string),
+        expired,
+        error(string),
+    }
+    
+    /// Get plugin display name
+    display-name: func() -> string;
+    
+    /// Get current authentication status
+    status: func() -> auth-status;
+    
+    /// Start device flow authentication
+    start-device-flow: func() -> result<device-code, string>;
+    
+    /// Poll for token (call after user authorizes)
+    poll: func(device-code: string) -> poll-result;
+    
+    /// Get current access token (if authenticated)
+    get-token: func() -> result<string, string>;
+    
+    /// Logout (clear stored credentials)
+    logout: func() -> result<_, string>;
+}
+
+/// Tool plugin interface
+interface tool-plugin {
+    /// Tool definition
+    record tool-def {
+        name: string,
+        description: string,
+        parameters-schema: string,
+    }
+    
+    /// Tool execution result
+    record tool-result {
+        success: bool,
+        output: string,
+        error: option<string>,
+    }
+    
+    /// Risk level for the tool
+    enum risk-level {
+        read-only,
+        write,
+        risky,
+        dangerous,
+    }
+    
+    /// Get tool definitions
+    get-tools: func() -> list<tool-def>;
+    
+    /// Get risk level for a tool
+    get-risk-level: func(tool-name: string) -> risk-level;
+    
+    /// Execute a tool
+    execute: func(tool-name: string, arguments: string) -> tool-result;
+}
+
+/// LLM provider plugin interface  
+interface provider-plugin {
+    /// Message role
+    enum role {
+        system,
+        user,
+        assistant,
+        tool,
+    }
+    
+    /// Chat message
+    record message {
+        role: role,
+        content: string,
+    }
+    
+    /// Token usage
+    record usage {
+        input-tokens: u32,
+        output-tokens: u32,
+    }
+    
+    /// Chat response
+    record chat-response {
+        text: string,
+        usage: option<usage>,
+    }
+    
+    /// Get provider name
+    name: func() -> string;
+    
+    /// Get available models
+    models: func() -> list<string>;
+    
+    /// Send chat completion (non-streaming)
+    chat: func(messages: list<message>, model: string) -> result<chat-response, string>;
+}
+
+// ============================================================================
+// World definitions (what plugins export)
+// ============================================================================
+
+/// Auth plugin world
+world auth-world {
+    import storage;
+    import http;
+    import env;
+    import log;
+    
+    export auth-plugin;
+}
+
+/// Tool plugin world
+world tool-world {
+    import storage;
+    import http;
+    import env;
+    import log;
+    
+    export tool-plugin;
+}
+
+/// Provider plugin world
+world provider-world {
+    import storage;
+    import http;
+    import env;
+    import log;
+    
+    export provider-plugin;
+}
