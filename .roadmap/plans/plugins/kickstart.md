@@ -70,6 +70,32 @@ You have **full autonomy** to execute this plan. Follow these rules:
 
 **NOTHING should be incomplete or partial.** If a task cannot be fully completed, STOP and resolve the blocker before continuing.
 
+### Mark Task Complete in Plan (REQUIRED)
+
+**After completing each task, mark it as DONE in the plan file itself.**
+
+This ensures **resumability** - if something goes wrong, you can resume from where you left off.
+
+Format: Add `✅ DONE` at the end of the task heading:
+
+```markdown
+### Task 1.1: Create `src/llm/auth/mod.rs` ✅ DONE
+
+### Task 1.2: Create `src/llm/auth/token_store.rs` ✅ DONE
+
+### Task 1.3: Create `src/llm/auth/gemini_oauth.rs`  <-- Currently working on this
+```
+
+**Commit the plan updates** along with the code changes:
+
+```bash
+git add .roadmap/plans/plugins/001-gemini-oauth.md
+git add src/llm/auth/
+git commit -m "feat(auth): complete Task 1.1 and 1.2 - auth module structure"
+```
+
+This creates a clear audit trail and allows resumption from any point.
+
 ### After EVERY Phase
 
 Before committing at phase boundary:
