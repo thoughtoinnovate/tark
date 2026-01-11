@@ -2,12 +2,46 @@
 
 This directory contains implementation plans that can be followed step-by-step.
 
-## Active Plans
+## Execution Order
 
-| ID | Name | Status | Dependencies | Description |
-|----|------|--------|--------------|-------------|
-| 001 | [Gemini OAuth](plans/001-gemini-oauth.md) | Ready | None | Google OAuth device flow for Gemini authentication |
-| 002 | [Plugin Runtime](plans/002-plugin-runtime.md) | Ready | 001 | WASM-based plug-and-play plugin system |
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  SEQUENCE 1: Foundation                                         │
+│  └── plugins/001-gemini-oauth.md                                │
+│      • Establishes auth patterns (DeviceFlowAuth trait)         │
+│      • Creates TokenStore for secure credentials                │
+│      • Immediate user value (Gemini OAuth)                      │
+│      • Effort: ~2-3 days                                        │
+├─────────────────────────────────────────────────────────────────┤
+│  SEQUENCE 2: Plugin Infrastructure                              │
+│  └── plugins/002-plugin-runtime.md                              │
+│      • WASM plugin host (wasmtime)                              │
+│      • Plugin manifest and registry                             │
+│      • WIT interfaces for plugins                               │
+│      • CLI commands (tark plugin add/remove/list)               │
+│      • Effort: ~5-7 days                                        │
+├─────────────────────────────────────────────────────────────────┤
+│  SEQUENCE 3: Example Plugins (Future)                           │
+│  └── plugins/003-*.md                                           │
+│      • Reference auth plugin implementations                    │
+│      • Reference tool plugins                                   │
+│      • Effort: ~2-3 days each                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Plugin Plans
+
+| Seq | Plan | Status | Dependencies | Description |
+|-----|------|--------|--------------|-------------|
+| 1 | [Gemini OAuth](plans/plugins/001-gemini-oauth.md) | Ready | None | Google OAuth device flow (foundation) |
+| 2 | [Plugin Runtime](plans/plugins/002-plugin-runtime.md) | Ready | Seq 1 | WASM-based plug-and-play plugin system |
+| 3 | (Future) | Planned | Seq 2 | Example plugin implementations |
+
+## Other Plans
+
+| ID | Name | Status | Description |
+|----|------|--------|-------------|
+| - | [Steering Files](plans/001-steering-files-feature.md) | Ready | Steering files feature |
 
 ## Plan Structure
 
