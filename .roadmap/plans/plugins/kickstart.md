@@ -274,16 +274,3 @@ Begin with **Sequence 1: 001-gemini-oauth.md**
 **GO.**
 ```
 
----
-
-## How to Use
-
-Copy the agent prompt above and paste it into an AI coding assistant (like Cursor Agent mode) to begin autonomous execution of the plugin system implementation.
-
-The agent will:
-1. Read and execute `001-gemini-oauth.md` first
-2. Complete all phases with validation
-3. Move to `002-plugin-runtime.md` 
-4. Build the complete plugin infrastructure
-
-No human intervention required unless the agent explicitly asks for help.
