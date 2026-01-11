@@ -55,6 +55,99 @@ You have **full autonomy** to execute this plan. Follow these rules:
 
 ---
 
+## Task Completion Requirements
+
+### After EVERY Task
+
+**VERIFY** that the task is 100% complete before moving on:
+
+- [ ] All code from the task is implemented (not partial)
+- [ ] Code compiles without errors
+- [ ] No clippy warnings
+- [ ] Tests exist for the new code
+- [ ] Tests pass
+- [ ] Feature works end-to-end (manually verify if needed)
+
+**NOTHING should be incomplete or partial.** If a task cannot be fully completed, STOP and resolve the blocker before continuing.
+
+### After EVERY Phase
+
+Before committing at phase boundary:
+
+- [ ] All tasks in the phase are 100% complete
+- [ ] All tests pass
+- [ ] Code is formatted (`cargo fmt --all`)
+- [ ] No lint warnings (`cargo clippy -- -D warnings`)
+- [ ] Commit message follows conventional format
+
+---
+
+## Post-Execution Review (After ALL Plans Complete)
+
+Once **all sequences are executed**, perform a comprehensive review:
+
+### 1. Test Case Review
+- Review ALL test files for completeness
+- Identify gaps in test coverage
+- Add missing test scenarios:
+  - Happy path tests
+  - Error/edge case tests
+  - Integration tests where components interact
+- Ensure tests are meaningful (not just coverage padding)
+
+### 2. Documentation Review
+- Update README.md with new features
+- Ensure all public APIs have doc comments (`///`)
+- Update AGENTS.md if architecture changed
+- Add/update examples if needed
+
+### 3. AGENTS.md Compliance Check
+
+Read `AGENTS.md` and verify compliance with ALL requirements:
+
+```bash
+# Must pass ALL of these:
+cargo build --release
+cargo fmt --all
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
+
+Verify:
+- [ ] Code follows existing patterns in codebase
+- [ ] No `unwrap()` in production code (use `?` or handle errors)
+- [ ] Uses `tracing` for logging, not `println!`
+- [ ] API keys are NEVER logged
+- [ ] Tests exist for ALL code changes
+- [ ] Documentation updated for significant changes
+- [ ] Version synced if needed (Cargo.toml + lua/tark/init.lua)
+
+### 4. Final Commit
+
+After all reviews and fixes:
+
+```bash
+# Final validation
+cargo build --release && \
+cargo fmt --all -- --check && \
+cargo clippy --all-targets --all-features -- -D warnings && \
+cargo test --all-features
+
+# Commit any review fixes
+git add -A
+git commit -m "chore: post-implementation review fixes
+
+- Fix test gaps identified in review
+- Enrich documentation
+- Ensure AGENTS.md compliance"
+
+# Push
+git push origin main
+```
+
+---
+
 ## Execution Order
 
 Execute these plans in strict sequence:
