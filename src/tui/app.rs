@@ -4702,15 +4702,17 @@ impl TuiApp {
         let registry = PluginRegistry::new().ok()?;
 
         // Find the plugin and its provider contribution
+        // First try matching by plugin ID (what the picker sends)
         for plugin in registry.provider_plugins() {
-            for contribution in &plugin.manifest.contributes.providers {
-                if contribution.id == provider_id {
-                    // Use base_provider to get models from pre-loaded cache
+            if plugin.id() == provider_id {
+                // Found plugin, check for base_provider
+                for contribution in &plugin.manifest.contributes.providers {
                     if let Some(base_provider) = &contribution.base_provider {
                         return Self::get_cached_models_for_provider(base_provider);
                     }
-                    return None;
                 }
+                // No base_provider set, use fallback
+                return Self::get_fallback_models("google");
             }
         }
         None
