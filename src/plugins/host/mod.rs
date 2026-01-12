@@ -987,11 +987,10 @@ fn http_get_impl(client: &reqwest::blocking::Client, url: &str, headers_json: &s
                 "status": status,
                 "headers": resp_headers,
                 "body": body
-            }).to_string()
+            })
+            .to_string()
         }
-        Err(e) => {
-            serde_json::json!({"error": e.to_string()}).to_string()
-        }
+        Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
     }
 }
 
@@ -1026,11 +1025,10 @@ fn http_post_impl(
                 "status": status,
                 "headers": resp_headers,
                 "body": body
-            }).to_string()
+            })
+            .to_string()
         }
-        Err(e) => {
-            serde_json::json!({"error": e.to_string()}).to_string()
-        }
+        Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
     }
 }
 

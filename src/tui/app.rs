@@ -4674,7 +4674,68 @@ impl TuiApp {
                     .with_description("Microsoft's compact model")
                     .with_active(current_model == "phi3"),
             ],
-            _ => vec![PickerItem::new("default", "Default Model")],
+            _ => {
+                // Try to get models from plugin provider
+                if let Some(models) = Self::get_plugin_provider_models(provider_id) {
+                    models
+                        .into_iter()
+                        .map(|(id, name, desc)| {
+                            PickerItem::new(&id, &name)
+                                .with_description(desc)
+                                .with_active(current_model == id)
+                        })
+                        .collect()
+                } else {
+                    vec![PickerItem::new("default", "Default Model")]
+                }
+            }
+        }
+    }
+
+    /// Get models from a plugin provider (uses models.dev via base_provider)
+    fn get_plugin_provider_models(provider_id: &str) -> Option<Vec<(String, String, String)>> {
+        use crate::plugins::PluginRegistry;
+
+        let registry = PluginRegistry::new().ok()?;
+
+        // Find the plugin and its provider contribution
+        for plugin in registry.provider_plugins() {
+            for contribution in &plugin.manifest.contributes.providers {
+                if contribution.id == provider_id {
+                    // If base_provider is set, fetch models from models.dev
+                    if let Some(base_provider) = &contribution.base_provider {
+                        return Self::get_models_from_models_dev(base_provider);
+                    }
+                    // Otherwise, no models to show (plugin doesn't specify base_provider)
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// Fetch models from models.dev API (cached for 24h)
+    fn get_models_from_models_dev(provider: &str) -> Option<Vec<(String, String, String)>> {
+        // Use block_in_place to call async function in sync context
+        let models_result = tokio::task::block_in_place(|| {
+            let models_db = crate::llm::models_db();
+            tokio::runtime::Handle::current().block_on(models_db.list_models(provider))
+        });
+
+        match models_result {
+            Ok(models) if !models.is_empty() => {
+                let mut result: Vec<(String, String, String)> = models
+                    .into_iter()
+                    .map(|m| {
+                        let desc = m.capability_summary();
+                        (m.id, m.name, desc)
+                    })
+                    .collect();
+                // Sort by model name
+                result.sort_by(|a, b| a.1.cmp(&b.1));
+                Some(result)
+            }
+            _ => None,
         }
     }
 

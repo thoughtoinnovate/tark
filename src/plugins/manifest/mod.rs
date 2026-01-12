@@ -108,6 +108,10 @@ pub struct ProviderContribution {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// Base provider for models.dev lookup (e.g., "google", "openai", "anthropic")
+    /// When set, tark loads models from models.dev using this provider key
+    #[serde(default)]
+    pub base_provider: Option<String>,
 }
 
 /// Command contribution declaration
