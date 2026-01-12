@@ -4551,7 +4551,9 @@ impl TuiApp {
                     .with_description("Microsoft's compact model")
                     .with_active(current_model == "phi3"),
             ],
-            _ => vec![PickerItem::new("default", "Default Model")],
+            // Important: plugin providers (e.g. gemini-oauth) are not covered above.
+            // Delegate to the provider-based picker which supports plugins via PluginRegistry.
+            _ => self.get_model_picker_items_for_provider(&current_provider),
         }
     }
 
