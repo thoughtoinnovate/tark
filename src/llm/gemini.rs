@@ -46,6 +46,7 @@ impl GeminiProvider {
 
         // Try OAuth token
         let token_path = dirs::data_local_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("tark")
             .join("tokens")
