@@ -185,3 +185,51 @@ fn test_auth_plugin_functions() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_model_picker_models_for_gemini_oauth() {
+    use tark_cli::llm::models_db;
+    use tark_cli::plugins::PluginRegistry;
+
+    println!("\n=== Testing Model Picker Models ===\n");
+
+    // 1. Check plugin
+    let registry = PluginRegistry::new().expect("Failed to create registry");
+
+    for plugin in registry.provider_plugins() {
+        println!("Plugin: {}", plugin.id());
+        for c in &plugin.manifest.contributes.providers {
+            println!("  base_provider: {:?}", c.base_provider);
+
+            if let Some(base) = &c.base_provider {
+                println!("\n  Checking models.dev for '{}':", base);
+
+                // Check cache
+                let db = models_db();
+                if let Some(models) = db.try_get_cached(base) {
+                    println!("  Cache hit: {} models", models.len());
+                    for m in models.iter().take(5) {
+                        println!("    - {}", m.id);
+                    }
+                } else {
+                    println!("  Cache miss - fetching from models.dev...");
+
+                    // Fetch directly (not preload which is background)
+                    match db.list_models(base).await {
+                        Ok(models) => {
+                            println!("  Fetched {} models:", models.len());
+                            for m in models.iter().take(10) {
+                                println!("    - {}: {}", m.id, m.name);
+                            }
+                        }
+                        Err(e) => {
+                            println!("  Fetch error: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("\n=== Done ===");
+}

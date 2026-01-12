@@ -4717,12 +4717,11 @@ impl TuiApp {
         None
     }
 
-    /// Get models from the pre-loaded models.dev cache
+    /// Get models from models.dev (cached or fetch)
     fn get_cached_models_for_provider(provider: &str) -> Option<Vec<(String, String, String)>> {
-        // Try to get from already-loaded cache (non-blocking)
         let models_db = crate::llm::models_db();
 
-        // Use try_get_cached which returns immediately from memory cache
+        // Try cache first (non-blocking)
         if let Some(models) = models_db.try_get_cached(provider) {
             if !models.is_empty() {
                 let mut result: Vec<(String, String, String)> = models
@@ -4737,7 +4736,26 @@ impl TuiApp {
             }
         }
 
-        // Fallback to hardcoded if cache not ready
+        // Cache empty - fetch synchronously (blocking but ensures models are shown)
+        let fetch_result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(models_db.list_models(provider))
+        });
+
+        if let Ok(models) = fetch_result {
+            if !models.is_empty() {
+                let mut result: Vec<(String, String, String)> = models
+                    .into_iter()
+                    .map(|m| {
+                        let desc = m.capability_summary();
+                        (m.id, m.name, desc)
+                    })
+                    .collect();
+                result.sort_by(|a, b| a.1.cmp(&b.1));
+                return Some(result);
+            }
+        }
+
+        // Fallback to hardcoded only if fetch failed
         Self::get_fallback_models(provider)
     }
 
