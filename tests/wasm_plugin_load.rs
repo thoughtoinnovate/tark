@@ -1,7 +1,7 @@
 //! Test loading and calling a WASM plugin
 
 use std::fs;
-use tark_cli::plugins::{AuthStatus, PluginHost, PluginRegistry};
+use tark_cli::plugins::{AuthStatus, PluginHost, PluginRegistry, PluginType};
 
 #[test]
 fn test_load_gemini_auth_plugin() {
@@ -133,4 +133,117 @@ fn test_auth_plugin_with_gemini_cli_credentials() {
     assert!(!token.is_empty());
 
     println!("✓ Full auth flow works with Gemini CLI credentials!");
+}
+
+// =============================================================================
+// Provider Plugin Tests (gemini-oauth)
+// =============================================================================
+
+#[test]
+fn test_load_gemini_oauth_provider_plugin() {
+    let registry = PluginRegistry::new().expect("Failed to create registry");
+
+    // Check if plugin is installed
+    let plugin = match registry.get("gemini-oauth") {
+        Some(p) => p,
+        None => {
+            println!("Skipping test: gemini-oauth plugin not installed");
+            return;
+        }
+    };
+
+    // Verify it's a provider type
+    assert_eq!(plugin.plugin_type(), PluginType::Provider);
+    println!("✓ gemini-oauth is a provider plugin");
+
+    // Load plugin
+    let mut host = PluginHost::new().expect("Failed to create plugin host");
+    host.load(plugin).expect("Failed to load plugin");
+    println!("✓ Successfully loaded gemini-oauth plugin");
+}
+
+#[test]
+fn test_gemini_oauth_provider_info() {
+    let registry = PluginRegistry::new().expect("Failed to create registry");
+    let plugin = match registry.get("gemini-oauth") {
+        Some(p) => p,
+        None => {
+            println!("Skipping test: gemini-oauth plugin not installed");
+            return;
+        }
+    };
+
+    let mut host = PluginHost::new().expect("Failed to create plugin host");
+    host.load(plugin).expect("Failed to load plugin");
+
+    let instance = host.get_mut("gemini-oauth").expect("Plugin not found");
+
+    // Test provider_info
+    let info = instance
+        .provider_info()
+        .expect("Failed to get provider info");
+    println!("Provider ID: {}", info.id);
+    println!("Display name: {}", info.display_name);
+    println!("Description: {}", info.description);
+    println!("Requires auth: {}", info.requires_auth);
+
+    assert_eq!(info.id, "gemini-oauth");
+    assert!(!info.display_name.is_empty());
+
+    // Test provider_models
+    let models = instance.provider_models().expect("Failed to get models");
+    println!("Available models: {}", models.len());
+    for model in &models {
+        println!("  - {} (context: {})", model.id, model.context_window);
+    }
+    assert!(!models.is_empty());
+
+    println!("✓ Provider info and models work correctly!");
+}
+
+#[test]
+fn test_gemini_oauth_provider_with_credentials() {
+    let registry = PluginRegistry::new().expect("Failed to create registry");
+    let plugin = match registry.get("gemini-oauth") {
+        Some(p) => p,
+        None => {
+            println!("Skipping test: gemini-oauth plugin not installed");
+            return;
+        }
+    };
+
+    // Check if Gemini CLI credentials exist
+    let creds_path = dirs::home_dir()
+        .map(|h| h.join(".gemini").join("oauth_creds.json"))
+        .expect("No home dir");
+
+    if !creds_path.exists() {
+        println!(
+            "Skipping test: No Gemini CLI credentials at {:?}",
+            creds_path
+        );
+        return;
+    }
+
+    let creds_json = fs::read_to_string(&creds_path).expect("Failed to read credentials");
+
+    let mut host = PluginHost::new().expect("Failed to create plugin host");
+    host.load(plugin).expect("Failed to load plugin");
+
+    let instance = host.get_mut("gemini-oauth").expect("Plugin not found");
+
+    // Initialize with credentials
+    instance
+        .provider_auth_init(&creds_json)
+        .expect("Failed to init provider");
+    println!("✓ Initialized provider with Gemini CLI credentials");
+
+    // Check auth status
+    let status = instance
+        .provider_auth_status()
+        .expect("Failed to get auth status");
+    println!("Auth status: {:?}", status);
+    assert_eq!(status, tark_cli::plugins::ProviderAuthStatus::Authenticated);
+
+    println!("✓ Provider auth works with Gemini CLI credentials!");
 }
