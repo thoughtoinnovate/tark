@@ -4701,17 +4701,16 @@ impl TuiApp {
 
         let registry = PluginRegistry::new().ok()?;
 
-        // Find the plugin and its provider contribution
-        // First try matching by plugin ID (what the picker sends)
+        // Find the plugin by ID (what the picker sends)
         for plugin in registry.provider_plugins() {
             if plugin.id() == provider_id {
-                // Found plugin, check for base_provider
+                // Found plugin, check for base_provider in contributions
                 for contribution in &plugin.manifest.contributes.providers {
                     if let Some(base_provider) = &contribution.base_provider {
                         return Self::get_cached_models_for_provider(base_provider);
                     }
                 }
-                // No base_provider set, use fallback
+                // No base_provider set, use google fallback for gemini plugins
                 return Self::get_fallback_models("google");
             }
         }
@@ -4779,27 +4778,30 @@ impl TuiApp {
             .map(|b| b.model_name().to_string())
             .unwrap_or_default();
 
-        // Try to fetch models dynamically from AgentBridge
+        // Only try dynamic fetch if the agent_bridge is configured for the SAME provider
+        // Otherwise the bridge would return models for the wrong provider
         if let Some(ref bridge) = self.agent_bridge {
-            // Use block_in_place to call async function in sync context
-            let models_result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(bridge.list_available_models())
-            });
+            if bridge.provider_name() == provider_id {
+                // Use block_in_place to call async function in sync context
+                let models_result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(bridge.list_available_models())
+                });
 
-            if !models_result.is_empty() {
-                // Successfully fetched models dynamically
-                return models_result
-                    .into_iter()
-                    .map(|(model_id, display_name, description)| {
-                        PickerItem::new(&model_id, &display_name)
-                            .with_description(description)
-                            .with_active(current_model == model_id)
-                    })
-                    .collect();
+                if !models_result.is_empty() {
+                    // Successfully fetched models dynamically
+                    return models_result
+                        .into_iter()
+                        .map(|(model_id, display_name, description)| {
+                            PickerItem::new(&model_id, &display_name)
+                                .with_description(description)
+                                .with_active(current_model == model_id)
+                        })
+                        .collect();
+                }
             }
         }
 
-        // Fall back to hardcoded list if fetch failed
+        // Fall back to hardcoded list or plugin provider
         self.get_model_picker_items_for_provider(provider_id)
     }
 
