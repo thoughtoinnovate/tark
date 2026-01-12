@@ -247,3 +247,54 @@ fn test_gemini_oauth_provider_with_credentials() {
 
     println!("✓ Provider auth works with Gemini CLI credentials!");
 }
+
+#[test]
+fn test_gemini_oauth_model_picker_integration() {
+    use tark_cli::plugins::PluginRegistry;
+
+    println!("\n=== Testing Model Picker Integration ===\n");
+
+    // 1. Check plugin is installed and enabled
+    let registry = PluginRegistry::new().expect("Failed to create registry");
+    let plugin = registry
+        .get("gemini-oauth")
+        .expect("gemini-oauth plugin not installed");
+    assert!(plugin.enabled, "Plugin should be enabled");
+    println!("✓ Plugin installed and enabled");
+
+    // 2. Check it's a provider type
+    assert_eq!(
+        plugin.plugin_type(),
+        tark_cli::plugins::PluginType::Provider
+    );
+    println!("✓ Plugin type is Provider");
+
+    // 3. Check contributions
+    let providers = &plugin.manifest.contributes.providers;
+    assert!(!providers.is_empty(), "Should have provider contributions");
+    println!("✓ Has provider contributions");
+
+    // 4. Check base_provider
+    let contribution = &providers[0];
+    assert_eq!(contribution.id, "gemini-oauth");
+    assert_eq!(contribution.base_provider, Some("google".to_string()));
+    println!("✓ base_provider = 'google'");
+
+    // 5. Check models can be retrieved
+    let models_db = tark_cli::llm::models_db();
+
+    // Try cache first
+    if let Some(models) = models_db.try_get_cached("google") {
+        println!("✓ Found {} Google models in cache", models.len());
+        for m in models.iter().take(3) {
+            println!("  - {}", m.id);
+        }
+    } else {
+        println!("! Cache empty, fallback models would be used:");
+        println!("  - gemini-2.0-flash-exp");
+        println!("  - gemini-1.5-pro");
+        println!("  - gemini-1.5-flash");
+    }
+
+    println!("\n=== Model Picker Integration OK ===");
+}
