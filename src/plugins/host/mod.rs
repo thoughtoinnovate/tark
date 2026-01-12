@@ -982,15 +982,15 @@ fn http_get_impl(client: &reqwest::blocking::Client, url: &str, headers_json: &s
             }
             let body = resp.text().unwrap_or_default();
 
-            format!(
-                r#"{{"status":{},"headers":{:?},"body":{}}}"#,
-                status,
-                resp_headers,
-                serde_json::to_string(&body).unwrap_or_default()
-            )
+            // Use proper JSON serialization for all fields
+            serde_json::json!({
+                "status": status,
+                "headers": resp_headers,
+                "body": body
+            }).to_string()
         }
         Err(e) => {
-            format!(r#"{{"error":"{}"}}"#, e)
+            serde_json::json!({"error": e.to_string()}).to_string()
         }
     }
 }
@@ -1021,15 +1021,15 @@ fn http_post_impl(
             }
             let body = resp.text().unwrap_or_default();
 
-            format!(
-                r#"{{"status":{},"headers":{:?},"body":{}}}"#,
-                status,
-                resp_headers,
-                serde_json::to_string(&body).unwrap_or_default()
-            )
+            // Use proper JSON serialization for all fields
+            serde_json::json!({
+                "status": status,
+                "headers": resp_headers,
+                "body": body
+            }).to_string()
         }
         Err(e) => {
-            format!(r#"{{"error":"{}"}}"#, e)
+            serde_json::json!({"error": e.to_string()}).to_string()
         }
     }
 }
