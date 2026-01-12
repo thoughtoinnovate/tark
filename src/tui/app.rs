@@ -4562,6 +4562,11 @@ impl TuiApp {
     ///
     /// Requirements: 1.3, 1.4, 4.1
     fn get_model_picker_items_for_provider(&self, provider_id: &str) -> Vec<PickerItem> {
+        tracing::info!(
+            "get_model_picker_items_for_provider called with: {}",
+            provider_id
+        );
+
         let current_model = self
             .agent_bridge
             .as_ref()
@@ -4679,7 +4684,12 @@ impl TuiApp {
             ],
             _ => {
                 // Try to get models from plugin provider
+                tracing::info!(
+                    "Falling through to plugin provider lookup for: {}",
+                    provider_id
+                );
                 if let Some(models) = Self::get_plugin_provider_models(provider_id) {
+                    tracing::info!("Got {} models from plugin", models.len());
                     models
                         .into_iter()
                         .map(|(id, name, desc)| {
@@ -4689,6 +4699,7 @@ impl TuiApp {
                         })
                         .collect()
                 } else {
+                    tracing::warn!("No models from plugin, showing Default Model");
                     vec![PickerItem::new("default", "Default Model")]
                 }
             }
@@ -4699,21 +4710,41 @@ impl TuiApp {
     fn get_plugin_provider_models(provider_id: &str) -> Option<Vec<(String, String, String)>> {
         use crate::plugins::PluginRegistry;
 
-        let registry = PluginRegistry::new().ok()?;
+        tracing::debug!("get_plugin_provider_models called with: {}", provider_id);
+
+        let registry = match PluginRegistry::new() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to create PluginRegistry: {}", e);
+                return None;
+            }
+        };
+
+        let plugins: Vec<_> = registry.provider_plugins().collect();
+        tracing::debug!("Found {} provider plugins", plugins.len());
 
         // Find the plugin by ID (what the picker sends)
-        for plugin in registry.provider_plugins() {
+        for plugin in plugins {
+            tracing::debug!("Checking plugin: {} vs {}", plugin.id(), provider_id);
             if plugin.id() == provider_id {
+                tracing::debug!("MATCH! Found plugin {}", plugin.id());
                 // Found plugin, check for base_provider in contributions
                 for contribution in &plugin.manifest.contributes.providers {
+                    tracing::debug!(
+                        "Contribution base_provider: {:?}",
+                        contribution.base_provider
+                    );
                     if let Some(base_provider) = &contribution.base_provider {
+                        tracing::debug!("Getting models for base_provider: {}", base_provider);
                         return Self::get_cached_models_for_provider(base_provider);
                     }
                 }
                 // No base_provider set, use google fallback for gemini plugins
+                tracing::debug!("No base_provider, using fallback");
                 return Self::get_fallback_models("google");
             }
         }
+        tracing::debug!("No matching plugin found for {}", provider_id);
         None
     }
 
@@ -4736,13 +4767,23 @@ impl TuiApp {
             }
         }
 
-        // Cache empty - fetch synchronously (blocking but ensures models are shown)
-        let fetch_result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(models_db.list_models(provider))
-        });
+        // Cache empty - try to fetch synchronously
+        // Use std::thread to avoid tokio runtime issues
+        let provider_owned = provider.to_string();
+        let fetch_result = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().ok()?;
+            rt.block_on(async {
+                let db = crate::llm::models_db();
+                db.list_models(&provider_owned).await.ok()
+            })
+        })
+        .join()
+        .ok()
+        .flatten();
 
-        if let Ok(models) = fetch_result {
+        if let Some(models) = fetch_result {
             if !models.is_empty() {
+                tracing::info!("Fetched {} models for {}", models.len(), provider);
                 let mut result: Vec<(String, String, String)> = models
                     .into_iter()
                     .map(|m| {
@@ -4755,6 +4796,7 @@ impl TuiApp {
             }
         }
 
+        tracing::warn!("Fetch failed for {}, using fallback", provider);
         // Fallback to hardcoded only if fetch failed
         Self::get_fallback_models(provider)
     }

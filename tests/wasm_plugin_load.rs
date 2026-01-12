@@ -233,3 +233,99 @@ async fn test_model_picker_models_for_gemini_oauth() {
 
     println!("\n=== Done ===");
 }
+
+#[test]
+fn test_get_plugin_provider_models_directly() {
+    use tark_cli::llm::models_db;
+    use tark_cli::plugins::PluginRegistry;
+
+    println!("\n=== Simulating TUI model picker flow ===\n");
+
+    let provider_id = "gemini-oauth";
+    println!("1. Provider ID: {}", provider_id);
+
+    // Step 1: Create registry
+    let registry = match PluginRegistry::new() {
+        Ok(r) => {
+            println!("2. PluginRegistry created successfully");
+            r
+        }
+        Err(e) => {
+            println!("2. ERROR creating PluginRegistry: {}", e);
+            panic!("Registry creation failed");
+        }
+    };
+
+    // Step 2: Get provider plugins
+    let plugins: Vec<_> = registry.provider_plugins().collect();
+    println!("3. Found {} provider plugins", plugins.len());
+
+    // Step 3: Find matching plugin
+    let mut found = false;
+    for plugin in plugins {
+        println!(
+            "   - Plugin: {} (comparing to {})",
+            plugin.id(),
+            provider_id
+        );
+        if plugin.id() == provider_id {
+            println!("4. MATCH FOUND for {}", plugin.id());
+            found = true;
+
+            // Check contributions
+            for contribution in &plugin.manifest.contributes.providers {
+                println!("   - Contribution ID: {}", contribution.id);
+                println!("   - base_provider: {:?}", contribution.base_provider);
+
+                if let Some(base_provider) = &contribution.base_provider {
+                    println!("5. Getting models for base_provider: {}", base_provider);
+
+                    let db = models_db();
+
+                    // Try cache
+                    if let Some(models) = db.try_get_cached(base_provider) {
+                        println!("   Cache hit: {} models", models.len());
+                    } else {
+                        println!("   Cache miss, fetching via separate thread...");
+
+                        // Use std::thread to create a new tokio runtime (like the TUI does)
+                        let base_owned = base_provider.to_string();
+                        let fetch_result = std::thread::spawn(move || {
+                            let rt = tokio::runtime::Runtime::new().ok()?;
+                            rt.block_on(async {
+                                let db = tark_cli::llm::models_db();
+                                db.list_models(&base_owned).await.ok()
+                            })
+                        })
+                        .join()
+                        .ok()
+                        .flatten();
+
+                        match fetch_result {
+                            Some(models) => {
+                                println!("6. Fetched {} models:", models.len());
+                                for m in models.iter().take(5) {
+                                    println!("      - {}: {}", m.id, m.name);
+                                }
+                                assert!(!models.is_empty(), "Should have models");
+                            }
+                            None => {
+                                println!("6. ERROR fetching models");
+                            }
+                        }
+                    }
+                } else {
+                    println!("5. No base_provider, would use fallback");
+                }
+            }
+            break;
+        }
+    }
+
+    if !found {
+        println!("4. ERROR: No matching plugin found for {}", provider_id);
+    }
+
+    assert!(found, "Plugin {} should be found", provider_id);
+    println!("\n=== Test Complete ===");
+}
