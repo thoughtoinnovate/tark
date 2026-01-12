@@ -26,9 +26,14 @@ mod host;
 mod manifest;
 mod registry;
 
-pub use host::PluginHost;
-pub use manifest::{PluginCapabilities, PluginManifest, PluginType};
+pub use host::{AuthStatus, PluginHost};
+pub use manifest::{
+    PluginCapabilities, PluginContributions, PluginManifest, PluginType, ProviderContribution,
+};
 pub use registry::{InstalledPlugin, PluginRegistry};
+
+/// Current plugin API version
+pub const PLUGIN_API_VERSION: &str = "0.1.0";
 
 use anyhow::Result;
 use std::path::PathBuf;

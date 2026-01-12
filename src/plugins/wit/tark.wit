@@ -155,8 +155,29 @@ interface tool-plugin {
     execute: func(tool-name: string, arguments: string) -> tool-result;
 }
 
-/// LLM provider plugin interface  
+/// LLM provider plugin interface (full-featured)
 interface provider-plugin {
+    /// Provider metadata
+    record provider-info {
+        /// Provider ID (e.g., "gemini-oauth")
+        id: string,
+        /// Display name (e.g., "Gemini (OAuth)")
+        display-name: string,
+        /// Description
+        description: string,
+        /// Whether provider requires authentication
+        requires-auth: bool,
+    }
+    
+    /// Model info
+    record model-info {
+        id: string,
+        display-name: string,
+        context-window: u32,
+        supports-streaming: bool,
+        supports-tools: bool,
+    }
+    
     /// Message role
     enum role {
         system,
@@ -181,16 +202,53 @@ interface provider-plugin {
     record chat-response {
         text: string,
         usage: option<usage>,
+        finish-reason: option<string>,
     }
     
-    /// Get provider name
-    name: func() -> string;
+    /// Stream chunk for streaming responses
+    record stream-chunk {
+        text: string,
+        done: bool,
+        usage: option<usage>,
+    }
+    
+    /// Auth status for provider
+    enum auth-status {
+        not-required,
+        authenticated,
+        not-authenticated,
+        expired,
+    }
+    
+    // === Provider Info ===
+    
+    /// Get provider metadata
+    info: func() -> provider-info;
     
     /// Get available models
-    models: func() -> list<string>;
+    models: func() -> list<model-info>;
+    
+    // === Authentication ===
+    
+    /// Get authentication status
+    auth-status: func() -> auth-status;
+    
+    /// Initialize with credentials (JSON)
+    auth-init: func(credentials-json: string) -> result<_, string>;
+    
+    /// Logout
+    auth-logout: func() -> result<_, string>;
+    
+    // === Chat ===
     
     /// Send chat completion (non-streaming)
     chat: func(messages: list<message>, model: string) -> result<chat-response, string>;
+    
+    /// Send chat completion (streaming) - returns stream ID
+    chat-stream-start: func(messages: list<message>, model: string) -> result<u64, string>;
+    
+    /// Poll stream for next chunk
+    chat-stream-poll: func(stream-id: u64) -> result<stream-chunk, string>;
 }
 
 // ============================================================================

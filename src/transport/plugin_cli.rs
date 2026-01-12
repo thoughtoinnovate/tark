@@ -143,35 +143,72 @@ pub async fn run_plugin_info(plugin_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Install a plugin from git
+/// Install a plugin from git repository or local path
 pub async fn run_plugin_add(url: &str, branch: &str) -> Result<()> {
     println!("{}", "=== Installing Plugin ===".bold().cyan());
     println!();
-    println!("Repository: {}", url);
-    println!("Branch:     {}", branch);
-    println!();
 
-    // Create temp directory for clone
-    let temp_dir = tempfile::tempdir()?;
-    let clone_path = temp_dir.path().join("plugin");
+    // Check if it's a local path
+    let is_local = url.starts_with('/')
+        || url.starts_with("./")
+        || url.starts_with("../")
+        || url.starts_with('~')
+        || std::path::Path::new(url).exists();
 
-    println!("Cloning repository...");
+    let source_path: std::path::PathBuf;
+    let _temp_dir: Option<tempfile::TempDir>;
 
-    // Clone the repository
-    let status = std::process::Command::new("git")
-        .args(["clone", "--depth", "1", "--branch", branch, url])
-        .arg(&clone_path)
-        .status()
-        .context("Failed to run git clone")?;
+    if is_local {
+        // Local path - expand ~ and use directly
+        let expanded = if url.starts_with('~') {
+            dirs::home_dir()
+                .map(|h| h.join(&url[2..]))
+                .unwrap_or_else(|| std::path::PathBuf::from(url))
+        } else {
+            std::path::PathBuf::from(url)
+        };
 
-    if !status.success() {
-        anyhow::bail!("git clone failed");
+        println!("Source: {} (local)", expanded.display());
+        println!();
+
+        if !expanded.exists() {
+            anyhow::bail!("Path does not exist: {}", expanded.display());
+        }
+
+        source_path = expanded;
+        _temp_dir = None;
+    } else {
+        // Git URL - clone to temp directory
+        println!("Repository: {}", url);
+        println!("Branch:     {}", branch);
+        println!();
+
+        let temp = tempfile::tempdir()?;
+        let clone_path = temp.path().join("plugin");
+
+        println!("Cloning repository...");
+
+        let status = std::process::Command::new("git")
+            .args(["clone", "--depth", "1", "--branch", branch, url])
+            .arg(&clone_path)
+            .status()
+            .context("Failed to run git clone")?;
+
+        if !status.success() {
+            anyhow::bail!("git clone failed");
+        }
+
+        source_path = clone_path;
+        _temp_dir = Some(temp);
     }
 
     // Verify plugin.toml exists
-    let manifest_path = clone_path.join("plugin.toml");
+    let manifest_path = source_path.join("plugin.toml");
     if !manifest_path.exists() {
-        anyhow::bail!("No plugin.toml found in repository");
+        anyhow::bail!(
+            "No plugin.toml found in {}\nMake sure the path contains a valid plugin.",
+            source_path.display()
+        );
     }
 
     // Load manifest to show info
@@ -200,7 +237,7 @@ pub async fn run_plugin_add(url: &str, branch: &str) -> Result<()> {
     }
 
     // Verify WASM exists
-    let wasm_path = clone_path.join(&manifest.plugin.wasm);
+    let wasm_path = source_path.join(&manifest.plugin.wasm);
     if !wasm_path.exists() {
         anyhow::bail!(
             "WASM module not found: {}\nDid you forget to build the plugin?",
@@ -213,7 +250,7 @@ pub async fn run_plugin_add(url: &str, branch: &str) -> Result<()> {
 
     // Install via registry
     let mut registry = PluginRegistry::new()?;
-    let plugin_id = registry.install(&clone_path.to_path_buf())?;
+    let plugin_id = registry.install(&source_path)?;
 
     println!();
     println!("✅ Successfully installed plugin: {}", plugin_id.green());

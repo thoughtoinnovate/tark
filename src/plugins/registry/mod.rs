@@ -78,6 +78,30 @@ impl InstalledPlugin {
         self.enabled = false;
         Ok(())
     }
+
+    /// Check if plugin should activate for an event
+    pub fn should_activate_for(&self, event: &str) -> bool {
+        // If no activation events specified, activate on startup
+        if self.manifest.activation.events.is_empty() {
+            return event == "onStartup";
+        }
+
+        self.manifest.activation.events.iter().any(|e| {
+            if e == event {
+                return true;
+            }
+            // Handle wildcard events like "onProvider:*"
+            if let Some(prefix) = e.strip_suffix('*') {
+                return event.starts_with(prefix);
+            }
+            false
+        })
+    }
+
+    /// Get contributed providers
+    pub fn contributed_providers(&self) -> &[super::manifest::ProviderContribution] {
+        &self.manifest.contributes.providers
+    }
 }
 
 /// Registry of all installed plugins
@@ -154,6 +178,18 @@ impl PluginRegistry {
     /// Get enabled plugins
     pub fn enabled(&self) -> impl Iterator<Item = &InstalledPlugin> {
         self.plugins.values().filter(|p| p.enabled)
+    }
+
+    /// Get enabled plugins as a Vec (for when you need ownership or multiple iterations)
+    pub fn list_enabled(&self) -> Vec<&InstalledPlugin> {
+        self.plugins.values().filter(|p| p.enabled).collect()
+    }
+
+    /// Get enabled provider plugins
+    pub fn provider_plugins(&self) -> impl Iterator<Item = &InstalledPlugin> {
+        self.plugins
+            .values()
+            .filter(|p| p.enabled && p.plugin_type() == PluginType::Provider)
     }
 
     /// Get plugins by type

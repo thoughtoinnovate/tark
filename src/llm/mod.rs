@@ -171,6 +171,42 @@ pub trait LlmProvider: Send + Sync {
     async fn review_code(&self, code: &str, language: &str) -> Result<Vec<CodeIssue>>;
 }
 
+/// Try to get Gemini token from the gemini-auth plugin
+fn try_gemini_auth_plugin() -> Option<String> {
+    use crate::plugins::{PluginHost, PluginRegistry};
+
+    // Check if gemini-auth plugin is installed
+    let registry = PluginRegistry::new().ok()?;
+    let plugin = registry.get("gemini-auth")?;
+
+    if !plugin.enabled {
+        return None;
+    }
+
+    // Load and initialize plugin
+    let mut host = PluginHost::new().ok()?;
+    host.load(plugin).ok()?;
+
+    let instance = host.get_mut("gemini-auth")?;
+
+    // Check if plugin has credentials - try loading from Gemini CLI
+    let gemini_cli_path = dirs::home_dir()?.join(".gemini").join("oauth_creds.json");
+    if gemini_cli_path.exists() {
+        if let Ok(creds_json) = std::fs::read_to_string(&gemini_cli_path) {
+            // Initialize plugin with Gemini CLI credentials
+            if instance.auth_init_with_credentials(&creds_json).is_ok() {
+                tracing::debug!("Initialized gemini-auth plugin with Gemini CLI credentials");
+            }
+        }
+    }
+
+    // Try to get token from plugin
+    match instance.auth_get_token() {
+        Ok(token) if !token.is_empty() => Some(token),
+        _ => None,
+    }
+}
+
 /// Create an LLM provider based on name
 pub fn create_provider(name: &str) -> Result<Box<dyn LlmProvider>> {
     create_provider_with_options(name, false, None)

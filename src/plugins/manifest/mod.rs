@@ -85,6 +85,61 @@ impl PluginCapabilities {
     }
 }
 
+/// Plugin contributions (VS Code-style)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginContributions {
+    /// LLM providers contributed
+    #[serde(default)]
+    pub providers: Vec<ProviderContribution>,
+
+    /// Commands contributed
+    #[serde(default)]
+    pub commands: Vec<CommandContribution>,
+
+    /// Configuration schema
+    #[serde(default)]
+    pub configuration: Vec<ConfigContribution>,
+}
+
+/// Provider contribution declaration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderContribution {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Command contribution declaration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandContribution {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+/// Configuration contribution declaration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigContribution {
+    pub key: String,
+    #[serde(rename = "type")]
+    pub value_type: String,
+    #[serde(default)]
+    pub default: Option<toml::Value>,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Plugin activation events
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginActivation {
+    /// Events that trigger plugin activation
+    /// Supported: "onStartup", "onProvider:<id>", "onCommand:<id>"
+    #[serde(default)]
+    pub events: Vec<String>,
+}
+
 /// Plugin manifest (plugin.toml)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
@@ -94,6 +149,14 @@ pub struct PluginManifest {
     /// Required capabilities
     #[serde(default)]
     pub capabilities: PluginCapabilities,
+
+    /// Plugin contributions (what the plugin adds)
+    #[serde(default)]
+    pub contributes: PluginContributions,
+
+    /// Activation events (when to load)
+    #[serde(default)]
+    pub activation: PluginActivation,
 
     /// Plugin-specific configuration schema (optional)
     #[serde(default)]
@@ -133,9 +196,17 @@ pub struct PluginMetadata {
     #[serde(default)]
     pub min_tark_version: Option<String>,
 
+    /// Required tark plugin API version (semver range)
+    #[serde(default = "default_api_version")]
+    pub api_version: String,
+
     /// WASM module filename (default: plugin.wasm)
     #[serde(default = "default_wasm_file")]
     pub wasm: String,
+}
+
+fn default_api_version() -> String {
+    "0.1".to_string()
 }
 
 fn default_wasm_file() -> String {
