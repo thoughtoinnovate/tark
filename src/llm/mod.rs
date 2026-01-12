@@ -10,6 +10,7 @@ mod models_db;
 mod ollama;
 mod openai;
 mod openrouter;
+mod plugin_provider;
 mod types;
 
 pub use claude::ClaudeProvider;
@@ -19,6 +20,7 @@ pub use models_db::{models_db, ModelCapabilities};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use openrouter::OpenRouterProvider;
+pub use plugin_provider::{list_plugin_providers, try_create_plugin_provider};
 pub use types::*;
 
 use anyhow::Result;
@@ -219,6 +221,13 @@ pub fn create_provider_with_options(
     silent: bool,
     model: Option<&str>,
 ) -> Result<Box<dyn LlmProvider>> {
+    // First, try plugin providers
+    if let Some(provider) = try_create_plugin_provider(name, model) {
+        tracing::info!("Using plugin provider: {}", name);
+        return Ok(provider);
+    }
+
+    // Then try built-in providers
     match name.to_lowercase().as_str() {
         "claude" | "anthropic" => {
             let mut p = ClaudeProvider::new()?;
@@ -262,9 +271,27 @@ pub fn create_provider_with_options(
             }
             Ok(Box::new(p))
         }
-        _ => anyhow::bail!(
-            "Unknown LLM provider: {}. Supported: claude, openai, ollama, copilot, gemini, openrouter",
-            name
-        ),
+        _ => {
+            // List available plugin providers in error message
+            let plugin_providers = list_plugin_providers();
+            let plugin_list = if plugin_providers.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nPlugin providers: {}",
+                    plugin_providers
+                        .iter()
+                        .map(|(id, _)| id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+
+            anyhow::bail!(
+                "Unknown LLM provider: {}. Supported: claude, openai, ollama, copilot, gemini, openrouter{}",
+                name,
+                plugin_list
+            )
+        }
     }
 }

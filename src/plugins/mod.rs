@@ -26,7 +26,9 @@ mod host;
 mod manifest;
 mod registry;
 
-pub use host::{AuthStatus, PluginHost};
+pub use host::{
+    AuthStatus, ChatResponse, ChatUsage, ModelInfo, PluginHost, ProviderAuthStatus, ProviderInfo,
+};
 pub use manifest::{
     PluginCapabilities, PluginContributions, PluginManifest, PluginType, ProviderContribution,
 };

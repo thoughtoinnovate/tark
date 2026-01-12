@@ -191,6 +191,244 @@ impl PluginInstance {
 
         Ok(name)
     }
+
+    // =========================================================================
+    // Provider Plugin Interface Methods
+    // =========================================================================
+
+    /// Get provider info (JSON)
+    pub fn provider_info(&mut self) -> Result<ProviderInfo> {
+        let json = self.call_string_return_fn("provider_info")?;
+        serde_json::from_str(&json).context("Failed to parse provider info JSON")
+    }
+
+    /// Get available models (JSON array)
+    pub fn provider_models(&mut self) -> Result<Vec<ModelInfo>> {
+        let json = self.call_string_return_fn("provider_models")?;
+        serde_json::from_str(&json).context("Failed to parse models JSON")
+    }
+
+    /// Get provider auth status
+    pub fn provider_auth_status(&mut self) -> Result<ProviderAuthStatus> {
+        let status_fn = self
+            .instance
+            .get_typed_func::<(), i32>(&mut self.store, "provider_auth_status")
+            .context("Plugin does not export 'provider_auth_status' function")?;
+
+        let result = status_fn.call(&mut self.store, ())?;
+        Ok(match result {
+            0 => ProviderAuthStatus::NotRequired,
+            1 => ProviderAuthStatus::Authenticated,
+            2 => ProviderAuthStatus::NotAuthenticated,
+            3 => ProviderAuthStatus::Expired,
+            _ => ProviderAuthStatus::NotAuthenticated,
+        })
+    }
+
+    /// Initialize provider with credentials (JSON)
+    pub fn provider_auth_init(&mut self, credentials_json: &str) -> Result<()> {
+        self.call_string_param_fn("provider_auth_init", credentials_json)
+    }
+
+    /// Logout from provider
+    pub fn provider_auth_logout(&mut self) -> Result<()> {
+        let logout_fn = self
+            .instance
+            .get_typed_func::<(), i32>(&mut self.store, "provider_auth_logout")
+            .context("Plugin does not export 'provider_auth_logout' function")?;
+
+        let result = logout_fn.call(&mut self.store, ())?;
+        if result < 0 {
+            anyhow::bail!("Provider logout failed");
+        }
+        Ok(())
+    }
+
+    /// Send chat completion request (non-streaming)
+    /// messages_json: JSON array of {role, content} objects
+    /// Returns: JSON response with {text, usage}
+    pub fn provider_chat(&mut self, messages_json: &str, model: &str) -> Result<ChatResponse> {
+        let alloc_fn = self
+            .instance
+            .get_typed_func::<i32, i32>(&mut self.store, "alloc")
+            .context("Plugin does not export 'alloc' function")?;
+
+        // Allocate and write messages JSON
+        let msgs_bytes = messages_json.as_bytes();
+        let msgs_ptr = alloc_fn.call(&mut self.store, msgs_bytes.len() as i32)?;
+        {
+            let memory = self
+                .instance
+                .get_memory(&mut self.store, "memory")
+                .context("Plugin has no memory export")?;
+            memory.write(&mut self.store, msgs_ptr as usize, msgs_bytes)?;
+        }
+
+        // Allocate and write model string
+        let model_bytes = model.as_bytes();
+        let model_ptr = alloc_fn.call(&mut self.store, model_bytes.len() as i32)?;
+        {
+            let memory = self
+                .instance
+                .get_memory(&mut self.store, "memory")
+                .context("Plugin has no memory export")?;
+            memory.write(&mut self.store, model_ptr as usize, model_bytes)?;
+        }
+
+        // Allocate return buffer
+        let ret_ptr = alloc_fn.call(&mut self.store, 65536)?; // 64KB for response
+
+        // Call provider_chat(msgs_ptr, msgs_len, model_ptr, model_len, ret_ptr) -> len
+        let chat_fn = self
+            .instance
+            .get_typed_func::<(i32, i32, i32, i32, i32), i32>(&mut self.store, "provider_chat")
+            .context("Plugin does not export 'provider_chat' function")?;
+
+        let len = chat_fn.call(
+            &mut self.store,
+            (
+                msgs_ptr,
+                msgs_bytes.len() as i32,
+                model_ptr,
+                model_bytes.len() as i32,
+                ret_ptr,
+            ),
+        )?;
+
+        if len < 0 {
+            anyhow::bail!("Provider chat failed with error code: {}", len);
+        }
+
+        // Read response JSON
+        let memory = self
+            .instance
+            .get_memory(&mut self.store, "memory")
+            .context("Plugin has no memory export")?;
+
+        let data = memory.data(&self.store);
+        let response_bytes = &data[ret_ptr as usize..(ret_ptr + len) as usize];
+        let response_json = String::from_utf8(response_bytes.to_vec())?;
+
+        serde_json::from_str(&response_json).context("Failed to parse chat response JSON")
+    }
+
+    // =========================================================================
+    // Helper Methods
+    // =========================================================================
+
+    /// Call a function that returns a string (allocates buffer, calls fn, reads result)
+    fn call_string_return_fn(&mut self, fn_name: &str) -> Result<String> {
+        let alloc_fn = self
+            .instance
+            .get_typed_func::<i32, i32>(&mut self.store, "alloc")
+            .context("Plugin does not export 'alloc' function")?;
+
+        let buffer_ptr = alloc_fn.call(&mut self.store, 8192)?;
+
+        let target_fn = self
+            .instance
+            .get_typed_func::<i32, i32>(&mut self.store, fn_name)
+            .with_context(|| format!("Plugin does not export '{}' function", fn_name))?;
+
+        let len = target_fn.call(&mut self.store, buffer_ptr)?;
+        if len < 0 {
+            anyhow::bail!("Function {} returned error code: {}", fn_name, len);
+        }
+
+        let memory = self
+            .instance
+            .get_memory(&mut self.store, "memory")
+            .context("Plugin has no memory export")?;
+
+        let data = memory.data(&self.store);
+        let result_bytes = &data[buffer_ptr as usize..(buffer_ptr + len) as usize];
+        String::from_utf8(result_bytes.to_vec()).context("Invalid UTF-8 in result")
+    }
+
+    /// Call a function that takes a string parameter
+    fn call_string_param_fn(&mut self, fn_name: &str, param: &str) -> Result<()> {
+        let alloc_fn = self
+            .instance
+            .get_typed_func::<i32, i32>(&mut self.store, "alloc")
+            .context("Plugin does not export 'alloc' function")?;
+
+        let param_bytes = param.as_bytes();
+        let param_ptr = alloc_fn.call(&mut self.store, param_bytes.len() as i32)?;
+
+        let memory = self
+            .instance
+            .get_memory(&mut self.store, "memory")
+            .context("Plugin has no memory export")?;
+
+        memory.write(&mut self.store, param_ptr as usize, param_bytes)?;
+
+        let target_fn = self
+            .instance
+            .get_typed_func::<(i32, i32), i32>(&mut self.store, fn_name)
+            .with_context(|| format!("Plugin does not export '{}' function", fn_name))?;
+
+        let result = target_fn.call(&mut self.store, (param_ptr, param_bytes.len() as i32))?;
+        if result < 0 {
+            anyhow::bail!("Function {} failed with error code: {}", fn_name, result);
+        }
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Provider Plugin Types
+// =============================================================================
+
+/// Provider metadata from plugin
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ProviderInfo {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub requires_auth: bool,
+}
+
+/// Model info from plugin
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub context_window: u32,
+    #[serde(default)]
+    pub supports_streaming: bool,
+    #[serde(default)]
+    pub supports_tools: bool,
+}
+
+/// Provider auth status
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderAuthStatus {
+    NotRequired,
+    Authenticated,
+    NotAuthenticated,
+    Expired,
+}
+
+/// Chat response from plugin
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChatResponse {
+    pub text: String,
+    #[serde(default)]
+    pub usage: Option<ChatUsage>,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
+/// Token usage from chat response
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChatUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
 }
 
 /// State passed to plugin host functions
