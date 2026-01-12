@@ -808,6 +808,9 @@ impl TuiApp {
         // Install Ctrl+C signal handler for force quit
         install_signal_handler();
 
+        // Preload models.dev database in background for fast model picker
+        crate::llm::models_db().preload();
+
         let terminal = Self::setup_terminal()?;
         let mut state = AppState::new();
         let events = EventHandler::new();
@@ -4692,7 +4695,7 @@ impl TuiApp {
         }
     }
 
-    /// Get models from a plugin provider (uses models.dev via base_provider)
+    /// Get models from a plugin provider (uses base_provider to determine model list)
     fn get_plugin_provider_models(provider_id: &str) -> Option<Vec<(String, String, String)>> {
         use crate::plugins::PluginRegistry;
 
@@ -4702,11 +4705,10 @@ impl TuiApp {
         for plugin in registry.provider_plugins() {
             for contribution in &plugin.manifest.contributes.providers {
                 if contribution.id == provider_id {
-                    // If base_provider is set, fetch models from models.dev
+                    // Use base_provider to get models from pre-loaded cache
                     if let Some(base_provider) = &contribution.base_provider {
-                        return Self::get_models_from_models_dev(base_provider);
+                        return Self::get_cached_models_for_provider(base_provider);
                     }
-                    // Otherwise, no models to show (plugin doesn't specify base_provider)
                     return None;
                 }
             }
@@ -4714,16 +4716,14 @@ impl TuiApp {
         None
     }
 
-    /// Fetch models from models.dev API (cached for 24h)
-    fn get_models_from_models_dev(provider: &str) -> Option<Vec<(String, String, String)>> {
-        // Use block_in_place to call async function in sync context
-        let models_result = tokio::task::block_in_place(|| {
-            let models_db = crate::llm::models_db();
-            tokio::runtime::Handle::current().block_on(models_db.list_models(provider))
-        });
+    /// Get models from the pre-loaded models.dev cache
+    fn get_cached_models_for_provider(provider: &str) -> Option<Vec<(String, String, String)>> {
+        // Try to get from already-loaded cache (non-blocking)
+        let models_db = crate::llm::models_db();
 
-        match models_result {
-            Ok(models) if !models.is_empty() => {
+        // Use try_get_cached which returns immediately from memory cache
+        if let Some(models) = models_db.try_get_cached(provider) {
+            if !models.is_empty() {
                 let mut result: Vec<(String, String, String)> = models
                     .into_iter()
                     .map(|m| {
@@ -4731,10 +4731,35 @@ impl TuiApp {
                         (m.id, m.name, desc)
                     })
                     .collect();
-                // Sort by model name
                 result.sort_by(|a, b| a.1.cmp(&b.1));
-                Some(result)
+                return Some(result);
             }
+        }
+
+        // Fallback to hardcoded if cache not ready
+        Self::get_fallback_models(provider)
+    }
+
+    /// Fallback models if cache not ready
+    fn get_fallback_models(provider: &str) -> Option<Vec<(String, String, String)>> {
+        match provider {
+            "google" | "gemini" => Some(vec![
+                (
+                    "gemini-2.0-flash-exp".into(),
+                    "Gemini 2.0 Flash".into(),
+                    "Fast and efficient".into(),
+                ),
+                (
+                    "gemini-1.5-pro".into(),
+                    "Gemini 1.5 Pro".into(),
+                    "Larger, more capable".into(),
+                ),
+                (
+                    "gemini-1.5-flash".into(),
+                    "Gemini 1.5 Flash".into(),
+                    "Fast and lightweight".into(),
+                ),
+            ]),
             _ => None,
         }
     }

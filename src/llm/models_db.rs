@@ -417,6 +417,77 @@ impl ModelsDbManager {
         }
     }
 
+    /// Try to get models from cache without blocking (returns None if cache not ready)
+    pub fn try_get_cached(&self, provider: &str) -> Option<Vec<ModelInfo>> {
+        // Try to read from memory cache without blocking
+        let cache_guard = self.cache.try_read().ok()?;
+        let entry = cache_guard.as_ref()?;
+
+        if !Self::is_cache_valid(entry) {
+            return None;
+        }
+
+        let provider_key = Self::normalize_provider(provider);
+        entry
+            .data
+            .providers
+            .get(&provider_key)
+            .map(|p| p.models.values().cloned().collect())
+    }
+
+    /// Preload models database in background (call at app startup)
+    pub fn preload(&self) {
+        let cache = self.cache.clone();
+        let cache_path = self.cache_path.clone();
+        let client = self.client.clone();
+
+        tokio::spawn(async move {
+            // First try disk cache
+            if let Some(ref path) = cache_path {
+                if let Ok(content) = tokio::fs::read_to_string(path).await {
+                    if let Ok(entry) = serde_json::from_str::<CacheEntry>(&content) {
+                        if Self::is_cache_valid(&entry) {
+                            let mut guard = cache.write().await;
+                            *guard = Some(entry);
+                            tracing::debug!("Loaded models.dev from disk cache");
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Fetch from API
+            match client.get(MODELS_API_URL).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(db) = resp.json::<ModelsDatabase>().await {
+                        let entry = CacheEntry {
+                            timestamp: Self::current_timestamp(),
+                            data: db,
+                        };
+
+                        // Save to disk
+                        if let Some(ref path) = cache_path {
+                            if let Some(parent) = path.parent() {
+                                let _ = tokio::fs::create_dir_all(parent).await;
+                            }
+                            if let Ok(content) = serde_json::to_string(&entry) {
+                                let _ = tokio::fs::write(path, content).await;
+                            }
+                        }
+
+                        // Store in memory
+                        let mut guard = cache.write().await;
+                        *guard = Some(entry);
+                        tracing::debug!("Preloaded models.dev from API");
+                    }
+                }
+                _ => {
+                    tracing::warn!("Failed to preload models.dev");
+                }
+            }
+        });
+    }
+
     /// Normalize provider name to match models.dev keys
     fn normalize_provider(provider: &str) -> String {
         match provider.to_lowercase().as_str() {
