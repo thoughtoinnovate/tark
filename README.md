@@ -421,7 +421,8 @@ tark plugin remove <plugin-id>
 
 ### Building Plugins
 
-See [Plugin SDK Documentation](docs/PLUGIN_SDK.md) for details on building plugins.
+- **[Plugin Development Guide](docs/PLUGIN_DEVELOPMENT.md)** - Step-by-step guide for building WASM plugins
+- **[Plugin SDK Documentation](docs/PLUGIN_SDK.md)** - WIT interface reference and API details
 
 ## Security
 

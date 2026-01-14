@@ -1,10 +1,16 @@
 # Tark Plugin SDK
 
-This guide explains how to build plugins for tark.
+> **📘 New to plugin development?** Start with the [Plugin Development Guide](PLUGIN_DEVELOPMENT.md) for a step-by-step tutorial. This document is the **interface reference** for the WIT definitions and host capabilities.
+
+This guide explains the WIT interfaces and host capabilities available to tark plugins.
 
 ## Overview
 
 Tark plugins are WebAssembly (WASM) modules that run in a sandboxed environment. They communicate with tark through WIT (WebAssembly Interface Types) interfaces, providing a secure and portable way to extend tark's functionality.
+
+**Documentation Structure**:
+- **[Plugin Development Guide](PLUGIN_DEVELOPMENT.md)** - Complete walkthrough: create, build, test, debug, and publish plugins
+- **This document (Plugin SDK)** - WIT interface reference and host capability APIs
 
 ## Plugin Types
 
