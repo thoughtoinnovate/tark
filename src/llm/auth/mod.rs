@@ -6,10 +6,8 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(unused_imports)]
 
-mod gemini_oauth;
 mod token_store;
 
-pub use gemini_oauth::GeminiOAuth;
 pub use token_store::TokenStore;
 
 use anyhow::Result;
@@ -86,7 +84,6 @@ pub enum AuthStatus {
 /// Trait for OAuth device flow authentication
 ///
 /// Implement this trait to add device flow auth for a provider.
-/// See `GeminiOAuth` for example implementation.
 #[async_trait]
 pub trait DeviceFlowAuth: Send + Sync {
     /// Provider name (e.g., "gemini", "copilot")

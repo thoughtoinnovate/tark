@@ -22,12 +22,13 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-mod host;
+pub mod host;
 mod manifest;
 mod registry;
 
 pub use host::{
-    AuthStatus, ChatResponse, ChatUsage, ModelInfo, PluginHost, ProviderAuthStatus, ProviderInfo,
+    AuthCredentials, AuthStatus, ChatResponse, ChatUsage, ModelInfo, PluginHost, PluginInstance,
+    ProviderAuthStatus, ProviderInfo,
 };
 pub use manifest::{
     PluginCapabilities, PluginContributions, PluginManifest, PluginType, ProviderContribution,

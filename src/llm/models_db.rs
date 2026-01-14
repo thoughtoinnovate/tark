@@ -435,6 +435,52 @@ impl ModelsDbManager {
             .map(|p| p.models.values().cloned().collect())
     }
 
+    /// Try to get a specific model from the in-memory cache without blocking.
+    ///
+    /// Returns `None` if the cache is not ready/expired or the model isn't present.
+    pub fn try_get_cached_model(&self, provider: &str, model_id: &str) -> Option<ModelInfo> {
+        let cache_guard = self.cache.try_read().ok()?;
+        let entry = cache_guard.as_ref()?;
+
+        if !Self::is_cache_valid(entry) {
+            return None;
+        }
+
+        let provider_key = Self::normalize_provider(provider);
+        entry
+            .data
+            .providers
+            .get(&provider_key)
+            .and_then(|p| p.models.get(model_id))
+            .cloned()
+    }
+
+    /// Try to get a model's context window from cache without blocking.
+    ///
+    /// Returns `None` if cache isn't ready or model is missing.
+    pub fn try_get_cached_context_limit(&self, provider: &str, model_id: &str) -> Option<u32> {
+        let model = self.try_get_cached_model(provider, model_id)?;
+        if model.limit.context > 0 {
+            Some(model.limit.context)
+        } else {
+            None
+        }
+    }
+
+    /// Try to calculate request cost from cache without blocking.
+    ///
+    /// Returns `None` if cache isn't ready or model is missing.
+    pub fn try_calculate_cost_cached(
+        &self,
+        provider: &str,
+        model_id: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Option<f64> {
+        let model = self.try_get_cached_model(provider, model_id)?;
+        Some(model.calculate_cost(input_tokens, output_tokens))
+    }
+
     /// Preload models database in background (call at app startup)
     pub fn preload(&self) {
         let cache = self.cache.clone();
@@ -488,25 +534,48 @@ impl ModelsDbManager {
         });
     }
 
+    /// Normalize provider name to match models.dev keys (public wrapper)
+    pub fn normalize_provider_name(&self, provider: &str) -> String {
+        Self::normalize_provider(provider)
+    }
+
     /// Normalize provider name to match models.dev keys
     fn normalize_provider(provider: &str) -> String {
-        match provider.to_lowercase().as_str() {
-            "openai" | "gpt" => "openai".to_string(),
-            "anthropic" | "claude" => "anthropic".to_string(),
-            "google" | "gemini" => "google".to_string(),
-            "ollama" | "local" => "ollama".to_string(),
-            "copilot" | "github" | "github-copilot" => "github-copilot".to_string(),
-            "openrouter" => "openrouter".to_string(),
-            "groq" => "groq".to_string(),
-            "together" | "togetherai" => "together".to_string(),
-            "fireworks" => "fireworks".to_string(),
-            "deepseek" => "deepseek".to_string(),
-            "mistral" => "mistral".to_string(),
-            "cohere" => "cohere".to_string(),
-            "perplexity" => "perplexity".to_string(),
-            "xai" | "grok" => "xai".to_string(),
-            other => other.to_string(),
+        let lower = provider.to_lowercase();
+
+        // Fast-path exact matches
+        match lower.as_str() {
+            "openai" | "gpt" => return "openai".to_string(),
+            "anthropic" | "claude" => return "anthropic".to_string(),
+            "google" | "gemini" => return "google".to_string(),
+            "ollama" | "local" => return "ollama".to_string(),
+            "copilot" | "github" | "github-copilot" => return "github-copilot".to_string(),
+            "openrouter" => return "openrouter".to_string(),
+            "groq" => return "groq".to_string(),
+            "together" | "togetherai" => return "together".to_string(),
+            "fireworks" => return "fireworks".to_string(),
+            "deepseek" => return "deepseek".to_string(),
+            "mistral" => return "mistral".to_string(),
+            "cohere" => return "cohere".to_string(),
+            "perplexity" => return "perplexity".to_string(),
+            "xai" | "grok" => return "xai".to_string(),
+            _ => {}
         }
+
+        // Plugin/provider aliases (best-effort). This enables models.dev lookups for
+        // plugin provider IDs like "gemini-oauth" without requiring every caller
+        // to special-case them.
+        if lower.contains("gemini") {
+            return "google".to_string();
+        }
+        if lower.contains("claude") {
+            return "anthropic".to_string();
+        }
+        if lower.contains("openai") || lower.starts_with("gpt") {
+            return "openai".to_string();
+        }
+
+        lower
     }
 
     /// Calculate cost for a request
@@ -1005,5 +1074,20 @@ mod tests {
         assert!(summary.contains("reasoning"));
         assert!(summary.contains("vision"));
         assert!(summary.contains("pdf"));
+    }
+
+    #[test]
+    fn test_normalize_provider_plugin_aliases() {
+        // Plugin IDs should still resolve to canonical models.dev provider keys
+        // so the rest of the app doesn't need special-casing.
+        assert_eq!(
+            ModelsDbManager::normalize_provider("gemini-oauth"),
+            "google"
+        );
+        assert_eq!(
+            ModelsDbManager::normalize_provider("claude-oauth"),
+            "anthropic"
+        );
+        assert_eq!(ModelsDbManager::normalize_provider("openai-sso"), "openai");
     }
 }

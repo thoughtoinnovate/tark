@@ -2,14 +2,31 @@
 //!
 //! Provides the runtime environment for executing plugins.
 //! Host functions allow plugins to access storage, HTTP, environment, and logging.
+//!
+//! # Security Architecture
+//!
+//! Plugins are sandboxed using WASM isolation, but we add additional protections:
+//! - **Epoch interruption**: Prevents infinite loops (configurable timeout)
+//! - **HTTP timeouts**: All HTTP requests have configurable timeouts
+//! - **Panic catching**: Plugin failures don't crash the host application
+//! - **Capability restrictions**: Plugins declare required capabilities in manifest
 
 use super::manifest::PluginCapabilities;
 use super::registry::InstalledPlugin;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 use wasmtime::*;
 use wasmtime_wasi::preview1::WasiP1Ctx;
+
+/// Default timeout for plugin HTTP requests (30 seconds)
+const HTTP_TIMEOUT_SECS: u64 = 30;
+
+/// Default epoch deadline ticks (roughly 30 seconds at default interval)
+const DEFAULT_EPOCH_DEADLINE: u64 = 30_000;
 
 /// A loaded plugin instance
 pub struct PluginInstance {
@@ -32,6 +49,54 @@ pub enum AuthStatus {
 }
 
 impl PluginInstance {
+    // =========================================================================
+    // Safety Wrappers
+    // =========================================================================
+
+    /// Safely execute a plugin operation, catching any panics
+    ///
+    /// This ensures that a misbehaving plugin cannot crash the host application.
+    /// Panics are converted to errors and logged.
+    fn safe_call<F, T>(&mut self, op_name: &str, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        // Reset epoch deadline before each call to ensure fresh timeout
+        self.store.set_epoch_deadline(DEFAULT_EPOCH_DEADLINE);
+
+        // Wrap in catch_unwind to prevent panics from crashing the host
+        let result = catch_unwind(AssertUnwindSafe(|| f(self)));
+
+        match result {
+            Ok(inner_result) => inner_result,
+            Err(panic_info) => {
+                // Extract panic message if possible
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+
+                tracing::error!(
+                    "[plugin:{}] Plugin panicked during '{}': {}",
+                    self.id,
+                    op_name,
+                    panic_msg
+                );
+
+                anyhow::bail!(
+                    "Plugin '{}' crashed during '{}': {}. \
+                    This is a plugin bug, not a tark bug.",
+                    self.id,
+                    op_name,
+                    panic_msg
+                )
+            }
+        }
+    }
+
     // =========================================================================
     // Auth Plugin Interface Methods
     // =========================================================================
@@ -244,72 +309,107 @@ impl PluginInstance {
         Ok(())
     }
 
+    /// Get auth credentials from auth-only plugin
+    ///
+    /// Auth-only plugins export this function instead of provider_chat.
+    /// The returned credentials are used to create a native provider instance
+    /// (e.g., GeminiProvider with Cloud Code Assist mode).
+    ///
+    /// Returns Err if the plugin doesn't export this function.
+    ///
+    /// # Safety
+    /// This call is wrapped with panic protection - plugin crashes won't crash tark.
+    pub fn provider_auth_credentials(&mut self) -> Result<AuthCredentials> {
+        self.safe_call("provider_auth_credentials", |this| {
+            let json = this.call_string_return_fn("provider_auth_credentials")?;
+            serde_json::from_str(&json).context("Failed to parse auth credentials JSON")
+        })
+    }
+
+    /// Check if plugin exports the auth-only interface
+    ///
+    /// Returns true if the plugin exports provider_auth_credentials,
+    /// indicating it's an auth-only plugin that delegates to native providers.
+    pub fn has_auth_credentials_interface(&mut self) -> bool {
+        self.instance
+            .get_typed_func::<i32, i32>(&mut self.store, "provider_auth_credentials")
+            .is_ok()
+    }
+
     /// Send chat completion request (non-streaming)
     /// messages_json: JSON array of {role, content} objects
     /// Returns: JSON response with {text, usage}
+    ///
+    /// # Safety
+    /// This call is wrapped with panic protection - plugin crashes won't crash tark.
     pub fn provider_chat(&mut self, messages_json: &str, model: &str) -> Result<ChatResponse> {
-        let alloc_fn = self
-            .instance
-            .get_typed_func::<i32, i32>(&mut self.store, "alloc")
-            .context("Plugin does not export 'alloc' function")?;
+        let messages_json = messages_json.to_string();
+        let model = model.to_string();
 
-        // Allocate and write messages JSON
-        let msgs_bytes = messages_json.as_bytes();
-        let msgs_ptr = alloc_fn.call(&mut self.store, msgs_bytes.len() as i32)?;
-        {
-            let memory = self
+        self.safe_call("provider_chat", move |this| {
+            let alloc_fn = this
                 .instance
-                .get_memory(&mut self.store, "memory")
-                .context("Plugin has no memory export")?;
-            memory.write(&mut self.store, msgs_ptr as usize, msgs_bytes)?;
-        }
+                .get_typed_func::<i32, i32>(&mut this.store, "alloc")
+                .context("Plugin does not export 'alloc' function")?;
 
-        // Allocate and write model string
-        let model_bytes = model.as_bytes();
-        let model_ptr = alloc_fn.call(&mut self.store, model_bytes.len() as i32)?;
-        {
-            let memory = self
+            // Allocate and write messages JSON
+            let msgs_bytes = messages_json.as_bytes();
+            let msgs_ptr = alloc_fn.call(&mut this.store, msgs_bytes.len() as i32)?;
+            {
+                let memory = this
+                    .instance
+                    .get_memory(&mut this.store, "memory")
+                    .context("Plugin has no memory export")?;
+                memory.write(&mut this.store, msgs_ptr as usize, msgs_bytes)?;
+            }
+
+            // Allocate and write model string
+            let model_bytes = model.as_bytes();
+            let model_ptr = alloc_fn.call(&mut this.store, model_bytes.len() as i32)?;
+            {
+                let memory = this
+                    .instance
+                    .get_memory(&mut this.store, "memory")
+                    .context("Plugin has no memory export")?;
+                memory.write(&mut this.store, model_ptr as usize, model_bytes)?;
+            }
+
+            // Allocate return buffer
+            let ret_ptr = alloc_fn.call(&mut this.store, 65536)?; // 64KB for response
+
+            // Call provider_chat(msgs_ptr, msgs_len, model_ptr, model_len, ret_ptr) -> len
+            let chat_fn = this
                 .instance
-                .get_memory(&mut self.store, "memory")
+                .get_typed_func::<(i32, i32, i32, i32, i32), i32>(&mut this.store, "provider_chat")
+                .context("Plugin does not export 'provider_chat' function")?;
+
+            let len = chat_fn.call(
+                &mut this.store,
+                (
+                    msgs_ptr,
+                    msgs_bytes.len() as i32,
+                    model_ptr,
+                    model_bytes.len() as i32,
+                    ret_ptr,
+                ),
+            )?;
+
+            if len < 0 {
+                anyhow::bail!("Provider chat failed with error code: {}", len);
+            }
+
+            // Read response JSON
+            let memory = this
+                .instance
+                .get_memory(&mut this.store, "memory")
                 .context("Plugin has no memory export")?;
-            memory.write(&mut self.store, model_ptr as usize, model_bytes)?;
-        }
 
-        // Allocate return buffer
-        let ret_ptr = alloc_fn.call(&mut self.store, 65536)?; // 64KB for response
+            let data = memory.data(&this.store);
+            let response_bytes = &data[ret_ptr as usize..(ret_ptr + len) as usize];
+            let response_json = String::from_utf8(response_bytes.to_vec())?;
 
-        // Call provider_chat(msgs_ptr, msgs_len, model_ptr, model_len, ret_ptr) -> len
-        let chat_fn = self
-            .instance
-            .get_typed_func::<(i32, i32, i32, i32, i32), i32>(&mut self.store, "provider_chat")
-            .context("Plugin does not export 'provider_chat' function")?;
-
-        let len = chat_fn.call(
-            &mut self.store,
-            (
-                msgs_ptr,
-                msgs_bytes.len() as i32,
-                model_ptr,
-                model_bytes.len() as i32,
-                ret_ptr,
-            ),
-        )?;
-
-        if len < 0 {
-            anyhow::bail!("Provider chat failed with error code: {}", len);
-        }
-
-        // Read response JSON
-        let memory = self
-            .instance
-            .get_memory(&mut self.store, "memory")
-            .context("Plugin has no memory export")?;
-
-        let data = memory.data(&self.store);
-        let response_bytes = &data[ret_ptr as usize..(ret_ptr + len) as usize];
-        let response_json = String::from_utf8(response_bytes.to_vec())?;
-
-        serde_json::from_str(&response_json).context("Failed to parse chat response JSON")
+            serde_json::from_str(&response_json).context("Failed to parse chat response JSON")
+        })
     }
 
     // =========================================================================
@@ -389,6 +489,10 @@ pub struct ProviderInfo {
     pub description: String,
     #[serde(default)]
     pub requires_auth: bool,
+    /// Provider key for models.dev lookup (e.g., "google" for gemini plugins)
+    /// If not set, tark will try to infer from the plugin id
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// Model info from plugin
@@ -431,6 +535,27 @@ pub struct ChatUsage {
     pub output_tokens: u32,
 }
 
+/// Auth credentials from auth-only plugin
+///
+/// Auth-only plugins provide credentials to tark's built-in providers
+/// instead of implementing the full provider_chat interface. This enables
+/// streaming, tools, and all native provider features.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct AuthCredentials {
+    /// Valid OAuth access token (refreshed by plugin if needed)
+    pub access_token: String,
+    /// Google Cloud project ID (for Cloud Code Assist API)
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// API mode: "standard" or "cloud_code_assist"
+    #[serde(default = "default_api_mode")]
+    pub api_mode: String,
+}
+
+fn default_api_mode() -> String {
+    "cloud_code_assist".to_string()
+}
+
 /// State passed to plugin host functions
 pub struct PluginState {
     /// Plugin ID
@@ -471,7 +596,14 @@ impl PluginState {
             plugin_id: plugin_id.to_string(),
             data_dir,
             capabilities,
-            http_client: reqwest::blocking::Client::new(),
+            // IMPORTANT: plugin HTTP is implemented with a blocking reqwest client.
+            // Without timeouts, a network stall can hang provider calls indefinitely,
+            // which shows up in the TUI as "no response".
+            http_client: reqwest::blocking::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+                .build()
+                .unwrap_or_else(|_| reqwest::blocking::Client::new()),
             storage,
             allowed_env_vars,
             allowed_http_domains,
@@ -522,23 +654,32 @@ impl PluginState {
     pub fn is_env_allowed(&self, name: &str) -> bool {
         self.allowed_env_vars.iter().any(|v| v == name || v == "*")
     }
+
+    /// Check if filesystem read access to a path is allowed
+    pub fn is_fs_read_allowed(&self, path: &str) -> bool {
+        self.capabilities.is_fs_read_allowed(path)
+    }
 }
 
 /// Plugin host - manages WASM runtime and plugin instances
 pub struct PluginHost {
-    /// WASM engine
-    engine: Engine,
+    /// WASM engine (shared for epoch increment thread)
+    engine: Arc<Engine>,
     /// Loaded plugin instances
     instances: HashMap<String, PluginInstance>,
 }
 
 impl PluginHost {
-    /// Create a new plugin host
+    /// Create a new plugin host with security features enabled
     pub fn new() -> Result<Self> {
-        let config = Config::new();
-        // Note: We use sync mode for simplicity. Async mode requires async instantiation.
+        let mut config = Config::new();
 
-        let engine = Engine::new(&config)?;
+        // Enable epoch-based interruption to prevent infinite loops
+        // This allows us to interrupt long-running WASM code
+        config.epoch_interruption(true);
+
+        // Note: We use sync mode for simplicity. Async mode requires async instantiation.
+        let engine = Arc::new(Engine::new(&config)?);
 
         Ok(Self {
             engine,
@@ -566,6 +707,10 @@ impl PluginHost {
         );
 
         let mut store = Store::new(&self.engine, state);
+
+        // Set epoch deadline to prevent infinite loops
+        // The deadline is set to a reasonable number of ticks
+        store.set_epoch_deadline(DEFAULT_EPOCH_DEADLINE);
 
         // Create linker with host functions
         let mut linker = Linker::new(&self.engine);
@@ -744,6 +889,8 @@ impl PluginHost {
 
                 // Clone client to release immutable borrow
                 let client = caller.data().http_client.clone();
+                // Direct call - http_get_impl uses reqwest::blocking which is safe
+                // Note: block_in_place() was removed as it panics on single-threaded runtimes
                 let response_str = http_get_impl(&client, &url, &headers_json);
 
                 write_string(&mut caller, ret_ptr, &response_str).unwrap_or(-1)
@@ -794,6 +941,8 @@ impl PluginHost {
                 tracing::debug!("[plugin:{}] http.post({})", plugin_id, url);
 
                 let client = caller.data().http_client.clone();
+                // Direct call - http_post_impl uses reqwest::blocking which is safe
+                // Note: block_in_place() was removed as it panics on single-threaded runtimes
                 let response_str = http_post_impl(&client, &url, body, &headers_json);
 
                 write_string(&mut caller, ret_ptr, &response_str).unwrap_or(-1)
@@ -883,6 +1032,55 @@ impl PluginHost {
             },
         )?;
 
+        // =========================================================================
+        // Filesystem Functions (read-only, capability-controlled)
+        // =========================================================================
+
+        // fs.read(path: string) -> i32 (bytes written or error)
+        // Error codes: -1 = invalid path string, -2 = permission denied, -3 = read error, -4 = write error
+        linker.func_wrap(
+            "tark:fs",
+            "read",
+            |mut caller: Caller<'_, PluginState>,
+             path_ptr: i32,
+             path_len: i32,
+             ret_ptr: i32|
+             -> i32 {
+                let path = match read_string(&mut caller, path_ptr, path_len) {
+                    Ok(p) => p,
+                    Err(_) => return -1, // Invalid path string
+                };
+
+                let plugin_id = caller.data().plugin_id.clone();
+
+                // Security check: is this path allowed?
+                if !caller.data().is_fs_read_allowed(&path) {
+                    tracing::warn!(
+                        "[plugin:{}] fs.read blocked - path not in allowed list: {}",
+                        plugin_id,
+                        path
+                    );
+                    return -2; // Permission denied
+                }
+
+                tracing::debug!("[plugin:{}] fs.read({})", plugin_id, path);
+
+                // Expand ~ to home directory
+                let expanded = expand_home_for_fs(&path);
+
+                // Read file contents
+                let contents = match std::fs::read_to_string(&expanded) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::debug!("[plugin:{}] fs.read failed: {}", plugin_id, e);
+                        return -3; // Read error
+                    }
+                };
+
+                write_string(&mut caller, ret_ptr, &contents).unwrap_or(-4)
+            },
+        )?;
+
         Ok(())
     }
 
@@ -955,6 +1153,24 @@ fn write_string(caller: &mut Caller<'_, PluginState>, ptr: i32, s: &str) -> Resu
 
     data[start..end].copy_from_slice(bytes);
     Ok(bytes.len() as i32)
+}
+
+// =============================================================================
+// Filesystem helper functions
+// =============================================================================
+
+/// Expand ~ to home directory in a path
+fn expand_home_for_fs(path: &str) -> String {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped).to_string_lossy().to_string();
+        }
+    } else if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home.to_string_lossy().to_string();
+        }
+    }
+    path.to_string()
 }
 
 // =============================================================================

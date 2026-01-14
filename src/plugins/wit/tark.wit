@@ -72,6 +72,16 @@ interface log {
     error: func(message: string);
 }
 
+/// Filesystem access (read-only, capability-controlled)
+/// Plugin must declare allowed paths in capabilities.fs_read
+interface fs {
+    /// Read a file from an allowed path
+    /// Supports ~ for home directory expansion
+    /// Returns file contents on success, error on failure
+    /// Error codes: -1 = invalid path, -2 = permission denied, -3 = read error
+    read: func(path: string) -> result<string, string>;
+}
+
 // ============================================================================
 // Plugin-provided interfaces (plugins export these)
 // ============================================================================
@@ -261,6 +271,7 @@ world auth-world {
     import http;
     import env;
     import log;
+    import fs;
     
     export auth-plugin;
 }
@@ -271,6 +282,7 @@ world tool-world {
     import http;
     import env;
     import log;
+    import fs;
     
     export tool-plugin;
 }
@@ -281,6 +293,7 @@ world provider-world {
     import http;
     import env;
     import log;
+    import fs;
     
     export provider-plugin;
 }

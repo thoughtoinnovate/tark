@@ -2,10 +2,16 @@
 //!
 //! Wraps a WASM provider plugin as an `LlmProvider` implementation,
 //! allowing plugins to be used seamlessly alongside built-in providers.
+//!
+//! # Auth-Only Plugins
+//!
+//! Some plugins only provide authentication and delegate to tark's native
+//! providers for actual API calls. These plugins export `provider_auth_credentials()`
+//! instead of `provider_chat()`, enabling streaming, tools, and all native features.
 
 use super::{
-    CodeIssue, CompletionResult, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role,
-    TokenUsage, ToolDefinition,
+    CodeIssue, CompletionResult, GeminiProvider, LlmProvider, LlmResponse, Message,
+    RefactoringSuggestion, Role, TokenUsage, ToolDefinition,
 };
 use crate::plugins::{
     ChatResponse, ModelInfo, PluginHost, PluginRegistry, PluginType, ProviderAuthStatus,
@@ -162,11 +168,6 @@ impl LlmProvider for PluginProviderAdapter {
         messages: &[Message],
         _tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse> {
-        let (mut host, plugin_id) = self.get_instance()?;
-        let instance = host
-            .get_mut(&plugin_id)
-            .ok_or_else(|| anyhow::anyhow!("Plugin instance not found"))?;
-
         // Convert messages to plugin format (JSON)
         let plugin_messages: Vec<PluginMessage> = messages
             .iter()
@@ -183,9 +184,49 @@ impl LlmProvider for PluginProviderAdapter {
             .collect();
 
         let messages_json = serde_json::to_string(&plugin_messages)?;
+        let model = self.model.clone();
+        let plugin_id = self.plugin_id.clone();
 
-        // Call plugin
-        let response: ChatResponse = instance.provider_chat(&messages_json, &self.model)?;
+        tracing::debug!(
+            "[plugin-provider:{}] provider_chat(model={}, messages={})",
+            plugin_id,
+            model,
+            plugin_messages.len()
+        );
+
+        // Run the entire plugin call in a blocking thread to avoid wasmtime-wasi runtime conflicts.
+        // The wasmtime-wasi runtime internally uses tokio and will panic if called from within
+        // a tokio runtime worker thread without proper isolation.
+        let (response, pid) =
+            tokio::task::spawn_blocking(move || -> Result<(ChatResponse, String)> {
+                let registry = PluginRegistry::new()?;
+                let plugin = registry
+                    .get(&plugin_id)
+                    .ok_or_else(|| anyhow::anyhow!("Plugin not found: {}", plugin_id))?;
+
+                let mut host = PluginHost::new()?;
+                host.load(plugin)?;
+
+                let instance = host
+                    .get_mut(&plugin_id)
+                    .ok_or_else(|| anyhow::anyhow!("Plugin instance not found"))?;
+
+                let response: ChatResponse = instance.provider_chat(&messages_json, &model)?;
+                Ok((response, plugin_id))
+            })
+            .await??;
+
+        if response.text.trim().is_empty() {
+            // Treat empty text as an error; it's almost always a plugin-side failure
+            // (auth, blocked HTTP domain, timeout, etc.) that would otherwise look like
+            // "no response" in the TUI.
+            anyhow::bail!(
+                "Plugin provider '{}' returned an empty response for model '{}'. \
+Check plugin auth status and allowed HTTP domains.",
+                pid,
+                self.model
+            );
+        }
 
         // Convert response
         let usage = response.usage.map(|u| TokenUsage {
@@ -298,6 +339,12 @@ pub fn list_plugin_providers() -> Vec<(String, String)> {
 }
 
 /// Try to create a provider from a plugin
+///
+/// This function supports two types of plugins:
+/// 1. **Auth-only plugins**: Export `provider_auth_credentials()` and delegate to native providers
+/// 2. **Full provider plugins**: Export `provider_chat()` and handle requests themselves
+///
+/// Auth-only plugins get native streaming, tools, and all provider features.
 pub fn try_create_plugin_provider(name: &str, model: Option<&str>) -> Option<Box<dyn LlmProvider>> {
     let registry = PluginRegistry::new().ok()?;
 
@@ -313,6 +360,59 @@ pub fn try_create_plugin_provider(name: &str, model: Option<&str>) -> Option<Box
         return None;
     }
 
+    // Load plugin to check interface type
+    let mut host = PluginHost::new().ok()?;
+    if host.load(plugin).is_err() {
+        tracing::debug!("Failed to load plugin {}", name);
+        return None;
+    }
+
+    let instance = host.get_mut(name)?;
+
+    // Auto-initialize with Gemini CLI credentials if available
+    if name == "gemini-oauth" || name.contains("gemini") {
+        if let Some(creds_path) =
+            dirs::home_dir().map(|h| h.join(".gemini").join("oauth_creds.json"))
+        {
+            if creds_path.exists() {
+                if let Ok(creds_json) = std::fs::read_to_string(&creds_path) {
+                    let _ = instance.provider_auth_init(&creds_json);
+                }
+            }
+        }
+    }
+
+    // Check if this is an auth-only plugin (exports provider_auth_credentials)
+    let has_auth_interface = instance.has_auth_credentials_interface();
+    tracing::info!(
+        "Plugin {} auth-only interface check: {}",
+        name,
+        has_auth_interface
+    );
+
+    if has_auth_interface {
+        tracing::info!(
+            "Plugin {} is auth-only, delegating to native provider",
+            name
+        );
+        match try_create_native_provider_from_auth_plugin(instance, model) {
+            Some(provider) => {
+                tracing::info!(
+                    "Successfully created native provider from auth plugin {}",
+                    name
+                );
+                return Some(provider);
+            }
+            None => {
+                tracing::error!("Failed to create native provider from auth plugin {}", name);
+                // Fall back to full provider adapter
+            }
+        }
+    }
+
+    // Fall back to full provider plugin (PluginProviderAdapter)
+    tracing::debug!("Plugin {} is a full provider plugin", name);
+
     let mut adapter = match PluginProviderAdapter::new(name) {
         Ok(a) => a,
         Err(e) => {
@@ -325,20 +425,64 @@ pub fn try_create_plugin_provider(name: &str, model: Option<&str>) -> Option<Box
         adapter = adapter.with_model(m);
     }
 
-    // Try to auto-initialize with Gemini CLI credentials if this is gemini-oauth
-    if name == "gemini-oauth" || name.contains("gemini") {
-        if let Some(creds_path) =
-            dirs::home_dir().map(|h| h.join(".gemini").join("oauth_creds.json"))
-        {
-            if creds_path.exists() {
-                if let Ok(creds_json) = std::fs::read_to_string(&creds_path) {
-                    let _ = adapter.auth_init(&creds_json);
+    Some(Box::new(adapter))
+}
+
+/// Create a native provider from an auth-only plugin's credentials
+fn try_create_native_provider_from_auth_plugin(
+    instance: &mut crate::plugins::PluginInstance,
+    model: Option<&str>,
+) -> Option<Box<dyn LlmProvider>> {
+    tracing::debug!("Calling provider_auth_credentials on plugin...");
+
+    // Get auth credentials from plugin
+    let creds = match instance.provider_auth_credentials() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to get auth credentials from plugin: {}", e);
+            return None;
+        }
+    };
+
+    tracing::info!(
+        "Got auth credentials: api_mode={}, has_project_id={}, token_len={}",
+        creds.api_mode,
+        creds.project_id.is_some(),
+        creds.access_token.len()
+    );
+
+    match creds.api_mode.as_str() {
+        "cloud_code_assist" => {
+            // Create GeminiProvider with Cloud Code Assist mode
+            let project_id = match creds.project_id {
+                Some(pid) => pid,
+                None => {
+                    tracing::error!("Cloud Code Assist mode requires project_id but none provided");
+                    return None;
                 }
-            }
+            };
+
+            let provider = GeminiProvider::with_cloud_code_assist(creds.access_token, project_id)
+                .with_model(model.unwrap_or("gemini-2.0-flash"));
+
+            tracing::info!(
+                "Created GeminiProvider with Cloud Code Assist mode, model={}",
+                model.unwrap_or("gemini-2.0-flash")
+            );
+
+            Some(Box::new(provider))
+        }
+        "standard" => {
+            // Standard API mode not yet supported for auth-only plugins
+            // (would need to pass API key instead of Bearer token)
+            tracing::warn!("Standard API mode not supported for auth-only plugins");
+            None
+        }
+        unknown => {
+            tracing::error!("Unknown API mode from auth plugin: {}", unknown);
+            None
         }
     }
-
-    Some(Box::new(adapter))
 }
 
 #[cfg(test)]

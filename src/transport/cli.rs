@@ -33,6 +33,7 @@ pub async fn run_tui_chat(
     socket_path: Option<String>,
     provider: Option<String>,
     model: Option<String>,
+    debug: bool,
 ) -> Result<()> {
     let working_dir = PathBuf::from(working_dir).canonicalize()?;
 
@@ -41,7 +42,8 @@ pub async fn run_tui_chat(
 
     // Create the TUI application with provider/model overrides from CLI
     // This ensures the correct provider is used when creating the AgentBridge
-    let mut app = TuiApp::with_provider_override(tui_config, provider.clone(), model.clone())?;
+    let mut app =
+        TuiApp::with_provider_override(tui_config, provider.clone(), model.clone(), debug)?;
 
     // Determine effective provider for logging
     let effective_provider = provider.unwrap_or_else(|| {
@@ -603,90 +605,40 @@ pub async fn run_auth(provider: Option<&str>) -> Result<()> {
             }
         }
         "gemini" | "google" => {
-            use crate::llm::auth::{AuthStatus as OAuthStatus, DeviceFlowAuth, GeminiOAuth};
+            // Check for API key
+            if std::env::var("GEMINI_API_KEY").is_ok() {
+                println!("✅ GEMINI_API_KEY is already set");
+                println!();
+                println!("You can use Gemini with your API key:");
+                println!("  tark chat --provider gemini");
+            } else if std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok() {
+                println!("✅ Using Application Default Credentials");
+                println!();
+                println!("GOOGLE_APPLICATION_CREDENTIALS is set");
+            } else {
+                // Check if gemini-oauth plugin has credentials
+                let oauth_creds_path = dirs::home_dir()
+                    .map(|h| h.join(".gemini").join("oauth_creds.json"))
+                    .unwrap_or_default();
 
-            // Check current auth status
-            let auth = GeminiOAuth::new()?;
-            let status = auth.status().await;
-
-            match status {
-                OAuthStatus::ApiKey => {
-                    println!("✅ GEMINI_API_KEY is already set");
+                if oauth_creds_path.exists() {
+                    println!("✅ Gemini CLI OAuth credentials found");
                     println!();
-                    println!("You can use Gemini with your API key:");
-                    println!("  tark chat --provider gemini");
-                }
-                OAuthStatus::OAuth => {
-                    println!("✅ Already authenticated with Google OAuth");
+                    println!("Use the gemini-oauth plugin provider:");
+                    println!("  tark chat --provider gemini-oauth");
                     println!();
-                    println!("Token location: ~/.local/share/tark/tokens/gemini.json");
+                    println!("Or set GEMINI_API_KEY for direct API access.");
+                } else {
+                    println!("{}", "Gemini Authentication Options".bold());
                     println!();
-                    println!("To re-authenticate, first logout:");
-                    println!("  tark auth logout gemini");
-                }
-                OAuthStatus::ADC => {
-                    println!("✅ Using Application Default Credentials");
+                    println!("Option 1 - API Key (recommended for simplicity):");
+                    println!("  export GEMINI_API_KEY=\"your-api-key\"");
+                    println!("  Get key: https://aistudio.google.com/apikey");
                     println!();
-                    println!("GOOGLE_APPLICATION_CREDENTIALS is set");
-                }
-                OAuthStatus::NotAuthenticated => {
-                    println!("Starting Google OAuth device flow...");
-                    println!();
-
-                    // Start device flow
-                    let device_response = auth.start_device_flow().await?;
-
-                    // Display auth info
-                    println!("🔐 Google Gemini Authentication");
-                    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                    println!();
-                    println!("1. Visit this URL in your browser:");
-                    println!("   {}", device_response.verification_url);
-                    println!();
-                    println!("2. Enter this code:");
-                    println!("   {}", device_response.user_code);
-                    println!();
-                    println!("Waiting for authorization...");
-                    println!();
-
-                    // Poll for token
-                    let start = std::time::Instant::now();
-                    let timeout = std::time::Duration::from_secs(device_response.expires_in);
-                    let interval = std::time::Duration::from_secs(device_response.interval);
-
-                    loop {
-                        if start.elapsed() > timeout {
-                            anyhow::bail!("Authentication timed out");
-                        }
-
-                        tokio::time::sleep(interval).await;
-
-                        match auth.poll(&device_response.device_code).await? {
-                            crate::llm::auth::PollResult::Pending => {
-                                eprint!(".");
-                                use std::io::Write;
-                                let _ = std::io::stderr().flush();
-                                continue;
-                            }
-                            crate::llm::auth::PollResult::Success(_) => {
-                                println!();
-                                println!();
-                                println!("✅ Successfully authenticated with Google!");
-                                println!();
-                                println!("Token saved to: ~/.local/share/tark/tokens/gemini.json");
-                                println!();
-                                println!("You can now use Gemini:");
-                                println!("  tark chat --provider gemini");
-                                break;
-                            }
-                            crate::llm::auth::PollResult::Expired => {
-                                anyhow::bail!("Device code expired");
-                            }
-                            crate::llm::auth::PollResult::Error(e) => {
-                                anyhow::bail!("Authentication failed: {}", e);
-                            }
-                        }
-                    }
+                    println!("Option 2 - OAuth via Gemini CLI (for Cloud Code Assist):");
+                    println!("  npm install -g @google/gemini-cli");
+                    println!("  gemini auth login");
+                    println!("  tark chat --provider gemini-oauth");
                 }
             }
         }
@@ -746,15 +698,38 @@ pub async fn run_auth_logout(provider: &str) -> Result<()> {
 
     match provider.to_lowercase().as_str() {
         "gemini" | "google" => {
-            use crate::llm::auth::{DeviceFlowAuth, GeminiOAuth};
+            // Clear plugin storage if exists
+            let plugin_storage = dirs::data_local_dir()
+                .map(|d| {
+                    d.join("tark")
+                        .join("plugins")
+                        .join("gemini-oauth")
+                        .join("data")
+                        .join("storage.json")
+                })
+                .unwrap_or_default();
 
-            let auth = GeminiOAuth::new()?;
-            auth.logout().await?;
+            if plugin_storage.exists() {
+                std::fs::remove_file(&plugin_storage)?;
+                println!("✅ Cleared gemini-oauth plugin credentials");
+            }
 
-            println!("✅ Logged out from Google Gemini");
+            // Clear native token if exists
+            let token_path = dirs::data_local_dir()
+                .map(|d| d.join("tark").join("tokens").join("gemini.json"))
+                .unwrap_or_default();
+
+            if token_path.exists() {
+                std::fs::remove_file(&token_path)?;
+                println!("✅ Cleared Gemini OAuth token");
+            }
+
             println!();
-            println!("To authenticate again:");
-            println!("  tark auth gemini");
+            println!("To re-authenticate with Gemini CLI OAuth:");
+            println!("  gemini auth login");
+            println!();
+            println!("Or set an API key:");
+            println!("  export GEMINI_API_KEY=\"your-key\"");
         }
         "copilot" | "github" => {
             // Remove Copilot token
@@ -790,14 +765,20 @@ pub async fn run_auth_status() -> Result<()> {
 
     // Check Gemini
     {
-        use crate::llm::auth::{AuthStatus, DeviceFlowAuth, GeminiOAuth};
-        let auth = GeminiOAuth::new()?;
-        let status = auth.status().await;
-        let status_str = match status {
-            AuthStatus::ApiKey => "✅ API Key".green(),
-            AuthStatus::OAuth => "✅ OAuth".green(),
-            AuthStatus::ADC => "✅ ADC".green(),
-            AuthStatus::NotAuthenticated => "❌ Not authenticated".red(),
+        let has_api_key = std::env::var("GEMINI_API_KEY").is_ok();
+        let has_adc = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok();
+        let has_oauth = dirs::home_dir()
+            .map(|h| h.join(".gemini").join("oauth_creds.json").exists())
+            .unwrap_or(false);
+
+        let status_str = if has_api_key {
+            "✅ API Key".green()
+        } else if has_adc {
+            "✅ ADC".green()
+        } else if has_oauth {
+            "✅ OAuth (via Gemini CLI)".green()
+        } else {
+            "❌ Not authenticated".red()
         };
         println!("  Gemini:     {}", status_str);
     }

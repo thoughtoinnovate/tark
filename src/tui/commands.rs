@@ -362,13 +362,17 @@ impl ProviderInfo {
             let auth_status = instance
                 .provider_auth_status()
                 .unwrap_or(ProviderAuthStatus::NotAuthenticated);
-            let available = matches!(
+            // IMPORTANT UX: plugin providers should be selectable even when not authenticated,
+            // so users can browse models and then authenticate when they try to chat.
+            //
+            // We still compute auth_status for hints and to help the UI display readiness.
+            let authenticated = matches!(
                 auth_status,
                 ProviderAuthStatus::NotRequired | ProviderAuthStatus::Authenticated
             );
 
             // Try to auto-init with Gemini CLI credentials if applicable
-            let available = if !available && plugin.id().contains("gemini") {
+            let authenticated = if !authenticated && plugin.id().contains("gemini") {
                 if let Some(creds_path) =
                     dirs::home_dir().map(|h| h.join(".gemini").join("oauth_creds.json"))
                 {
@@ -396,15 +400,15 @@ impl ProviderInfo {
                     false
                 }
             } else {
-                available
+                authenticated
             };
 
-            let hint = if available {
+            let hint = if authenticated {
                 None
             } else {
                 Some(format!(
-                    "Plugin '{}' requires authentication. Check plugin documentation.",
-                    plugin.id()
+                    "Authentication required (status: {:?}). You can still pick a model; authenticate before chatting.",
+                    auth_status
                 ))
             };
 
@@ -412,7 +416,7 @@ impl ProviderInfo {
                 plugin.id(),
                 &info.display_name,
                 &info.description,
-                available,
+                true, // selectable (installed & loadable)
                 hint,
             ));
         }

@@ -290,6 +290,18 @@ impl ThinkingConfig {
         items.insert(0, ("off".to_string(), "Disable thinking".to_string()));
         items
     }
+
+    /// Get the default level name (falls back to "medium" if not configured)
+    pub fn default_level(&self) -> Option<&str> {
+        if self.default_level.is_empty() {
+            return Some("medium");
+        }
+        if self.levels.contains_key(&self.default_level) {
+            Some(&self.default_level)
+        } else {
+            Some("medium")
+        }
+    }
 }
 
 impl Default for ThinkingConfig {

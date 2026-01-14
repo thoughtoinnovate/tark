@@ -6,8 +6,9 @@
 #![allow(dead_code)]
 
 use super::{
-    CodeIssue, CompletionResult, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role,
-    StreamCallback, StreamEvent, StreamingResponseBuilder, TokenUsage, ToolCall, ToolDefinition,
+    streaming::SseDecoder, CodeIssue, CompletionResult, LlmError, LlmProvider, LlmResponse,
+    Message, RefactoringSuggestion, Role, StreamCallback, StreamEvent, StreamingResponseBuilder,
+    TokenUsage, ToolCall, ToolDefinition,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -328,19 +329,18 @@ impl LlmProvider for ClaudeProvider {
                 "Anthropic API error ({}): {}",
                 status, error_text
             )));
-            anyhow::bail!("Anthropic API error ({}): {}", status, error_text);
+            return Err(LlmError::from_http_status(status, error_text).into());
         }
 
         // Process SSE stream
         let mut builder = StreamingResponseBuilder::new();
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut decoder = SseDecoder::new();
         let mut input_tokens: u32 = 0;
         let mut output_tokens: u32 = 0;
 
-        // Track tool calls by index
-        let mut tool_call_map: std::collections::HashMap<usize, (String, String, String)> =
-            std::collections::HashMap::new(); // index -> (id, name, accumulated_args)
+        // Track tool calls using shared tracker (handles index -> id mapping)
+        let mut tool_tracker = crate::llm::streaming::ToolCallTracker::new();
 
         let mut last_activity_at = std::time::Instant::now();
         loop {
@@ -357,10 +357,8 @@ impl LlmProvider for ClaudeProvider {
                     }
 
                     // Add any in-progress tool calls
-                    for (id, name, args) in tool_call_map.values() {
-                        builder
-                            .tool_calls
-                            .insert(id.clone(), (name.clone(), args.clone()));
+                    for (id, (name, args)) in tool_tracker.into_calls() {
+                        builder.tool_calls.insert(id, (name, args));
                     }
 
                     return Ok(builder.build());
@@ -369,10 +367,11 @@ impl LlmProvider for ClaudeProvider {
 
             // Enforce per-chunk timeout: if we haven't received any bytes recently, abort.
             if last_activity_at.elapsed() >= STREAM_CHUNK_TIMEOUT {
-                anyhow::bail!(
+                return Err(LlmError::Network(format!(
                     "Stream timeout - no response from Anthropic for {} seconds",
                     STREAM_CHUNK_TIMEOUT.as_secs()
-                );
+                ))
+                .into());
             }
 
             // Use a short poll interval so interrupts can be observed quickly even when
@@ -385,107 +384,92 @@ impl LlmProvider for ClaudeProvider {
 
             last_activity_at = std::time::Instant::now();
             let chunk = chunk_result.context("Error reading stream chunk")?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
 
-            buffer.push_str(&chunk_str);
-
-            // Process complete lines (SSE format)
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim().to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
-                if line.is_empty() {
-                    continue;
-                }
-
-                // Handle event lines (we track them for context but process data lines)
-                if line.starts_with("event:") {
-                    continue;
-                }
-
-                if let Some(json_str) = line.strip_prefix("data: ") {
-                    // Parse the streaming event
-                    if let Ok(event) = serde_json::from_str::<ClaudeStreamEvent>(json_str) {
-                        match event {
-                            ClaudeStreamEvent::MessageStart { message } => {
-                                // Capture input tokens from message_start
-                                if let Some(usage) = message.usage {
-                                    input_tokens = usage.input_tokens;
+            // Push bytes into SSE decoder
+            for payload_json in decoder.push(&chunk) {
+                // Parse the streaming event
+                if let Ok(event) = serde_json::from_str::<ClaudeStreamEvent>(&payload_json) {
+                    match event {
+                        ClaudeStreamEvent::MessageStart { message } => {
+                            // Capture input tokens from message_start
+                            if let Some(usage) = message.usage {
+                                input_tokens = usage.input_tokens;
+                            }
+                        }
+                        ClaudeStreamEvent::ContentBlockStart {
+                            index,
+                            content_block,
+                        } => {
+                            match content_block {
+                                ClaudeStreamContentBlock::Text { .. } => {
+                                    // Text block started, nothing to emit yet
+                                }
+                                ClaudeStreamContentBlock::ToolUse { id, name } => {
+                                    // Register with tracker (maps index -> id)
+                                    let event = tool_tracker.start_call(
+                                        &id,
+                                        &name,
+                                        Some(&index.to_string()),
+                                    );
+                                    builder.process(&event);
+                                    callback(event);
+                                }
+                                ClaudeStreamContentBlock::Thinking { .. } => {
+                                    // Thinking block started
                                 }
                             }
-                            ClaudeStreamEvent::ContentBlockStart {
-                                index,
-                                content_block,
-                            } => {
-                                match content_block {
-                                    ClaudeStreamContentBlock::Text { .. } => {
-                                        // Text block started, nothing to emit yet
-                                    }
-                                    ClaudeStreamContentBlock::ToolUse { id, name } => {
-                                        tool_call_map.insert(
-                                            index,
-                                            (id.clone(), name.clone(), String::new()),
-                                        );
-                                        let event = StreamEvent::ToolCallStart { id, name };
-                                        builder.process(&event);
-                                        callback(event);
-                                    }
-                                    ClaudeStreamContentBlock::Thinking { .. } => {
-                                        // Thinking block started
-                                    }
-                                }
-                            }
-                            ClaudeStreamEvent::ContentBlockDelta { index, delta } => match delta {
-                                ClaudeStreamDelta::TextDelta { text } => {
-                                    if !text.is_empty() {
-                                        let event = StreamEvent::TextDelta(text);
-                                        builder.process(&event);
-                                        callback(event);
-                                    }
-                                }
-                                ClaudeStreamDelta::InputJsonDelta { partial_json } => {
-                                    if let Some((id, _, args)) = tool_call_map.get_mut(&index) {
-                                        args.push_str(&partial_json);
-                                        let event = StreamEvent::ToolCallDelta {
-                                            id: id.clone(),
-                                            arguments_delta: partial_json,
-                                        };
-                                        builder.process(&event);
-                                        callback(event);
-                                    }
-                                }
-                                ClaudeStreamDelta::ThinkingDelta { thinking } => {
-                                    if !thinking.is_empty() {
-                                        let event = StreamEvent::ThinkingDelta(thinking);
-                                        builder.process(&event);
-                                        callback(event);
-                                    }
-                                }
-                            },
-                            ClaudeStreamEvent::ContentBlockStop { index } => {
-                                // Emit ToolCallComplete if this was a tool call block
-                                if let Some((id, _, _)) = tool_call_map.get(&index) {
-                                    let event = StreamEvent::ToolCallComplete { id: id.clone() };
+                        }
+                        ClaudeStreamEvent::ContentBlockDelta { index, delta } => match delta {
+                            ClaudeStreamDelta::TextDelta { text } => {
+                                if !text.is_empty() {
+                                    let event = StreamEvent::TextDelta(text);
+                                    builder.process(&event);
                                     callback(event);
                                 }
                             }
-                            ClaudeStreamEvent::MessageDelta { usage, .. } => {
-                                // Capture output tokens
-                                if let Some(u) = usage {
-                                    output_tokens = u.output_tokens;
+                            ClaudeStreamDelta::InputJsonDelta { partial_json } => {
+                                // Tracker resolves index -> id automatically
+                                if let Some(event) =
+                                    tool_tracker.append_args(&index.to_string(), &partial_json)
+                                {
+                                    builder.process(&event);
+                                    callback(event);
                                 }
                             }
-                            ClaudeStreamEvent::MessageStop => {
-                                callback(StreamEvent::Done);
+                            ClaudeStreamDelta::ThinkingDelta { thinking } => {
+                                if !thinking.is_empty() {
+                                    let event = StreamEvent::ThinkingDelta(thinking);
+                                    builder.process(&event);
+                                    callback(event);
+                                }
                             }
-                            ClaudeStreamEvent::Ping => {
-                                // Keepalive, ignore
+                        },
+                        ClaudeStreamEvent::ContentBlockStop { index } => {
+                            // Emit ToolCallComplete if this was a tool call block
+                            if let Some(event) = tool_tracker.complete_call(&index.to_string()) {
+                                callback(event);
                             }
-                            ClaudeStreamEvent::Error { error } => {
-                                let msg = format!("{}: {}", error.error_type, error.message);
-                                callback(StreamEvent::Error(msg.clone()));
-                                anyhow::bail!("Claude streaming error: {}", msg);
+                        }
+                        ClaudeStreamEvent::MessageDelta { usage, .. } => {
+                            // Capture output tokens
+                            if let Some(u) = usage {
+                                output_tokens = u.output_tokens;
                             }
+                        }
+                        ClaudeStreamEvent::MessageStop => {
+                            callback(StreamEvent::Done);
+                        }
+                        ClaudeStreamEvent::Ping => {
+                            // Keepalive, ignore
+                        }
+                        ClaudeStreamEvent::Error { error } => {
+                            let msg = format!("{}: {}", error.error_type, error.message);
+                            callback(StreamEvent::Error(msg.clone()));
+                            return Err(LlmError::ServiceError(format!(
+                                "Claude streaming error: {}",
+                                msg
+                            ))
+                            .into());
                         }
                     }
                 }
@@ -501,8 +485,72 @@ impl LlmProvider for ClaudeProvider {
             });
         }
 
-        // Add tool calls to builder
-        for (_, (id, name, args)) in tool_call_map {
+        // Flush any remaining buffered events (handles final event without trailing \n)
+        for payload_json in decoder.finish() {
+            if let Ok(event) = serde_json::from_str::<ClaudeStreamEvent>(&payload_json) {
+                match event {
+                    ClaudeStreamEvent::MessageStart { message } => {
+                        if let Some(usage) = message.usage {
+                            let _ = usage.input_tokens; // Will be read from final MessageDelta
+                        }
+                    }
+                    ClaudeStreamEvent::ContentBlockStart {
+                        index,
+                        content_block,
+                    } => {
+                        if let ClaudeStreamContentBlock::ToolUse { id, name } = content_block {
+                            let event =
+                                tool_tracker.start_call(&id, &name, Some(&index.to_string()));
+                            callback(event);
+                        }
+                    }
+                    ClaudeStreamEvent::ContentBlockDelta { index, delta } => match delta {
+                        ClaudeStreamDelta::TextDelta { text } => {
+                            if !text.is_empty() {
+                                let event = StreamEvent::TextDelta(text);
+                                builder.process(&event);
+                                callback(event);
+                            }
+                        }
+                        ClaudeStreamDelta::InputJsonDelta { partial_json } => {
+                            if let Some(event) =
+                                tool_tracker.append_args(&index.to_string(), &partial_json)
+                            {
+                                callback(event);
+                            }
+                        }
+                        ClaudeStreamDelta::ThinkingDelta { thinking } => {
+                            if !thinking.is_empty() {
+                                let event = StreamEvent::ThinkingDelta(thinking);
+                                builder.process(&event);
+                                callback(event);
+                            }
+                        }
+                    },
+                    ClaudeStreamEvent::ContentBlockStop { index } => {
+                        if let Some(event) = tool_tracker.complete_call(&index.to_string()) {
+                            callback(event);
+                        }
+                    }
+                    ClaudeStreamEvent::MessageDelta { delta, usage: _ } => {
+                        if let Some(reason) = delta.stop_reason {
+                            tracing::debug!("Claude stop reason: {}", reason);
+                        }
+                    }
+                    ClaudeStreamEvent::MessageStop => {
+                        callback(StreamEvent::Done);
+                    }
+                    ClaudeStreamEvent::Ping => {}
+                    ClaudeStreamEvent::Error { error } => {
+                        let msg = format!("{}: {}", error.error_type, error.message);
+                        callback(StreamEvent::Error(msg.clone()));
+                    }
+                }
+            }
+        }
+
+        // Add tracked tool calls to builder
+        for (id, (name, args)) in tool_tracker.into_calls() {
             builder.tool_calls.insert(id, (name, args));
         }
 

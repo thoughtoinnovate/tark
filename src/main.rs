@@ -75,6 +75,10 @@ enum Commands {
         /// Model to use (e.g., gpt-4o, claude-sonnet-4, gemini-2.0-flash-exp)
         #[arg(short, long)]
         model: Option<String>,
+
+        /// Enable debug logging to tark-debug.log
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Get a one-shot completion for a file position
@@ -196,6 +200,16 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
+    // Initialize models.dev cache with a persistent global cache directory.
+    // This enables fast, dynamic model pickers and pricing/limits lookups across runs.
+    if let Ok(global) = storage::GlobalStorage::new() {
+        let cache_dir = global.root().join("cache");
+        if std::fs::create_dir_all(&cache_dir).is_ok() {
+            llm::init_models_db(cache_dir);
+            llm::models_db().preload();
+        }
+    }
+
     match cli.command {
         Commands::Lsp => {
             tracing::info!("Starting LSP server on stdio");
@@ -234,6 +248,7 @@ async fn main() -> Result<()> {
             socket,
             provider,
             model,
+            debug,
         } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());
 
@@ -251,7 +266,8 @@ async fn main() -> Result<()> {
             }
 
             // Run the TUI application
-            transport::cli::run_tui_chat(message, &working_dir, socket, provider, model).await?;
+            transport::cli::run_tui_chat(message, &working_dir, socket, provider, model, debug)
+                .await?;
         }
         Commands::Complete { file, line, col } => {
             transport::cli::run_complete(&file, line, col).await?;

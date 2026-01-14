@@ -55,6 +55,48 @@ impl ThinkSettings {
             Self::off()
         }
     }
+
+    /// Resolve settings with auto-detection based on model capability (from models.dev)
+    ///
+    /// This async version queries models.dev to check if the current model supports
+    /// reasoning/thinking. If it does and the user hasn't explicitly disabled thinking,
+    /// it will auto-enable thinking with default effort.
+    pub async fn resolve_auto(
+        level_name: &str,
+        config: &crate::config::ThinkingConfig,
+        provider: &str,
+        model: &str,
+    ) -> Self {
+        // If user explicitly set a level, respect it
+        if !level_name.is_empty() && level_name != "auto" {
+            return Self::resolve(level_name, config);
+        }
+
+        // Check if model supports reasoning via models.dev (cached)
+        let db = super::models_db();
+        let supports_reasoning = db.supports_reasoning(provider, model).await;
+
+        if supports_reasoning {
+            // Auto-enable thinking with default level
+            let default_level = config.default_level().unwrap_or("medium");
+            if let Some(level) = config.get_level(default_level) {
+                tracing::debug!(
+                    "Auto-enabled thinking for {} {} (supports reasoning via models.dev)",
+                    provider,
+                    model
+                );
+                return Self::from_config_level(default_level, level);
+            }
+        }
+
+        // Model doesn't support reasoning or models.dev unavailable - disable
+        tracing::debug!(
+            "Thinking disabled for {} {} (no reasoning support or models.dev unavailable)",
+            provider,
+            model
+        );
+        Self::off()
+    }
 }
 
 /// Role in a conversation

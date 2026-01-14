@@ -38,6 +38,12 @@ use super::widgets::{
 };
 use tokio::sync::mpsc;
 
+/// (models, provider_key) returned from plugin provider metadata.
+///
+/// - models: Vec of (id, name, description)
+/// - provider_key: optional models.dev provider key declared by plugin (e.g. "google")
+type PluginProviderModelsWithKey = (Vec<(String, String, String)>, Option<String>);
+
 /// Spinner animation frames for processing indicator
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -748,7 +754,7 @@ impl AppState {
 struct PendingMessageRequest {
     content: String,
     attachments: Vec<MessageAttachment>,
-    tx: mpsc::Sender<AgentEvent>,
+    tx: mpsc::UnboundedSender<AgentEvent>,
 }
 
 /// Async message request ready for processing
@@ -756,7 +762,7 @@ struct PendingMessageRequest {
 pub struct AsyncMessageRequest {
     content: String,
     attachments: Vec<MessageAttachment>,
-    tx: mpsc::Sender<AgentEvent>,
+    tx: mpsc::UnboundedSender<AgentEvent>,
     config: super::attachments::AttachmentConfig,
 }
 
@@ -775,7 +781,7 @@ pub struct TuiApp {
     /// Agent bridge for LLM integration
     agent_bridge: Option<AgentBridge>,
     /// Receiver for agent events (streaming responses, tool calls, etc.)
-    agent_event_rx: Option<mpsc::Receiver<AgentEvent>>,
+    agent_event_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
     /// Pending message request for async processing
     pending_request: Option<PendingMessageRequest>,
     /// Detected system username for display
@@ -957,6 +963,7 @@ impl TuiApp {
         config: TuiConfig,
         provider: Option<String>,
         model: Option<String>,
+        debug: bool,
     ) -> anyhow::Result<Self> {
         // Set up panic hook before initializing terminal
         Self::install_panic_hook();
@@ -984,7 +991,7 @@ impl TuiApp {
         let prompt_history = super::prompt_history::PromptHistory::for_workspace(&working_dir);
 
         let (agent_bridge, llm_configured, llm_error, interaction_rx) =
-            match AgentBridge::with_provider_and_interaction(working_dir, provider, model) {
+            match AgentBridge::with_provider_and_interaction(working_dir, provider, model, debug) {
                 Ok((bridge, rx)) => (Some(bridge), true, None, Some(rx)),
                 Err(e) => {
                     let error_msg = format!(
@@ -1079,14 +1086,12 @@ impl TuiApp {
             let model_name_ref = model_name.as_str();
             let provider_name_ref = provider_name.as_str();
 
-            // Fetch context limit asynchronously (this will use cache if available)
-            let max_tokens = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    crate::llm::models_db()
-                        .get_context_limit(provider_name_ref, model_name_ref)
-                        .await
-                })
-            });
+            // IMPORTANT: do not block the Tokio runtime from UI code.
+            // Use cache-only lookup here; models_db preloads at startup and will populate shortly.
+            // If cache isn't ready yet, keep the agent's existing context limit.
+            let max_tokens = crate::llm::models_db()
+                .try_get_cached_context_limit(provider_name_ref, model_name_ref)
+                .unwrap_or_else(|| bridge.max_context_tokens() as u32);
 
             // Sync the agent's context limit with the model's actual limit
             // This ensures auto-compaction triggers at the right threshold
@@ -1442,8 +1447,8 @@ impl TuiApp {
     fn process_next_queued_message(&mut self) {
         // Check if there are queued messages
         if let Some(next_message) = self.state.prompt_queue.pop_front() {
-            // Create mpsc channel for AgentEvents
-            let (tx, rx) = mpsc::channel(100);
+            // Create channel for AgentEvents (unbounded to avoid dropping streaming chunks)
+            let (tx, rx) = mpsc::unbounded_channel();
             self.agent_event_rx = Some(rx);
 
             // Mark as processing
@@ -3110,8 +3115,8 @@ impl TuiApp {
                     error_msg
                 )));
             } else if self.agent_bridge.is_some() {
-                // Create mpsc channel for AgentEvents (Requirements 1.1, 1.2)
-                let (tx, rx) = mpsc::channel(100);
+                // Create channel for AgentEvents (unbounded to avoid dropping streaming chunks)
+                let (tx, rx) = mpsc::unbounded_channel();
                 self.agent_event_rx = Some(rx);
 
                 // Mark as processing
@@ -4436,125 +4441,8 @@ impl TuiApp {
             .map(|b| b.provider_name().to_string())
             .unwrap_or_else(|| "openai".to_string());
 
-        let current_model = self
-            .agent_bridge
-            .as_ref()
-            .map(|b| b.model_name().to_string())
-            .unwrap_or_default();
-
-        match current_provider.as_str() {
-            "openai" | "gpt" => vec![
-                PickerItem::new("gpt-4o", "GPT-4o")
-                    .with_description("Most capable, multimodal")
-                    .with_active(current_model == "gpt-4o"),
-                PickerItem::new("gpt-4o-mini", "GPT-4o Mini")
-                    .with_description("Fast and affordable")
-                    .with_active(current_model == "gpt-4o-mini"),
-                PickerItem::new("o3-mini", "O3 Mini")
-                    .with_description("Latest reasoning model")
-                    .with_active(current_model == "o3-mini"),
-                PickerItem::new("o1", "O1")
-                    .with_description("Advanced reasoning model")
-                    .with_active(current_model == "o1"),
-                PickerItem::new("o1-mini", "O1 Mini")
-                    .with_description("Fast reasoning model")
-                    .with_active(current_model == "o1-mini"),
-                PickerItem::new("gpt-4-turbo", "GPT-4 Turbo")
-                    .with_description("High capability, 128k context")
-                    .with_active(current_model == "gpt-4-turbo"),
-                PickerItem::new("gpt-4", "GPT-4")
-                    .with_description("Original GPT-4")
-                    .with_active(current_model == "gpt-4"),
-                PickerItem::new("gpt-3.5-turbo", "GPT-3.5 Turbo")
-                    .with_description("Fast and economical")
-                    .with_active(current_model == "gpt-3.5-turbo"),
-            ],
-            "claude" | "anthropic" => vec![
-                PickerItem::new("claude-sonnet-4-20250514", "Claude Sonnet 4")
-                    .with_description("Latest, most capable")
-                    .with_active(current_model == "claude-sonnet-4-20250514"),
-                PickerItem::new("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet")
-                    .with_description("Hybrid reasoning model")
-                    .with_active(current_model == "claude-3-7-sonnet-20250219"),
-                PickerItem::new("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet")
-                    .with_description("Best balance of speed and capability")
-                    .with_active(current_model == "claude-3-5-sonnet-20241022"),
-                PickerItem::new("claude-3-5-haiku-20241022", "Claude 3.5 Haiku")
-                    .with_description("Fast and affordable")
-                    .with_active(current_model == "claude-3-5-haiku-20241022"),
-                PickerItem::new("claude-3-opus-20240229", "Claude 3 Opus")
-                    .with_description("Most powerful, best for complex tasks")
-                    .with_active(current_model == "claude-3-opus-20240229"),
-                PickerItem::new("claude-3-haiku-20240307", "Claude 3 Haiku")
-                    .with_description("Fastest, most economical")
-                    .with_active(current_model == "claude-3-haiku-20240307"),
-            ],
-            "copilot" | "github" => vec![
-                PickerItem::new("gpt-4o", "GPT-4o")
-                    .with_description("Most capable model via Copilot")
-                    .with_active(current_model == "gpt-4o"),
-                PickerItem::new("gpt-4", "GPT-4")
-                    .with_description("Original GPT-4")
-                    .with_active(current_model == "gpt-4"),
-            ],
-            "gemini" | "google" => vec![
-                PickerItem::new("gemini-2.0-flash-exp", "Gemini 2.0 Flash")
-                    .with_description("Fast and efficient (default)")
-                    .with_active(current_model == "gemini-2.0-flash-exp"),
-                PickerItem::new("gemini-2.0-flash-thinking-exp", "Gemini 2.0 Flash Thinking")
-                    .with_description("With extended thinking")
-                    .with_active(current_model == "gemini-2.0-flash-thinking-exp"),
-                PickerItem::new("gemini-1.5-pro", "Gemini 1.5 Pro")
-                    .with_description("Larger, more capable")
-                    .with_active(current_model == "gemini-1.5-pro"),
-                PickerItem::new("gemini-1.5-flash", "Gemini 1.5 Flash")
-                    .with_description("Fast and lightweight")
-                    .with_active(current_model == "gemini-1.5-flash"),
-            ],
-            "openrouter" => vec![
-                PickerItem::new("anthropic/claude-sonnet-4", "Claude Sonnet 4")
-                    .with_description("Latest Claude via OpenRouter")
-                    .with_active(current_model == "anthropic/claude-sonnet-4"),
-                PickerItem::new("deepseek/deepseek-chat", "DeepSeek Chat")
-                    .with_description("Very affordable, great quality")
-                    .with_active(current_model == "deepseek/deepseek-chat"),
-                PickerItem::new("google/gemini-2.0-flash-exp:free", "Gemini 2.0 (Free)")
-                    .with_description("Free via OpenRouter")
-                    .with_active(current_model == "google/gemini-2.0-flash-exp:free"),
-                PickerItem::new(
-                    "meta-llama/llama-3.1-8b-instruct:free",
-                    "Llama 3.1 8B (Free)",
-                )
-                .with_description("Free open model")
-                .with_active(current_model == "meta-llama/llama-3.1-8b-instruct:free"),
-                PickerItem::new("qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B")
-                    .with_description("Excellent for coding")
-                    .with_active(current_model == "qwen/qwen-2.5-72b-instruct"),
-            ],
-            "ollama" | "local" => vec![
-                PickerItem::new("llama3.2", "Llama 3.2")
-                    .with_description("Meta's latest open model")
-                    .with_active(current_model == "llama3.2"),
-                PickerItem::new("qwen2.5-coder", "Qwen 2.5 Coder")
-                    .with_description("Excellent for coding tasks")
-                    .with_active(current_model == "qwen2.5-coder"),
-                PickerItem::new("codellama", "Code Llama")
-                    .with_description("Optimized for code generation")
-                    .with_active(current_model == "codellama"),
-                PickerItem::new("deepseek-coder-v2", "DeepSeek Coder V2")
-                    .with_description("Advanced coding model")
-                    .with_active(current_model == "deepseek-coder-v2"),
-                PickerItem::new("mistral", "Mistral")
-                    .with_description("Fast and capable")
-                    .with_active(current_model == "mistral"),
-                PickerItem::new("phi3", "Phi-3")
-                    .with_description("Microsoft's compact model")
-                    .with_active(current_model == "phi3"),
-            ],
-            // Important: plugin providers (e.g. gemini-oauth) are not covered above.
-            // Delegate to the provider-based picker which supports plugins via PluginRegistry.
-            _ => self.get_model_picker_items_for_provider(&current_provider),
-        }
+        // Always use provider-based picker. It supports plugins and (now) models.dev-backed lists.
+        self.get_model_picker_items_for_provider(&current_provider)
     }
 
     /// Get picker items for model selection for a specific provider
@@ -4575,182 +4463,204 @@ impl TuiApp {
             .map(|b| b.model_name().to_string())
             .unwrap_or_default();
 
-        match provider_id {
-            "openai" | "gpt" => vec![
-                PickerItem::new("gpt-4o", "GPT-4o")
-                    .with_description("Most capable, multimodal")
-                    .with_active(current_model == "gpt-4o"),
-                PickerItem::new("gpt-4o-mini", "GPT-4o Mini")
-                    .with_description("Fast and affordable")
-                    .with_active(current_model == "gpt-4o-mini"),
-                PickerItem::new("o3-mini", "O3 Mini")
-                    .with_description("Latest reasoning model")
-                    .with_active(current_model == "o3-mini"),
-                PickerItem::new("o1", "O1")
-                    .with_description("Advanced reasoning model")
-                    .with_active(current_model == "o1"),
-                PickerItem::new("o1-mini", "O1 Mini")
-                    .with_description("Fast reasoning model")
-                    .with_active(current_model == "o1-mini"),
-                PickerItem::new("gpt-4-turbo", "GPT-4 Turbo")
-                    .with_description("High capability, 128k context")
-                    .with_active(current_model == "gpt-4-turbo"),
-                PickerItem::new("gpt-4", "GPT-4")
-                    .with_description("Original GPT-4")
-                    .with_active(current_model == "gpt-4"),
-                PickerItem::new("gpt-3.5-turbo", "GPT-3.5 Turbo")
-                    .with_description("Fast and economical")
-                    .with_active(current_model == "gpt-3.5-turbo"),
-            ],
-            "claude" | "anthropic" => vec![
-                PickerItem::new("claude-sonnet-4-20250514", "Claude Sonnet 4")
-                    .with_description("Latest, most capable")
-                    .with_active(current_model == "claude-sonnet-4-20250514"),
-                PickerItem::new("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet")
-                    .with_description("Hybrid reasoning model")
-                    .with_active(current_model == "claude-3-7-sonnet-20250219"),
-                PickerItem::new("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet")
-                    .with_description("Best balance of speed and capability")
-                    .with_active(current_model == "claude-3-5-sonnet-20241022"),
-                PickerItem::new("claude-3-5-haiku-20241022", "Claude 3.5 Haiku")
-                    .with_description("Fast and affordable")
-                    .with_active(current_model == "claude-3-5-haiku-20241022"),
-                PickerItem::new("claude-3-opus-20240229", "Claude 3 Opus")
-                    .with_description("Most powerful, best for complex tasks")
-                    .with_active(current_model == "claude-3-opus-20240229"),
-                PickerItem::new("claude-3-haiku-20240307", "Claude 3 Haiku")
-                    .with_description("Fastest, most economical")
-                    .with_active(current_model == "claude-3-haiku-20240307"),
-            ],
-            "copilot" | "github" => vec![
-                PickerItem::new("gpt-4o", "GPT-4o")
-                    .with_description("Most capable model via Copilot")
-                    .with_active(current_model == "gpt-4o"),
-                PickerItem::new("gpt-4", "GPT-4")
-                    .with_description("Original GPT-4")
-                    .with_active(current_model == "gpt-4"),
-            ],
-            "gemini" | "google" => vec![
-                PickerItem::new("gemini-2.0-flash-exp", "Gemini 2.0 Flash")
-                    .with_description("Fast and efficient (default)")
-                    .with_active(current_model == "gemini-2.0-flash-exp"),
-                PickerItem::new("gemini-2.0-flash-thinking-exp", "Gemini 2.0 Flash Thinking")
-                    .with_description("With extended thinking")
-                    .with_active(current_model == "gemini-2.0-flash-thinking-exp"),
-                PickerItem::new("gemini-1.5-pro", "Gemini 1.5 Pro")
-                    .with_description("Larger, more capable")
-                    .with_active(current_model == "gemini-1.5-pro"),
-                PickerItem::new("gemini-1.5-flash", "Gemini 1.5 Flash")
-                    .with_description("Fast and lightweight")
-                    .with_active(current_model == "gemini-1.5-flash"),
-            ],
-            "openrouter" => vec![
-                PickerItem::new("anthropic/claude-sonnet-4", "Claude Sonnet 4")
-                    .with_description("Latest Claude via OpenRouter")
-                    .with_active(current_model == "anthropic/claude-sonnet-4"),
-                PickerItem::new("deepseek/deepseek-chat", "DeepSeek Chat")
-                    .with_description("Very affordable, great quality")
-                    .with_active(current_model == "deepseek/deepseek-chat"),
-                PickerItem::new("google/gemini-2.0-flash-exp:free", "Gemini 2.0 (Free)")
-                    .with_description("Free via OpenRouter")
-                    .with_active(current_model == "google/gemini-2.0-flash-exp:free"),
-                PickerItem::new(
-                    "meta-llama/llama-3.1-8b-instruct:free",
-                    "Llama 3.1 8B (Free)",
-                )
-                .with_description("Free open model")
-                .with_active(current_model == "meta-llama/llama-3.1-8b-instruct:free"),
-                PickerItem::new("qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B")
-                    .with_description("Excellent for coding")
-                    .with_active(current_model == "qwen/qwen-2.5-72b-instruct"),
-            ],
-            "ollama" | "local" => vec![
-                PickerItem::new("llama3.2", "Llama 3.2")
-                    .with_description("Meta's latest open model")
-                    .with_active(current_model == "llama3.2"),
-                PickerItem::new("qwen2.5-coder", "Qwen 2.5 Coder")
-                    .with_description("Excellent for coding tasks")
-                    .with_active(current_model == "qwen2.5-coder"),
-                PickerItem::new("codellama", "Code Llama")
-                    .with_description("Optimized for code generation")
-                    .with_active(current_model == "codellama"),
-                PickerItem::new("deepseek-coder-v2", "DeepSeek Coder V2")
-                    .with_description("Advanced coding model")
-                    .with_active(current_model == "deepseek-coder-v2"),
-                PickerItem::new("mistral", "Mistral")
-                    .with_description("Fast and capable")
-                    .with_active(current_model == "mistral"),
-                PickerItem::new("phi3", "Phi-3")
-                    .with_description("Microsoft's compact model")
-                    .with_active(current_model == "phi3"),
-            ],
-            _ => {
-                // Try to get models from plugin provider
+        // For plugin providers: check if plugin provides its own model list
+        // If empty, use plugin's declared provider key to load from models.dev
+        if let Some((models, provider_key)) = Self::get_plugin_provider_models_with_key(provider_id)
+        {
+            if !models.is_empty() {
+                // Plugin provides its own model list - use it
                 tracing::info!(
-                    "Falling through to plugin provider lookup for: {}",
-                    provider_id
+                    "Using plugin's own model list for '{}': {} models",
+                    provider_id,
+                    models.len()
                 );
-                if let Some(models) = Self::get_plugin_provider_models(provider_id) {
-                    tracing::info!("Got {} models from plugin", models.len());
-                    models
-                        .into_iter()
-                        .map(|(id, name, desc)| {
-                            PickerItem::new(&id, &name)
-                                .with_description(desc)
-                                .with_active(current_model == id)
-                        })
-                        .collect()
-                } else {
-                    tracing::warn!("No models from plugin, showing Default Model");
-                    vec![PickerItem::new("default", "Default Model")]
+                return models
+                    .into_iter()
+                    .map(|(id, name, desc)| {
+                        PickerItem::new(&id, &name)
+                            .with_description(desc)
+                            .with_active(current_model == id)
+                    })
+                    .collect();
+            } else if let Some(key) = provider_key {
+                // Plugin returns empty list but declares a provider key - load from models.dev
+                tracing::info!(
+                    "Plugin '{}' declares provider '{}', loading models from models.dev",
+                    provider_id,
+                    key
+                );
+                if let Some(models) = Self::get_cached_models_for_provider(&key) {
+                    if !models.is_empty() {
+                        return models
+                            .into_iter()
+                            .map(|(id, name, desc)| {
+                                PickerItem::new(&id, &name)
+                                    .with_description(desc)
+                                    .with_active(current_model == id)
+                            })
+                            .collect();
+                    }
                 }
             }
         }
+
+        // For built-in providers, use models.dev directly
+        if let Some(models) = Self::get_cached_models_for_provider(provider_id) {
+            if !models.is_empty() {
+                return models
+                    .into_iter()
+                    .map(|(id, name, desc)| {
+                        PickerItem::new(&id, &name)
+                            .with_description(desc)
+                            .with_active(current_model == id)
+                    })
+                    .collect();
+            }
+        }
+
+        tracing::warn!("No models for '{}', showing Default Model", provider_id);
+        vec![PickerItem::new("default", "Default Model")]
     }
 
-    /// Get models from a plugin provider (uses base_provider to determine model list)
+    /// Get models from a plugin provider along with its declared provider key.
+    /// Returns (models, provider_key) where:
+    /// - models: the plugin's own model list (may be empty if plugin wants tark to load from models.dev)
+    /// - provider_key: the models.dev provider key declared by plugin (e.g., "google")
+    fn get_plugin_provider_models_with_key(
+        provider_id: &str,
+    ) -> Option<PluginProviderModelsWithKey> {
+        use crate::plugins::{PluginHost, PluginRegistry};
+
+        tracing::debug!(
+            "get_plugin_provider_models_with_key called with: {}",
+            provider_id
+        );
+
+        let registry = match PluginRegistry::new() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("Failed to create plugin registry: {}", e);
+                return None;
+            }
+        };
+
+        let plugin = match registry.get(provider_id) {
+            Some(p) => p,
+            None => {
+                tracing::debug!("No plugin found with id: {}", provider_id);
+                return None;
+            }
+        };
+
+        let mut host = match PluginHost::new() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!("Failed to create plugin host: {}", e);
+                return None;
+            }
+        };
+
+        if let Err(e) = host.load(plugin) {
+            tracing::debug!("Failed to load plugin {}: {}", provider_id, e);
+            return None;
+        }
+
+        let instance = host.get_mut(provider_id)?;
+
+        // Get provider info to extract the provider key
+        let provider_key = match instance.provider_info() {
+            Ok(info) => info.provider,
+            Err(e) => {
+                tracing::debug!("Failed to get provider info: {}", e);
+                None
+            }
+        };
+
+        // Get the plugin's model list
+        let models = match instance.provider_models() {
+            Ok(models) => models
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.id,
+                        m.display_name,
+                        format!("Context: {}k", m.context_window / 1000),
+                    )
+                })
+                .collect(),
+            Err(e) => {
+                tracing::debug!("Failed to get models from plugin: {}", e);
+                Vec::new()
+            }
+        };
+
+        Some((models, provider_key))
+    }
+
+    /// Get models from a plugin provider by calling the plugin's provider_models() function.
+    /// This returns the models the plugin actually supports, not models.dev data.
+    #[allow(dead_code)]
     fn get_plugin_provider_models(provider_id: &str) -> Option<Vec<(String, String, String)>> {
-        use crate::plugins::PluginRegistry;
+        use crate::plugins::{PluginHost, PluginRegistry};
 
         tracing::debug!("get_plugin_provider_models called with: {}", provider_id);
 
         let registry = match PluginRegistry::new() {
             Ok(r) => r,
             Err(e) => {
-                tracing::error!("Failed to create PluginRegistry: {}", e);
+                tracing::debug!("Failed to create PluginRegistry: {}", e);
                 return None;
             }
         };
 
-        let plugins: Vec<_> = registry.provider_plugins().collect();
-        tracing::debug!("Found {} provider plugins", plugins.len());
+        // Check if this is a plugin provider
+        let plugin = registry.get(provider_id)?;
+        if !plugin.enabled {
+            tracing::debug!("Plugin {} is disabled", provider_id);
+            return None;
+        }
 
-        // Find the plugin by ID (what the picker sends)
-        for plugin in plugins {
-            tracing::debug!("Checking plugin: {} vs {}", plugin.id(), provider_id);
-            if plugin.id() == provider_id {
-                tracing::debug!("MATCH! Found plugin {}", plugin.id());
-                // Found plugin, check for base_provider in contributions
-                for contribution in &plugin.manifest.contributes.providers {
-                    tracing::debug!(
-                        "Contribution base_provider: {:?}",
-                        contribution.base_provider
-                    );
-                    if let Some(base_provider) = &contribution.base_provider {
-                        tracing::debug!("Getting models for base_provider: {}", base_provider);
-                        return Self::get_cached_models_for_provider(base_provider);
-                    }
-                }
-                // No base_provider set, use google fallback for gemini plugins
-                tracing::debug!("No base_provider, using fallback");
-                return Self::get_fallback_models("google");
+        // Load the plugin and call provider_models()
+        let mut host = match PluginHost::new() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!("Failed to create PluginHost: {}", e);
+                return None;
+            }
+        };
+
+        if let Err(e) = host.load(plugin) {
+            tracing::debug!("Failed to load plugin {}: {}", provider_id, e);
+            return None;
+        }
+
+        let instance = host.get_mut(provider_id)?;
+
+        // Get the plugin's own model list
+        match instance.provider_models() {
+            Ok(models) => {
+                tracing::info!("Plugin {} reports {} models", provider_id, models.len());
+                let result: Vec<(String, String, String)> = models
+                    .into_iter()
+                    .map(|m| {
+                        let desc = if m.context_window > 0 {
+                            format!("{}K context", m.context_window / 1000)
+                        } else {
+                            String::new()
+                        };
+                        (m.id, m.display_name, desc)
+                    })
+                    .collect();
+                Some(result)
+            }
+            Err(e) => {
+                tracing::debug!("Failed to get models from plugin {}: {}", provider_id, e);
+                None
             }
         }
-        tracing::debug!("No matching plugin found for {}", provider_id);
-        None
     }
 
-    /// Get models from models.dev (cached or fetch)
+    /// Get models from models.dev cache (non-blocking)
     fn get_cached_models_for_provider(provider: &str) -> Option<Vec<(String, String, String)>> {
         let models_db = crate::llm::models_db();
 
@@ -4769,44 +4679,19 @@ impl TuiApp {
             }
         }
 
-        // Cache empty - try to fetch synchronously
-        // Use std::thread to avoid tokio runtime issues
-        let provider_owned = provider.to_string();
-        let fetch_result = std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().ok()?;
-            rt.block_on(async {
-                let db = crate::llm::models_db();
-                db.list_models(&provider_owned).await.ok()
-            })
-        })
-        .join()
-        .ok()
-        .flatten();
-
-        if let Some(models) = fetch_result {
-            if !models.is_empty() {
-                tracing::info!("Fetched {} models for {}", models.len(), provider);
-                let mut result: Vec<(String, String, String)> = models
-                    .into_iter()
-                    .map(|m| {
-                        let desc = m.capability_summary();
-                        (m.id, m.name, desc)
-                    })
-                    .collect();
-                result.sort_by(|a, b| a.1.cmp(&b.1));
-                return Some(result);
-            }
-        }
-
-        tracing::warn!("Fetch failed for {}, using fallback", provider);
-        // Fallback to hardcoded only if fetch failed
+        // Cache not ready yet. models_db preloads in the background; fall back to a small
+        // provider-specific list instead of blocking/creating nested runtimes.
         Self::get_fallback_models(provider)
     }
 
     /// Fallback models if cache not ready
     fn get_fallback_models(provider: &str) -> Option<Vec<(String, String, String)>> {
-        match provider {
-            "google" | "gemini" => Some(vec![
+        // Normalize provider to handle plugin IDs like "gemini-oauth"
+        let normalized = crate::llm::models_db().normalize_provider_name(provider);
+        let provider_key = normalized.as_str();
+
+        match provider_key {
+            "google" => Some(vec![
                 (
                     "gemini-2.0-flash-exp".into(),
                     "Gemini 2.0 Flash".into(),
@@ -4834,36 +4719,8 @@ impl TuiApp {
     ///
     /// Requirements: 1.3, 1.4, 4.1
     fn get_model_picker_items_for_provider_dynamic(&self, provider_id: &str) -> Vec<PickerItem> {
-        let current_model = self
-            .agent_bridge
-            .as_ref()
-            .map(|b| b.model_name().to_string())
-            .unwrap_or_default();
-
-        // Only try dynamic fetch if the agent_bridge is configured for the SAME provider
-        // Otherwise the bridge would return models for the wrong provider
-        if let Some(ref bridge) = self.agent_bridge {
-            if bridge.provider_name() == provider_id {
-                // Use block_in_place to call async function in sync context
-                let models_result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(bridge.list_available_models())
-                });
-
-                if !models_result.is_empty() {
-                    // Successfully fetched models dynamically
-                    return models_result
-                        .into_iter()
-                        .map(|(model_id, display_name, description)| {
-                            PickerItem::new(&model_id, &display_name)
-                                .with_description(description)
-                                .with_active(current_model == model_id)
-                        })
-                        .collect();
-                }
-            }
-        }
-
-        // Fall back to hardcoded list or plugin provider
+        // IMPORTANT: never block the runtime to "dynamically" fetch models.
+        // We rely on models_db cache and/or plugin-declared models instead.
         self.get_model_picker_items_for_provider(provider_id)
     }
 
@@ -4959,7 +4816,8 @@ impl TuiApp {
 
                     // Show model picker for the selected provider
                     self.state.picker.set_title("Select Model");
-                    let items = self.get_model_picker_items_for_provider_dynamic(selected_id);
+                    // Never block here; use cached/provider-declared models.
+                    let items = self.get_model_picker_items_for_provider(selected_id);
                     self.state.picker.set_items(items);
                     self.state.active_picker_type = Some(PickerType::Model);
                     self.state.picker.show();
@@ -5350,46 +5208,58 @@ impl TuiApp {
         &mut self,
         request: AsyncMessageRequest,
     ) -> anyhow::Result<()> {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
-        // Flag to track if LLM work is done
-        let done_flag = Arc::new(AtomicBool::new(false));
-        let done_flag_clone = done_flag.clone();
-
-        // Take the bridge temporarily to use in spawned task
-        // We need to use block_in_place since AgentBridge isn't Send
+        // Take the bridge temporarily to use in a background thread (so UI stays responsive).
         let bridge = self.agent_bridge.take();
 
         if let Some(mut bridge) = bridge {
             let has_attachments = !request.attachments.is_empty();
             let tx = request.tx.clone();
 
-            // Spawn the LLM work in a blocking task
-            let handle = tokio::task::spawn_blocking(move || {
-                let rt = tokio::runtime::Handle::current();
-                let result = rt.block_on(async {
-                    if has_attachments {
-                        bridge
-                            .send_message_with_attachments(
-                                &request.content,
-                                request.attachments,
-                                tx.clone(),
-                                &request.config,
-                            )
-                            .await
-                    } else {
-                        bridge
-                            .send_message_streaming(&request.content, tx.clone())
-                            .await
-                    }
-                });
-                done_flag_clone.store(true, Ordering::SeqCst);
-                (bridge, result, tx)
+            // IMPORTANT: do not call `Handle::block_on` or create nested runtimes inside a Tokio
+            // runtime thread (can panic). Instead, run the LLM work on a dedicated OS thread with
+            // its own current-thread Tokio runtime.
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<(
+                AgentBridge,
+                anyhow::Result<()>,
+                mpsc::UnboundedSender<AgentEvent>,
+            )>();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+
+                let result = match runtime {
+                    Ok(rt) => rt.block_on(async {
+                        if has_attachments {
+                            bridge
+                                .send_message_with_attachments(
+                                    &request.content,
+                                    request.attachments,
+                                    tx.clone(),
+                                    &request.config,
+                                )
+                                .await
+                        } else {
+                            bridge
+                                .send_message_streaming(&request.content, tx.clone())
+                                .await
+                        }
+                    }),
+                    Err(e) => Err(anyhow::anyhow!("Failed to start background runtime: {}", e)),
+                };
+
+                let _ = done_tx.send((bridge, result, tx));
             });
 
             // Poll events and render while LLM is working
-            while !done_flag.load(Ordering::SeqCst) && !is_force_quit_requested() {
+            let mut completed: Option<(
+                AgentBridge,
+                anyhow::Result<()>,
+                mpsc::UnboundedSender<AgentEvent>,
+            )> = None;
+            while completed.is_none() && !is_force_quit_requested() {
                 // Poll for agent events (streaming chunks)
                 let events_processed = self.poll_agent_events();
 
@@ -5418,18 +5288,25 @@ impl TuiApp {
 
                 // Small yield to let the spawned task make progress
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+                // Check if the background thread finished without blocking UI.
+                if let Ok(done) = done_rx.try_recv() {
+                    completed = Some(done);
+                }
             }
 
             // Check if force quit was requested
             if is_force_quit_requested() {
                 tracing::warn!("Force quit requested during LLM processing");
                 self.state.quit();
-                // Don't wait for the handle - just restore bridge and exit
-                // The spawned task will be cancelled when we exit
+                // Don't wait; the process exit will terminate background work.
+                return Ok(());
             }
 
             // Get the result and restore the bridge
-            let (bridge, result, tx) = handle.await.expect("LLM task panicked");
+            let (bridge, result, tx) = completed
+                .or_else(|| done_rx.recv().ok())
+                .expect("LLM background thread failed");
             self.agent_bridge = Some(bridge);
 
             match result {
@@ -5437,7 +5314,7 @@ impl TuiApp {
                     // Message sent successfully
                 }
                 Err(e) => {
-                    let _ = tx.send(AgentEvent::Error(e.to_string())).await;
+                    let _ = tx.send(AgentEvent::Error(e.to_string()));
                     self.state.agent_processing = false;
                 }
             }
@@ -5704,7 +5581,38 @@ impl TuiApp {
                                 // - thinking_content is for UI display only (shown in ThinkingBlock)
                                 // - content is what gets saved to session and sent to LLM
                                 // - Embedding thinking would increase context size unnecessarily
-                                last_msg.content = info.text.clone();
+
+                                // CRITICAL FIX: Prefer streamed content over shorter final text
+                                // Extract all text from segments to get the complete streamed content
+                                let streamed_text: String = last_msg
+                                    .segments
+                                    .iter()
+                                    .filter_map(|seg| match seg {
+                                        super::widgets::MessageSegment::Text(text) => {
+                                            Some(text.as_str())
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("");
+
+                                // Choose the better source of truth:
+                                // - If streamed text is longer and info.text is empty/shorter, keep streamed
+                                // - Otherwise, use info.text (it might have corrections or be more complete)
+                                if !streamed_text.is_empty()
+                                    && (info.text.is_empty()
+                                        || streamed_text.len() > info.text.len())
+                                {
+                                    last_msg.content = streamed_text;
+                                    tracing::debug!(
+                                        "Finalize: keeping streamed text ({} chars) over final text ({} chars)",
+                                        last_msg.content.len(),
+                                        info.text.len()
+                                    );
+                                } else {
+                                    last_msg.content = info.text.clone();
+                                }
+
                                 // Note: thinking_content is already populated during streaming
                                 // and will be displayed separately by the ThinkingBlock widget
                                 last_msg.is_streaming = false;

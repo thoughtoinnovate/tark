@@ -5,18 +5,23 @@
 pub mod auth;
 mod claude;
 mod copilot;
+mod debug_wrapper;
+mod error;
 mod gemini;
 mod models_db;
 mod ollama;
 mod openai;
 mod openrouter;
 mod plugin_provider;
+pub mod streaming;
 mod types;
 
 pub use claude::ClaudeProvider;
 pub use copilot::CopilotProvider;
+pub use debug_wrapper::DebugProviderWrapper;
+pub use error::LlmError;
 pub use gemini::GeminiProvider;
-pub use models_db::{models_db, ModelCapabilities};
+pub use models_db::{init_models_db, models_db, ModelCapabilities};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use openrouter::OpenRouterProvider;
@@ -293,5 +298,21 @@ pub fn create_provider_with_options(
                 plugin_list
             )
         }
+    }
+}
+
+/// Create provider with optional debug wrapper
+pub fn create_provider_with_debug(
+    name: &str,
+    silent: bool,
+    model: Option<&str>,
+    debug_log_path: Option<&std::path::Path>,
+) -> Result<Box<dyn LlmProvider>> {
+    let provider = create_provider_with_options(name, silent, model)?;
+
+    if let Some(log_path) = debug_log_path {
+        Ok(Box::new(DebugProviderWrapper::new(provider, log_path)?))
+    } else {
+        Ok(provider)
     }
 }

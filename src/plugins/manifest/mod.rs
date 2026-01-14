@@ -56,6 +56,11 @@ pub struct PluginCapabilities {
     /// Allowed filesystem paths (relative to workspace)
     #[serde(default)]
     pub filesystem: Vec<String>,
+
+    /// Allowed filesystem read paths (absolute, supports ~ for home)
+    /// Used for reading system files like Gemini CLI installation
+    #[serde(default)]
+    pub fs_read: Vec<String>,
 }
 
 impl PluginCapabilities {
@@ -82,6 +87,84 @@ impl PluginCapabilities {
                 var == allowed
             }
         })
+    }
+
+    /// Check if filesystem read access to a path is allowed
+    pub fn is_fs_read_allowed(&self, requested_path: &str) -> bool {
+        if self.fs_read.is_empty() {
+            return false;
+        }
+
+        // Expand ~ in requested path
+        let expanded_requested = expand_home_path(requested_path);
+
+        // Try to canonicalize (resolve symlinks, normalize)
+        let canonical_requested = match std::fs::canonicalize(&expanded_requested) {
+            Ok(p) => p,
+            Err(_) => {
+                // Path doesn't exist yet, use the expanded path directly
+                std::path::PathBuf::from(&expanded_requested)
+            }
+        };
+
+        for allowed in &self.fs_read {
+            let expanded_allowed = expand_home_path(allowed);
+
+            // Check for glob pattern (contains *)
+            if allowed.contains('*') {
+                if glob_match_path(&expanded_allowed, &canonical_requested.to_string_lossy()) {
+                    return true;
+                }
+                continue;
+            }
+
+            // Exact path match
+            let canonical_allowed = match std::fs::canonicalize(&expanded_allowed) {
+                Ok(p) => p,
+                Err(_) => std::path::PathBuf::from(&expanded_allowed),
+            };
+
+            if canonical_requested == canonical_allowed {
+                return true;
+            }
+
+            // Also check if requested path starts with allowed directory
+            if canonical_requested.starts_with(&canonical_allowed) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+/// Expand ~ to home directory in a path
+fn expand_home_path(path: &str) -> String {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped).to_string_lossy().to_string();
+        }
+    } else if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home.to_string_lossy().to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// Simple glob matching for paths (supports * and **)
+fn glob_match_path(pattern: &str, path: &str) -> bool {
+    // Convert glob pattern to regex
+    let regex_pattern = pattern
+        .replace('.', r"\.")
+        .replace("**", "<<<DOUBLESTAR>>>")
+        .replace('*', "[^/]*")
+        .replace("<<<DOUBLESTAR>>>", ".*");
+
+    if let Ok(re) = regex::Regex::new(&format!("^{}$", regex_pattern)) {
+        re.is_match(path)
+    } else {
+        false
     }
 }
 
@@ -334,5 +417,41 @@ http = ["oauth2.googleapis.com", "*.google.com"]
         assert!(caps.is_env_allowed("GEMINI_PROJECT_ID"));
         assert!(caps.is_env_allowed("GOOGLE_API_KEY"));
         assert!(!caps.is_env_allowed("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn test_expand_home_path() {
+        let home = dirs::home_dir().unwrap();
+        let home_str = home.to_string_lossy();
+
+        assert_eq!(
+            expand_home_path("~/.gemini/oauth_creds.json"),
+            format!("{}/.gemini/oauth_creds.json", home_str)
+        );
+        assert_eq!(expand_home_path("/absolute/path"), "/absolute/path");
+        assert_eq!(expand_home_path("relative/path"), "relative/path");
+    }
+
+    #[test]
+    fn test_fs_read_empty() {
+        let caps = PluginCapabilities::default();
+        assert!(!caps.is_fs_read_allowed("/any/path"));
+    }
+
+    #[test]
+    fn test_glob_match_path() {
+        // Single star matches within directory
+        assert!(glob_match_path("/usr/*/file.txt", "/usr/local/file.txt"));
+        assert!(!glob_match_path(
+            "/usr/*/file.txt",
+            "/usr/local/bin/file.txt"
+        ));
+
+        // Double star matches across directories
+        assert!(glob_match_path(
+            "/usr/**/file.txt",
+            "/usr/local/bin/file.txt"
+        ));
+        assert!(glob_match_path("/usr/**/*.js", "/usr/local/lib/test.js"));
     }
 }
