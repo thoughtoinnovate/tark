@@ -466,6 +466,9 @@ impl GeminiProvider {
 
             // Push bytes into SSE decoder
             for payload_json in decoder.push(&chunk) {
+                // Debug-only: record raw streaming payload for troubleshooting
+                crate::llm::append_llm_raw_line(&payload_json);
+
                 if let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(&payload_json) {
                     if let Some(candidate) = chunk.candidates.first() {
                         if let Some(content) = &candidate.content {
@@ -732,6 +735,9 @@ impl GeminiProvider {
 
             // Push bytes into SSE decoder
             for payload_json in decoder.push(&chunk) {
+                // Debug-only: record raw streaming payload for troubleshooting
+                crate::llm::append_llm_raw_line(&payload_json);
+
                 // Cloud Code Assist wraps response in {"response": {...}}
                 match serde_json::from_str::<CloudCodeAssistStreamChunk>(&payload_json) {
                     Ok(chunk) => {
