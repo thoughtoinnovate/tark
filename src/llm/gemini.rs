@@ -3,9 +3,23 @@
 //! SECURITY: API keys are ONLY sent to official Google endpoints.
 //! The GEMINI_API_KEY is never sent to any third-party services.
 //!
-//! Supports two API modes:
-//! - Standard API - Uses OpenAI-compatible endpoint for reliability
-//! - Cloud Code Assist API (cloudcode-pa.googleapis.com) - OAuth Bearer auth, native format
+//! # Authentication Modes
+//!
+//! Gemini has two distinct API endpoints with different auth requirements:
+//!
+//! ## 1. Standard API (API Key users)
+//! - Endpoint: `generativelanguage.googleapis.com` (OpenAI-compatible format)
+//! - Auth: API key via `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+//! - Uses: `OpenAiCompatProvider` internally
+//!
+//! ## 2. Cloud Code Assist API (OAuth users)
+//! - Endpoint: `cloudcode-pa.googleapis.com` (native Gemini format)
+//! - Auth: OAuth Bearer token
+//! - Uses: `CloudCodeAssistProvider` internally (native format required)
+//!
+//! **Note:** OAuth tokens do NOT work with the Standard API endpoint.
+//! The OpenAI-compat endpoint only accepts API keys, not OAuth tokens.
+//! This is why we maintain CloudCodeAssistProvider for OAuth users.
 
 #![allow(dead_code)]
 
