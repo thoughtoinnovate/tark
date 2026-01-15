@@ -17,6 +17,7 @@ use super::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::env;
 
 /// Official Google Gemini API endpoint (Standard mode)
@@ -154,6 +155,7 @@ impl GeminiProvider {
     fn convert_messages(&self, messages: &[Message]) -> (Option<String>, Vec<GeminiContent>) {
         let mut system_instruction = None;
         let mut contents = Vec::new();
+        let mut allowed_tool_call_ids: HashSet<String> = HashSet::new();
 
         for msg in messages {
             match msg.role {
@@ -195,21 +197,29 @@ impl GeminiProvider {
                                         }
                                     }
                                     ContentPart::ToolUse {
+                                        id,
                                         name,
                                         input,
                                         thought_signature,
-                                        ..
                                     } => {
                                         // Include tool calls as functionCall parts so that
                                         // subsequent tool results (functionResponse) are
                                         // properly attributed by the model.
-                                        parts.push(GeminiPart::FunctionCall {
-                                            function_call: GeminiFunctionCall {
-                                                name: name.clone(),
-                                                args: input.clone(),
-                                                thought_signature: thought_signature.clone(),
-                                            },
-                                        });
+                                        if thought_signature.is_some() {
+                                            allowed_tool_call_ids.insert(id.clone());
+                                            parts.push(GeminiPart::FunctionCall {
+                                                function_call: GeminiFunctionCall {
+                                                    name: name.clone(),
+                                                    args: input.clone(),
+                                                    thought_signature: thought_signature.clone(),
+                                                },
+                                            });
+                                        } else {
+                                            tracing::warn!(
+                                                "Skipping Gemini tool call '{}' without thought_signature",
+                                                name
+                                            );
+                                        }
                                     }
                                     ContentPart::ToolResult { .. } => {
                                         // Tool results are handled in Role::Tool
@@ -231,6 +241,14 @@ impl GeminiProvider {
                     if let (Some(tool_call_id), Some(text)) =
                         (&msg.tool_call_id, msg.content.as_text())
                     {
+                        if !allowed_tool_call_ids.contains(tool_call_id) {
+                            tracing::warn!(
+                                "Skipping Gemini tool response for '{}' without matching thought_signature",
+                                tool_call_id
+                            );
+                            continue;
+                        }
+
                         // Extract function name from tool_call_id (format: "gemini_{name}")
                         let function_name = tool_call_id
                             .strip_prefix("gemini_")
@@ -1349,5 +1367,35 @@ mod tests {
             }
             _ => panic!("Expected FunctionCall"),
         }
+    }
+
+    #[test]
+    fn test_convert_messages_skips_missing_thought_signature() {
+        let provider = GeminiProvider {
+            client: reqwest::Client::new(),
+            auth: GeminiAuth::ApiKey("test".to_string()),
+            model: "gemini-2.0-flash-exp".to_string(),
+            max_tokens: 16,
+            api_mode: GeminiApiMode::Standard,
+        };
+
+        let messages = vec![
+            Message::user("Hello"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::ToolUse {
+                    id: "gemini_list".to_string(),
+                    name: "list_directory".to_string(),
+                    input: serde_json::json!({"path": "."}),
+                    thought_signature: None,
+                }]),
+                tool_call_id: None,
+            },
+            Message::tool_result("gemini_list", "file.txt"),
+        ];
+
+        let (_, contents) = provider.convert_messages(&messages);
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].role, "user");
     }
 }
