@@ -712,12 +712,16 @@ impl LlmProvider for CloudCodeAssistProvider {
             thinking_config: None,
         };
 
-        // Add thinking config if enabled
+        // Note: CloudCodeAssist endpoint does NOT support thinkingConfig parameter
+        // The API returns "Unknown name" error if we include it
+        // Thinking/reasoning is handled internally by compatible models (gemini-2.5+)
+        // but we cannot explicitly enable it via this endpoint
         if settings.enabled && settings.budget_tokens > 0 {
-            request.thinking_config = Some(GeminiThinkingConfig {
-                thinking_budget: settings.budget_tokens as i32,
-                include_thoughts: true,
-            });
+            tracing::debug!(
+                "CloudCodeAssist: thinking config requested but not supported by endpoint. \
+                 Model {} may still use internal reasoning.",
+                self.model
+            );
         }
 
         if let Some(tools) = tools {
