@@ -54,6 +54,154 @@ pub fn append_raw_line(line: &str) {
     }
 }
 
+// ============================================================================
+// Structured Debug Logging Helpers
+// ============================================================================
+
+/// Log a structured request event
+pub fn log_request(provider: &str, model: &str, messages_count: usize, has_tools: bool) {
+    let path = match cell().lock().ok().and_then(|g| g.clone()) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let request_id = REQUEST_ID.try_with(|id| id.clone()).ok();
+
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let entry = serde_json::json!({
+            "type": "request",
+            "request_id": request_id,
+            "provider": provider,
+            "model": model,
+            "messages_count": messages_count,
+            "has_tools": has_tools,
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        });
+        let _ = writeln!(f, "{}", entry);
+    }
+
+    tracing::debug!(
+        target: "llm",
+        provider = provider,
+        model = model,
+        messages = messages_count,
+        has_tools = has_tools,
+        "LLM request"
+    );
+}
+
+/// Log a thinking/reasoning event
+pub fn log_thinking(provider: &str, content: &str) {
+    let path = match cell().lock().ok().and_then(|g| g.clone()) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let request_id = REQUEST_ID.try_with(|id| id.clone()).ok();
+
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let entry = serde_json::json!({
+            "type": "thinking",
+            "request_id": request_id,
+            "provider": provider,
+            "content": content,
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        });
+        let _ = writeln!(f, "{}", entry);
+    }
+
+    // Log a truncated version to tracing
+    let truncated = if content.len() > 200 {
+        format!("{}...", &content[..200])
+    } else {
+        content.to_string()
+    };
+
+    tracing::debug!(
+        target: "llm",
+        provider = provider,
+        thinking = %truncated,
+        "LLM thinking"
+    );
+}
+
+/// Log a tool call event
+pub fn log_tool_call(
+    provider: &str,
+    tool_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    has_thought_signature: bool,
+) {
+    let path = match cell().lock().ok().and_then(|g| g.clone()) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let request_id = REQUEST_ID.try_with(|id| id.clone()).ok();
+
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let entry = serde_json::json!({
+            "type": "tool_call",
+            "request_id": request_id,
+            "provider": provider,
+            "tool_id": tool_id,
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "has_thought_signature": has_thought_signature,
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        });
+        let _ = writeln!(f, "{}", entry);
+    }
+
+    tracing::debug!(
+        target: "llm",
+        provider = provider,
+        tool_id = tool_id,
+        tool_name = tool_name,
+        has_thought_signature = has_thought_signature,
+        "LLM tool call"
+    );
+}
+
+/// Log a tool result event
+pub fn log_tool_result(provider: &str, tool_id: &str, result_preview: &str, is_error: bool) {
+    let path = match cell().lock().ok().and_then(|g| g.clone()) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let request_id = REQUEST_ID.try_with(|id| id.clone()).ok();
+
+    // Truncate result preview
+    let preview = if result_preview.len() > 500 {
+        format!("{}...", &result_preview[..500])
+    } else {
+        result_preview.to_string()
+    };
+
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let entry = serde_json::json!({
+            "type": "tool_result",
+            "request_id": request_id,
+            "provider": provider,
+            "tool_id": tool_id,
+            "result_preview": preview,
+            "is_error": is_error,
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        });
+        let _ = writeln!(f, "{}", entry);
+    }
+
+    tracing::debug!(
+        target: "llm",
+        provider = provider,
+        tool_id = tool_id,
+        is_error = is_error,
+        "LLM tool result"
+    );
+}
+
 /// Append a line to the raw log with a request_id prefix (best-effort).
 pub fn append_raw_line_with_id(request_id: &str, line: &str) {
     let path = match cell().lock().ok().and_then(|g| g.clone()) {

@@ -11,6 +11,7 @@ mod gemini;
 mod models_db;
 mod ollama;
 mod openai;
+mod openai_compat;
 mod openrouter;
 mod plugin_provider;
 mod raw_log;
@@ -25,6 +26,9 @@ pub use gemini::GeminiProvider;
 pub use models_db::{init_models_db, models_db, ModelCapabilities};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
+// OpenAI-compatible provider components - public API for plugin providers
+#[allow(unused_imports)]
+pub use openai_compat::{AuthMethod, OpenAiCompatConfig, OpenAiCompatProvider};
 pub use openrouter::OpenRouterProvider;
 pub use plugin_provider::{list_plugin_providers, try_create_plugin_provider};
 pub use types::*;
