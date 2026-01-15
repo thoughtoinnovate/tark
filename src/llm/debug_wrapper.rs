@@ -67,17 +67,32 @@ impl LlmProvider for DebugProviderWrapper {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse> {
+        let request_id = DebugLogEntry::new_request_id();
+
         // Log request
-        self.log(&DebugLogEntry::request(self.name(), messages, tools))
-            .await;
+        self.log(&DebugLogEntry::request(
+            &request_id,
+            self.name(),
+            messages,
+            tools,
+        ))
+        .await;
 
         let start = std::time::Instant::now();
-        let result = self.inner.chat(messages, tools).await;
+        // Set request_id in task-local context for raw logging
+        let result = crate::llm::raw_log::REQUEST_ID
+            .scope(request_id.clone(), self.inner.chat(messages, tools))
+            .await;
         let duration = start.elapsed();
 
         // Log response
-        self.log(&DebugLogEntry::response(self.name(), &result, duration))
-            .await;
+        self.log(&DebugLogEntry::response(
+            &request_id,
+            self.name(),
+            &result,
+            duration,
+        ))
+        .await;
 
         result
     }
@@ -88,8 +103,11 @@ impl LlmProvider for DebugProviderWrapper {
         tools: Option<&[ToolDefinition]>,
         settings: &ThinkSettings,
     ) -> Result<LlmResponse> {
+        let request_id = DebugLogEntry::new_request_id();
+
         // Log request with thinking settings
         self.log(&DebugLogEntry::request_with_thinking(
+            &request_id,
             self.name(),
             messages,
             tools,
@@ -98,15 +116,23 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        let result = self
-            .inner
-            .chat_with_thinking(messages, tools, settings)
+        // Set request_id in task-local context for raw logging
+        let result = crate::llm::raw_log::REQUEST_ID
+            .scope(
+                request_id.clone(),
+                self.inner.chat_with_thinking(messages, tools, settings),
+            )
             .await;
         let duration = start.elapsed();
 
         // Log response
-        self.log(&DebugLogEntry::response(self.name(), &result, duration))
-            .await;
+        self.log(&DebugLogEntry::response(
+            &request_id,
+            self.name(),
+            &result,
+            duration,
+        ))
+        .await;
 
         result
     }
@@ -118,20 +144,36 @@ impl LlmProvider for DebugProviderWrapper {
         callback: StreamCallback,
         interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<LlmResponse> {
+        let request_id = DebugLogEntry::new_request_id();
+
         // Log request
-        self.log(&DebugLogEntry::request(self.name(), messages, tools))
-            .await;
+        self.log(&DebugLogEntry::request(
+            &request_id,
+            self.name(),
+            messages,
+            tools,
+        ))
+        .await;
 
         let start = std::time::Instant::now();
-        let result = self
-            .inner
-            .chat_streaming(messages, tools, callback, interrupt_check)
+        // Set request_id in task-local context for raw logging
+        let result = crate::llm::raw_log::REQUEST_ID
+            .scope(
+                request_id.clone(),
+                self.inner
+                    .chat_streaming(messages, tools, callback, interrupt_check),
+            )
             .await;
         let duration = start.elapsed();
 
         // Log response
-        self.log(&DebugLogEntry::response(self.name(), &result, duration))
-            .await;
+        self.log(&DebugLogEntry::response(
+            &request_id,
+            self.name(),
+            &result,
+            duration,
+        ))
+        .await;
 
         result
     }
@@ -144,8 +186,11 @@ impl LlmProvider for DebugProviderWrapper {
         interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
         settings: &ThinkSettings,
     ) -> Result<LlmResponse> {
+        let request_id = DebugLogEntry::new_request_id();
+
         // Log request with thinking settings
         self.log(&DebugLogEntry::request_with_thinking(
+            &request_id,
             self.name(),
             messages,
             tools,
@@ -154,15 +199,29 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        let result = self
-            .inner
-            .chat_streaming_with_thinking(messages, tools, callback, interrupt_check, settings)
+        // Set request_id in task-local context for raw logging
+        let result = crate::llm::raw_log::REQUEST_ID
+            .scope(
+                request_id.clone(),
+                self.inner.chat_streaming_with_thinking(
+                    messages,
+                    tools,
+                    callback,
+                    interrupt_check,
+                    settings,
+                ),
+            )
             .await;
         let duration = start.elapsed();
 
         // Log response
-        self.log(&DebugLogEntry::response(self.name(), &result, duration))
-            .await;
+        self.log(&DebugLogEntry::response(
+            &request_id,
+            self.name(),
+            &result,
+            duration,
+        ))
+        .await;
 
         result
     }
@@ -177,8 +236,11 @@ impl LlmProvider for DebugProviderWrapper {
         suffix: &str,
         language: &str,
     ) -> Result<CompletionResult> {
+        let request_id = DebugLogEntry::new_request_id();
+
         // Log FIM request
         self.log(&DebugLogEntry::fim_request(
+            &request_id,
             self.name(),
             prefix,
             suffix,
@@ -187,19 +249,33 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        let result = self.inner.complete_fim(prefix, suffix, language).await;
+        // Set request_id in task-local context for raw logging
+        let result = crate::llm::raw_log::REQUEST_ID
+            .scope(
+                request_id.clone(),
+                self.inner.complete_fim(prefix, suffix, language),
+            )
+            .await;
         let duration = start.elapsed();
 
         // Log FIM response
-        self.log(&DebugLogEntry::fim_response(self.name(), &result, duration))
-            .await;
+        self.log(&DebugLogEntry::fim_response(
+            &request_id,
+            self.name(),
+            &result,
+            duration,
+        ))
+        .await;
 
         result
     }
 
     async fn explain_code(&self, code: &str, context: &str) -> Result<String> {
+        let request_id = DebugLogEntry::new_request_id();
+
         // Log code explanation request
         self.log(&DebugLogEntry::code_explanation_request(
+            &request_id,
             self.name(),
             code,
             context,
@@ -207,11 +283,15 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        let result = self.inner.explain_code(code, context).await;
+        // Set request_id in task-local context for raw logging
+        let result = crate::llm::raw_log::REQUEST_ID
+            .scope(request_id.clone(), self.inner.explain_code(code, context))
+            .await;
         let duration = start.elapsed();
 
         // Log code explanation response
         self.log(&DebugLogEntry::code_explanation_response(
+            &request_id,
             self.name(),
             &result,
             duration,
@@ -226,8 +306,11 @@ impl LlmProvider for DebugProviderWrapper {
         code: &str,
         context: &str,
     ) -> Result<Vec<RefactoringSuggestion>> {
+        let request_id = DebugLogEntry::new_request_id();
+
         // Log refactoring request
         self.log(&DebugLogEntry::refactoring_request(
+            &request_id,
             self.name(),
             code,
             context,
@@ -235,11 +318,18 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        let result = self.inner.suggest_refactorings(code, context).await;
+        // Set request_id in task-local context for raw logging
+        let result = crate::llm::raw_log::REQUEST_ID
+            .scope(
+                request_id.clone(),
+                self.inner.suggest_refactorings(code, context),
+            )
+            .await;
         let duration = start.elapsed();
 
         // Log refactoring response
         self.log(&DebugLogEntry::refactoring_response(
+            &request_id,
             self.name(),
             &result,
             duration,
@@ -250,8 +340,11 @@ impl LlmProvider for DebugProviderWrapper {
     }
 
     async fn review_code(&self, code: &str, language: &str) -> Result<Vec<CodeIssue>> {
+        let request_id = DebugLogEntry::new_request_id();
+
         // Log code review request
         self.log(&DebugLogEntry::code_review_request(
+            &request_id,
             self.name(),
             code,
             language,
@@ -259,11 +352,15 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        let result = self.inner.review_code(code, language).await;
+        // Set request_id in task-local context for raw logging
+        let result = crate::llm::raw_log::REQUEST_ID
+            .scope(request_id.clone(), self.inner.review_code(code, language))
+            .await;
         let duration = start.elapsed();
 
         // Log code review response
         self.log(&DebugLogEntry::code_review_response(
+            &request_id,
             self.name(),
             &result,
             duration,
@@ -277,6 +374,7 @@ impl LlmProvider for DebugProviderWrapper {
 /// Structured debug log entry
 #[derive(Debug, Serialize)]
 pub struct DebugLogEntry {
+    request_id: String,
     timestamp: String,
     provider: String,
     event_type: String,
@@ -354,9 +452,20 @@ pub struct TokenUsageSummary {
 }
 
 impl DebugLogEntry {
+    /// Generate a new request ID
+    fn new_request_id() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
     /// Create a request log entry
-    pub fn request(provider: &str, messages: &[Message], tools: Option<&[ToolDefinition]>) -> Self {
+    pub fn request(
+        request_id: &str,
+        provider: &str,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+    ) -> Self {
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "request".to_string(),
@@ -373,12 +482,14 @@ impl DebugLogEntry {
 
     /// Create a request log entry with thinking settings
     pub fn request_with_thinking(
+        request_id: &str,
         provider: &str,
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
         settings: &ThinkSettings,
     ) -> Self {
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "request_with_thinking".to_string(),
@@ -395,6 +506,7 @@ impl DebugLogEntry {
 
     /// Create a response log entry
     pub fn response(
+        request_id: &str,
         provider: &str,
         result: &Result<LlmResponse>,
         duration: std::time::Duration,
@@ -405,6 +517,7 @@ impl DebugLogEntry {
         };
 
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "response".to_string(),
@@ -420,8 +533,15 @@ impl DebugLogEntry {
     }
 
     /// Create a FIM request log entry
-    pub fn fim_request(provider: &str, prefix: &str, suffix: &str, language: &str) -> Self {
+    pub fn fim_request(
+        request_id: &str,
+        provider: &str,
+        prefix: &str,
+        suffix: &str,
+        language: &str,
+    ) -> Self {
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "fim_request".to_string(),
@@ -442,6 +562,7 @@ impl DebugLogEntry {
 
     /// Create a FIM response log entry
     pub fn fim_response(
+        request_id: &str,
         provider: &str,
         result: &Result<CompletionResult>,
         duration: std::time::Duration,
@@ -452,6 +573,7 @@ impl DebugLogEntry {
         };
 
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "fim_response".to_string(),
@@ -467,8 +589,14 @@ impl DebugLogEntry {
     }
 
     /// Create a code explanation request log entry
-    pub fn code_explanation_request(provider: &str, code: &str, context: &str) -> Self {
+    pub fn code_explanation_request(
+        request_id: &str,
+        provider: &str,
+        code: &str,
+        context: &str,
+    ) -> Self {
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "code_explanation_request".to_string(),
@@ -489,6 +617,7 @@ impl DebugLogEntry {
 
     /// Create a code explanation response log entry
     pub fn code_explanation_response(
+        request_id: &str,
         provider: &str,
         result: &Result<String>,
         duration: std::time::Duration,
@@ -499,6 +628,7 @@ impl DebugLogEntry {
         };
 
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "code_explanation_response".to_string(),
@@ -514,8 +644,14 @@ impl DebugLogEntry {
     }
 
     /// Create a refactoring request log entry
-    pub fn refactoring_request(provider: &str, code: &str, context: &str) -> Self {
+    pub fn refactoring_request(
+        request_id: &str,
+        provider: &str,
+        code: &str,
+        context: &str,
+    ) -> Self {
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "refactoring_request".to_string(),
@@ -536,6 +672,7 @@ impl DebugLogEntry {
 
     /// Create a refactoring response log entry
     pub fn refactoring_response(
+        request_id: &str,
         provider: &str,
         result: &Result<Vec<RefactoringSuggestion>>,
         duration: std::time::Duration,
@@ -546,6 +683,7 @@ impl DebugLogEntry {
         };
 
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "refactoring_response".to_string(),
@@ -561,8 +699,14 @@ impl DebugLogEntry {
     }
 
     /// Create a code review request log entry
-    pub fn code_review_request(provider: &str, code: &str, language: &str) -> Self {
+    pub fn code_review_request(
+        request_id: &str,
+        provider: &str,
+        code: &str,
+        language: &str,
+    ) -> Self {
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "code_review_request".to_string(),
@@ -583,6 +727,7 @@ impl DebugLogEntry {
 
     /// Create a code review response log entry
     pub fn code_review_response(
+        request_id: &str,
         provider: &str,
         result: &Result<Vec<CodeIssue>>,
         duration: std::time::Duration,
@@ -593,6 +738,7 @@ impl DebugLogEntry {
         };
 
         Self {
+            request_id: request_id.to_string(),
             timestamp: DebugProviderWrapper::timestamp(),
             provider: provider.to_string(),
             event_type: "code_review_response".to_string(),
@@ -896,5 +1042,108 @@ mod tests {
             assert!(entry.get("provider").is_some());
             assert!(entry.get("event_type").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn test_debug_wrapper_includes_request_id() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let log_path = temp_file.path().to_path_buf();
+
+        let mock_provider = Box::new(MockProvider);
+        let wrapper = DebugProviderWrapper::new(mock_provider, &log_path).unwrap();
+
+        let messages = vec![Message::user("Test message")];
+
+        // Make a request
+        let result = wrapper.chat(&messages, None).await;
+        assert!(result.is_ok());
+
+        // Read log file
+        let log_content = fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = log_content.lines().collect();
+
+        // Should have exactly 2 lines (request + response)
+        assert_eq!(lines.len(), 2);
+
+        // Parse both entries
+        let request_entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let response_entry: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+
+        // Both should have request_id
+        let request_id = request_entry.get("request_id").and_then(|v| v.as_str());
+        let response_id = response_entry.get("request_id").and_then(|v| v.as_str());
+
+        assert!(request_id.is_some(), "Request entry should have request_id");
+        assert!(
+            response_id.is_some(),
+            "Response entry should have request_id"
+        );
+
+        // request_id should match between request and response
+        assert_eq!(
+            request_id, response_id,
+            "Request and response should have the same request_id"
+        );
+
+        // Verify the request_id is a valid UUID format (8-4-4-4-12 hex digits)
+        let id = request_id.unwrap();
+        assert_eq!(id.len(), 36, "UUID should be 36 characters");
+        assert_eq!(
+            id.chars().filter(|c| *c == '-').count(),
+            4,
+            "UUID should have 4 hyphens"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_different_requests_have_different_ids() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let log_path = temp_file.path().to_path_buf();
+
+        let mock_provider = Box::new(MockProvider);
+        let wrapper = DebugProviderWrapper::new(mock_provider, &log_path).unwrap();
+
+        let messages = vec![Message::user("First request")];
+
+        // Make first request
+        let result1 = wrapper.chat(&messages, None).await;
+        assert!(result1.is_ok());
+
+        // Make second request
+        let messages2 = vec![Message::user("Second request")];
+        let result2 = wrapper.chat(&messages2, None).await;
+        assert!(result2.is_ok());
+
+        // Read log file
+        let log_content = fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = log_content.lines().collect();
+
+        // Should have 4 lines (2 requests + 2 responses)
+        assert_eq!(lines.len(), 4);
+
+        // Extract all request_ids
+        let request_ids: Vec<String> = lines
+            .iter()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .map(|entry| {
+                entry
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+
+        // First request and response should share the same ID
+        assert_eq!(request_ids[0], request_ids[1]);
+
+        // Second request and response should share the same ID
+        assert_eq!(request_ids[2], request_ids[3]);
+
+        // But the two requests should have different IDs
+        assert_ne!(
+            request_ids[0], request_ids[2],
+            "Different requests should have different request_ids"
+        );
     }
 }
