@@ -50,6 +50,20 @@ const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦
 /// Interval between spinner frame updates (milliseconds)
 const SPINNER_INTERVAL_MS: u64 = 80;
 
+/// Truncate a string at a valid UTF-8 char boundary (by byte length).
+///
+/// Used for UI previews where we want to cap size without panicking on multibyte chars.
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if max_bytes >= s.len() {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Global force quit flag - set by signal handler on double Ctrl+C
 static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
 
@@ -1562,9 +1576,42 @@ impl TuiApp {
                 let was_visible = self.state.auth_dialog.is_visible();
                 self.check_copilot_auth_pending();
                 let visibility_changed = was_visible != self.state.auth_dialog.is_visible();
-                Ok(visibility_changed)
+
+                // Debug-only: refresh the raw LLM streaming tail for the panel.
+                // This is best-effort and only updates UI when the file exists/changes.
+                let raw_changed = self.refresh_llm_raw_tail();
+                Ok(visibility_changed || raw_changed)
             }
         }
+    }
+
+    /// Refresh the panel's raw LLM streaming tail (debug-only).
+    ///
+    /// When `tark --debug` is enabled, providers append raw streaming payloads to
+    /// `llm_raw_response.log` in the workspace. We show a small tail in the panel.
+    fn refresh_llm_raw_tail(&mut self) -> bool {
+        let Some(bridge) = self.agent_bridge.as_ref() else {
+            return false;
+        };
+        let path = bridge.working_dir().join("llm_raw_response.log");
+        let Ok(content) = std::fs::read_to_string(path) else {
+            if !self.state.enhanced_panel_data.llm_raw_tail.is_empty() {
+                self.state.enhanced_panel_data.llm_raw_tail.clear();
+                return true;
+            }
+            return false;
+        };
+
+        // Keep last ~200 lines in memory; panel shows a smaller tail.
+        let all: Vec<&str> = content.lines().collect();
+        let start = all.len().saturating_sub(200);
+        let tail: Vec<String> = all[start..].iter().map(|s| (*s).to_string()).collect();
+
+        if tail != self.state.enhanced_panel_data.llm_raw_tail {
+            self.state.enhanced_panel_data.llm_raw_tail = tail;
+            return true;
+        }
+        false
     }
     // Handle auth dialog input if visible
     fn handle_key_event(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
@@ -3080,6 +3127,17 @@ impl TuiApp {
         if CommandHandler::is_command(&content) {
             self.handle_command(&content);
         } else {
+            // UX hint: users sometimes type "think" expecting it to enable thinking blocks.
+            // Commands must start with '/', so show a helpful hint instead of silently sending.
+            let trimmed = content.trim();
+            if trimmed.eq_ignore_ascii_case("think") || trimmed.eq_ignore_ascii_case("thinking") {
+                self.state.message_list.push(ChatMessage::system(
+                    "Tip: use `/think [low|medium|high]` to enable LLM thinking, and `/thinking` to toggle displaying thinking blocks in the UI."
+                        .to_string(),
+                ));
+                return;
+            }
+
             // Regular message - add to the list with detected username (Requirements 2.2)
             // FIRST check if agent is already processing - if so, queue the message
             // Note: agent_bridge may be temporarily None during processing (taken by spawn_blocking)
@@ -5354,6 +5412,9 @@ impl TuiApp {
     /// Returns true if any events were processed.
     fn poll_agent_events(&mut self) -> bool {
         let mut processed = false;
+        // Buffer for chunks that arrive before Started event (fixes race condition)
+        let mut buffered_text_chunks: Vec<String> = Vec::new();
+        let mut buffered_thinking_chunks: Vec<String> = Vec::new();
 
         // Take the receiver temporarily to avoid borrow issues
         if let Some(mut rx) = self.agent_event_rx.take() {
@@ -5369,6 +5430,30 @@ impl TuiApp {
                         self.state.status_message = Some("Receiving response...".to_string());
                         // Clear current tool indicator
                         self.state.current_tool = None;
+
+                        // Apply buffered chunks now that the message exists
+                        // This fixes the race condition where chunks arrive before Started
+                        if let Some(last_msg) = self.state.message_list.messages_mut().last_mut() {
+                            for chunk in buffered_text_chunks.drain(..) {
+                                last_msg.content.push_str(&chunk);
+                                match last_msg.segments.last_mut() {
+                                    Some(MessageSegment::Text(ref mut text)) => {
+                                        text.push_str(&chunk);
+                                    }
+                                    _ => {
+                                        last_msg.segments.push(MessageSegment::Text(chunk));
+                                    }
+                                }
+                            }
+                            if self.state.thinking_display {
+                                for chunk in buffered_thinking_chunks.drain(..) {
+                                    last_msg.thinking_content.push_str(&chunk);
+                                }
+                            }
+                            if !last_msg.content.is_empty() {
+                                self.state.auto_scroll_pending = true;
+                            }
+                        }
                     }
                     AgentEvent::TextChunk(chunk) => {
                         // Append chunk to the streaming assistant message (Requirements 3.2)
@@ -5391,7 +5476,13 @@ impl TuiApp {
 
                                 // Request auto-scroll on next render (after visible_height is updated)
                                 self.state.auto_scroll_pending = true;
+                            } else {
+                                // Buffer chunk until Started creates the message (fixes race condition)
+                                buffered_text_chunks.push(chunk);
                             }
+                        } else {
+                            // Buffer chunk until Started creates the message (fixes race condition)
+                            buffered_text_chunks.push(chunk);
                         }
                     }
                     AgentEvent::ThinkingChunk(chunk) => {
@@ -5406,7 +5497,13 @@ impl TuiApp {
                                 {
                                     // Append thinking content to the message's thinking_content field
                                     last_msg.thinking_content.push_str(&chunk);
+                                } else {
+                                    // Buffer chunk until Started creates the message (fixes race condition)
+                                    buffered_thinking_chunks.push(chunk);
                                 }
+                            } else {
+                                // Buffer chunk until Started creates the message (fixes race condition)
+                                buffered_thinking_chunks.push(chunk);
                             }
                         }
                         // Note: When thinking_display is disabled, thinking content is silently ignored
@@ -5447,21 +5544,18 @@ impl TuiApp {
                     }
                     AgentEvent::ToolCallCompleted {
                         tool,
-                        result_preview,
+                        result_preview: result_full,
                     } => {
                         // Clear current tool from status bar (Requirement 4.6)
                         self.state.current_tool = None;
                         self.state.status_message = Some(format!("✓ {} completed", tool));
 
                         // Check if this is a mode switch confirmation
-                        if tool == "switch_mode"
-                            && result_preview.contains("MODE_SWITCH_CONFIRMED:")
-                        {
+                        if tool == "switch_mode" && result_full.contains("MODE_SWITCH_CONFIRMED:") {
                             // Parse the mode switch result
-                            if let Some(json_start) = result_preview.find("MODE_SWITCH_CONFIRMED:")
-                            {
+                            if let Some(json_start) = result_full.find("MODE_SWITCH_CONFIRMED:") {
                                 let json_str =
-                                    &result_preview[json_start + "MODE_SWITCH_CONFIRMED:".len()..];
+                                    &result_full[json_start + "MODE_SWITCH_CONFIRMED:".len()..];
                                 if let Some(json_end) = json_str.find('\n') {
                                     let json_part = &json_str[..json_end];
                                     if let Ok(parsed) =
@@ -5495,28 +5589,47 @@ impl TuiApp {
                                 let mut matched_block_id = None;
                                 for t in last_msg.tool_call_info.iter_mut().rev() {
                                     if t.tool == tool && t.result_preview == "⏳ Running..." {
-                                        let mut final_preview = result_preview.clone();
+                                        let mut final_full = result_full.clone();
                                         // Strip MODE_SWITCH_CONFIRMED prefix for display
-                                        if final_preview.contains("MODE_SWITCH_CONFIRMED:") {
-                                            if let Some(display_start) = final_preview.find("\n\n")
-                                            {
-                                                final_preview =
-                                                    final_preview[display_start + 2..].to_string();
+                                        if final_full.contains("MODE_SWITCH_CONFIRMED:") {
+                                            if let Some(display_start) = final_full.find("\n\n") {
+                                                final_full =
+                                                    final_full[display_start + 2..].to_string();
                                             }
                                         }
                                         if tool == "shell" || tool == "execute" {
                                             if let Some(cmd) =
                                                 t.args.get("command").and_then(|v| v.as_str())
                                             {
-                                                final_preview =
-                                                    format!("shell> {}\n{}", cmd, final_preview);
+                                                final_full =
+                                                    format!("shell> {}\n{}", cmd, final_full);
                                             }
                                         }
-                                        // Truncate result preview if too long
-                                        t.result_preview = if final_preview.len() > 500 {
-                                            format!("{}...", &final_preview[..497])
+                                        // Store full result (bounded) + a short preview for the inline line.
+                                        // The expanded tool block uses result_full and supports scrolling.
+                                        const MAX_TOOL_RESULT_CHARS: usize = 200_000;
+                                        let bounded_full =
+                                            if final_full.len() > MAX_TOOL_RESULT_CHARS {
+                                                format!(
+                                                    "{}...(truncated)",
+                                                    final_full
+                                                        .chars()
+                                                        .take(MAX_TOOL_RESULT_CHARS)
+                                                        .collect::<String>()
+                                                )
+                                            } else {
+                                                final_full
+                                            };
+                                        t.result_full = Some(bounded_full.clone());
+
+                                        // Preview for the collapsed tool line
+                                        t.result_preview = if bounded_full.len() > 500 {
+                                            format!(
+                                                "{}...",
+                                                truncate_at_char_boundary(&bounded_full, 497)
+                                            )
                                         } else {
-                                            final_preview
+                                            bounded_full
                                         };
                                         matched_block_id = Some(t.block_id.clone());
                                         break;
@@ -5557,6 +5670,7 @@ impl TuiApp {
                                                     format!("shell> {}\n{}", cmd, final_error);
                                             }
                                         }
+                                        t.result_full = Some(final_error.clone());
                                         t.result_preview = final_error;
                                         // Keep block expanded for errors (don't collapse)
                                         break;
@@ -6595,6 +6709,17 @@ impl Drop for TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_truncate_at_char_boundary_is_utf8_safe() {
+        // Use a multibyte character that will straddle common byte cutoffs.
+        let s = format!("{}{}", "a".repeat(496), "─"); // '─' is 3 bytes
+                                                       // Cutting at 497 bytes would be mid-char without boundary adjustment.
+        let truncated = truncate_at_char_boundary(&s, 497);
+        assert!(truncated.is_char_boundary(truncated.len()));
+        // Must not panic and must remain valid UTF-8.
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
 
     #[test]
     fn test_app_state_default() {

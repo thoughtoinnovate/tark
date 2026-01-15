@@ -14,12 +14,28 @@
 //!
 //! ## 2. Cloud Code Assist API (OAuth users)
 //! - Endpoint: `cloudcode-pa.googleapis.com` (native Gemini format)
-//! - Auth: OAuth Bearer token
+//! - Auth: OAuth Bearer token with `cloud-platform` scope
 //! - Uses: `CloudCodeAssistProvider` internally (native format required)
 //!
-//! **Note:** OAuth tokens do NOT work with the Standard API endpoint.
-//! The OpenAI-compat endpoint only accepts API keys, not OAuth tokens.
-//! This is why we maintain CloudCodeAssistProvider for OAuth users.
+//! # Why CloudCodeAssist is Required for OAuth
+//!
+//! The OpenAI-compat endpoint (`generativelanguage.googleapis.com/v1beta/openai/`)
+//! returns 401 Unauthorized when using OAuth Bearer tokens. The standard Gemini
+//! endpoint requires `generative-language` scopes, but Gemini CLI OAuth flow
+//! provides `cloud-platform` scopes which only work with CloudCodeAssist.
+//!
+//! CloudCodeAssist is the endpoint used by Gemini CLI and is designed for OAuth.
+//!
+//! # Thinking/Reasoning Limitations
+//!
+//! **CloudCodeAssist (OAuth)**: Does NOT support visible thinking output
+//! - The API rejects the `thinkingConfig` parameter ("Unknown name" error)
+//! - Models may reason internally but thinking content is not exposed
+//! - Only `thoughtSignature` (encrypted metadata) is returned
+//!
+//! **OpenAI-compat (API key)**: DOES support thinking via `reasoning_effort`
+//! - Pass "low", "medium", or "high" to enable thinking
+//! - Thinking content is returned in response parts marked with `thought: true`
 
 #![allow(dead_code)]
 
