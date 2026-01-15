@@ -90,7 +90,10 @@ impl OpenRouterProvider {
                         let tool_calls: Vec<OpenRouterToolCall> = parts
                             .iter()
                             .filter_map(|p| {
-                                if let ContentPart::ToolUse { id, name, input } = p {
+                                if let ContentPart::ToolUse {
+                                    id, name, input, ..
+                                } = p
+                                {
                                     Some(OpenRouterToolCall {
                                         id: id.clone(),
                                         call_type: "function".to_string(),
@@ -266,6 +269,7 @@ impl LlmProvider for OpenRouterProvider {
                             name: tc.function.name.clone(),
                             arguments: serde_json::from_str(&tc.function.arguments)
                                 .unwrap_or(serde_json::Value::Null),
+                            thought_signature: None,
                         })
                         .collect()
                 })
@@ -376,7 +380,7 @@ impl LlmProvider for OpenRouterProvider {
                     for (id, name, args) in tool_call_map.values() {
                         builder
                             .tool_calls
-                            .insert(id.clone(), (name.clone(), args.clone()));
+                            .insert(id.clone(), (name.clone(), args.clone(), None));
                     }
                     return Ok(builder.build());
                 }
@@ -446,6 +450,7 @@ impl LlmProvider for OpenRouterProvider {
                                         let event = StreamEvent::ToolCallStart {
                                             id: id.clone(),
                                             name,
+                                            thought_signature: None,
                                         };
                                         builder.process(&event);
                                         callback(event);
@@ -495,7 +500,7 @@ impl LlmProvider for OpenRouterProvider {
 
         // Add tool calls to builder
         for (_, (id, name, args)) in tool_call_map {
-            builder.tool_calls.insert(id, (name, args));
+            builder.tool_calls.insert(id, (name, args, None));
         }
 
         Ok(builder.build())

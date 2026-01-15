@@ -231,6 +231,7 @@ impl LlmProvider for ClaudeProvider {
                         id,
                         name,
                         arguments: input,
+                        thought_signature: None,
                     });
                 }
                 _ => {}
@@ -358,7 +359,7 @@ impl LlmProvider for ClaudeProvider {
 
                     // Add any in-progress tool calls
                     for (id, (name, args)) in tool_tracker.into_calls() {
-                        builder.tool_calls.insert(id, (name, args));
+                        builder.tool_calls.insert(id, (name, args, None));
                     }
 
                     return Ok(builder.build());
@@ -551,7 +552,7 @@ impl LlmProvider for ClaudeProvider {
 
         // Add tracked tool calls to builder
         for (id, (name, args)) in tool_tracker.into_calls() {
-            builder.tool_calls.insert(id, (name, args));
+            builder.tool_calls.insert(id, (name, args, None));
         }
 
         Ok(builder.build())

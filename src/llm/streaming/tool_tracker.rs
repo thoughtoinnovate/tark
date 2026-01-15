@@ -59,6 +59,7 @@ impl ToolCallTracker {
         StreamEvent::ToolCallStart {
             id: call_id.to_string(),
             name: name.to_string(),
+            thought_signature: None,
         }
     }
 
@@ -144,7 +145,7 @@ mod tests {
         // Start a call
         let event = tracker.start_call("call_123", "search", None);
         match event {
-            StreamEvent::ToolCallStart { id, name } => {
+            StreamEvent::ToolCallStart { id, name, .. } => {
                 assert_eq!(id, "call_123");
                 assert_eq!(name, "search");
             }
@@ -200,7 +201,7 @@ mod tests {
         // OpenAI-style: item_id "fc_xxx" maps to call_id "call_xxx"
         let event = tracker.start_call("call_456", "get_weather", Some("fc_456"));
         match event {
-            StreamEvent::ToolCallStart { id, name } => {
+            StreamEvent::ToolCallStart { id, name, .. } => {
                 assert_eq!(id, "call_456");
                 assert_eq!(name, "get_weather");
             }

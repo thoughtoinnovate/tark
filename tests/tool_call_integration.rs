@@ -39,6 +39,7 @@ fn test_message_with_tool_call() {
             id: "call_123".to_string(),
             name: "search".to_string(),
             input: serde_json::json!({"query": "test"}),
+            thought_signature: None,
         }]),
         tool_call_id: None,
     };
@@ -94,6 +95,7 @@ mod openai_specific {
                         id: "call_123".to_string(),
                         name: "get_weather".to_string(),
                         input: serde_json::json!({"city": "Paris"}),
+                        thought_signature: None,
                     },
                 ]),
                 tool_call_id: None,
@@ -145,6 +147,7 @@ mod openai_specific {
                     id: "call_list_dir".to_string(),
                     name: "list_directory".to_string(),
                     input: serde_json::json!({"path": "src"}),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
             },
@@ -198,7 +201,7 @@ mod streaming_integration {
         let event = tracker.start_call("call_abc", "search", Some("fc_123"));
 
         match event {
-            StreamEvent::ToolCallStart { id, name } => {
+            StreamEvent::ToolCallStart { id, name, .. } => {
                 assert_eq!(id, "call_abc");
                 assert_eq!(name, "search");
             }
@@ -246,7 +249,7 @@ mod streaming_integration {
         let event = tracker.start_call("toolu_abc", "get_weather", Some(&index.to_string()));
 
         match event {
-            StreamEvent::ToolCallStart { id, name } => {
+            StreamEvent::ToolCallStart { id, name, .. } => {
                 assert_eq!(id, "toolu_abc");
                 assert_eq!(name, "get_weather");
             }

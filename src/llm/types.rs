@@ -152,6 +152,8 @@ pub enum ContentPart {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
@@ -317,6 +319,33 @@ mod tests {
         let resp_usage = response.usage().unwrap();
         assert_eq!(resp_usage.total_tokens, 23);
     }
+
+    #[test]
+    fn test_streaming_builder_preserves_tool_thought_signature() {
+        let mut builder = StreamingResponseBuilder::new();
+
+        builder.process(&StreamEvent::ToolCallStart {
+            id: "call_1".to_string(),
+            name: "list_directory".to_string(),
+            thought_signature: Some("sig_123".to_string()),
+        });
+        builder.process(&StreamEvent::ToolCallDelta {
+            id: "call_1".to_string(),
+            arguments_delta: r#"{"path": "."}"#.to_string(),
+        });
+        builder.process(&StreamEvent::ToolCallComplete {
+            id: "call_1".to_string(),
+        });
+
+        let response = builder.build();
+        match response {
+            LlmResponse::ToolCalls { calls, .. } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].thought_signature.as_deref(), Some("sig_123"));
+            }
+            _ => panic!("Expected ToolCalls response"),
+        }
+    }
 }
 
 /// A tool call from the LLM
@@ -325,6 +354,8 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// Definition of a tool for the LLM
@@ -391,7 +422,11 @@ pub enum StreamEvent {
     /// Thinking/reasoning content (e.g., Claude extended thinking)
     ThinkingDelta(String),
     /// Tool call started
-    ToolCallStart { id: String, name: String },
+    ToolCallStart {
+        id: String,
+        name: String,
+        thought_signature: Option<String>,
+    },
     /// Tool call arguments chunk (arguments come incrementally)
     ToolCallDelta { id: String, arguments_delta: String },
     /// Tool call completed (all arguments received)
@@ -415,8 +450,8 @@ pub struct StreamingResponseBuilder {
     pub text: String,
     /// Accumulated thinking content
     pub thinking: String,
-    /// Tool calls being built (id -> (name, accumulated_args))
-    pub tool_calls: std::collections::HashMap<String, (String, String)>,
+    /// Tool calls being built (id -> (name, accumulated_args, thought_signature))
+    pub tool_calls: std::collections::HashMap<String, (String, String, Option<String>)>,
     /// Token usage (if provided at end)
     pub usage: Option<TokenUsage>,
 }
@@ -436,15 +471,21 @@ impl StreamingResponseBuilder {
             StreamEvent::ThinkingDelta(text) => {
                 self.thinking.push_str(text);
             }
-            StreamEvent::ToolCallStart { id, name } => {
-                self.tool_calls
-                    .insert(id.clone(), (name.clone(), String::new()));
+            StreamEvent::ToolCallStart {
+                id,
+                name,
+                thought_signature,
+            } => {
+                self.tool_calls.insert(
+                    id.clone(),
+                    (name.clone(), String::new(), thought_signature.clone()),
+                );
             }
             StreamEvent::ToolCallDelta {
                 id,
                 arguments_delta,
             } => {
-                if let Some((_, args)) = self.tool_calls.get_mut(id) {
+                if let Some((_, args, _)) = self.tool_calls.get_mut(id) {
                     args.push_str(arguments_delta);
                 }
             }
@@ -457,12 +498,13 @@ impl StreamingResponseBuilder {
         let tool_calls: Vec<ToolCall> = self
             .tool_calls
             .into_iter()
-            .map(|(id, (name, args))| {
+            .map(|(id, (name, args, thought_signature))| {
                 let arguments = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
                 ToolCall {
                     id,
                     name,
                     arguments,
+                    thought_signature,
                 }
             })
             .collect();

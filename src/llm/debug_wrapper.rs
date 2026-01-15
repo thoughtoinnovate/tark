@@ -610,11 +610,55 @@ impl DebugLogEntry {
 
 impl From<&Message> for MessageSummary {
     fn from(msg: &Message) -> Self {
-        let content = msg.content.as_text().unwrap_or("");
+        let content_string: String = match &msg.content {
+            crate::llm::MessageContent::Text(t) => t.clone(),
+            crate::llm::MessageContent::Parts(parts) => {
+                // MessageContent::as_text() intentionally ignores tool parts.
+                // For debug logs, include a compact representation so tool-only
+                // assistant messages don't look like empty strings.
+                let mut out = String::new();
+                for part in parts {
+                    match part {
+                        crate::llm::ContentPart::Text { text } => {
+                            out.push_str(text);
+                        }
+                        crate::llm::ContentPart::ToolUse {
+                            id, name, input, ..
+                        } => {
+                            if !out.is_empty() {
+                                out.push('\n');
+                            }
+                            let input_str =
+                                serde_json::to_string(input).unwrap_or_else(|_| input.to_string());
+                            out.push_str(&format!(
+                                "[tool_use name={} id={} input={}]",
+                                name,
+                                id,
+                                truncate_str(&input_str, 200)
+                            ));
+                        }
+                        crate::llm::ContentPart::ToolResult {
+                            tool_use_id,
+                            content,
+                        } => {
+                            if !out.is_empty() {
+                                out.push('\n');
+                            }
+                            out.push_str(&format!(
+                                "[tool_result id={} content={}]",
+                                tool_use_id,
+                                truncate_str(content, 200)
+                            ));
+                        }
+                    }
+                }
+                out
+            }
+        };
         Self {
             role: format!("{:?}", msg.role).to_lowercase(),
-            content_preview: truncate_str(content, 500),
-            content_len: content.len(),
+            content_preview: truncate_str(&content_string, 500),
+            content_len: content_string.len(),
         }
     }
 }

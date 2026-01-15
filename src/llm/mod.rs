@@ -13,6 +13,7 @@ mod ollama;
 mod openai;
 mod openrouter;
 mod plugin_provider;
+mod raw_log;
 pub mod streaming;
 mod types;
 
@@ -27,6 +28,8 @@ pub use openai::OpenAiProvider;
 pub use openrouter::OpenRouterProvider;
 pub use plugin_provider::{list_plugin_providers, try_create_plugin_provider};
 pub use types::*;
+
+pub use raw_log::{append_raw_line as append_llm_raw_line, set_raw_log_path};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -134,6 +137,7 @@ pub trait LlmProvider: Send + Sync {
             callback(StreamEvent::ToolCallStart {
                 id: tool_call.id.clone(),
                 name: tool_call.name.clone(),
+                thought_signature: tool_call.thought_signature.clone(),
             });
             callback(StreamEvent::ToolCallDelta {
                 id: tool_call.id.clone(),

@@ -194,7 +194,12 @@ impl GeminiProvider {
                                             parts.push(GeminiPart::Text { text: text.clone() });
                                         }
                                     }
-                                    ContentPart::ToolUse { name, input, .. } => {
+                                    ContentPart::ToolUse {
+                                        name,
+                                        input,
+                                        thought_signature,
+                                        ..
+                                    } => {
                                         // Include tool calls as functionCall parts so that
                                         // subsequent tool results (functionResponse) are
                                         // properly attributed by the model.
@@ -202,6 +207,7 @@ impl GeminiProvider {
                                             function_call: GeminiFunctionCall {
                                                 name: name.clone(),
                                                 args: input.clone(),
+                                                thought_signature: thought_signature.clone(),
                                             },
                                         });
                                     }
@@ -459,6 +465,9 @@ impl GeminiProvider {
                                         let event = StreamEvent::ToolCallStart {
                                             id: id.clone(),
                                             name: function_call.name.clone(),
+                                            thought_signature: function_call
+                                                .thought_signature
+                                                .clone(),
                                         };
                                         builder.process(&event);
                                         callback(event);
@@ -513,6 +522,7 @@ impl GeminiProvider {
                                     callback(StreamEvent::ToolCallStart {
                                         id: id.clone(),
                                         name: function_call.name.clone(),
+                                        thought_signature: function_call.thought_signature.clone(),
                                     });
 
                                     let args_str = serde_json::to_string(&function_call.args)
@@ -726,6 +736,9 @@ impl GeminiProvider {
                                                 let event = StreamEvent::ToolCallStart {
                                                     id: id.clone(),
                                                     name: function_call.name.clone(),
+                                                    thought_signature: function_call
+                                                        .thought_signature
+                                                        .clone(),
                                                 };
                                                 builder.process(&event);
                                                 callback(event);
@@ -795,6 +808,9 @@ impl GeminiProvider {
                                             callback(StreamEvent::ToolCallStart {
                                                 id: id.clone(),
                                                 name: function_call.name.clone(),
+                                                thought_signature: function_call
+                                                    .thought_signature
+                                                    .clone(),
                                             });
 
                                             let args_str =
@@ -931,6 +947,7 @@ impl LlmProvider for GeminiProvider {
                                 id: format!("gemini_{}", function_call.name), // Gemini doesn't provide IDs
                                 name: function_call.name.clone(),
                                 arguments: function_call.args.clone(),
+                                thought_signature: function_call.thought_signature.clone(),
                             });
                         }
                         GeminiPart::FunctionResponse { .. } => {
@@ -1200,6 +1217,8 @@ struct GeminiFunctionResponse {
 struct GeminiFunctionCall {
     name: String,
     args: serde_json::Value,
+    #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1311,7 +1330,8 @@ mod tests {
                     "parts": [{
                         "functionCall": {
                             "name": "test_function",
-                            "args": {"key": "value"}
+                            "args": {"key": "value"},
+                            "thoughtSignature": "sig_123"
                         }
                     }]
                 }
@@ -1325,6 +1345,7 @@ mod tests {
         match part {
             GeminiPart::FunctionCall { function_call } => {
                 assert_eq!(function_call.name, "test_function");
+                assert_eq!(function_call.thought_signature.as_deref(), Some("sig_123"));
             }
             _ => panic!("Expected FunctionCall"),
         }

@@ -77,6 +77,7 @@ impl ConversationContext {
                 id: tc.id.clone(),
                 name: tc.name.clone(),
                 input: tc.arguments.clone(),
+                thought_signature: tc.thought_signature.clone(),
             })
             .collect();
 

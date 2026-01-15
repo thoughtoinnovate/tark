@@ -451,7 +451,10 @@ impl OpenAiProvider {
                         let tool_calls: Vec<OpenAiToolCall> = parts
                             .iter()
                             .filter_map(|p| {
-                                if let ContentPart::ToolUse { id, name, input } = p {
+                                if let ContentPart::ToolUse {
+                                    id, name, input, ..
+                                } = p
+                                {
                                     Some(OpenAiToolCall {
                                         id: id.clone(),
                                         call_type: "function".to_string(),
@@ -795,15 +798,33 @@ impl LlmProvider for OpenAiProvider {
         // Parse output items
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut thinking_parts = Vec::new();
 
         for output in response.output {
             match output.output_type.as_str() {
                 "message" => {
-                    // Extract text from content array
+                    // Extract text and thinking from content array
                     for item in &output.content {
-                        if item.content_type == "output_text" {
-                            if let Some(text) = &item.text {
-                                text_parts.push(text.clone());
+                        match item.content_type.as_str() {
+                            "output_text" => {
+                                if let Some(text) = &item.text {
+                                    text_parts.push(text.clone());
+                                }
+                            }
+                            // Thinking/reasoning content for o1/o3/gpt-5 models.
+                            //
+                            // OpenAI has used multiple type labels over time across models/endpoints,
+                            // so accept a small set of known variants instead of one exact string.
+                            "reasoning" | "thinking" | "summary_text" | "reasoning_text"
+                            | "thinking_text" | "summary" => {
+                                if let Some(thinking) = &item.text {
+                                    if !thinking.is_empty() {
+                                        thinking_parts.push(thinking.clone());
+                                    }
+                                }
+                            }
+                            _ => {
+                                tracing::debug!("Unknown content type: {}", item.content_type);
                             }
                         }
                     }
@@ -815,6 +836,7 @@ impl LlmProvider for OpenAiProvider {
                             name: func_call.name,
                             arguments: serde_json::from_str(&func_call.arguments)
                                 .unwrap_or(serde_json::Value::Null),
+                            thought_signature: None,
                         });
                     }
                 }
@@ -948,7 +970,7 @@ impl LlmProvider for OpenAiProvider {
                 if check() {
                     // Return partial response accumulated so far
                     for (id, (name, args)) in tool_tracker.into_calls() {
-                        builder.tool_calls.insert(id, (name, args));
+                        builder.tool_calls.insert(id, (name, args, None));
                     }
                     return Ok(builder.build());
                 }
@@ -985,6 +1007,8 @@ impl LlmProvider for OpenAiProvider {
                 // Parse the Responses API streaming event
                 if let Ok(event_data) = serde_json::from_str::<ResponsesStreamEvent>(&payload_json)
                 {
+                    // Debug-only: record raw streaming payload for troubleshooting.
+                    crate::llm::append_llm_raw_line(&payload_json);
                     match event_data.event_type.as_str() {
                         "response.output_text.delta" => {
                             // Text delta
@@ -992,6 +1016,19 @@ impl LlmProvider for OpenAiProvider {
                                 if !delta.is_empty() {
                                     let event = StreamEvent::TextDelta(delta);
                                     builder.process(&event);
+                                    callback(event);
+                                }
+                            }
+                        }
+                        "response.reasoning.delta"
+                        | "response.thinking.delta"
+                        | "response.reasoning_text.delta"
+                        | "response.thinking_text.delta"
+                        | "response.summary_text.delta" => {
+                            // Thinking/reasoning delta for o1/o3/gpt-5 models
+                            if let Some(delta) = event_data.delta {
+                                if !delta.is_empty() {
+                                    let event = StreamEvent::ThinkingDelta(delta);
                                     callback(event);
                                 }
                             }
@@ -1067,12 +1104,26 @@ impl LlmProvider for OpenAiProvider {
             }
 
             if let Ok(event_data) = serde_json::from_str::<ResponsesStreamEvent>(&payload_json) {
+                crate::llm::append_llm_raw_line(&payload_json);
                 match event_data.event_type.as_str() {
                     "response.output_text.delta" => {
                         if let Some(delta) = event_data.delta {
                             if !delta.is_empty() {
                                 let event = StreamEvent::TextDelta(delta);
                                 builder.process(&event);
+                                callback(event);
+                            }
+                        }
+                    }
+                    "response.reasoning.delta"
+                    | "response.thinking.delta"
+                    | "response.reasoning_text.delta"
+                    | "response.thinking_text.delta"
+                    | "response.summary_text.delta" => {
+                        // Thinking/reasoning delta for o1/o3/gpt-5 models
+                        if let Some(delta) = event_data.delta {
+                            if !delta.is_empty() {
+                                let event = StreamEvent::ThinkingDelta(delta);
                                 callback(event);
                             }
                         }
@@ -1125,7 +1176,7 @@ impl LlmProvider for OpenAiProvider {
         // Build and return final response
         // Add tracked tool calls to the builder
         for (id, (name, args)) in tool_tracker.into_calls() {
-            builder.tool_calls.insert(id, (name, args));
+            builder.tool_calls.insert(id, (name, args, None));
         }
 
         Ok(builder.build())
@@ -2269,6 +2320,30 @@ mod tests {
         let event: ResponsesStreamEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.event_type, "response.output_text.delta");
         assert_eq!(event.delta.unwrap(), "Hello");
+    }
+
+    #[test]
+    fn test_parse_responses_stream_event_reasoning_delta() {
+        let json = r#"{
+            "type": "response.reasoning.delta",
+            "delta": "Thinking..."
+        }"#;
+
+        let event: ResponsesStreamEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event_type, "response.reasoning.delta");
+        assert_eq!(event.delta.unwrap(), "Thinking...");
+    }
+
+    #[test]
+    fn test_parse_responses_stream_event_reasoning_text_delta() {
+        let json = r#"{
+            "type": "response.reasoning_text.delta",
+            "delta": "Thinking..."
+        }"#;
+
+        let event: ResponsesStreamEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event_type, "response.reasoning_text.delta");
+        assert_eq!(event.delta.unwrap(), "Thinking...");
     }
 
     #[test]

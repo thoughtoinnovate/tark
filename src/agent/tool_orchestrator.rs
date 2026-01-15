@@ -240,10 +240,22 @@ impl ToolOrchestrator {
 
         // Execute each tool
         for call in limited_calls {
-            let result = self
-                .tools
-                .execute(&call.name, call.arguments.clone())
-                .await?;
+            // Notify UI immediately that the tool is starting (so the user sees progress)
+            let args_preview = serde_json::to_string(&call.arguments).unwrap_or_default();
+            on_tool_call(call.name.clone(), args_preview);
+
+            let result = match self.tools.execute(&call.name, call.arguments.clone()).await {
+                Ok(r) => r,
+                Err(e) => {
+                    // Don't abort the whole agent loop on tool errors; surface the failure as a
+                    // tool result and let the LLM decide what to do next.
+                    let msg = format!("Tool '{}' failed: {}", call.name, e);
+                    on_tool_complete(call.name.clone(), msg.clone(), false);
+                    self.context.add_tool_result(&call.id, &msg);
+                    state.log_tool_call(call, truncate_preview(&msg, 200));
+                    continue;
+                }
+            };
 
             // Duplicate detection
             if state.check_duplicate(&call.name, &call.arguments, &result.output) {
@@ -264,16 +276,15 @@ impl ToolOrchestrator {
             }
 
             // Notify UI
-            let args_preview = serde_json::to_string(&call.arguments).unwrap_or_default();
-            on_tool_call(call.name.clone(), args_preview);
-
-            let preview = truncate_preview(&result.output, 200);
-            on_tool_complete(call.name.clone(), preview.clone(), result.success);
+            // Pass full tool output to UI so expanding the tool block shows real content.
+            // The UI will truncate for the collapsed preview.
+            on_tool_complete(call.name.clone(), result.output.clone(), result.success);
 
             // Add to context
             self.context.add_tool_result(&call.id, &result.output);
 
             // Log for response
+            let preview = truncate_preview(&result.output, 200);
             state.log_tool_call(call, preview);
         }
 
@@ -657,6 +668,7 @@ mod tests {
                     id: "call_1".to_string(),
                     name: "search".to_string(),
                     input: serde_json::json!({"query": "test"}),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
             },
