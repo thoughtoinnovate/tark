@@ -29,6 +29,14 @@ coverage/
 *.profraw
 usage.db
 
+# E2E Visual Test artifacts (generated, not baseline)
+tests/visual/*/recordings/*.gif
+tests/visual/*/recordings/*.cast
+tests/visual/*/current/
+tests/visual/*/diffs/
+tests/visual/logs/
+tests/visual/sandbox/
+
 # AI coding agent folders
 .tark/
 .kiro/
