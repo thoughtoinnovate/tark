@@ -35,3 +35,12 @@ usage.db
 
 # Local plugins (plugins should be installed from external repos)
 plugins/
+
+# Web/Node.js
+node_modules/
+dist/
+.vite/
+*.local
+web/**/node_modules/
+web/**/dist/
+web/**/.vite/
