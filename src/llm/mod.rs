@@ -33,7 +33,7 @@ pub use openrouter::OpenRouterProvider;
 pub use plugin_provider::{list_plugin_providers, try_create_plugin_provider};
 pub use types::*;
 
-pub use raw_log::{append_raw_line as append_llm_raw_line, set_raw_log_path};
+pub use raw_log::append_raw_line as append_llm_raw_line;
 
 use anyhow::Result;
 use async_trait::async_trait;

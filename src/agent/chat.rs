@@ -2323,10 +2323,27 @@ impl ChatAgent {
                             self.mode
                         );
 
-                        let result = self
-                            .tools
-                            .execute(&call.name, call.arguments.clone())
-                            .await?;
+                        let result =
+                            match self.tools.execute(&call.name, call.arguments.clone()).await {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    // Surface error as tool result so model can recover
+                                    let msg = format!("Tool '{}' failed: {}", call.name, e);
+                                    on_tool_complete(call.name.clone(), msg.clone(), false);
+                                    self.context.add_tool_result(&call.id, &msg);
+                                    let preview = if msg.len() > 200 {
+                                        format!("{}...", truncate_at_char_boundary(&msg, 200))
+                                    } else {
+                                        msg
+                                    };
+                                    tool_call_log.push(ToolCallLog {
+                                        tool: call.name.clone(),
+                                        args: call.arguments.clone(),
+                                        result_preview: preview,
+                                    });
+                                    continue;
+                                }
+                            };
 
                         // Check for duplicate results to prevent infinite loops
                         let result_key = format!(
@@ -2459,10 +2476,27 @@ impl ChatAgent {
                             .unwrap_or_else(|_| "{}".to_string());
                         on_tool_call(call.name.clone(), args_preview);
 
-                        let result = self
-                            .tools
-                            .execute(&call.name, call.arguments.clone())
-                            .await?;
+                        let result =
+                            match self.tools.execute(&call.name, call.arguments.clone()).await {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    // Surface error as tool result so model can recover
+                                    let msg = format!("Tool '{}' failed: {}", call.name, e);
+                                    on_tool_complete(call.name.clone(), msg.clone(), false);
+                                    self.context.add_tool_result(&call.id, &msg);
+                                    let preview = if msg.len() > 200 {
+                                        format!("{}...", truncate_at_char_boundary(&msg, 200))
+                                    } else {
+                                        msg
+                                    };
+                                    tool_call_log.push(ToolCallLog {
+                                        tool: call.name.clone(),
+                                        args: call.arguments.clone(),
+                                        result_preview: preview,
+                                    });
+                                    continue;
+                                }
+                            };
 
                         // Check for duplicate results to prevent infinite loops
                         let result_key = format!(

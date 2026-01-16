@@ -380,13 +380,25 @@ impl CloudCodeAssistProvider {
 
     /// Convert messages to native Gemini format
     ///
-    /// IMPORTANT: This version correctly handles thoughtSignature as a SIBLING
-    /// of functionCall, not nested inside it.
+    /// IMPORTANT: This version correctly handles:
+    /// - thoughtSignature as a SIBLING of functionCall, not nested inside it
+    /// - Multiple consecutive tool results grouped into a single user turn
+    ///   (Gemini requires function call count == function response count per turn)
     fn convert_messages(&self, messages: &[Message]) -> (Option<String>, Vec<GeminiContent>) {
         let mut system_instruction = None;
         let mut contents = Vec::new();
+        // Buffer for collecting consecutive tool results
+        let mut pending_tool_parts: Vec<GeminiPartRaw> = Vec::new();
 
         for msg in messages {
+            // Before processing non-Tool messages, flush any pending tool results
+            if msg.role != Role::Tool && !pending_tool_parts.is_empty() {
+                contents.push(GeminiContent {
+                    role: "user".to_string(),
+                    parts: std::mem::take(&mut pending_tool_parts),
+                });
+            }
+
             match msg.role {
                 Role::System => {
                     if let Some(text) = msg.content.as_text() {
@@ -470,7 +482,8 @@ impl CloudCodeAssistProvider {
                     }
                 }
                 Role::Tool => {
-                    // Gemini expects function responses as user role with functionResponse part
+                    // Collect tool results into pending buffer
+                    // They'll be flushed as a single user turn when we hit a non-Tool message
                     if let (Some(tool_call_id), Some(text)) =
                         (&msg.tool_call_id, msg.content.as_text())
                     {
@@ -484,22 +497,27 @@ impl CloudCodeAssistProvider {
                         let response_value = serde_json::from_str(text)
                             .unwrap_or_else(|_| serde_json::json!({ "result": text }));
 
-                        contents.push(GeminiContent {
-                            role: "user".to_string(),
-                            parts: vec![GeminiPartRaw {
-                                text: None,
-                                thought: None,
-                                thought_signature: None,
-                                function_call: None,
-                                function_response: Some(GeminiFunctionResponse {
-                                    name: function_name,
-                                    response: response_value,
-                                }),
-                            }],
+                        pending_tool_parts.push(GeminiPartRaw {
+                            text: None,
+                            thought: None,
+                            thought_signature: None,
+                            function_call: None,
+                            function_response: Some(GeminiFunctionResponse {
+                                name: function_name,
+                                response: response_value,
+                            }),
                         });
                     }
                 }
             }
+        }
+
+        // Flush any remaining tool results at the end
+        if !pending_tool_parts.is_empty() {
+            contents.push(GeminiContent {
+                role: "user".to_string(),
+                parts: pending_tool_parts,
+            });
         }
 
         (system_instruction, contents)
@@ -631,10 +649,19 @@ impl LlmProvider for CloudCodeAssistProvider {
 
         let api_response = wrapper.response;
 
-        let usage = api_response.usage_metadata.map(|u| TokenUsage {
-            input_tokens: u.prompt_token_count,
-            output_tokens: u.candidates_token_count,
-            total_tokens: u.total_token_count,
+        let usage = api_response.usage_metadata.and_then(|u| {
+            match (
+                u.prompt_token_count,
+                u.candidates_token_count,
+                u.total_token_count,
+            ) {
+                (Some(input), Some(output), Some(total)) => Some(TokenUsage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    total_tokens: total,
+                }),
+                _ => None,
+            }
         });
 
         if let Some(candidate) = api_response.candidates.first() {
@@ -875,9 +902,6 @@ impl LlmProvider for CloudCodeAssistProvider {
             let chunk = chunk_result.context("Error reading stream chunk")?;
 
             for payload_json in decoder.push(&chunk) {
-                // Debug logging
-                crate::llm::append_llm_raw_line(&payload_json);
-
                 // Cloud Code Assist wraps response in {"response": {...}}
                 if let Ok(chunk) = serde_json::from_str::<CloudCodeAssistStreamChunk>(&payload_json)
                 {
@@ -890,7 +914,6 @@ impl LlmProvider for CloudCodeAssistProvider {
                                         if !text.is_empty() {
                                             // Check if this is thinking content
                                             if part.thought == Some(true) {
-                                                // Emit as thinking delta
                                                 let event =
                                                     StreamEvent::ThinkingDelta(text.clone());
                                                 builder.process(&event);
@@ -932,12 +955,19 @@ impl LlmProvider for CloudCodeAssistProvider {
                         }
                     }
 
+                    // Only update usage if we have actual token counts (final chunk)
                     if let Some(usage) = chunk.response.usage_metadata {
-                        builder.usage = Some(TokenUsage {
-                            input_tokens: usage.prompt_token_count,
-                            output_tokens: usage.candidates_token_count,
-                            total_tokens: usage.total_token_count,
-                        });
+                        if let (Some(input), Some(output), Some(total)) = (
+                            usage.prompt_token_count,
+                            usage.candidates_token_count,
+                            usage.total_token_count,
+                        ) {
+                            builder.usage = Some(TokenUsage {
+                                input_tokens: input,
+                                output_tokens: output,
+                                total_tokens: total,
+                            });
+                        }
                     }
                 }
             }
@@ -986,12 +1016,19 @@ impl LlmProvider for CloudCodeAssistProvider {
                     }
                 }
 
+                // Only update usage if we have actual token counts (final chunk)
                 if let Some(usage) = chunk.response.usage_metadata {
-                    builder.usage = Some(TokenUsage {
-                        input_tokens: usage.prompt_token_count,
-                        output_tokens: usage.candidates_token_count,
-                        total_tokens: usage.total_token_count,
-                    });
+                    if let (Some(input), Some(output), Some(total)) = (
+                        usage.prompt_token_count,
+                        usage.candidates_token_count,
+                        usage.total_token_count,
+                    ) {
+                        builder.usage = Some(TokenUsage {
+                            input_tokens: input,
+                            output_tokens: output,
+                            total_tokens: total,
+                        });
+                    }
                 }
             }
         }
@@ -1217,14 +1254,16 @@ struct GeminiCandidate {
     content: Option<GeminiContent>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct GeminiUsageMetadata {
-    #[serde(rename = "promptTokenCount")]
-    prompt_token_count: u32,
-    #[serde(rename = "candidatesTokenCount")]
-    candidates_token_count: u32,
-    #[serde(rename = "totalTokenCount")]
-    total_token_count: u32,
+    /// Token counts are optional in intermediate streaming chunks
+    /// CloudCodeAssist only sends them in the final chunk
+    #[serde(rename = "promptTokenCount", default)]
+    prompt_token_count: Option<u32>,
+    #[serde(rename = "candidatesTokenCount", default)]
+    candidates_token_count: Option<u32>,
+    #[serde(rename = "totalTokenCount", default)]
+    total_token_count: Option<u32>,
 }
 
 // ============================================================================
@@ -1307,8 +1346,18 @@ mod tests {
         assert_eq!(response.candidates.len(), 1);
         assert!(response.usage_metadata.is_some());
         let usage = response.usage_metadata.unwrap();
-        assert_eq!(usage.prompt_token_count, 10);
-        assert_eq!(usage.candidates_token_count, 5);
-        assert_eq!(usage.total_token_count, 15);
+        assert_eq!(usage.prompt_token_count, Some(10));
+        assert_eq!(usage.candidates_token_count, Some(5));
+        assert_eq!(usage.total_token_count, Some(15));
+    }
+
+    #[test]
+    fn test_usage_metadata_optional_fields() {
+        // CloudCodeAssist sends partial usage in intermediate chunks
+        let json = r#"{"trafficType": "PROVISIONED_THROUGHPUT"}"#;
+        let usage: GeminiUsageMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.prompt_token_count, None);
+        assert_eq!(usage.candidates_token_count, None);
+        assert_eq!(usage.total_token_count, None);
     }
 }

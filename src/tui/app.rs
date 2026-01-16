@@ -1577,42 +1577,11 @@ impl TuiApp {
                 self.check_copilot_auth_pending();
                 let visibility_changed = was_visible != self.state.auth_dialog.is_visible();
 
-                // Debug-only: refresh the raw LLM streaming tail for the panel.
-                // This is best-effort and only updates UI when the file exists/changes.
-                let raw_changed = self.refresh_llm_raw_tail();
-                Ok(visibility_changed || raw_changed)
+                Ok(visibility_changed)
             }
         }
     }
 
-    /// Refresh the panel's raw LLM streaming tail (debug-only).
-    ///
-    /// When `tark --debug` is enabled, providers append raw streaming payloads to
-    /// `llm_raw_response.log` in the workspace. We show a small tail in the panel.
-    fn refresh_llm_raw_tail(&mut self) -> bool {
-        let Some(bridge) = self.agent_bridge.as_ref() else {
-            return false;
-        };
-        let path = bridge.working_dir().join("llm_raw_response.log");
-        let Ok(content) = std::fs::read_to_string(path) else {
-            if !self.state.enhanced_panel_data.llm_raw_tail.is_empty() {
-                self.state.enhanced_panel_data.llm_raw_tail.clear();
-                return true;
-            }
-            return false;
-        };
-
-        // Keep last ~200 lines in memory; panel shows a smaller tail.
-        let all: Vec<&str> = content.lines().collect();
-        let start = all.len().saturating_sub(200);
-        let tail: Vec<String> = all[start..].iter().map(|s| (*s).to_string()).collect();
-
-        if tail != self.state.enhanced_panel_data.llm_raw_tail {
-            self.state.enhanced_panel_data.llm_raw_tail = tail;
-            return true;
-        }
-        false
-    }
     // Handle auth dialog input if visible
     fn handle_key_event(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
         // Handle auth dialog input if visible
@@ -5620,7 +5589,6 @@ impl TuiApp {
                                             } else {
                                                 final_full
                                             };
-                                        t.result_full = Some(bounded_full.clone());
 
                                         // Preview for the collapsed tool line
                                         t.result_preview = if bounded_full.len() > 500 {
@@ -5670,7 +5638,6 @@ impl TuiApp {
                                                     format!("shell> {}\n{}", cmd, final_error);
                                             }
                                         }
-                                        t.result_full = Some(final_error.clone());
                                         t.result_preview = final_error;
                                         // Keep block expanded for errors (don't collapse)
                                         break;
