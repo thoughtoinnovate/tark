@@ -417,7 +417,7 @@ impl AgentBridge {
         let storage = TarkStorage::new(&working_dir)?;
 
         // Load or create session
-        let current_session = storage.load_current_session().unwrap_or_else(|_| {
+        let mut current_session = storage.load_current_session().unwrap_or_else(|_| {
             let session = ChatSession::new();
             let _ = storage.save_session(&session);
             session
@@ -449,6 +449,10 @@ impl AgentBridge {
                 _ => String::new(),
             }
         };
+
+        // Sync session with resolved provider/model (overrides may have changed them)
+        current_session.provider = provider_name.clone();
+        current_session.model = model_name.clone();
 
         // Create LLM provider (silent mode for TUI)
         let debug_log_path = if debug {
@@ -1944,17 +1948,26 @@ mod tests {
         // Regression: model switching should update session fields and be safe to call.
         // (The provider instance is also recreated, but we don't introspect that here.)
         let tmp = tempfile::TempDir::new().expect("temp dir");
-        let (mut bridge, _rx) =
-            AgentBridge::new_with_interaction(tmp.path().to_path_buf()).expect("bridge");
 
-        // Use a built-in provider to avoid requiring external plugins for this unit test.
-        bridge.set_provider("ollama").expect("set_provider");
-        bridge.set_model("llama3.2");
+        // Use ollama from the start to avoid requiring API keys (ollama doesn't need one)
+        let (mut bridge, _rx) = AgentBridge::with_provider_and_interaction(
+            tmp.path().to_path_buf(),
+            Some("ollama".to_string()),
+            Some("llama3.2".to_string()),
+            false,
+        )
+        .expect("bridge");
 
         assert_eq!(bridge.provider_name(), "ollama");
         assert_eq!(bridge.model_name(), "llama3.2");
+
+        // Switch to a different model and verify session fields are updated
+        bridge.set_model("codellama");
+
+        assert_eq!(bridge.provider_name(), "ollama");
+        assert_eq!(bridge.model_name(), "codellama");
         assert_eq!(bridge.current_session.provider, "ollama");
-        assert_eq!(bridge.current_session.model, "llama3.2");
+        assert_eq!(bridge.current_session.model, "codellama");
     }
 
     #[test]
