@@ -75,6 +75,20 @@ pub enum AgentEvent {
     AuthFailed { provider: String, error: String },
 }
 
+fn emit_final_text_if_missing(
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    did_stream_text: bool,
+    response_text: &str,
+) {
+    if did_stream_text {
+        return;
+    }
+    if response_text.trim().is_empty() {
+        return;
+    }
+    let _ = event_tx.send(AgentEvent::TextChunk(response_text.to_string()));
+}
+
 /// Summary info from agent response
 #[derive(Debug, Clone)]
 pub struct AgentResponseInfo {
@@ -240,14 +254,123 @@ pub struct AgentBridge {
     interaction_tx: Option<crate::tools::InteractionSender>,
     /// Current trust level for risky operations
     trust_level: crate::tools::TrustLevel,
+    /// Whether debug logging is enabled
+    debug_enabled: bool,
     /// Plan service for managing execution plans (session-scoped)
     plan_service: Arc<crate::services::PlanService>,
 }
 
 impl AgentBridge {
+    /// Refresh provider instance for auth-only plugins that supply short-lived credentials.
+    ///
+    /// For now this is targeted at `gemini-oauth`, which delegates to the native Gemini provider
+    /// using a Bearer token that can expire during a long-running session.
+    ///
+    /// The plugin is responsible for refreshing tokens; re-creating the provider ensures we pick
+    /// up the latest access token before each request.
+    fn refresh_provider_if_needed(&mut self) {
+        if self.provider_name != "gemini-oauth" {
+            return;
+        }
+
+        let debug_log_path = if self.debug_enabled {
+            Some(self.working_dir.join("tark-debug.log"))
+        } else {
+            None
+        };
+        match llm::create_provider_with_debug(
+            &self.provider_name,
+            true,
+            Some(&self.model_name),
+            debug_log_path.as_deref(),
+        ) {
+            Ok(provider) => {
+                self.agent.update_provider(Arc::from(provider));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to refresh provider '{}' with model '{}': {}",
+                    self.provider_name,
+                    self.model_name,
+                    e
+                );
+            }
+        }
+    }
+
+    /// Check if the current provider supports auth refresh (e.g., auth-only plugins)
+    fn can_refresh_auth(&self) -> bool {
+        // Currently only gemini-oauth uses auth-only plugin pattern
+        self.provider_name == "gemini-oauth"
+    }
+
+    /// Send message with auth retry logic (retry once on 401 after refresh)
+    #[allow(clippy::too_many_arguments)]
+    async fn chat_streaming_with_auth_retry<F1, F2, F3, F4>(
+        &mut self,
+        message: &str,
+        interrupt_check: impl Fn() -> bool + Send + Sync + 'static,
+        on_text: F1,
+        on_thinking: F2,
+        on_tool_call: F3,
+        on_tool_complete: F4,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<crate::agent::AgentResponse>
+    where
+        F1: Fn(String) + Send + Sync + 'static,
+        F2: Fn(String) + Send + Sync + 'static,
+        F3: Fn(String, String) + Send + Sync + 'static,
+        F4: Fn(String, String, bool) + Send + Sync + 'static,
+    {
+        // First attempt
+        let result = self
+            .agent
+            .chat_streaming(
+                message,
+                interrupt_check,
+                on_text,
+                on_thinking,
+                on_tool_call,
+                on_tool_complete,
+            )
+            .await;
+
+        // Check if we got Unauthorized and can refresh
+        if let Err(ref e) = result {
+            let error_str = e.to_string();
+            if (error_str.contains("Unauthorized") || error_str.contains("401"))
+                && self.can_refresh_auth()
+            {
+                tracing::info!("Got 401 Unauthorized, refreshing auth and retrying once...");
+
+                // Notify user we're refreshing
+                let _ = event_tx.send(AgentEvent::TextChunk(
+                    "\n🔄 Token expired, refreshing credentials and retrying...\n".to_string(),
+                ));
+
+                // Refresh provider (plugin will get new token)
+                self.refresh_provider_if_needed();
+
+                // Retry once
+                return self
+                    .agent
+                    .chat_streaming(
+                        message,
+                        || false, // New interrupt check (can't reuse moved closure)
+                        |_| {},   // Dummy callbacks (real ones were moved)
+                        |_| {},
+                        |_, _| {},
+                        |_, _, _| {},
+                    )
+                    .await;
+            }
+        }
+
+        result
+    }
     /// Create a new agent bridge
     pub fn new(working_dir: PathBuf) -> Result<Self> {
-        let (bridge, _rx) = Self::with_provider_and_interaction(working_dir, None, None)?;
+        let (bridge, _rx) = Self::with_provider_and_interaction(working_dir, None, None, false)?;
         Ok(bridge)
     }
 
@@ -258,7 +381,7 @@ impl AgentBridge {
     pub fn new_with_interaction(
         working_dir: PathBuf,
     ) -> Result<(Self, crate::tools::InteractionReceiver)> {
-        Self::with_provider_and_interaction(working_dir, None, None)
+        Self::with_provider_and_interaction(working_dir, None, None, false)
     }
 
     /// Create a new agent bridge with optional provider and model overrides
@@ -269,9 +392,14 @@ impl AgentBridge {
         working_dir: PathBuf,
         provider_override: Option<String>,
         model_override: Option<String>,
+        debug: bool,
     ) -> Result<Self> {
-        let (bridge, _rx) =
-            Self::with_provider_and_interaction(working_dir, provider_override, model_override)?;
+        let (bridge, _rx) = Self::with_provider_and_interaction(
+            working_dir,
+            provider_override,
+            model_override,
+            debug,
+        )?;
         Ok(bridge)
     }
 
@@ -283,6 +411,7 @@ impl AgentBridge {
         working_dir: PathBuf,
         provider_override: Option<String>,
         model_override: Option<String>,
+        debug: bool,
     ) -> Result<(Self, crate::tools::InteractionReceiver)> {
         let config = Config::load().unwrap_or_default();
         let storage = TarkStorage::new(&working_dir)?;
@@ -322,7 +451,13 @@ impl AgentBridge {
         };
 
         // Create LLM provider (silent mode for TUI)
-        let provider = llm::create_provider_with_options(&provider_name, true, None)?;
+        let debug_log_path = if debug {
+            Some(working_dir.join("tark-debug.log"))
+        } else {
+            None
+        };
+        let provider =
+            llm::create_provider_with_debug(&provider_name, true, None, debug_log_path.as_deref())?;
         let provider = Arc::from(provider);
 
         // Get mode from session
@@ -356,6 +491,9 @@ impl AgentBridge {
 
         // Set thinking configuration
         agent.set_thinking_config(config.thinking.clone());
+
+        // Initialize think level from config (makes default-on work and persists across restarts)
+        agent.set_think_level_sync(config.thinking.effective_default_level_name());
 
         // Restore session messages if any
         if !current_session.messages.is_empty() {
@@ -397,6 +535,7 @@ impl AgentBridge {
                 interaction_tx: Some(interaction_tx),
                 trust_level,
                 plan_service,
+                debug_enabled: debug,
             },
             interaction_rx,
         ))
@@ -430,6 +569,32 @@ impl AgentBridge {
                 // Sort by model name
                 result.sort_by(|a, b| a.1.cmp(&b.1));
                 return result;
+            }
+        }
+
+        // If this is a plugin provider ID (e.g. "gemini-oauth"), try resolving to a models.dev
+        // base provider via plugin manifest metadata.
+        // This enables dynamic model lists for plugin providers even when they don't match a
+        // canonical models.dev provider key.
+        if let Ok(registry) = crate::plugins::PluginRegistry::new() {
+            if let Some(plugin) = registry.get(&self.provider_name) {
+                for contrib in &plugin.manifest.contributes.providers {
+                    if let Some(base) = &contrib.base_provider {
+                        if let Ok(models) = models_db.list_models(base).await {
+                            if !models.is_empty() {
+                                let mut result: Vec<(String, String, String)> = models
+                                    .into_iter()
+                                    .map(|m| {
+                                        let desc = m.capability_summary();
+                                        (m.id, m.name, desc)
+                                    })
+                                    .collect();
+                                result.sort_by(|a, b| a.1.cmp(&b.1));
+                                return result;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -896,18 +1061,14 @@ impl AgentBridge {
                     self.current_session.output_tokens += usage.output_tokens as usize;
 
                     // Calculate cost and log usage
-                    let cost = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            crate::llm::models_db()
-                                .calculate_cost(
-                                    &self.provider_name,
-                                    &self.model_name,
-                                    usage.input_tokens,
-                                    usage.output_tokens,
-                                )
-                                .await
-                        })
-                    });
+                    let cost = crate::llm::models_db()
+                        .calculate_cost(
+                            &self.provider_name,
+                            &self.model_name,
+                            usage.input_tokens,
+                            usage.output_tokens,
+                        )
+                        .await;
                     self.current_session.total_cost += cost;
 
                     // Log usage to tracker for cost breakdown display
@@ -952,17 +1113,21 @@ impl AgentBridge {
     pub async fn send_message_streaming(
         &mut self,
         message: &str,
-        event_tx: mpsc::Sender<AgentEvent>,
+        event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<()> {
         // Set processing flag
         self.is_processing.store(true, Ordering::SeqCst);
         self.clear_interrupt();
 
+        // For auth-only plugins (e.g. gemini-oauth), refresh provider before each request so
+        // access tokens are always current (plugin will refresh if expired).
+        self.refresh_provider_if_needed();
+
         // Sync approval mode to the agent's tool registry
         self.agent.set_trust_level(self.trust_level).await;
 
         // Notify started
-        let _ = event_tx.send(AgentEvent::Started).await;
+        let _ = event_tx.send(AgentEvent::Started);
 
         // Set session name from first message if not set
         if self.current_session.name.is_empty() {
@@ -980,61 +1145,57 @@ impl AgentBridge {
         let text_tx = event_tx.clone();
         let thinking_tx = event_tx.clone();
         let tool_tx = event_tx.clone();
+        let tool_call_tx = tool_tx.clone();
+        let tool_complete_tx = tool_tx.clone();
+
+        // Track whether any text was actually streamed. Some responses can complete with tool
+        // calls, errors, or non-delta text; we still want the final assistant message to show.
+        let did_stream_text = Arc::new(AtomicBool::new(false));
+        let did_stream_text_tx = did_stream_text.clone();
 
         // Create streaming callbacks
         let on_text = move |chunk: String| {
-            let _ = text_tx.try_send(AgentEvent::TextChunk(chunk));
+            did_stream_text_tx.store(true, Ordering::SeqCst);
+            let _ = text_tx.send(AgentEvent::TextChunk(chunk));
         };
 
         let on_thinking = move |chunk: String| {
-            let _ = thinking_tx.try_send(AgentEvent::ThinkingChunk(chunk));
+            let _ = thinking_tx.send(AgentEvent::ThinkingChunk(chunk));
         };
 
         let on_tool_call = move |name: String, args: String| {
             let args_value: serde_json::Value =
                 serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
-            let _ = tool_tx.try_send(AgentEvent::ToolCallStarted {
+            let _ = tool_call_tx.send(AgentEvent::ToolCallStarted {
                 tool: name,
                 args: args_value,
             });
         };
 
-        // Create channel for tool completion events
-        let (tool_complete_tx, mut tool_complete_rx) =
-            tokio::sync::mpsc::channel::<AgentEvent>(100);
-        let event_tx_for_complete = event_tx.clone();
-
-        // Spawn task to forward tool completion events
-        tokio::spawn(async move {
-            while let Some(event) = tool_complete_rx.recv().await {
-                let _ = event_tx_for_complete.send(event).await;
-            }
-        });
-
         let on_tool_complete = move |name: String, result_preview: String, success: bool| {
             if success {
-                let _ = tool_complete_tx.try_send(AgentEvent::ToolCallCompleted {
+                let _ = tool_complete_tx.send(AgentEvent::ToolCallCompleted {
                     tool: name,
                     result_preview,
                 });
             } else {
-                let _ = tool_complete_tx.try_send(AgentEvent::ToolCallFailed {
+                let _ = tool_complete_tx.send(AgentEvent::ToolCallFailed {
                     tool: name,
                     error: result_preview,
                 });
             }
         };
 
-        // Send to agent with streaming callbacks
+        // Send to agent with streaming callbacks (with auth retry)
         let result = self
-            .agent
-            .chat_streaming(
+            .chat_streaming_with_auth_retry(
                 message,
                 interrupt_check,
                 on_text,
                 on_thinking,
                 on_tool_call,
                 on_tool_complete,
+                &event_tx,
             )
             .await;
 
@@ -1045,8 +1206,16 @@ impl AgentBridge {
             Ok(response) => {
                 // Check if interrupted
                 if response.text.contains("interrupted") {
-                    let _ = event_tx.send(AgentEvent::Interrupted).await;
+                    let _ = event_tx.send(AgentEvent::Interrupted);
                 } else {
+                    // If nothing was streamed, emit the final response text so the user sees it.
+                    // The Completed event does not include text.
+                    emit_final_text_if_missing(
+                        &event_tx,
+                        did_stream_text.load(Ordering::SeqCst),
+                        &response.text,
+                    );
+
                     // Add assistant response to session with tool call history
                     let tool_calls: Vec<ToolCallRecord> = response
                         .tool_call_log
@@ -1103,7 +1272,7 @@ impl AgentBridge {
                     }
 
                     // Send completed event
-                    let _ = event_tx.send(AgentEvent::Completed(response.into())).await;
+                    let _ = event_tx.send(AgentEvent::Completed(response.into()));
                 }
 
                 // Save session
@@ -1115,7 +1284,7 @@ impl AgentBridge {
                 // Save session even on error
                 let _ = self.storage.save_session(&self.current_session);
 
-                let _ = event_tx.send(AgentEvent::Error(e.to_string())).await;
+                let _ = event_tx.send(AgentEvent::Error(e.to_string()));
                 Err(e)
             }
         }
@@ -1132,7 +1301,7 @@ impl AgentBridge {
         &mut self,
         message: &str,
         attachments: Vec<MessageAttachment>,
-        event_tx: mpsc::Sender<AgentEvent>,
+        event_tx: mpsc::UnboundedSender<AgentEvent>,
         config: &AttachmentConfig,
     ) -> Result<()> {
         // Validate attachments (Requirements 10.5)
@@ -1343,7 +1512,13 @@ impl AgentBridge {
     ///
     /// Also updates the context limit based on the current model and new provider.
     pub fn set_provider(&mut self, provider_name: &str) -> Result<()> {
-        let provider = llm::create_provider_with_options(provider_name, true, None)?;
+        let debug_log_path = if self.debug_enabled {
+            Some(self.working_dir.join("tark-debug.log"))
+        } else {
+            None
+        };
+        let provider =
+            llm::create_provider_with_debug(provider_name, true, None, debug_log_path.as_deref())?;
         let provider = Arc::from(provider);
 
         self.provider_name = provider_name.to_string();
@@ -1352,15 +1527,13 @@ impl AgentBridge {
         // Update agent provider
         self.agent.update_provider(provider);
 
-        // Update context limit for the new provider + current model
-        let context_limit = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                crate::llm::models_db()
-                    .get_context_limit(provider_name, &self.model_name)
-                    .await
-            })
-        });
-        self.agent.set_max_context_tokens(context_limit as usize);
+        // Update context limit for the new provider + current model.
+        // IMPORTANT: do not block the Tokio runtime from sync code. Use cache-only lookup.
+        if let Some(context_limit) =
+            crate::llm::models_db().try_get_cached_context_limit(provider_name, &self.model_name)
+        {
+            self.agent.set_max_context_tokens(context_limit as usize);
+        }
 
         // Save session
         let _ = self.storage.save_session(&self.current_session);
@@ -1377,21 +1550,52 @@ impl AgentBridge {
         self.model_name = model_name.to_string();
         self.current_session.model = model_name.to_string();
 
-        // Fetch the new model's context limit and update the agent
-        let context_limit = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                crate::llm::models_db()
-                    .get_context_limit(&self.provider_name, model_name)
-                    .await
-            })
-        });
+        // Re-create the provider with the selected model so the change actually takes effect.
+        //
+        // Without this, the UI/model picker updates, but the underlying provider instance
+        // (including plugin providers like `gemini-oauth`) continues using its previous/default
+        // model which can look like "no response" or "stuck" behavior.
+        let debug_log_path = if self.debug_enabled {
+            Some(self.working_dir.join("tark-debug.log"))
+        } else {
+            None
+        };
+        match llm::create_provider_with_debug(
+            &self.provider_name,
+            true,
+            Some(model_name),
+            debug_log_path.as_deref(),
+        ) {
+            Ok(provider) => {
+                self.agent.update_provider(Arc::from(provider));
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to re-create provider '{}' with model '{}': {}",
+                    self.provider_name,
+                    model_name,
+                    e
+                );
+                // Keep previous provider instance so the app remains usable.
+            }
+        }
 
-        self.agent.set_max_context_tokens(context_limit as usize);
-        tracing::info!(
-            "Model switched to {} (context limit: {} tokens)",
-            model_name,
-            context_limit
-        );
+        // Update context limit from cache (non-blocking). models_db preloads in background.
+        if let Some(context_limit) =
+            crate::llm::models_db().try_get_cached_context_limit(&self.provider_name, model_name)
+        {
+            self.agent.set_max_context_tokens(context_limit as usize);
+            tracing::info!(
+                "Model switched to {} (context limit: {} tokens)",
+                model_name,
+                context_limit
+            );
+        } else {
+            tracing::info!(
+                "Model switched to {} (context limit pending models_db cache)",
+                model_name
+            );
+        }
 
         // Save session
         let _ = self.storage.save_session(&self.current_session);
@@ -1713,6 +1917,65 @@ fn model_priority(model_id: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_agent_event_channel_unbounded_no_drop() {
+        // Regression: Gemini Cloud Code Assist can emit many small streaming chunks quickly.
+        // Using a bounded channel + try_send will drop chunks under load, causing truncated output.
+        // Ensure our event channel can buffer bursts without dropping.
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+
+        let n = 5000usize;
+        for i in 0..n {
+            tx.send(AgentEvent::TextChunk(format!("x{i}")))
+                .expect("send should succeed");
+        }
+
+        let mut received = 0usize;
+        while let Ok(_ev) = rx.try_recv() {
+            received += 1;
+        }
+
+        assert_eq!(received, n);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_set_model_updates_session_fields() {
+        // Regression: model switching should update session fields and be safe to call.
+        // (The provider instance is also recreated, but we don't introspect that here.)
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let (mut bridge, _rx) =
+            AgentBridge::new_with_interaction(tmp.path().to_path_buf()).expect("bridge");
+
+        // Use a built-in provider to avoid requiring external plugins for this unit test.
+        bridge.set_provider("ollama").expect("set_provider");
+        bridge.set_model("llama3.2");
+
+        assert_eq!(bridge.provider_name(), "ollama");
+        assert_eq!(bridge.model_name(), "llama3.2");
+        assert_eq!(bridge.current_session.provider, "ollama");
+        assert_eq!(bridge.current_session.model, "llama3.2");
+    }
+
+    #[test]
+    fn test_emit_final_text_if_missing() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+
+        // If nothing streamed, we should emit a final TextChunk
+        emit_final_text_if_missing(&tx, false, "hello");
+        match rx.try_recv().expect("expected one event") {
+            AgentEvent::TextChunk(s) => assert_eq!(s, "hello"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // If text already streamed, don't emit
+        emit_final_text_if_missing(&tx, true, "ignored");
+        assert!(rx.try_recv().is_err());
+
+        // If response text is empty/whitespace, don't emit
+        emit_final_text_if_missing(&tx, false, "   ");
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn test_agent_mode_conversion() {

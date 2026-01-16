@@ -99,7 +99,11 @@ impl Tool for FilePreviewTool {
         let mut all_lines: Vec<String> = Vec::new();
 
         for line in reader.lines() {
-            let line = line?;
+            // Handle invalid UTF-8 gracefully by skipping problematic lines
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue, // Skip lines with invalid UTF-8
+            };
             total_lines += 1;
 
             if total_lines <= head_lines {

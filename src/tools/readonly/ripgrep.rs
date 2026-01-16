@@ -8,7 +8,7 @@ use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::sinks::UTF8;
+use grep_searcher::sinks::Lossy;
 use grep_searcher::SearcherBuilder;
 use ignore::types::TypesBuilder;
 use ignore::WalkBuilder;
@@ -138,9 +138,9 @@ impl Tool for RipgrepTool {
             let mut types_builder = TypesBuilder::new();
             types_builder.add_defaults();
 
-            if let Some(ref ft) = params.file_type {
+            if let Some(ft) = normalize_file_type(params.file_type.as_deref()) {
                 // Select only this file type
-                types_builder.select(ft);
+                types_builder.select(&ft);
             }
 
             let types = types_builder.build()?;
@@ -235,7 +235,7 @@ fn search_file(
     searcher.search_file(
         matcher,
         &file,
-        UTF8(|line_num, line| {
+        Lossy(|line_num, line| {
             let mut count = match_count_clone.lock().unwrap();
             if *count >= max_results {
                 return Ok(false); // Stop searching
@@ -270,6 +270,18 @@ fn search_file(
 
 /// Simple glob matching for file patterns
 fn glob_match(pattern: &str, text: &str) -> bool {
+    // Support simple brace expansion: `*.{rs,lua,toml,md}`
+    // This is a common pattern produced by LLMs and users.
+    if let Some((prefix, alts, suffix)) = split_first_brace_group(pattern) {
+        for alt in alts {
+            let expanded = format!("{prefix}{alt}{suffix}");
+            if glob_match(&expanded, text) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     let pattern = pattern.to_lowercase();
     let text = text.to_lowercase();
     let mut pattern_chars = pattern.chars().peekable();
@@ -307,6 +319,55 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     text_chars.peek().is_none()
 }
 
+/// Normalize `file_type` to an ignore/ripgrep type name.
+///
+/// Returns `None` for empty/whitespace-only strings.
+fn normalize_file_type(ft: Option<&str>) -> Option<String> {
+    let ft = ft?.trim();
+    if ft.is_empty() {
+        return None;
+    }
+
+    // Common aliases seen in LLM outputs / user inputs
+    let lowered = ft.to_lowercase();
+    let normalized = match lowered.as_str() {
+        "rs" | ".rs" => "rust",
+        "py" | ".py" => "python",
+        "js" | ".js" => "javascript",
+        "ts" | ".ts" => "ts",
+        other => other,
+    };
+
+    Some(normalized.to_string())
+}
+
+/// Split the first `{a,b,c}` brace group in a glob pattern.
+///
+/// Returns `(prefix, alternatives, suffix)` if a brace group exists, otherwise `None`.
+fn split_first_brace_group(pattern: &str) -> Option<(String, Vec<String>, String)> {
+    let start = pattern.find('{')?;
+    let end = pattern[start..].find('}')? + start;
+    if end <= start + 1 {
+        return None;
+    }
+
+    let prefix = pattern[..start].to_string();
+    let suffix = pattern[end + 1..].to_string();
+    let inner = &pattern[start + 1..end];
+    let alts: Vec<String> = inner
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    if alts.is_empty() {
+        None
+    } else {
+        Some((prefix, alts, suffix))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +380,24 @@ mod tests {
         assert!(glob_match("test_*.py", "test_main.py"));
         assert!(!glob_match("test_*.py", "main.py"));
         assert!(glob_match("*", "anything"));
+    }
+
+    #[test]
+    fn test_glob_match_brace_expansion() {
+        assert!(glob_match("*.{rs,lua,toml,md}", "main.rs"));
+        assert!(glob_match("*.{rs,lua,toml,md}", "init.lua"));
+        assert!(!glob_match("*.{rs,lua,toml,md}", "main.py"));
+    }
+
+    #[test]
+    fn test_normalize_file_type() {
+        assert_eq!(normalize_file_type(None), None);
+        assert_eq!(normalize_file_type(Some("")), None);
+        assert_eq!(normalize_file_type(Some("   ")), None);
+        assert_eq!(normalize_file_type(Some("rs")).as_deref(), Some("rust"));
+        assert_eq!(normalize_file_type(Some(".rs")).as_deref(), Some("rust"));
+        assert_eq!(normalize_file_type(Some("py")).as_deref(), Some("python"));
+        assert_eq!(normalize_file_type(Some("rust")).as_deref(), Some("rust"));
     }
 
     #[tokio::test]

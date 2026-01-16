@@ -333,6 +333,12 @@ Example - User says "help with plan to improve UX":
     {id: "feedback", type: "free_text", text: "Any specific user feedback or issues?"}
   ]
 
+🔄 TOOL EFFICIENCY - AVOID LOOPS:
+- NEVER call the same tool with identical arguments twice in a row
+- If a tool returns the same content you've already seen, STOP and summarize your findings
+- After 2-3 tool calls that don't yield new information, conclude with what you learned
+- If you're stuck in a loop, explain what you found and ask the user for guidance
+
 ✅ ALWAYS:
 - DISCOVER the codebase before creating plans (list directories, read key files)
 - When user asks for a "plan" → use `save_plan` tool (NOT propose_change, NOT markdown files)
@@ -399,6 +405,12 @@ Example:
 ❌ WRONG: "What specific areas would you like me to explain?"
 ✅ RIGHT: Call ask_user with questions like:
   {type: "multi_select", text: "Which areas should I explain?", options: ["Architecture", "Data flow", "APIs", "Testing"]}
+
+🔄 TOOL EFFICIENCY - AVOID LOOPS:
+- NEVER call the same tool with identical arguments twice in a row
+- If a tool returns the same content you've already seen, STOP and summarize your findings
+- After 2-3 tool calls that don't yield new information, conclude with what you learned
+- If you're stuck in a loop, explain what you found and ask the user for guidance
 
 Be thorough and cautious. Explain implications of changes."#
             .to_string(),
@@ -533,6 +545,12 @@ Example - User says "add authentication":
 - Say you "can't create diagrams" - YOU CAN with Mermaid/PlantUML!
 - Run dangerous shell commands (they will be blocked anyway)
 - Ask questions in chat text - USE ask_user tool instead!
+
+🔄 TOOL EFFICIENCY - AVOID LOOPS:
+- NEVER call the same tool with identical arguments twice in a row
+- If a tool returns the same content you've already seen, STOP and summarize your findings
+- After 2-3 tool calls that don't yield new information, conclude with what you learned
+- If you're stuck in a loop, explain what you found and ask the user for guidance
 
 ✅ ALWAYS DO THIS:
 - Try 3+ different search patterns before concluding something doesn't exist
@@ -1224,6 +1242,13 @@ impl ChatAgent {
         let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
         let mut accumulated_usage = crate::llm::TokenUsage::default();
 
+        // Track duplicate tool results to prevent infinite loops
+        let mut last_tool_results: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut consecutive_duplicate_calls = 0;
+        const MAX_CONSECUTIVE_DUPLICATES: usize = 2;
+        const MAX_TOOL_CALLS_PER_TURN: usize = 5;
+
         loop {
             if iterations >= self.max_iterations {
                 self.context.add_assistant(
@@ -1266,11 +1291,25 @@ impl ChatAgent {
                 LlmResponse::ToolCalls { calls, .. } => {
                     total_tool_calls += calls.len();
 
+                    // Limit tool calls per turn to prevent runaway loops
+                    if calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        tracing::warn!(
+                            "LLM requested {} tools in single turn, limiting to {}",
+                            calls.len(),
+                            MAX_TOOL_CALLS_PER_TURN
+                        );
+                    }
+                    let limited_calls = if calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        &calls[..MAX_TOOL_CALLS_PER_TURN]
+                    } else {
+                        &calls[..]
+                    };
+
                     // First, add the assistant message with tool calls (required for OpenAI)
-                    self.context.add_assistant_tool_calls(&calls);
+                    self.context.add_assistant_tool_calls(limited_calls);
 
                     // Execute each tool call and add results
-                    for (i, call) in calls.iter().enumerate() {
+                    for (i, call) in limited_calls.iter().enumerate() {
                         // Update status with current tool and argument
                         let tool_arg = match &call.name[..] {
                             "grep" | "file_search" => call
@@ -1344,6 +1383,35 @@ impl ChatAgent {
                             .execute(&call.name, call.arguments.clone())
                             .await?;
 
+                        // Check for duplicate results to prevent infinite loops
+                        let result_key = format!(
+                            "{}:{}",
+                            call.name,
+                            serde_json::to_string(&call.arguments).unwrap_or_default()
+                        );
+                        if let Some(last_result) = last_tool_results.get(&result_key) {
+                            if last_result == &result.output {
+                                consecutive_duplicate_calls += 1;
+                                tracing::warn!(
+                                    "Tool '{}' returned identical result ({}/{})",
+                                    call.name,
+                                    consecutive_duplicate_calls,
+                                    MAX_CONSECUTIVE_DUPLICATES
+                                );
+                                if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                                    // Force the agent to summarize instead of looping
+                                    self.context.add_assistant(
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    );
+                                    // Break out of the tool execution loop
+                                    break;
+                                }
+                            }
+                        } else {
+                            consecutive_duplicate_calls = 0;
+                        }
+                        last_tool_results.insert(result_key, result.output.clone());
+
                         // Log if a tool was rejected (helps debug hallucinated tool calls)
                         if !result.success && result.output.contains("Unknown tool") {
                             tracing::warn!(
@@ -1369,6 +1437,11 @@ impl ChatAgent {
 
                         // Add tool result to context
                         self.context.add_tool_result(&call.id, &result.output);
+                    }
+
+                    // If we broke out of tool execution due to duplicates, break main loop too
+                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                        break;
                     }
                 }
                 LlmResponse::Mixed {
@@ -1401,11 +1474,34 @@ impl ChatAgent {
 
                     total_tool_calls += tool_calls.len();
 
+                    // Limit tool calls per turn to prevent runaway loops
+                    if tool_calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        tracing::warn!(
+                            "LLM requested {} tools in single turn, limiting to {}",
+                            tool_calls.len(),
+                            MAX_TOOL_CALLS_PER_TURN
+                        );
+                    }
+                    let limited_tool_calls = if tool_calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        &tool_calls[..MAX_TOOL_CALLS_PER_TURN]
+                    } else {
+                        &tool_calls[..]
+                    };
+
+                    // CRITICAL FIX: Persist text BEFORE adding tool calls to context
+                    // This ensures the assistant's explanation is not lost when tools are invoked
+                    if let Some(t) = &text {
+                        if !t.is_empty() {
+                            self.context.add_assistant(t);
+                            tracing::debug!("Persisted mixed response text before tools: {}", t);
+                        }
+                    }
+
                     // Add assistant message with tool calls (required for OpenAI)
-                    self.context.add_assistant_tool_calls(&tool_calls);
+                    self.context.add_assistant_tool_calls(limited_tool_calls);
 
                     // Execute tool calls
-                    for (i, call) in tool_calls.iter().enumerate() {
+                    for (i, call) in limited_tool_calls.iter().enumerate() {
                         // Update status with current tool
                         let tool_arg = match &call.name[..] {
                             "grep" | "file_search" => call
@@ -1486,6 +1582,35 @@ impl ChatAgent {
                             );
                         }
 
+                        // Check for duplicate results to prevent infinite loops
+                        let result_key = format!(
+                            "{}:{}",
+                            call.name,
+                            serde_json::to_string(&call.arguments).unwrap_or_default()
+                        );
+                        if let Some(last_result) = last_tool_results.get(&result_key) {
+                            if last_result == &result.output {
+                                consecutive_duplicate_calls += 1;
+                                tracing::warn!(
+                                    "Tool '{}' returned identical result ({}/{})",
+                                    call.name,
+                                    consecutive_duplicate_calls,
+                                    MAX_CONSECUTIVE_DUPLICATES
+                                );
+                                if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                                    // Force the agent to summarize instead of looping
+                                    self.context.add_assistant(
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    );
+                                    // Break out of the tool execution loop
+                                    break;
+                                }
+                            }
+                        } else {
+                            consecutive_duplicate_calls = 0;
+                        }
+                        last_tool_results.insert(result_key, result.output.clone());
+
                         tracing::debug!("Tool result: {:?}", result);
 
                         // Log the tool call
@@ -1501,6 +1626,11 @@ impl ChatAgent {
                         });
 
                         self.context.add_tool_result(&call.id, &result.output);
+                    }
+
+                    // If we broke out of tool execution due to duplicates, break main loop too
+                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                        break;
                     }
                 }
             }
@@ -1580,6 +1710,13 @@ impl ChatAgent {
         let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
         let mut accumulated_usage = crate::llm::TokenUsage::default();
 
+        // Track duplicate tool results to prevent infinite loops
+        let mut last_tool_results: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut consecutive_duplicate_calls = 0;
+        const MAX_CONSECUTIVE_DUPLICATES: usize = 2;
+        const MAX_TOOL_CALLS_PER_TURN: usize = 5;
+
         loop {
             // Check for interrupt at start of each iteration
             if interrupt_check() {
@@ -1652,11 +1789,25 @@ impl ChatAgent {
                 LlmResponse::ToolCalls { calls, .. } => {
                     total_tool_calls += calls.len();
 
+                    // Limit tool calls per turn to prevent runaway loops
+                    if calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        tracing::warn!(
+                            "LLM requested {} tools in single turn, limiting to {}",
+                            calls.len(),
+                            MAX_TOOL_CALLS_PER_TURN
+                        );
+                    }
+                    let limited_calls = if calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        &calls[..MAX_TOOL_CALLS_PER_TURN]
+                    } else {
+                        &calls[..]
+                    };
+
                     // First, add the assistant message with tool calls
-                    self.context.add_assistant_tool_calls(&calls);
+                    self.context.add_assistant_tool_calls(limited_calls);
 
                     // Execute each tool call with interrupt checking
-                    for (i, call) in calls.iter().enumerate() {
+                    for (i, call) in limited_calls.iter().enumerate() {
                         // Check for interrupt before each tool execution
                         if interrupt_check() {
                             tracing::info!(
@@ -1706,6 +1857,35 @@ impl ChatAgent {
                             .execute(&call.name, call.arguments.clone())
                             .await?;
 
+                        // Check for duplicate results to prevent infinite loops
+                        let result_key = format!(
+                            "{}:{}",
+                            call.name,
+                            serde_json::to_string(&call.arguments).unwrap_or_default()
+                        );
+                        if let Some(last_result) = last_tool_results.get(&result_key) {
+                            if last_result == &result.output {
+                                consecutive_duplicate_calls += 1;
+                                tracing::warn!(
+                                    "Tool '{}' returned identical result ({}/{})",
+                                    call.name,
+                                    consecutive_duplicate_calls,
+                                    MAX_CONSECUTIVE_DUPLICATES
+                                );
+                                if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                                    // Force the agent to summarize instead of looping
+                                    self.context.add_assistant(
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    );
+                                    // Break out of the tool execution loop
+                                    break;
+                                }
+                            }
+                        } else {
+                            consecutive_duplicate_calls = 0;
+                        }
+                        last_tool_results.insert(result_key, result.output.clone());
+
                         if !result.success && result.output.contains("Unknown tool") {
                             tracing::warn!(
                                 "Tool '{}' not available in {:?} mode - model hallucinated this call",
@@ -1727,6 +1907,11 @@ impl ChatAgent {
                         });
 
                         self.context.add_tool_result(&call.id, &result.output);
+                    }
+
+                    // If we broke out of tool execution due to duplicates, break main loop too
+                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                        break;
                     }
                 }
                 LlmResponse::Mixed {
@@ -1757,10 +1942,34 @@ impl ChatAgent {
                     }
 
                     total_tool_calls += tool_calls.len();
-                    self.context.add_assistant_tool_calls(&tool_calls);
+
+                    // Limit tool calls per turn to prevent runaway loops
+                    if tool_calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        tracing::warn!(
+                            "LLM requested {} tools in single turn, limiting to {}",
+                            tool_calls.len(),
+                            MAX_TOOL_CALLS_PER_TURN
+                        );
+                    }
+                    let limited_tool_calls = if tool_calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        &tool_calls[..MAX_TOOL_CALLS_PER_TURN]
+                    } else {
+                        &tool_calls[..]
+                    };
+
+                    // CRITICAL FIX: Persist text BEFORE adding tool calls to context
+                    // This ensures the assistant's explanation is not lost when tools are invoked
+                    if let Some(t) = &text {
+                        if !t.is_empty() {
+                            self.context.add_assistant(t);
+                            tracing::debug!("Persisted mixed response text before tools: {}", t);
+                        }
+                    }
+
+                    self.context.add_assistant_tool_calls(limited_tool_calls);
 
                     // Execute tool calls with interrupt checking
-                    for (i, call) in tool_calls.iter().enumerate() {
+                    for (i, call) in limited_tool_calls.iter().enumerate() {
                         if interrupt_check() {
                             tracing::info!(
                                 "Agent interrupted before tool execution: {}",
@@ -1801,6 +2010,35 @@ impl ChatAgent {
                             .execute(&call.name, call.arguments.clone())
                             .await?;
 
+                        // Check for duplicate results to prevent infinite loops
+                        let result_key = format!(
+                            "{}:{}",
+                            call.name,
+                            serde_json::to_string(&call.arguments).unwrap_or_default()
+                        );
+                        if let Some(last_result) = last_tool_results.get(&result_key) {
+                            if last_result == &result.output {
+                                consecutive_duplicate_calls += 1;
+                                tracing::warn!(
+                                    "Tool '{}' returned identical result ({}/{})",
+                                    call.name,
+                                    consecutive_duplicate_calls,
+                                    MAX_CONSECUTIVE_DUPLICATES
+                                );
+                                if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                                    // Force the agent to summarize instead of looping
+                                    self.context.add_assistant(
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    );
+                                    // Break out of the tool execution loop
+                                    break;
+                                }
+                            }
+                        } else {
+                            consecutive_duplicate_calls = 0;
+                        }
+                        last_tool_results.insert(result_key, result.output.clone());
+
                         if !result.success && result.output.contains("Unknown tool") {
                             tracing::warn!(
                                 "Tool '{}' not available in {:?} mode - model hallucinated this call",
@@ -1821,6 +2059,11 @@ impl ChatAgent {
                         });
 
                         self.context.add_tool_result(&call.id, &result.output);
+                    }
+
+                    // If we broke out of tool execution due to duplicates, break main loop too
+                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                        break;
                     }
                 }
             }
@@ -1908,6 +2151,13 @@ impl ChatAgent {
         let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
         let mut accumulated_usage = crate::llm::TokenUsage::default();
         let mut accumulated_text = String::new();
+
+        // Track duplicate tool results to prevent infinite loops
+        let mut last_tool_results: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut consecutive_duplicate_calls = 0;
+        const MAX_CONSECUTIVE_DUPLICATES: usize = 2;
+        const MAX_TOOL_CALLS_PER_TURN: usize = 5;
 
         loop {
             // Check for interrupt at start of each iteration
@@ -2036,11 +2286,34 @@ impl ChatAgent {
                 LlmResponse::ToolCalls { calls, .. } => {
                     total_tool_calls += calls.len();
 
+                    // Limit tool calls per turn to prevent runaway loops
+                    if calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        tracing::warn!(
+                            "LLM requested {} tools in single turn, limiting to {}",
+                            calls.len(),
+                            MAX_TOOL_CALLS_PER_TURN
+                        );
+                    }
+                    let limited_calls = if calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        &calls[..MAX_TOOL_CALLS_PER_TURN]
+                    } else {
+                        &calls[..]
+                    };
+
                     // First, add the assistant message with tool calls (required for OpenAI)
-                    self.context.add_assistant_tool_calls(&calls);
+                    self.context.add_assistant_tool_calls(limited_calls);
+
+                    // CRITICAL FIX: Emit a preamble before the first tool call if no text has been emitted yet
+                    // This prevents the UI from showing a blank assistant message before tools
+                    if accumulated_text.is_empty() && total_tool_calls == 0 {
+                        let preamble = "Let me check the codebase for you.";
+                        on_text(preamble.to_string());
+                        accumulated_text = preamble.to_string();
+                        tracing::debug!("Emitted preamble before first tool execution");
+                    }
 
                     // Execute each tool call and add results
-                    for call in calls.iter() {
+                    for call in limited_calls.iter() {
                         // Check for interrupt before each tool
                         if interrupt_check() {
                             tracing::info!("Agent interrupted before tool: {}", call.name);
@@ -2068,10 +2341,56 @@ impl ChatAgent {
                             self.mode
                         );
 
-                        let result = self
-                            .tools
-                            .execute(&call.name, call.arguments.clone())
-                            .await?;
+                        let result =
+                            match self.tools.execute(&call.name, call.arguments.clone()).await {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    // Surface error as tool result so model can recover
+                                    let msg = format!("Tool '{}' failed: {}", call.name, e);
+                                    on_tool_complete(call.name.clone(), msg.clone(), false);
+                                    self.context.add_tool_result(&call.id, &msg);
+                                    let preview = if msg.len() > 200 {
+                                        format!("{}...", truncate_at_char_boundary(&msg, 200))
+                                    } else {
+                                        msg
+                                    };
+                                    tool_call_log.push(ToolCallLog {
+                                        tool: call.name.clone(),
+                                        args: call.arguments.clone(),
+                                        result_preview: preview,
+                                    });
+                                    continue;
+                                }
+                            };
+
+                        // Check for duplicate results to prevent infinite loops
+                        let result_key = format!(
+                            "{}:{}",
+                            call.name,
+                            serde_json::to_string(&call.arguments).unwrap_or_default()
+                        );
+                        if let Some(last_result) = last_tool_results.get(&result_key) {
+                            if last_result == &result.output {
+                                consecutive_duplicate_calls += 1;
+                                tracing::warn!(
+                                    "Tool '{}' returned identical result ({}/{})",
+                                    call.name,
+                                    consecutive_duplicate_calls,
+                                    MAX_CONSECUTIVE_DUPLICATES
+                                );
+                                if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                                    // Force the agent to summarize instead of looping
+                                    self.context.add_assistant(
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    );
+                                    // Break out of the tool execution loop
+                                    break;
+                                }
+                            }
+                        } else {
+                            consecutive_duplicate_calls = 0;
+                        }
+                        last_tool_results.insert(result_key, result.output.clone());
 
                         if !result.success && result.output.contains("Unknown tool") {
                             tracing::warn!(
@@ -2097,20 +2416,66 @@ impl ChatAgent {
 
                         self.context.add_tool_result(&call.id, &result.output);
                     }
+
+                    // If we broke out of tool execution due to duplicates, break main loop too
+                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                        break;
+                    }
                 }
                 LlmResponse::Mixed {
                     text, tool_calls, ..
                 } => {
                     // Handle mixed response with both text and tool calls
-                    if let Some(t) = &text {
-                        // Text was already streamed, just log it
-                        tracing::debug!("Mixed response text: {}", t);
+                    // CRITICAL FIX: Use accumulated text from streaming if available, otherwise use final text
+                    let final_text = if !accumulated_text.is_empty() {
+                        accumulated_text.clone()
+                    } else if let Some(t) = &text {
+                        t.clone()
+                    } else {
+                        String::new()
+                    };
+
+                    // Persist text BEFORE adding tool calls to context
+                    // This ensures the assistant's explanation is not lost when tools are invoked
+                    if !final_text.is_empty() {
+                        self.context.add_assistant(&final_text);
+                        tracing::debug!(
+                            "Persisted mixed response text before tools: {}",
+                            final_text
+                        );
                     }
 
                     total_tool_calls += tool_calls.len();
-                    self.context.add_assistant_tool_calls(&tool_calls);
 
-                    for call in &tool_calls {
+                    // Limit tool calls per turn to prevent runaway loops
+                    if tool_calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        tracing::warn!(
+                            "LLM requested {} tools in single turn, limiting to {}",
+                            tool_calls.len(),
+                            MAX_TOOL_CALLS_PER_TURN
+                        );
+                    }
+                    let limited_tool_calls = if tool_calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                        &tool_calls[..MAX_TOOL_CALLS_PER_TURN]
+                    } else {
+                        &tool_calls[..]
+                    };
+
+                    self.context.add_assistant_tool_calls(limited_tool_calls);
+
+                    // CRITICAL FIX: Emit a preamble before the first tool call if no text has been emitted yet
+                    // This prevents the UI from showing a blank assistant message before tools
+                    // In Mixed responses, final_text might be non-empty if text was streamed/provided
+                    if final_text.is_empty() && total_tool_calls == 0 {
+                        let preamble = "Let me check the codebase for you.";
+                        on_text(preamble.to_string());
+                        accumulated_text = preamble.to_string();
+                        tracing::debug!(
+                            "Emitted preamble before first tool execution (Mixed response)"
+                        );
+                    }
+
+                    for call in limited_tool_calls {
                         if interrupt_check() {
                             tracing::info!("Agent interrupted before tool: {}", call.name);
                             self.context
@@ -2129,10 +2494,56 @@ impl ChatAgent {
                             .unwrap_or_else(|_| "{}".to_string());
                         on_tool_call(call.name.clone(), args_preview);
 
-                        let result = self
-                            .tools
-                            .execute(&call.name, call.arguments.clone())
-                            .await?;
+                        let result =
+                            match self.tools.execute(&call.name, call.arguments.clone()).await {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    // Surface error as tool result so model can recover
+                                    let msg = format!("Tool '{}' failed: {}", call.name, e);
+                                    on_tool_complete(call.name.clone(), msg.clone(), false);
+                                    self.context.add_tool_result(&call.id, &msg);
+                                    let preview = if msg.len() > 200 {
+                                        format!("{}...", truncate_at_char_boundary(&msg, 200))
+                                    } else {
+                                        msg
+                                    };
+                                    tool_call_log.push(ToolCallLog {
+                                        tool: call.name.clone(),
+                                        args: call.arguments.clone(),
+                                        result_preview: preview,
+                                    });
+                                    continue;
+                                }
+                            };
+
+                        // Check for duplicate results to prevent infinite loops
+                        let result_key = format!(
+                            "{}:{}",
+                            call.name,
+                            serde_json::to_string(&call.arguments).unwrap_or_default()
+                        );
+                        if let Some(last_result) = last_tool_results.get(&result_key) {
+                            if last_result == &result.output {
+                                consecutive_duplicate_calls += 1;
+                                tracing::warn!(
+                                    "Tool '{}' returned identical result ({}/{})",
+                                    call.name,
+                                    consecutive_duplicate_calls,
+                                    MAX_CONSECUTIVE_DUPLICATES
+                                );
+                                if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                                    // Force the agent to summarize instead of looping
+                                    self.context.add_assistant(
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    );
+                                    // Break out of the tool execution loop
+                                    break;
+                                }
+                            }
+                        } else {
+                            consecutive_duplicate_calls = 0;
+                        }
+                        last_tool_results.insert(result_key, result.output.clone());
 
                         if !result.success && result.output.contains("Unknown tool") {
                             tracing::warn!(
@@ -2157,6 +2568,11 @@ impl ChatAgent {
                         on_tool_complete(call.name.clone(), preview, result.success);
 
                         self.context.add_tool_result(&call.id, &result.output);
+                    }
+
+                    // If we broke out of tool execution due to duplicates, break main loop too
+                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
+                        break;
                     }
                 }
             }

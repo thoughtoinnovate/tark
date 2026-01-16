@@ -2,23 +2,40 @@
 
 #![allow(dead_code)]
 
+use crate::config::Config;
+
+pub mod auth;
 mod claude;
 mod copilot;
+mod debug_wrapper;
+mod error;
 mod gemini;
 mod models_db;
 mod ollama;
 mod openai;
+mod openai_compat;
 mod openrouter;
+mod plugin_provider;
+mod raw_log;
+pub mod streaming;
 mod types;
 
 pub use claude::ClaudeProvider;
 pub use copilot::CopilotProvider;
+pub use debug_wrapper::DebugProviderWrapper;
+pub use error::LlmError;
 pub use gemini::GeminiProvider;
-pub use models_db::{models_db, ModelCapabilities};
+pub use models_db::{init_models_db, models_db, ModelCapabilities};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
+// OpenAI-compatible provider components - public API for plugin providers
+#[allow(unused_imports)]
+pub use openai_compat::{AuthMethod, OpenAiCompatConfig, OpenAiCompatProvider};
 pub use openrouter::OpenRouterProvider;
+pub use plugin_provider::{list_plugin_providers, try_create_plugin_provider};
 pub use types::*;
+
+pub use raw_log::append_raw_line as append_llm_raw_line;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -126,6 +143,7 @@ pub trait LlmProvider: Send + Sync {
             callback(StreamEvent::ToolCallStart {
                 id: tool_call.id.clone(),
                 name: tool_call.name.clone(),
+                thought_signature: tool_call.thought_signature.clone(),
             });
             callback(StreamEvent::ToolCallDelta {
                 id: tool_call.id.clone(),
@@ -170,6 +188,42 @@ pub trait LlmProvider: Send + Sync {
     async fn review_code(&self, code: &str, language: &str) -> Result<Vec<CodeIssue>>;
 }
 
+/// Try to get Gemini token from the gemini-auth plugin
+fn try_gemini_auth_plugin() -> Option<String> {
+    use crate::plugins::{PluginHost, PluginRegistry};
+
+    // Check if gemini-auth plugin is installed
+    let registry = PluginRegistry::new().ok()?;
+    let plugin = registry.get("gemini-auth")?;
+
+    if !plugin.enabled {
+        return None;
+    }
+
+    // Load and initialize plugin
+    let mut host = PluginHost::new().ok()?;
+    host.load(plugin).ok()?;
+
+    let instance = host.get_mut("gemini-auth")?;
+
+    // Check if plugin has credentials - try loading from Gemini CLI
+    let gemini_cli_path = dirs::home_dir()?.join(".gemini").join("oauth_creds.json");
+    if gemini_cli_path.exists() {
+        if let Ok(creds_json) = std::fs::read_to_string(&gemini_cli_path) {
+            // Initialize plugin with Gemini CLI credentials
+            if instance.auth_init_with_credentials(&creds_json).is_ok() {
+                tracing::debug!("Initialized gemini-auth plugin with Gemini CLI credentials");
+            }
+        }
+    }
+
+    // Try to get token from plugin
+    match instance.auth_get_token() {
+        Ok(token) if !token.is_empty() => Some(token),
+        _ => None,
+    }
+}
+
 /// Create an LLM provider based on name
 pub fn create_provider(name: &str) -> Result<Box<dyn LlmProvider>> {
     create_provider_with_options(name, false, None)
@@ -177,21 +231,32 @@ pub fn create_provider(name: &str) -> Result<Box<dyn LlmProvider>> {
 
 /// Create an LLM provider with options
 /// - `silent`: When true, suppress CLI output (for TUI usage)
+/// - Loads max_tokens from config file for each provider
 pub fn create_provider_with_options(
     name: &str,
     silent: bool,
     model: Option<&str>,
 ) -> Result<Box<dyn LlmProvider>> {
+    // First, try plugin providers
+    if let Some(provider) = try_create_plugin_provider(name, model) {
+        tracing::info!("Using plugin provider: {}", name);
+        return Ok(provider);
+    }
+
+    // Load config to get max_tokens settings
+    let config = Config::load().unwrap_or_default();
+
+    // Then try built-in providers
     match name.to_lowercase().as_str() {
         "claude" | "anthropic" => {
-            let mut p = ClaudeProvider::new()?;
+            let mut p = ClaudeProvider::new()?.with_max_tokens(config.llm.claude.max_tokens);
             if let Some(m) = model {
                 p = p.with_model(m);
             }
             Ok(Box::new(p))
         }
         "openai" | "gpt" => {
-            let mut p = OpenAiProvider::new()?;
+            let mut p = OpenAiProvider::new()?.with_max_tokens(config.llm.openai.max_tokens);
             if let Some(m) = model {
                 p = p.with_model(m);
             }
@@ -205,29 +270,66 @@ pub fn create_provider_with_options(
             Ok(Box::new(p))
         }
         "copilot" | "github" => {
-            let mut p = CopilotProvider::new()?.with_silent(silent);
+            let mut p = CopilotProvider::new()?
+                .with_silent(silent)
+                .with_max_tokens(config.llm.copilot.max_tokens);
             if let Some(m) = model {
                 p = p.with_model(m);
             }
             Ok(Box::new(p))
         }
         "gemini" | "google" => {
-            let mut p = GeminiProvider::new()?;
+            let mut p = GeminiProvider::new()?.with_max_tokens(config.llm.gemini.max_tokens);
             if let Some(m) = model {
                 p = p.with_model(m);
             }
             Ok(Box::new(p))
         }
         "openrouter" => {
-            let mut p = OpenRouterProvider::new()?;
+            let mut p =
+                OpenRouterProvider::new()?.with_max_tokens(config.llm.openrouter.max_tokens);
             if let Some(m) = model {
                 p = p.with_model(m);
             }
             Ok(Box::new(p))
         }
-        _ => anyhow::bail!(
-            "Unknown LLM provider: {}. Supported: claude, openai, ollama, copilot, gemini, openrouter",
-            name
-        ),
+        _ => {
+            // List available plugin providers in error message
+            let plugin_providers = list_plugin_providers();
+            let plugin_list = if plugin_providers.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nPlugin providers: {}",
+                    plugin_providers
+                        .iter()
+                        .map(|(id, _)| id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+
+            anyhow::bail!(
+                "Unknown LLM provider: {}. Supported: claude, openai, ollama, copilot, gemini, openrouter{}",
+                name,
+                plugin_list
+            )
+        }
+    }
+}
+
+/// Create provider with optional debug wrapper
+pub fn create_provider_with_debug(
+    name: &str,
+    silent: bool,
+    model: Option<&str>,
+    debug_log_path: Option<&std::path::Path>,
+) -> Result<Box<dyn LlmProvider>> {
+    let provider = create_provider_with_options(name, silent, model)?;
+
+    if let Some(log_path) = debug_log_path {
+        Ok(Box::new(DebugProviderWrapper::new(provider, log_path)?))
+    } else {
+        Ok(provider)
     }
 }

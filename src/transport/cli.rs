@@ -33,6 +33,7 @@ pub async fn run_tui_chat(
     socket_path: Option<String>,
     provider: Option<String>,
     model: Option<String>,
+    debug: bool,
 ) -> Result<()> {
     let working_dir = PathBuf::from(working_dir).canonicalize()?;
 
@@ -41,7 +42,8 @@ pub async fn run_tui_chat(
 
     // Create the TUI application with provider/model overrides from CLI
     // This ensures the correct provider is used when creating the AgentBridge
-    let mut app = TuiApp::with_provider_override(tui_config, provider.clone(), model.clone())?;
+    let mut app =
+        TuiApp::with_provider_override(tui_config, provider.clone(), model.clone(), debug)?;
 
     // Determine effective provider for logging
     let effective_provider = provider.unwrap_or_else(|| {
@@ -136,16 +138,34 @@ fn check_llm_configuration_for_provider(provider: &str) -> Result<(), String> {
             }
         }
         "gemini" | "google" => {
-            if std::env::var("GOOGLE_API_KEY").is_err() && std::env::var("GEMINI_API_KEY").is_err()
-            {
-                return Err("Google Gemini API key not configured.\n\n\
-                    To use Gemini, set the GOOGLE_API_KEY or GEMINI_API_KEY environment variable:\n\
-                    \n\
-                    export GOOGLE_API_KEY=\"your-api-key-here\"\n\
-                    \n\
-                    Get your API key from: https://aistudio.google.com/apikey"
-                    .to_string());
+            // Check for API key first
+            if std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok() {
+                return Ok(());
             }
+            // Check for OAuth token
+            let token_path = dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("tark")
+                .join("tokens")
+                .join("gemini.json");
+            if token_path.exists() {
+                return Ok(());
+            }
+            // Check for ADC
+            if std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok() {
+                return Ok(());
+            }
+            return Err("Google Gemini not configured.\n\n\
+                Option 1 - OAuth (recommended for personal use):\n\
+                  tark auth gemini\n\
+                \n\
+                Option 2 - API Key:\n\
+                  export GEMINI_API_KEY=\"your-api-key-here\"\n\
+                  Get your API key from: https://aistudio.google.com/apikey\n\
+                \n\
+                Option 3 - Application Default Credentials (Google Cloud):\n\
+                  gcloud auth application-default login"
+                .to_string());
         }
         "openrouter" => {
             if std::env::var("OPENROUTER_API_KEY").is_err() {
@@ -207,6 +227,10 @@ pub async fn run_chat(initial_message: Option<String>, working_dir: &str) -> Res
     // Create agent
     let mut agent =
         ChatAgent::new(provider, tools).with_max_iterations(config.agent.max_iterations);
+
+    // Apply thinking configuration and default think level from config
+    agent.set_thinking_config(config.thinking.clone());
+    agent.set_think_level_sync(config.thinking.effective_default_level_name());
 
     // Handle initial message if provided
     if let Some(msg) = initial_message {
@@ -585,15 +609,41 @@ pub async fn run_auth(provider: Option<&str>) -> Result<()> {
             }
         }
         "gemini" | "google" => {
+            // Check for API key
             if std::env::var("GEMINI_API_KEY").is_ok() {
                 println!("✅ GEMINI_API_KEY is already set");
+                println!();
+                println!("You can use Gemini with your API key:");
+                println!("  tark chat --provider gemini");
+            } else if std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok() {
+                println!("✅ Using Application Default Credentials");
+                println!();
+                println!("GOOGLE_APPLICATION_CREDENTIALS is set");
             } else {
-                println!("{}", "Gemini API Key Required".bold());
-                println!();
-                println!("Please set your API key:");
-                println!("  export GEMINI_API_KEY=\"your-api-key-here\"");
-                println!();
-                println!("Get your API key at: https://aistudio.google.com/apikey");
+                // Check if gemini-oauth plugin has credentials
+                let oauth_creds_path = dirs::home_dir()
+                    .map(|h| h.join(".gemini").join("oauth_creds.json"))
+                    .unwrap_or_default();
+
+                if oauth_creds_path.exists() {
+                    println!("✅ Gemini CLI OAuth credentials found");
+                    println!();
+                    println!("Use the gemini-oauth plugin provider:");
+                    println!("  tark chat --provider gemini-oauth");
+                    println!();
+                    println!("Or set GEMINI_API_KEY for direct API access.");
+                } else {
+                    println!("{}", "Gemini Authentication Options".bold());
+                    println!();
+                    println!("Option 1 - API Key (recommended for simplicity):");
+                    println!("  export GEMINI_API_KEY=\"your-api-key\"");
+                    println!("  Get key: https://aistudio.google.com/apikey");
+                    println!();
+                    println!("Option 2 - OAuth via Gemini CLI (for Cloud Code Assist):");
+                    println!("  npm install -g @google/gemini-cli");
+                    println!("  gemini auth login");
+                    println!("  tark chat --provider gemini-oauth");
+                }
             }
         }
         "openrouter" => {
@@ -641,4 +691,138 @@ fn format_number(n: u64) -> String {
     } else {
         format!("{}", n)
     }
+}
+
+/// Logout from an LLM provider (clear stored tokens)
+pub async fn run_auth_logout(provider: &str) -> Result<()> {
+    use colored::Colorize;
+
+    println!("{}", "=== Tark Logout ===".bold().cyan());
+    println!();
+
+    match provider.to_lowercase().as_str() {
+        "gemini" | "google" => {
+            // Clear plugin storage if exists
+            let plugin_storage = dirs::data_local_dir()
+                .map(|d| {
+                    d.join("tark")
+                        .join("plugins")
+                        .join("gemini-oauth")
+                        .join("data")
+                        .join("storage.json")
+                })
+                .unwrap_or_default();
+
+            if plugin_storage.exists() {
+                std::fs::remove_file(&plugin_storage)?;
+                println!("✅ Cleared gemini-oauth plugin credentials");
+            }
+
+            // Clear native token if exists
+            let token_path = dirs::data_local_dir()
+                .map(|d| d.join("tark").join("tokens").join("gemini.json"))
+                .unwrap_or_default();
+
+            if token_path.exists() {
+                std::fs::remove_file(&token_path)?;
+                println!("✅ Cleared Gemini OAuth token");
+            }
+
+            println!();
+            println!("To re-authenticate with Gemini CLI OAuth:");
+            println!("  gemini auth login");
+            println!();
+            println!("Or set an API key:");
+            println!("  export GEMINI_API_KEY=\"your-key\"");
+        }
+        "copilot" | "github" => {
+            // Remove Copilot token
+            if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "tark") {
+                let token_path = proj_dirs.config_dir().join("copilot_token.json");
+                if token_path.exists() {
+                    std::fs::remove_file(&token_path)?;
+                    println!("✅ Logged out from GitHub Copilot");
+                } else {
+                    println!("No Copilot token found");
+                }
+            }
+        }
+        _ => {
+            println!(
+                "Provider '{}' does not use stored authentication.",
+                provider
+            );
+            println!();
+            println!("To change API keys, update your environment variables.");
+        }
+    }
+
+    Ok(())
+}
+
+/// Check authentication status for all providers
+pub async fn run_auth_status() -> Result<()> {
+    use colored::Colorize;
+
+    println!("{}", "=== Tark Authentication Status ===".bold().cyan());
+    println!();
+
+    // Check Gemini
+    {
+        let has_api_key = std::env::var("GEMINI_API_KEY").is_ok();
+        let has_adc = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok();
+        let has_oauth = dirs::home_dir()
+            .map(|h| h.join(".gemini").join("oauth_creds.json").exists())
+            .unwrap_or(false);
+
+        let status_str = if has_api_key {
+            "✅ API Key".green()
+        } else if has_adc {
+            "✅ ADC".green()
+        } else if has_oauth {
+            "✅ OAuth (via Gemini CLI)".green()
+        } else {
+            "❌ Not authenticated".red()
+        };
+        println!("  Gemini:     {}", status_str);
+    }
+
+    // Check Copilot
+    {
+        let token_exists = directories::ProjectDirs::from("", "", "tark")
+            .map(|p| p.config_dir().join("copilot_token.json").exists())
+            .unwrap_or(false);
+        if token_exists {
+            println!("  Copilot:    {}", "✅ Authenticated".green());
+        } else {
+            println!("  Copilot:    {}", "❌ Not authenticated".red());
+        }
+    }
+
+    // Check OpenAI
+    if std::env::var("OPENAI_API_KEY").is_ok() {
+        println!("  OpenAI:     {}", "✅ API Key set".green());
+    } else {
+        println!("  OpenAI:     {}", "❌ OPENAI_API_KEY not set".red());
+    }
+
+    // Check Claude
+    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        println!("  Claude:     {}", "✅ API Key set".green());
+    } else {
+        println!("  Claude:     {}", "❌ ANTHROPIC_API_KEY not set".red());
+    }
+
+    // Check OpenRouter
+    if std::env::var("OPENROUTER_API_KEY").is_ok() {
+        println!("  OpenRouter: {}", "✅ API Key set".green());
+    } else {
+        println!("  OpenRouter: {}", "❌ OPENROUTER_API_KEY not set".red());
+    }
+
+    println!();
+    println!("Authenticate with: tark auth <provider>");
+    println!("Logout with: tark auth logout <provider>");
+
+    Ok(())
 }

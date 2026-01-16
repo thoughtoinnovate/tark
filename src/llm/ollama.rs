@@ -598,6 +598,7 @@ impl OllamaProvider {
                 id: format!("ollama_{}", uuid_simple()),
                 name: tc.tool,
                 arguments: tc.args,
+                thought_signature: None,
             });
         }
 

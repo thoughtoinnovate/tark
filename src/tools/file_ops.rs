@@ -165,8 +165,10 @@ impl Tool for ReadFileTool {
             ));
         }
 
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
+        // Use lossy UTF-8 conversion to handle files with invalid encoding
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let content = String::from_utf8_lossy(&bytes).into_owned();
                 let output = match (params.start_line, params.end_line) {
                     (Some(start), Some(end)) => {
                         let lines: Vec<&str> = content.lines().collect();

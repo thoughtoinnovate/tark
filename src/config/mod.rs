@@ -56,7 +56,8 @@ impl Default for ClaudeConfig {
     fn default() -> Self {
         Self {
             model: "claude-sonnet-4-20250514".to_string(),
-            max_tokens: 4096,
+            // Higher default for extended thinking models
+            max_tokens: 16384,
         }
     }
 }
@@ -72,7 +73,9 @@ impl Default for OpenAiConfig {
     fn default() -> Self {
         Self {
             model: "gpt-4o".to_string(),
-            max_tokens: 4096,
+            // Higher default for GPT-5/o-series reasoning models
+            // Reasoning consumes tokens from output budget
+            max_tokens: 16384,
         }
     }
 }
@@ -106,7 +109,8 @@ impl Default for CopilotConfig {
     fn default() -> Self {
         Self {
             model: "gpt-4o".to_string(),
-            max_tokens: 4096,
+            // Higher default for reasoning models
+            max_tokens: 16384,
             auth_timeout_secs: 1800, // 30 minutes
         }
     }
@@ -123,7 +127,8 @@ impl Default for GeminiConfig {
     fn default() -> Self {
         Self {
             model: "gemini-2.0-flash-exp".to_string(),
-            max_tokens: 8192,
+            // Higher default for thinking models
+            max_tokens: 16384,
         }
     }
 }
@@ -141,7 +146,8 @@ impl Default for OpenRouterConfig {
     fn default() -> Self {
         Self {
             model: "anthropic/claude-sonnet-4".to_string(),
-            max_tokens: 4096,
+            // Higher default for reasoning/thinking models
+            max_tokens: 16384,
             site_url: None,
             app_name: Some("Tark".to_string()),
         }
@@ -290,16 +296,81 @@ impl ThinkingConfig {
         items.insert(0, ("off".to_string(), "Disable thinking".to_string()));
         items
     }
+
+    /// Get the configured default level name.
+    ///
+    /// This does **not** validate the value against `levels`. Validation is handled by
+    /// `effective_default_level_name()`.
+    pub fn default_level(&self) -> Option<&str> {
+        let v = self.default_level.trim();
+        if v.is_empty() {
+            Some("medium")
+        } else {
+            Some(v)
+        }
+    }
+
+    /// Get the effective default think level name to apply at startup.
+    ///
+    /// Returns:
+    /// - "off" when thinking is disabled or misconfigured
+    /// - a valid level name present in `levels` otherwise
+    pub fn effective_default_level_name(&self) -> String {
+        let candidate = self
+            .default_level()
+            .unwrap_or("medium")
+            .trim()
+            .to_lowercase();
+
+        if candidate.is_empty() || candidate == "off" {
+            return "off".to_string();
+        }
+
+        if self.get_level(&candidate).is_some() {
+            candidate
+        } else {
+            "off".to_string()
+        }
+    }
 }
 
 impl Default for ThinkingConfig {
     fn default() -> Self {
         Self {
-            default_level: "off".to_string(), // Off by default (cost protection)
+            default_level: "medium".to_string(),
             max_visible_lines: 6,
             auto_collapse: false,
             levels: Self::default_levels(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ThinkingConfig;
+
+    #[test]
+    fn thinking_default_is_medium() {
+        let cfg = ThinkingConfig::default();
+        assert_eq!(cfg.effective_default_level_name(), "medium");
+    }
+
+    #[test]
+    fn effective_default_level_handles_off() {
+        let cfg = ThinkingConfig {
+            default_level: "off".to_string(),
+            ..ThinkingConfig::default()
+        };
+        assert_eq!(cfg.effective_default_level_name(), "off");
+    }
+
+    #[test]
+    fn effective_default_level_handles_invalid() {
+        let cfg = ThinkingConfig {
+            default_level: "does-not-exist".to_string(),
+            ..ThinkingConfig::default()
+        };
+        assert_eq!(cfg.effective_default_level_name(), "off");
     }
 }
 

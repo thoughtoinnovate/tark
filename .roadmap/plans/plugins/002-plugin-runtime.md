@@ -2,10 +2,10 @@
 
 **Goal**: Build a plug-and-play plugin system using WASM sandboxing that allows users to install, manage, and run third-party plugins without recompiling tark.
 
-**Status**: Ready for implementation (after 001-gemini-oauth)
+**Status**: ✅ COMPLETE
 
 **Dependencies**: 
-- `001-gemini-oauth.md` should be completed first (establishes auth patterns)
+- `001-gemini-oauth.md` should be completed first (establishes auth patterns) ✅
 
 ---
 

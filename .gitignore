@@ -32,3 +32,6 @@ usage.db
 # AI coding agent folders
 .tark/
 .kiro/
+
+# Local plugins (plugins should be installed from external repos)
+plugins/

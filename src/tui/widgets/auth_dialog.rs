@@ -1,7 +1,8 @@
 //! Authentication dialog widget for OAuth device flow
 //!
-//! Displays a centered modal dialog for GitHub Copilot authentication
+//! Displays a centered modal dialog for OAuth authentication
 //! with device code, URL, and status updates.
+//! Works with any provider implementing DeviceFlowAuth.
 
 #![allow(dead_code)]
 
@@ -71,15 +72,27 @@ impl AuthDialog {
         }
     }
 
-    /// Show Copilot authentication dialog
-    pub fn show_copilot_auth(&mut self, url: &str, code: &str, timeout: u64) {
+    /// Show device flow authentication dialog for any provider
+    ///
+    /// This is the generic method that works with Copilot, Gemini, etc.
+    pub fn show_device_flow(&mut self, provider_name: &str, url: &str, code: &str, timeout: u64) {
         self.visible = true;
-        self.provider = "GitHub Copilot".to_string();
+        self.provider = provider_name.to_string();
         self.verification_url = url.to_string();
         self.user_code = code.to_string();
         self.status = AuthStatus::WaitingForUser;
         self.timeout_secs = timeout;
         self.started_at = Some(Instant::now());
+    }
+
+    /// Show Copilot authentication dialog (backwards compatible)
+    pub fn show_copilot_auth(&mut self, url: &str, code: &str, timeout: u64) {
+        self.show_device_flow("GitHub Copilot", url, code, timeout);
+    }
+
+    /// Show Gemini authentication dialog
+    pub fn show_gemini_auth(&mut self, url: &str, code: &str, timeout: u64) {
+        self.show_device_flow("Google Gemini", url, code, timeout);
     }
 
     /// Set the authentication status
@@ -106,6 +119,11 @@ impl AuthDialog {
     /// Get the verification URL (for opening in browser)
     pub fn verification_url(&self) -> &str {
         &self.verification_url
+    }
+
+    /// Get the provider name
+    pub fn provider(&self) -> &str {
+        &self.provider
     }
 
     /// Get elapsed time percentage (0.0 to 1.0)
@@ -359,6 +377,17 @@ mod tests {
     }
 
     #[test]
+    fn test_show_device_flow_generic() {
+        let mut dialog = AuthDialog::new();
+        dialog.show_device_flow("Test Provider", "https://example.com/auth", "ABC-123", 300);
+
+        assert!(dialog.is_visible());
+        assert_eq!(dialog.provider(), "Test Provider");
+        assert_eq!(dialog.user_code(), "ABC-123");
+        assert_eq!(dialog.verification_url(), "https://example.com/auth");
+    }
+
+    #[test]
     fn test_show_copilot_auth() {
         let mut dialog = AuthDialog::new();
         dialog.show_copilot_auth("https://github.com/login/device", "ABCD-1234", 300);
@@ -367,6 +396,16 @@ mod tests {
         assert_eq!(dialog.provider, "GitHub Copilot");
         assert_eq!(dialog.user_code(), "ABCD-1234");
         assert_eq!(dialog.verification_url, "https://github.com/login/device");
+    }
+
+    #[test]
+    fn test_show_gemini_auth() {
+        let mut dialog = AuthDialog::new();
+        dialog.show_gemini_auth("https://google.com/device", "XYZ-789", 300);
+
+        assert!(dialog.is_visible());
+        assert_eq!(dialog.provider, "Google Gemini");
+        assert_eq!(dialog.user_code(), "XYZ-789");
     }
 
     #[test]

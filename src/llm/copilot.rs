@@ -162,7 +162,7 @@ impl CopilotProvider {
             token,
             token_path,
             model: "gpt-4o".to_string(),
-            max_tokens: 4096,
+            max_tokens: 4096,        // Fallback default; config overrides this
             auth_timeout_secs: 1800, // 30 minutes default
             silent: false,
         })
@@ -586,7 +586,10 @@ impl CopilotProvider {
                         let tool_calls: Vec<CopilotToolCall> = parts
                             .iter()
                             .filter_map(|p| {
-                                if let ContentPart::ToolUse { id, name, input } = p {
+                                if let ContentPart::ToolUse {
+                                    id, name, input, ..
+                                } = p
+                                {
                                     Some(CopilotToolCall {
                                         id: id.clone(),
                                         call_type: "function".to_string(),
@@ -744,6 +747,7 @@ impl LlmProvider for CopilotProvider {
                             name: tc.function.name.clone(),
                             arguments: serde_json::from_str(&tc.function.arguments)
                                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                            thought_signature: None,
                         })
                         .collect();
 
@@ -966,6 +970,7 @@ impl LlmProvider for CopilotProvider {
                     name,
                     arguments: serde_json::from_str(&arguments)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                    thought_signature: None,
                 })
                 .collect();
             calls.sort_by(|a, b| a.id.cmp(&b.id));
@@ -975,6 +980,7 @@ impl LlmProvider for CopilotProvider {
                 callback(StreamEvent::ToolCallStart {
                     id: call.id.clone(),
                     name: call.name.clone(),
+                    thought_signature: call.thought_signature.clone(),
                 });
                 callback(StreamEvent::ToolCallDelta {
                     id: call.id.clone(),

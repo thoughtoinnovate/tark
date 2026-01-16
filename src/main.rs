@@ -8,6 +8,7 @@ mod config;
 mod diagnostics;
 mod llm;
 mod lsp;
+mod plugins;
 mod services;
 mod storage;
 mod tools;
@@ -74,6 +75,10 @@ enum Commands {
         /// Model to use (e.g., gpt-4o, claude-sonnet-4, gemini-2.0-flash-exp)
         #[arg(short, long)]
         model: Option<String>,
+
+        /// Enable debug logging to tark-debug.log
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Get a one-shot completion for a file position
@@ -93,7 +98,11 @@ enum Commands {
 
     /// Authenticate with LLM providers
     Auth {
+        #[command(subcommand)]
+        command: Option<AuthCommands>,
+
         /// Provider to authenticate (copilot, openai, claude, gemini, openrouter, ollama)
+        #[arg(conflicts_with = "command")]
         provider: Option<String>,
     },
 
@@ -110,6 +119,66 @@ enum Commands {
         /// Cleanup logs older than N days
         #[arg(long)]
         cleanup: Option<u32>,
+    },
+
+    /// Plugin management commands
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
+}
+
+/// Auth subcommands
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Logout from a provider (clear stored tokens)
+    Logout {
+        /// Provider to logout from (copilot, gemini)
+        provider: String,
+    },
+
+    /// Show authentication status for all providers
+    Status,
+}
+
+/// Plugin subcommands
+#[derive(Subcommand)]
+enum PluginCommands {
+    /// List installed plugins
+    List,
+
+    /// Show plugin details
+    Info {
+        /// Plugin ID
+        plugin_id: String,
+    },
+
+    /// Install a plugin from a git repository
+    Add {
+        /// Git repository URL or local path
+        url: String,
+
+        /// Branch or tag (default: main)
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+
+    /// Uninstall a plugin
+    Remove {
+        /// Plugin ID
+        plugin_id: String,
+    },
+
+    /// Enable a disabled plugin
+    Enable {
+        /// Plugin ID
+        plugin_id: String,
+    },
+
+    /// Disable a plugin
+    Disable {
+        /// Plugin ID
+        plugin_id: String,
     },
 }
 
@@ -130,6 +199,16 @@ async fn main() -> Result<()> {
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
+
+    // Initialize models.dev cache with a persistent global cache directory.
+    // This enables fast, dynamic model pickers and pricing/limits lookups across runs.
+    if let Ok(global) = storage::GlobalStorage::new() {
+        let cache_dir = global.root().join("cache");
+        if std::fs::create_dir_all(&cache_dir).is_ok() {
+            llm::init_models_db(cache_dir);
+            llm::models_db().preload();
+        }
+    }
 
     match cli.command {
         Commands::Lsp => {
@@ -169,6 +248,7 @@ async fn main() -> Result<()> {
             socket,
             provider,
             model,
+            debug,
         } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());
 
@@ -186,14 +266,23 @@ async fn main() -> Result<()> {
             }
 
             // Run the TUI application
-            transport::cli::run_tui_chat(message, &working_dir, socket, provider, model).await?;
+            transport::cli::run_tui_chat(message, &working_dir, socket, provider, model, debug)
+                .await?;
         }
         Commands::Complete { file, line, col } => {
             transport::cli::run_complete(&file, line, col).await?;
         }
-        Commands::Auth { provider } => {
-            transport::cli::run_auth(provider.as_deref()).await?;
-        }
+        Commands::Auth { command, provider } => match command {
+            Some(AuthCommands::Logout { provider }) => {
+                transport::cli::run_auth_logout(&provider).await?;
+            }
+            Some(AuthCommands::Status) => {
+                transport::cli::run_auth_status().await?;
+            }
+            None => {
+                transport::cli::run_auth(provider.as_deref()).await?;
+            }
+        },
         Commands::Usage {
             format,
             cwd,
@@ -204,6 +293,26 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
             transport::cli::run_usage(&working_dir, &format, cleanup).await?;
         }
+        Commands::Plugin { command } => match command {
+            PluginCommands::List => {
+                transport::plugin_cli::run_plugin_list().await?;
+            }
+            PluginCommands::Info { plugin_id } => {
+                transport::plugin_cli::run_plugin_info(&plugin_id).await?;
+            }
+            PluginCommands::Add { url, branch } => {
+                transport::plugin_cli::run_plugin_add(&url, &branch).await?;
+            }
+            PluginCommands::Remove { plugin_id } => {
+                transport::plugin_cli::run_plugin_remove(&plugin_id).await?;
+            }
+            PluginCommands::Enable { plugin_id } => {
+                transport::plugin_cli::run_plugin_enable(&plugin_id).await?;
+            }
+            PluginCommands::Disable { plugin_id } => {
+                transport::plugin_cli::run_plugin_disable(&plugin_id).await?;
+            }
+        },
     }
 
     Ok(())

@@ -391,6 +391,57 @@ impl AskUserTool {
     pub fn new(interaction_tx: Option<InteractionSender>) -> Self {
         Self { interaction_tx }
     }
+
+    /// Format the user response in a human-readable Q&A format
+    fn format_response(questionnaire: &Questionnaire, response: &UserResponse) -> String {
+        let mut output = String::new();
+        output.push_str("## User Responses\n\n");
+
+        for question in &questionnaire.questions {
+            // Question text
+            output.push_str(&format!("**Q: {}**\n", question.text));
+
+            // Answer
+            if let Some(answer) = response.answers.get(&question.id) {
+                match answer {
+                    AnswerValue::Single(val) => {
+                        // For single-select, try to find the label
+                        let display_val = match &question.kind {
+                            QuestionType::SingleSelect { options, .. } => options
+                                .iter()
+                                .find(|o| &o.value == val)
+                                .map(|o| o.label.as_str())
+                                .unwrap_or(val),
+                            _ => val.as_str(),
+                        };
+                        output.push_str(&format!("A: {}\n", display_val));
+                    }
+                    AnswerValue::Multi(vals) => {
+                        // For multi-select, find labels
+                        let display_vals: Vec<&str> = match &question.kind {
+                            QuestionType::MultiSelect { options, .. } => vals
+                                .iter()
+                                .map(|v| {
+                                    options
+                                        .iter()
+                                        .find(|o| &o.value == v)
+                                        .map(|o| o.label.as_str())
+                                        .unwrap_or(v.as_str())
+                                })
+                                .collect(),
+                            _ => vals.iter().map(|v| v.as_str()).collect(),
+                        };
+                        output.push_str(&format!("A: {}\n", display_vals.join(", ")));
+                    }
+                }
+            } else {
+                output.push_str("A: (no answer)\n");
+            }
+            output.push('\n');
+        }
+
+        output
+    }
 }
 
 #[async_trait]
@@ -536,6 +587,9 @@ impl Tool for AskUserTool {
         // Create a oneshot channel for the response
         let (response_tx, response_rx) = oneshot::channel();
 
+        // Clone questionnaire for formatting the response later
+        let questionnaire_for_format = questionnaire.clone();
+
         // Send the request to the TUI
         if let Err(e) = tx
             .send(InteractionRequest::Questionnaire {
@@ -563,10 +617,9 @@ impl Tool for AskUserTool {
                          You may ask these questions conversationally via chat prompts instead.",
                     ))
                 } else {
-                    // Format the response nicely
-                    let json_response = serde_json::to_string_pretty(&response)
-                        .unwrap_or_else(|_| format!("{:?}", response));
-                    Ok(ToolResult::success(json_response))
+                    // Format the response in human-readable Q&A format
+                    let formatted = Self::format_response(&questionnaire_for_format, &response);
+                    Ok(ToolResult::success(formatted))
                 }
             }
             Ok(Err(_)) => Ok(ToolResult::error(

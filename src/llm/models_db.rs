@@ -417,25 +417,165 @@ impl ModelsDbManager {
         }
     }
 
+    /// Try to get models from cache without blocking (returns None if cache not ready)
+    pub fn try_get_cached(&self, provider: &str) -> Option<Vec<ModelInfo>> {
+        // Try to read from memory cache without blocking
+        let cache_guard = self.cache.try_read().ok()?;
+        let entry = cache_guard.as_ref()?;
+
+        if !Self::is_cache_valid(entry) {
+            return None;
+        }
+
+        let provider_key = Self::normalize_provider(provider);
+        entry
+            .data
+            .providers
+            .get(&provider_key)
+            .map(|p| p.models.values().cloned().collect())
+    }
+
+    /// Try to get a specific model from the in-memory cache without blocking.
+    ///
+    /// Returns `None` if the cache is not ready/expired or the model isn't present.
+    pub fn try_get_cached_model(&self, provider: &str, model_id: &str) -> Option<ModelInfo> {
+        let cache_guard = self.cache.try_read().ok()?;
+        let entry = cache_guard.as_ref()?;
+
+        if !Self::is_cache_valid(entry) {
+            return None;
+        }
+
+        let provider_key = Self::normalize_provider(provider);
+        entry
+            .data
+            .providers
+            .get(&provider_key)
+            .and_then(|p| p.models.get(model_id))
+            .cloned()
+    }
+
+    /// Try to get a model's context window from cache without blocking.
+    ///
+    /// Returns `None` if cache isn't ready or model is missing.
+    pub fn try_get_cached_context_limit(&self, provider: &str, model_id: &str) -> Option<u32> {
+        let model = self.try_get_cached_model(provider, model_id)?;
+        if model.limit.context > 0 {
+            Some(model.limit.context)
+        } else {
+            None
+        }
+    }
+
+    /// Try to calculate request cost from cache without blocking.
+    ///
+    /// Returns `None` if cache isn't ready or model is missing.
+    pub fn try_calculate_cost_cached(
+        &self,
+        provider: &str,
+        model_id: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Option<f64> {
+        let model = self.try_get_cached_model(provider, model_id)?;
+        Some(model.calculate_cost(input_tokens, output_tokens))
+    }
+
+    /// Preload models database in background (call at app startup)
+    pub fn preload(&self) {
+        let cache = self.cache.clone();
+        let cache_path = self.cache_path.clone();
+        let client = self.client.clone();
+
+        tokio::spawn(async move {
+            // First try disk cache
+            if let Some(ref path) = cache_path {
+                if let Ok(content) = tokio::fs::read_to_string(path).await {
+                    if let Ok(entry) = serde_json::from_str::<CacheEntry>(&content) {
+                        if Self::is_cache_valid(&entry) {
+                            let mut guard = cache.write().await;
+                            *guard = Some(entry);
+                            tracing::debug!("Loaded models.dev from disk cache");
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Fetch from API
+            match client.get(MODELS_API_URL).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(db) = resp.json::<ModelsDatabase>().await {
+                        let entry = CacheEntry {
+                            timestamp: Self::current_timestamp(),
+                            data: db,
+                        };
+
+                        // Save to disk
+                        if let Some(ref path) = cache_path {
+                            if let Some(parent) = path.parent() {
+                                let _ = tokio::fs::create_dir_all(parent).await;
+                            }
+                            if let Ok(content) = serde_json::to_string(&entry) {
+                                let _ = tokio::fs::write(path, content).await;
+                            }
+                        }
+
+                        // Store in memory
+                        let mut guard = cache.write().await;
+                        *guard = Some(entry);
+                        tracing::debug!("Preloaded models.dev from API");
+                    }
+                }
+                _ => {
+                    tracing::warn!("Failed to preload models.dev");
+                }
+            }
+        });
+    }
+
+    /// Normalize provider name to match models.dev keys (public wrapper)
+    pub fn normalize_provider_name(&self, provider: &str) -> String {
+        Self::normalize_provider(provider)
+    }
+
     /// Normalize provider name to match models.dev keys
     fn normalize_provider(provider: &str) -> String {
-        match provider.to_lowercase().as_str() {
-            "openai" | "gpt" => "openai".to_string(),
-            "anthropic" | "claude" => "anthropic".to_string(),
-            "google" | "gemini" => "google".to_string(),
-            "ollama" | "local" => "ollama".to_string(),
-            "copilot" | "github" | "github-copilot" => "github-copilot".to_string(),
-            "openrouter" => "openrouter".to_string(),
-            "groq" => "groq".to_string(),
-            "together" | "togetherai" => "together".to_string(),
-            "fireworks" => "fireworks".to_string(),
-            "deepseek" => "deepseek".to_string(),
-            "mistral" => "mistral".to_string(),
-            "cohere" => "cohere".to_string(),
-            "perplexity" => "perplexity".to_string(),
-            "xai" | "grok" => "xai".to_string(),
-            other => other.to_string(),
+        let lower = provider.to_lowercase();
+
+        // Fast-path exact matches
+        match lower.as_str() {
+            "openai" | "gpt" => return "openai".to_string(),
+            "anthropic" | "claude" => return "anthropic".to_string(),
+            "google" | "gemini" => return "google".to_string(),
+            "ollama" | "local" => return "ollama".to_string(),
+            "copilot" | "github" | "github-copilot" => return "github-copilot".to_string(),
+            "openrouter" => return "openrouter".to_string(),
+            "groq" => return "groq".to_string(),
+            "together" | "togetherai" => return "together".to_string(),
+            "fireworks" => return "fireworks".to_string(),
+            "deepseek" => return "deepseek".to_string(),
+            "mistral" => return "mistral".to_string(),
+            "cohere" => return "cohere".to_string(),
+            "perplexity" => return "perplexity".to_string(),
+            "xai" | "grok" => return "xai".to_string(),
+            _ => {}
         }
+
+        // Plugin/provider aliases (best-effort). This enables models.dev lookups for
+        // plugin provider IDs like "gemini-oauth" without requiring every caller
+        // to special-case them.
+        if lower.contains("gemini") {
+            return "google".to_string();
+        }
+        if lower.contains("claude") {
+            return "anthropic".to_string();
+        }
+        if lower.contains("openai") || lower.starts_with("gpt") {
+            return "openai".to_string();
+        }
+
+        lower
     }
 
     /// Calculate cost for a request
@@ -934,5 +1074,20 @@ mod tests {
         assert!(summary.contains("reasoning"));
         assert!(summary.contains("vision"));
         assert!(summary.contains("pdf"));
+    }
+
+    #[test]
+    fn test_normalize_provider_plugin_aliases() {
+        // Plugin IDs should still resolve to canonical models.dev provider keys
+        // so the rest of the app doesn't need special-casing.
+        assert_eq!(
+            ModelsDbManager::normalize_provider("gemini-oauth"),
+            "google"
+        );
+        assert_eq!(
+            ModelsDbManager::normalize_provider("claude-oauth"),
+            "anthropic"
+        );
+        assert_eq!(ModelsDbManager::normalize_provider("openai-sso"), "openai");
     }
 }

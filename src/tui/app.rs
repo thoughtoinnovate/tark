@@ -38,11 +38,31 @@ use super::widgets::{
 };
 use tokio::sync::mpsc;
 
+/// (models, provider_key) returned from plugin provider metadata.
+///
+/// - models: Vec of (id, name, description)
+/// - provider_key: optional models.dev provider key declared by plugin (e.g. "google")
+type PluginProviderModelsWithKey = (Vec<(String, String, String)>, Option<String>);
+
 /// Spinner animation frames for processing indicator
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Interval between spinner frame updates (milliseconds)
 const SPINNER_INTERVAL_MS: u64 = 80;
+
+/// Truncate a string at a valid UTF-8 char boundary (by byte length).
+///
+/// Used for UI previews where we want to cap size without panicking on multibyte chars.
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if max_bytes >= s.len() {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 /// Global force quit flag - set by signal handler on double Ctrl+C
 static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
@@ -748,7 +768,7 @@ impl AppState {
 struct PendingMessageRequest {
     content: String,
     attachments: Vec<MessageAttachment>,
-    tx: mpsc::Sender<AgentEvent>,
+    tx: mpsc::UnboundedSender<AgentEvent>,
 }
 
 /// Async message request ready for processing
@@ -756,7 +776,7 @@ struct PendingMessageRequest {
 pub struct AsyncMessageRequest {
     content: String,
     attachments: Vec<MessageAttachment>,
-    tx: mpsc::Sender<AgentEvent>,
+    tx: mpsc::UnboundedSender<AgentEvent>,
     config: super::attachments::AttachmentConfig,
 }
 
@@ -775,7 +795,7 @@ pub struct TuiApp {
     /// Agent bridge for LLM integration
     agent_bridge: Option<AgentBridge>,
     /// Receiver for agent events (streaming responses, tool calls, etc.)
-    agent_event_rx: Option<mpsc::Receiver<AgentEvent>>,
+    agent_event_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
     /// Pending message request for async processing
     pending_request: Option<PendingMessageRequest>,
     /// Detected system username for display
@@ -807,6 +827,9 @@ impl TuiApp {
 
         // Install Ctrl+C signal handler for force quit
         install_signal_handler();
+
+        // Preload models.dev database in background for fast model picker
+        crate::llm::models_db().preload();
 
         let terminal = Self::setup_terminal()?;
         let mut state = AppState::new();
@@ -866,11 +889,19 @@ impl TuiApp {
         // Sync agent mode and approval mode from session
         app.sync_agent_mode_from_bridge();
         app.sync_trust_level_from_bridge();
+        app.sync_think_level_from_bridge();
 
         // Restore messages from current session on startup (Requirements 6.1, 6.6)
         app.restore_messages_from_session();
 
         Ok(app)
+    }
+
+    /// Sync think level from AgentBridge to UI state
+    fn sync_think_level_from_bridge(&mut self) {
+        if let Some(ref bridge) = self.agent_bridge {
+            self.state.think_level = bridge.think_level().to_string();
+        }
     }
 
     /// Create a new TUI application with a specific configuration
@@ -954,6 +985,7 @@ impl TuiApp {
         config: TuiConfig,
         provider: Option<String>,
         model: Option<String>,
+        debug: bool,
     ) -> anyhow::Result<Self> {
         // Set up panic hook before initializing terminal
         Self::install_panic_hook();
@@ -981,7 +1013,7 @@ impl TuiApp {
         let prompt_history = super::prompt_history::PromptHistory::for_workspace(&working_dir);
 
         let (agent_bridge, llm_configured, llm_error, interaction_rx) =
-            match AgentBridge::with_provider_and_interaction(working_dir, provider, model) {
+            match AgentBridge::with_provider_and_interaction(working_dir, provider, model, debug) {
                 Ok((bridge, rx)) => (Some(bridge), true, None, Some(rx)),
                 Err(e) => {
                     let error_msg = format!(
@@ -1076,14 +1108,12 @@ impl TuiApp {
             let model_name_ref = model_name.as_str();
             let provider_name_ref = provider_name.as_str();
 
-            // Fetch context limit asynchronously (this will use cache if available)
-            let max_tokens = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    crate::llm::models_db()
-                        .get_context_limit(provider_name_ref, model_name_ref)
-                        .await
-                })
-            });
+            // IMPORTANT: do not block the Tokio runtime from UI code.
+            // Use cache-only lookup here; models_db preloads at startup and will populate shortly.
+            // If cache isn't ready yet, keep the agent's existing context limit.
+            let max_tokens = crate::llm::models_db()
+                .try_get_cached_context_limit(provider_name_ref, model_name_ref)
+                .unwrap_or_else(|| bridge.max_context_tokens() as u32);
 
             // Sync the agent's context limit with the model's actual limit
             // This ensures auto-compaction triggers at the right threshold
@@ -1439,8 +1469,8 @@ impl TuiApp {
     fn process_next_queued_message(&mut self) {
         // Check if there are queued messages
         if let Some(next_message) = self.state.prompt_queue.pop_front() {
-            // Create mpsc channel for AgentEvents
-            let (tx, rx) = mpsc::channel(100);
+            // Create channel for AgentEvents (unbounded to avoid dropping streaming chunks)
+            let (tx, rx) = mpsc::unbounded_channel();
             self.agent_event_rx = Some(rx);
 
             // Mark as processing
@@ -1554,10 +1584,12 @@ impl TuiApp {
                 let was_visible = self.state.auth_dialog.is_visible();
                 self.check_copilot_auth_pending();
                 let visibility_changed = was_visible != self.state.auth_dialog.is_visible();
+
                 Ok(visibility_changed)
             }
         }
     }
+
     // Handle auth dialog input if visible
     fn handle_key_event(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
         // Handle auth dialog input if visible
@@ -3072,6 +3104,17 @@ impl TuiApp {
         if CommandHandler::is_command(&content) {
             self.handle_command(&content);
         } else {
+            // UX hint: users sometimes type "think" expecting it to enable thinking blocks.
+            // Commands must start with '/', so show a helpful hint instead of silently sending.
+            let trimmed = content.trim();
+            if trimmed.eq_ignore_ascii_case("think") || trimmed.eq_ignore_ascii_case("thinking") {
+                self.state.message_list.push(ChatMessage::system(
+                    "Tip: use `/think [low|medium|high]` to enable LLM thinking, and `/thinking` to toggle displaying thinking blocks in the UI."
+                        .to_string(),
+                ));
+                return;
+            }
+
             // Regular message - add to the list with detected username (Requirements 2.2)
             // FIRST check if agent is already processing - if so, queue the message
             // Note: agent_bridge may be temporarily None during processing (taken by spawn_blocking)
@@ -3107,8 +3150,8 @@ impl TuiApp {
                     error_msg
                 )));
             } else if self.agent_bridge.is_some() {
-                // Create mpsc channel for AgentEvents (Requirements 1.1, 1.2)
-                let (tx, rx) = mpsc::channel(100);
+                // Create channel for AgentEvents (unbounded to avoid dropping streaming chunks)
+                let (tx, rx) = mpsc::unbounded_channel();
                 self.agent_event_rx = Some(rx);
 
                 // Mark as processing
@@ -3303,16 +3346,8 @@ impl TuiApp {
                 if let Some(ref bridge) = self.agent_bridge {
                     let thinking_config = bridge.thinking_config().clone();
                     let new_level = if self.state.think_level == "off" {
-                        // Use "medium" as default toggle level, or first available level
-                        if thinking_config.get_level("medium").is_some() {
-                            "medium".to_string()
-                        } else {
-                            thinking_config
-                                .level_names()
-                                .first()
-                                .map(|s: &&str| s.to_string())
-                                .unwrap_or_else(|| "off".to_string())
-                        }
+                        // Use configured default level (validated; returns "off" on misconfig)
+                        thinking_config.effective_default_level_name()
                     } else {
                         "off".to_string()
                     };
@@ -4433,123 +4468,8 @@ impl TuiApp {
             .map(|b| b.provider_name().to_string())
             .unwrap_or_else(|| "openai".to_string());
 
-        let current_model = self
-            .agent_bridge
-            .as_ref()
-            .map(|b| b.model_name().to_string())
-            .unwrap_or_default();
-
-        match current_provider.as_str() {
-            "openai" | "gpt" => vec![
-                PickerItem::new("gpt-4o", "GPT-4o")
-                    .with_description("Most capable, multimodal")
-                    .with_active(current_model == "gpt-4o"),
-                PickerItem::new("gpt-4o-mini", "GPT-4o Mini")
-                    .with_description("Fast and affordable")
-                    .with_active(current_model == "gpt-4o-mini"),
-                PickerItem::new("o3-mini", "O3 Mini")
-                    .with_description("Latest reasoning model")
-                    .with_active(current_model == "o3-mini"),
-                PickerItem::new("o1", "O1")
-                    .with_description("Advanced reasoning model")
-                    .with_active(current_model == "o1"),
-                PickerItem::new("o1-mini", "O1 Mini")
-                    .with_description("Fast reasoning model")
-                    .with_active(current_model == "o1-mini"),
-                PickerItem::new("gpt-4-turbo", "GPT-4 Turbo")
-                    .with_description("High capability, 128k context")
-                    .with_active(current_model == "gpt-4-turbo"),
-                PickerItem::new("gpt-4", "GPT-4")
-                    .with_description("Original GPT-4")
-                    .with_active(current_model == "gpt-4"),
-                PickerItem::new("gpt-3.5-turbo", "GPT-3.5 Turbo")
-                    .with_description("Fast and economical")
-                    .with_active(current_model == "gpt-3.5-turbo"),
-            ],
-            "claude" | "anthropic" => vec![
-                PickerItem::new("claude-sonnet-4-20250514", "Claude Sonnet 4")
-                    .with_description("Latest, most capable")
-                    .with_active(current_model == "claude-sonnet-4-20250514"),
-                PickerItem::new("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet")
-                    .with_description("Hybrid reasoning model")
-                    .with_active(current_model == "claude-3-7-sonnet-20250219"),
-                PickerItem::new("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet")
-                    .with_description("Best balance of speed and capability")
-                    .with_active(current_model == "claude-3-5-sonnet-20241022"),
-                PickerItem::new("claude-3-5-haiku-20241022", "Claude 3.5 Haiku")
-                    .with_description("Fast and affordable")
-                    .with_active(current_model == "claude-3-5-haiku-20241022"),
-                PickerItem::new("claude-3-opus-20240229", "Claude 3 Opus")
-                    .with_description("Most powerful, best for complex tasks")
-                    .with_active(current_model == "claude-3-opus-20240229"),
-                PickerItem::new("claude-3-haiku-20240307", "Claude 3 Haiku")
-                    .with_description("Fastest, most economical")
-                    .with_active(current_model == "claude-3-haiku-20240307"),
-            ],
-            "copilot" | "github" => vec![
-                PickerItem::new("gpt-4o", "GPT-4o")
-                    .with_description("Most capable model via Copilot")
-                    .with_active(current_model == "gpt-4o"),
-                PickerItem::new("gpt-4", "GPT-4")
-                    .with_description("Original GPT-4")
-                    .with_active(current_model == "gpt-4"),
-            ],
-            "gemini" | "google" => vec![
-                PickerItem::new("gemini-2.0-flash-exp", "Gemini 2.0 Flash")
-                    .with_description("Fast and efficient (default)")
-                    .with_active(current_model == "gemini-2.0-flash-exp"),
-                PickerItem::new("gemini-2.0-flash-thinking-exp", "Gemini 2.0 Flash Thinking")
-                    .with_description("With extended thinking")
-                    .with_active(current_model == "gemini-2.0-flash-thinking-exp"),
-                PickerItem::new("gemini-1.5-pro", "Gemini 1.5 Pro")
-                    .with_description("Larger, more capable")
-                    .with_active(current_model == "gemini-1.5-pro"),
-                PickerItem::new("gemini-1.5-flash", "Gemini 1.5 Flash")
-                    .with_description("Fast and lightweight")
-                    .with_active(current_model == "gemini-1.5-flash"),
-            ],
-            "openrouter" => vec![
-                PickerItem::new("anthropic/claude-sonnet-4", "Claude Sonnet 4")
-                    .with_description("Latest Claude via OpenRouter")
-                    .with_active(current_model == "anthropic/claude-sonnet-4"),
-                PickerItem::new("deepseek/deepseek-chat", "DeepSeek Chat")
-                    .with_description("Very affordable, great quality")
-                    .with_active(current_model == "deepseek/deepseek-chat"),
-                PickerItem::new("google/gemini-2.0-flash-exp:free", "Gemini 2.0 (Free)")
-                    .with_description("Free via OpenRouter")
-                    .with_active(current_model == "google/gemini-2.0-flash-exp:free"),
-                PickerItem::new(
-                    "meta-llama/llama-3.1-8b-instruct:free",
-                    "Llama 3.1 8B (Free)",
-                )
-                .with_description("Free open model")
-                .with_active(current_model == "meta-llama/llama-3.1-8b-instruct:free"),
-                PickerItem::new("qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B")
-                    .with_description("Excellent for coding")
-                    .with_active(current_model == "qwen/qwen-2.5-72b-instruct"),
-            ],
-            "ollama" | "local" => vec![
-                PickerItem::new("llama3.2", "Llama 3.2")
-                    .with_description("Meta's latest open model")
-                    .with_active(current_model == "llama3.2"),
-                PickerItem::new("qwen2.5-coder", "Qwen 2.5 Coder")
-                    .with_description("Excellent for coding tasks")
-                    .with_active(current_model == "qwen2.5-coder"),
-                PickerItem::new("codellama", "Code Llama")
-                    .with_description("Optimized for code generation")
-                    .with_active(current_model == "codellama"),
-                PickerItem::new("deepseek-coder-v2", "DeepSeek Coder V2")
-                    .with_description("Advanced coding model")
-                    .with_active(current_model == "deepseek-coder-v2"),
-                PickerItem::new("mistral", "Mistral")
-                    .with_description("Fast and capable")
-                    .with_active(current_model == "mistral"),
-                PickerItem::new("phi3", "Phi-3")
-                    .with_description("Microsoft's compact model")
-                    .with_active(current_model == "phi3"),
-            ],
-            _ => vec![PickerItem::new("default", "Default Model")],
-        }
+        // Always use provider-based picker. It supports plugins and (now) models.dev-backed lists.
+        self.get_model_picker_items_for_provider(&current_provider)
     }
 
     /// Get picker items for model selection for a specific provider
@@ -4559,122 +4479,263 @@ impl TuiApp {
     ///
     /// Requirements: 1.3, 1.4, 4.1
     fn get_model_picker_items_for_provider(&self, provider_id: &str) -> Vec<PickerItem> {
+        tracing::info!(
+            "get_model_picker_items_for_provider called with: {}",
+            provider_id
+        );
+
         let current_model = self
             .agent_bridge
             .as_ref()
             .map(|b| b.model_name().to_string())
             .unwrap_or_default();
 
-        match provider_id {
-            "openai" | "gpt" => vec![
-                PickerItem::new("gpt-4o", "GPT-4o")
-                    .with_description("Most capable, multimodal")
-                    .with_active(current_model == "gpt-4o"),
-                PickerItem::new("gpt-4o-mini", "GPT-4o Mini")
-                    .with_description("Fast and affordable")
-                    .with_active(current_model == "gpt-4o-mini"),
-                PickerItem::new("o3-mini", "O3 Mini")
-                    .with_description("Latest reasoning model")
-                    .with_active(current_model == "o3-mini"),
-                PickerItem::new("o1", "O1")
-                    .with_description("Advanced reasoning model")
-                    .with_active(current_model == "o1"),
-                PickerItem::new("o1-mini", "O1 Mini")
-                    .with_description("Fast reasoning model")
-                    .with_active(current_model == "o1-mini"),
-                PickerItem::new("gpt-4-turbo", "GPT-4 Turbo")
-                    .with_description("High capability, 128k context")
-                    .with_active(current_model == "gpt-4-turbo"),
-                PickerItem::new("gpt-4", "GPT-4")
-                    .with_description("Original GPT-4")
-                    .with_active(current_model == "gpt-4"),
-                PickerItem::new("gpt-3.5-turbo", "GPT-3.5 Turbo")
-                    .with_description("Fast and economical")
-                    .with_active(current_model == "gpt-3.5-turbo"),
-            ],
-            "claude" | "anthropic" => vec![
-                PickerItem::new("claude-sonnet-4-20250514", "Claude Sonnet 4")
-                    .with_description("Latest, most capable")
-                    .with_active(current_model == "claude-sonnet-4-20250514"),
-                PickerItem::new("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet")
-                    .with_description("Hybrid reasoning model")
-                    .with_active(current_model == "claude-3-7-sonnet-20250219"),
-                PickerItem::new("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet")
-                    .with_description("Best balance of speed and capability")
-                    .with_active(current_model == "claude-3-5-sonnet-20241022"),
-                PickerItem::new("claude-3-5-haiku-20241022", "Claude 3.5 Haiku")
-                    .with_description("Fast and affordable")
-                    .with_active(current_model == "claude-3-5-haiku-20241022"),
-                PickerItem::new("claude-3-opus-20240229", "Claude 3 Opus")
-                    .with_description("Most powerful, best for complex tasks")
-                    .with_active(current_model == "claude-3-opus-20240229"),
-                PickerItem::new("claude-3-haiku-20240307", "Claude 3 Haiku")
-                    .with_description("Fastest, most economical")
-                    .with_active(current_model == "claude-3-haiku-20240307"),
-            ],
-            "copilot" | "github" => vec![
-                PickerItem::new("gpt-4o", "GPT-4o")
-                    .with_description("Most capable model via Copilot")
-                    .with_active(current_model == "gpt-4o"),
-                PickerItem::new("gpt-4", "GPT-4")
-                    .with_description("Original GPT-4")
-                    .with_active(current_model == "gpt-4"),
-            ],
-            "gemini" | "google" => vec![
-                PickerItem::new("gemini-2.0-flash-exp", "Gemini 2.0 Flash")
-                    .with_description("Fast and efficient (default)")
-                    .with_active(current_model == "gemini-2.0-flash-exp"),
-                PickerItem::new("gemini-2.0-flash-thinking-exp", "Gemini 2.0 Flash Thinking")
-                    .with_description("With extended thinking")
-                    .with_active(current_model == "gemini-2.0-flash-thinking-exp"),
-                PickerItem::new("gemini-1.5-pro", "Gemini 1.5 Pro")
-                    .with_description("Larger, more capable")
-                    .with_active(current_model == "gemini-1.5-pro"),
-                PickerItem::new("gemini-1.5-flash", "Gemini 1.5 Flash")
-                    .with_description("Fast and lightweight")
-                    .with_active(current_model == "gemini-1.5-flash"),
-            ],
-            "openrouter" => vec![
-                PickerItem::new("anthropic/claude-sonnet-4", "Claude Sonnet 4")
-                    .with_description("Latest Claude via OpenRouter")
-                    .with_active(current_model == "anthropic/claude-sonnet-4"),
-                PickerItem::new("deepseek/deepseek-chat", "DeepSeek Chat")
-                    .with_description("Very affordable, great quality")
-                    .with_active(current_model == "deepseek/deepseek-chat"),
-                PickerItem::new("google/gemini-2.0-flash-exp:free", "Gemini 2.0 (Free)")
-                    .with_description("Free via OpenRouter")
-                    .with_active(current_model == "google/gemini-2.0-flash-exp:free"),
-                PickerItem::new(
-                    "meta-llama/llama-3.1-8b-instruct:free",
-                    "Llama 3.1 8B (Free)",
-                )
-                .with_description("Free open model")
-                .with_active(current_model == "meta-llama/llama-3.1-8b-instruct:free"),
-                PickerItem::new("qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B")
-                    .with_description("Excellent for coding")
-                    .with_active(current_model == "qwen/qwen-2.5-72b-instruct"),
-            ],
-            "ollama" | "local" => vec![
-                PickerItem::new("llama3.2", "Llama 3.2")
-                    .with_description("Meta's latest open model")
-                    .with_active(current_model == "llama3.2"),
-                PickerItem::new("qwen2.5-coder", "Qwen 2.5 Coder")
-                    .with_description("Excellent for coding tasks")
-                    .with_active(current_model == "qwen2.5-coder"),
-                PickerItem::new("codellama", "Code Llama")
-                    .with_description("Optimized for code generation")
-                    .with_active(current_model == "codellama"),
-                PickerItem::new("deepseek-coder-v2", "DeepSeek Coder V2")
-                    .with_description("Advanced coding model")
-                    .with_active(current_model == "deepseek-coder-v2"),
-                PickerItem::new("mistral", "Mistral")
-                    .with_description("Fast and capable")
-                    .with_active(current_model == "mistral"),
-                PickerItem::new("phi3", "Phi-3")
-                    .with_description("Microsoft's compact model")
-                    .with_active(current_model == "phi3"),
-            ],
-            _ => vec![PickerItem::new("default", "Default Model")],
+        // For plugin providers: check if plugin provides its own model list
+        // If empty, use plugin's declared provider key to load from models.dev
+        if let Some((models, provider_key)) = Self::get_plugin_provider_models_with_key(provider_id)
+        {
+            if !models.is_empty() {
+                // Plugin provides its own model list - use it
+                tracing::info!(
+                    "Using plugin's own model list for '{}': {} models",
+                    provider_id,
+                    models.len()
+                );
+                return models
+                    .into_iter()
+                    .map(|(id, name, desc)| {
+                        PickerItem::new(&id, &name)
+                            .with_description(desc)
+                            .with_active(current_model == id)
+                    })
+                    .collect();
+            } else if let Some(key) = provider_key {
+                // Plugin returns empty list but declares a provider key - load from models.dev
+                tracing::info!(
+                    "Plugin '{}' declares provider '{}', loading models from models.dev",
+                    provider_id,
+                    key
+                );
+                if let Some(models) = Self::get_cached_models_for_provider(&key) {
+                    if !models.is_empty() {
+                        return models
+                            .into_iter()
+                            .map(|(id, name, desc)| {
+                                PickerItem::new(&id, &name)
+                                    .with_description(desc)
+                                    .with_active(current_model == id)
+                            })
+                            .collect();
+                    }
+                }
+            }
+        }
+
+        // For built-in providers, use models.dev directly
+        if let Some(models) = Self::get_cached_models_for_provider(provider_id) {
+            if !models.is_empty() {
+                return models
+                    .into_iter()
+                    .map(|(id, name, desc)| {
+                        PickerItem::new(&id, &name)
+                            .with_description(desc)
+                            .with_active(current_model == id)
+                    })
+                    .collect();
+            }
+        }
+
+        tracing::warn!("No models for '{}', showing Default Model", provider_id);
+        vec![PickerItem::new("default", "Default Model")]
+    }
+
+    /// Get models from a plugin provider along with its declared provider key.
+    /// Returns (models, provider_key) where:
+    /// - models: the plugin's own model list (may be empty if plugin wants tark to load from models.dev)
+    /// - provider_key: the models.dev provider key declared by plugin (e.g., "google")
+    fn get_plugin_provider_models_with_key(
+        provider_id: &str,
+    ) -> Option<PluginProviderModelsWithKey> {
+        use crate::plugins::{PluginHost, PluginRegistry};
+
+        tracing::debug!(
+            "get_plugin_provider_models_with_key called with: {}",
+            provider_id
+        );
+
+        let registry = match PluginRegistry::new() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("Failed to create plugin registry: {}", e);
+                return None;
+            }
+        };
+
+        let plugin = match registry.get(provider_id) {
+            Some(p) => p,
+            None => {
+                tracing::debug!("No plugin found with id: {}", provider_id);
+                return None;
+            }
+        };
+
+        let mut host = match PluginHost::new() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!("Failed to create plugin host: {}", e);
+                return None;
+            }
+        };
+
+        if let Err(e) = host.load(plugin) {
+            tracing::debug!("Failed to load plugin {}: {}", provider_id, e);
+            return None;
+        }
+
+        let instance = host.get_mut(provider_id)?;
+
+        // Get provider info to extract the provider key
+        let provider_key = match instance.provider_info() {
+            Ok(info) => info.provider,
+            Err(e) => {
+                tracing::debug!("Failed to get provider info: {}", e);
+                None
+            }
+        };
+
+        // Get the plugin's model list
+        let models = match instance.provider_models() {
+            Ok(models) => models
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.id,
+                        m.display_name,
+                        format!("Context: {}k", m.context_window / 1000),
+                    )
+                })
+                .collect(),
+            Err(e) => {
+                tracing::debug!("Failed to get models from plugin: {}", e);
+                Vec::new()
+            }
+        };
+
+        Some((models, provider_key))
+    }
+
+    /// Get models from a plugin provider by calling the plugin's provider_models() function.
+    /// This returns the models the plugin actually supports, not models.dev data.
+    #[allow(dead_code)]
+    fn get_plugin_provider_models(provider_id: &str) -> Option<Vec<(String, String, String)>> {
+        use crate::plugins::{PluginHost, PluginRegistry};
+
+        tracing::debug!("get_plugin_provider_models called with: {}", provider_id);
+
+        let registry = match PluginRegistry::new() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("Failed to create PluginRegistry: {}", e);
+                return None;
+            }
+        };
+
+        // Check if this is a plugin provider
+        let plugin = registry.get(provider_id)?;
+        if !plugin.enabled {
+            tracing::debug!("Plugin {} is disabled", provider_id);
+            return None;
+        }
+
+        // Load the plugin and call provider_models()
+        let mut host = match PluginHost::new() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!("Failed to create PluginHost: {}", e);
+                return None;
+            }
+        };
+
+        if let Err(e) = host.load(plugin) {
+            tracing::debug!("Failed to load plugin {}: {}", provider_id, e);
+            return None;
+        }
+
+        let instance = host.get_mut(provider_id)?;
+
+        // Get the plugin's own model list
+        match instance.provider_models() {
+            Ok(models) => {
+                tracing::info!("Plugin {} reports {} models", provider_id, models.len());
+                let result: Vec<(String, String, String)> = models
+                    .into_iter()
+                    .map(|m| {
+                        let desc = if m.context_window > 0 {
+                            format!("{}K context", m.context_window / 1000)
+                        } else {
+                            String::new()
+                        };
+                        (m.id, m.display_name, desc)
+                    })
+                    .collect();
+                Some(result)
+            }
+            Err(e) => {
+                tracing::debug!("Failed to get models from plugin {}: {}", provider_id, e);
+                None
+            }
+        }
+    }
+
+    /// Get models from models.dev cache (non-blocking)
+    fn get_cached_models_for_provider(provider: &str) -> Option<Vec<(String, String, String)>> {
+        let models_db = crate::llm::models_db();
+
+        // Try cache first (non-blocking)
+        if let Some(models) = models_db.try_get_cached(provider) {
+            if !models.is_empty() {
+                let mut result: Vec<(String, String, String)> = models
+                    .into_iter()
+                    .map(|m| {
+                        let desc = m.capability_summary();
+                        (m.id, m.name, desc)
+                    })
+                    .collect();
+                result.sort_by(|a, b| a.1.cmp(&b.1));
+                return Some(result);
+            }
+        }
+
+        // Cache not ready yet. models_db preloads in the background; fall back to a small
+        // provider-specific list instead of blocking/creating nested runtimes.
+        Self::get_fallback_models(provider)
+    }
+
+    /// Fallback models if cache not ready
+    fn get_fallback_models(provider: &str) -> Option<Vec<(String, String, String)>> {
+        // Normalize provider to handle plugin IDs like "gemini-oauth"
+        let normalized = crate::llm::models_db().normalize_provider_name(provider);
+        let provider_key = normalized.as_str();
+
+        match provider_key {
+            "google" => Some(vec![
+                (
+                    "gemini-2.0-flash-exp".into(),
+                    "Gemini 2.0 Flash".into(),
+                    "Fast and efficient".into(),
+                ),
+                (
+                    "gemini-1.5-pro".into(),
+                    "Gemini 1.5 Pro".into(),
+                    "Larger, more capable".into(),
+                ),
+                (
+                    "gemini-1.5-flash".into(),
+                    "Gemini 1.5 Flash".into(),
+                    "Fast and lightweight".into(),
+                ),
+            ]),
+            _ => None,
         }
     }
 
@@ -4685,33 +4746,8 @@ impl TuiApp {
     ///
     /// Requirements: 1.3, 1.4, 4.1
     fn get_model_picker_items_for_provider_dynamic(&self, provider_id: &str) -> Vec<PickerItem> {
-        let current_model = self
-            .agent_bridge
-            .as_ref()
-            .map(|b| b.model_name().to_string())
-            .unwrap_or_default();
-
-        // Try to fetch models dynamically from AgentBridge
-        if let Some(ref bridge) = self.agent_bridge {
-            // Use block_in_place to call async function in sync context
-            let models_result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(bridge.list_available_models())
-            });
-
-            if !models_result.is_empty() {
-                // Successfully fetched models dynamically
-                return models_result
-                    .into_iter()
-                    .map(|(model_id, display_name, description)| {
-                        PickerItem::new(&model_id, &display_name)
-                            .with_description(description)
-                            .with_active(current_model == model_id)
-                    })
-                    .collect();
-            }
-        }
-
-        // Fall back to hardcoded list if fetch failed
+        // IMPORTANT: never block the runtime to "dynamically" fetch models.
+        // We rely on models_db cache and/or plugin-declared models instead.
         self.get_model_picker_items_for_provider(provider_id)
     }
 
@@ -4807,7 +4843,8 @@ impl TuiApp {
 
                     // Show model picker for the selected provider
                     self.state.picker.set_title("Select Model");
-                    let items = self.get_model_picker_items_for_provider_dynamic(selected_id);
+                    // Never block here; use cached/provider-declared models.
+                    let items = self.get_model_picker_items_for_provider(selected_id);
                     self.state.picker.set_items(items);
                     self.state.active_picker_type = Some(PickerType::Model);
                     self.state.picker.show();
@@ -5198,46 +5235,58 @@ impl TuiApp {
         &mut self,
         request: AsyncMessageRequest,
     ) -> anyhow::Result<()> {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
-        // Flag to track if LLM work is done
-        let done_flag = Arc::new(AtomicBool::new(false));
-        let done_flag_clone = done_flag.clone();
-
-        // Take the bridge temporarily to use in spawned task
-        // We need to use block_in_place since AgentBridge isn't Send
+        // Take the bridge temporarily to use in a background thread (so UI stays responsive).
         let bridge = self.agent_bridge.take();
 
         if let Some(mut bridge) = bridge {
             let has_attachments = !request.attachments.is_empty();
             let tx = request.tx.clone();
 
-            // Spawn the LLM work in a blocking task
-            let handle = tokio::task::spawn_blocking(move || {
-                let rt = tokio::runtime::Handle::current();
-                let result = rt.block_on(async {
-                    if has_attachments {
-                        bridge
-                            .send_message_with_attachments(
-                                &request.content,
-                                request.attachments,
-                                tx.clone(),
-                                &request.config,
-                            )
-                            .await
-                    } else {
-                        bridge
-                            .send_message_streaming(&request.content, tx.clone())
-                            .await
-                    }
-                });
-                done_flag_clone.store(true, Ordering::SeqCst);
-                (bridge, result, tx)
+            // IMPORTANT: do not call `Handle::block_on` or create nested runtimes inside a Tokio
+            // runtime thread (can panic). Instead, run the LLM work on a dedicated OS thread with
+            // its own current-thread Tokio runtime.
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<(
+                AgentBridge,
+                anyhow::Result<()>,
+                mpsc::UnboundedSender<AgentEvent>,
+            )>();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+
+                let result = match runtime {
+                    Ok(rt) => rt.block_on(async {
+                        if has_attachments {
+                            bridge
+                                .send_message_with_attachments(
+                                    &request.content,
+                                    request.attachments,
+                                    tx.clone(),
+                                    &request.config,
+                                )
+                                .await
+                        } else {
+                            bridge
+                                .send_message_streaming(&request.content, tx.clone())
+                                .await
+                        }
+                    }),
+                    Err(e) => Err(anyhow::anyhow!("Failed to start background runtime: {}", e)),
+                };
+
+                let _ = done_tx.send((bridge, result, tx));
             });
 
             // Poll events and render while LLM is working
-            while !done_flag.load(Ordering::SeqCst) && !is_force_quit_requested() {
+            let mut completed: Option<(
+                AgentBridge,
+                anyhow::Result<()>,
+                mpsc::UnboundedSender<AgentEvent>,
+            )> = None;
+            while completed.is_none() && !is_force_quit_requested() {
                 // Poll for agent events (streaming chunks)
                 let events_processed = self.poll_agent_events();
 
@@ -5266,18 +5315,25 @@ impl TuiApp {
 
                 // Small yield to let the spawned task make progress
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+                // Check if the background thread finished without blocking UI.
+                if let Ok(done) = done_rx.try_recv() {
+                    completed = Some(done);
+                }
             }
 
             // Check if force quit was requested
             if is_force_quit_requested() {
                 tracing::warn!("Force quit requested during LLM processing");
                 self.state.quit();
-                // Don't wait for the handle - just restore bridge and exit
-                // The spawned task will be cancelled when we exit
+                // Don't wait; the process exit will terminate background work.
+                return Ok(());
             }
 
             // Get the result and restore the bridge
-            let (bridge, result, tx) = handle.await.expect("LLM task panicked");
+            let (bridge, result, tx) = completed
+                .or_else(|| done_rx.recv().ok())
+                .expect("LLM background thread failed");
             self.agent_bridge = Some(bridge);
 
             match result {
@@ -5285,7 +5341,7 @@ impl TuiApp {
                     // Message sent successfully
                 }
                 Err(e) => {
-                    let _ = tx.send(AgentEvent::Error(e.to_string())).await;
+                    let _ = tx.send(AgentEvent::Error(e.to_string()));
                     self.state.agent_processing = false;
                 }
             }
@@ -5325,6 +5381,9 @@ impl TuiApp {
     /// Returns true if any events were processed.
     fn poll_agent_events(&mut self) -> bool {
         let mut processed = false;
+        // Buffer for chunks that arrive before Started event (fixes race condition)
+        let mut buffered_text_chunks: Vec<String> = Vec::new();
+        let mut buffered_thinking_chunks: Vec<String> = Vec::new();
 
         // Take the receiver temporarily to avoid borrow issues
         if let Some(mut rx) = self.agent_event_rx.take() {
@@ -5340,6 +5399,30 @@ impl TuiApp {
                         self.state.status_message = Some("Receiving response...".to_string());
                         // Clear current tool indicator
                         self.state.current_tool = None;
+
+                        // Apply buffered chunks now that the message exists
+                        // This fixes the race condition where chunks arrive before Started
+                        if let Some(last_msg) = self.state.message_list.messages_mut().last_mut() {
+                            for chunk in buffered_text_chunks.drain(..) {
+                                last_msg.content.push_str(&chunk);
+                                match last_msg.segments.last_mut() {
+                                    Some(MessageSegment::Text(ref mut text)) => {
+                                        text.push_str(&chunk);
+                                    }
+                                    _ => {
+                                        last_msg.segments.push(MessageSegment::Text(chunk));
+                                    }
+                                }
+                            }
+                            if self.state.thinking_display {
+                                for chunk in buffered_thinking_chunks.drain(..) {
+                                    last_msg.thinking_content.push_str(&chunk);
+                                }
+                            }
+                            if !last_msg.content.is_empty() {
+                                self.state.auto_scroll_pending = true;
+                            }
+                        }
                     }
                     AgentEvent::TextChunk(chunk) => {
                         // Append chunk to the streaming assistant message (Requirements 3.2)
@@ -5362,7 +5445,13 @@ impl TuiApp {
 
                                 // Request auto-scroll on next render (after visible_height is updated)
                                 self.state.auto_scroll_pending = true;
+                            } else {
+                                // Buffer chunk until Started creates the message (fixes race condition)
+                                buffered_text_chunks.push(chunk);
                             }
+                        } else {
+                            // Buffer chunk until Started creates the message (fixes race condition)
+                            buffered_text_chunks.push(chunk);
                         }
                     }
                     AgentEvent::ThinkingChunk(chunk) => {
@@ -5377,7 +5466,13 @@ impl TuiApp {
                                 {
                                     // Append thinking content to the message's thinking_content field
                                     last_msg.thinking_content.push_str(&chunk);
+                                } else {
+                                    // Buffer chunk until Started creates the message (fixes race condition)
+                                    buffered_thinking_chunks.push(chunk);
                                 }
+                            } else {
+                                // Buffer chunk until Started creates the message (fixes race condition)
+                                buffered_thinking_chunks.push(chunk);
                             }
                         }
                         // Note: When thinking_display is disabled, thinking content is silently ignored
@@ -5418,21 +5513,18 @@ impl TuiApp {
                     }
                     AgentEvent::ToolCallCompleted {
                         tool,
-                        result_preview,
+                        result_preview: result_full,
                     } => {
                         // Clear current tool from status bar (Requirement 4.6)
                         self.state.current_tool = None;
                         self.state.status_message = Some(format!("✓ {} completed", tool));
 
                         // Check if this is a mode switch confirmation
-                        if tool == "switch_mode"
-                            && result_preview.contains("MODE_SWITCH_CONFIRMED:")
-                        {
+                        if tool == "switch_mode" && result_full.contains("MODE_SWITCH_CONFIRMED:") {
                             // Parse the mode switch result
-                            if let Some(json_start) = result_preview.find("MODE_SWITCH_CONFIRMED:")
-                            {
+                            if let Some(json_start) = result_full.find("MODE_SWITCH_CONFIRMED:") {
                                 let json_str =
-                                    &result_preview[json_start + "MODE_SWITCH_CONFIRMED:".len()..];
+                                    &result_full[json_start + "MODE_SWITCH_CONFIRMED:".len()..];
                                 if let Some(json_end) = json_str.find('\n') {
                                     let json_part = &json_str[..json_end];
                                     if let Ok(parsed) =
@@ -5466,28 +5558,46 @@ impl TuiApp {
                                 let mut matched_block_id = None;
                                 for t in last_msg.tool_call_info.iter_mut().rev() {
                                     if t.tool == tool && t.result_preview == "⏳ Running..." {
-                                        let mut final_preview = result_preview.clone();
+                                        let mut final_full = result_full.clone();
                                         // Strip MODE_SWITCH_CONFIRMED prefix for display
-                                        if final_preview.contains("MODE_SWITCH_CONFIRMED:") {
-                                            if let Some(display_start) = final_preview.find("\n\n")
-                                            {
-                                                final_preview =
-                                                    final_preview[display_start + 2..].to_string();
+                                        if final_full.contains("MODE_SWITCH_CONFIRMED:") {
+                                            if let Some(display_start) = final_full.find("\n\n") {
+                                                final_full =
+                                                    final_full[display_start + 2..].to_string();
                                             }
                                         }
                                         if tool == "shell" || tool == "execute" {
                                             if let Some(cmd) =
                                                 t.args.get("command").and_then(|v| v.as_str())
                                             {
-                                                final_preview =
-                                                    format!("shell> {}\n{}", cmd, final_preview);
+                                                final_full =
+                                                    format!("shell> {}\n{}", cmd, final_full);
                                             }
                                         }
-                                        // Truncate result preview if too long
-                                        t.result_preview = if final_preview.len() > 500 {
-                                            format!("{}...", &final_preview[..497])
+                                        // Store full result (bounded) + a short preview for the inline line.
+                                        // The expanded tool block uses result_full and supports scrolling.
+                                        const MAX_TOOL_RESULT_CHARS: usize = 200_000;
+                                        let bounded_full =
+                                            if final_full.len() > MAX_TOOL_RESULT_CHARS {
+                                                format!(
+                                                    "{}...(truncated)",
+                                                    final_full
+                                                        .chars()
+                                                        .take(MAX_TOOL_RESULT_CHARS)
+                                                        .collect::<String>()
+                                                )
+                                            } else {
+                                                final_full
+                                            };
+
+                                        // Preview for the collapsed tool line
+                                        t.result_preview = if bounded_full.len() > 500 {
+                                            format!(
+                                                "{}...",
+                                                truncate_at_char_boundary(&bounded_full, 497)
+                                            )
                                         } else {
-                                            final_preview
+                                            bounded_full
                                         };
                                         matched_block_id = Some(t.block_id.clone());
                                         break;
@@ -5552,7 +5662,38 @@ impl TuiApp {
                                 // - thinking_content is for UI display only (shown in ThinkingBlock)
                                 // - content is what gets saved to session and sent to LLM
                                 // - Embedding thinking would increase context size unnecessarily
-                                last_msg.content = info.text.clone();
+
+                                // CRITICAL FIX: Prefer streamed content over shorter final text
+                                // Extract all text from segments to get the complete streamed content
+                                let streamed_text: String = last_msg
+                                    .segments
+                                    .iter()
+                                    .filter_map(|seg| match seg {
+                                        super::widgets::MessageSegment::Text(text) => {
+                                            Some(text.as_str())
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("");
+
+                                // Choose the better source of truth:
+                                // - If streamed text is longer and info.text is empty/shorter, keep streamed
+                                // - Otherwise, use info.text (it might have corrections or be more complete)
+                                if !streamed_text.is_empty()
+                                    && (info.text.is_empty()
+                                        || streamed_text.len() > info.text.len())
+                                {
+                                    last_msg.content = streamed_text;
+                                    tracing::debug!(
+                                        "Finalize: keeping streamed text ({} chars) over final text ({} chars)",
+                                        last_msg.content.len(),
+                                        info.text.len()
+                                    );
+                                } else {
+                                    last_msg.content = info.text.clone();
+                                }
+
                                 // Note: thinking_content is already populated during streaming
                                 // and will be displayed separately by the ThinkingBlock widget
                                 last_msg.is_streaming = false;
@@ -6535,6 +6676,17 @@ impl Drop for TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_truncate_at_char_boundary_is_utf8_safe() {
+        // Use a multibyte character that will straddle common byte cutoffs.
+        let s = format!("{}{}", "a".repeat(496), "─"); // '─' is 3 bytes
+                                                       // Cutting at 497 bytes would be mid-char without boundary adjustment.
+        let truncated = truncate_at_char_boundary(&s, 497);
+        assert!(truncated.is_char_boundary(truncated.len()));
+        // Must not panic and must remain valid UTF-8.
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
 
     #[test]
     fn test_app_state_default() {

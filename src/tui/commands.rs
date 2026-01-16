@@ -137,6 +137,7 @@ impl ProviderInfo {
     ///
     /// Returns true if the provider's required API key is set, or for Ollama
     /// if the OLLAMA_MODEL env var is set (Ollama doesn't require an API key).
+    /// Also checks plugin providers.
     pub fn check_provider_availability(provider_id: &str) -> bool {
         match provider_id {
             "openai" => std::env::var("OPENAI_API_KEY").is_ok(),
@@ -157,8 +158,63 @@ impl ProviderInfo {
                 // For now, we check if OLLAMA_MODEL or OLLAMA_BASE_URL is set
                 std::env::var("OLLAMA_MODEL").is_ok() || std::env::var("OLLAMA_BASE_URL").is_ok()
             }
-            _ => false,
+            _ => {
+                // Check if it's a plugin provider
+                Self::check_plugin_provider_availability(provider_id)
+            }
         }
+    }
+
+    /// Check if a plugin provider is available
+    fn check_plugin_provider_availability(provider_id: &str) -> bool {
+        use crate::plugins::{PluginHost, PluginRegistry, ProviderAuthStatus};
+
+        let registry = match PluginRegistry::new() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+
+        let plugin = match registry.get(provider_id) {
+            Some(p) if p.enabled => p,
+            _ => return false,
+        };
+
+        let mut host = match PluginHost::new() {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+
+        if host.load(plugin).is_err() {
+            return false;
+        }
+
+        let instance = match host.get_mut(provider_id) {
+            Some(i) => i,
+            None => return false,
+        };
+
+        // Try to auto-init with Gemini CLI credentials if applicable
+        if provider_id.contains("gemini") {
+            if let Some(creds_path) =
+                dirs::home_dir().map(|h| h.join(".gemini").join("oauth_creds.json"))
+            {
+                if creds_path.exists() {
+                    if let Ok(creds_json) = std::fs::read_to_string(&creds_path) {
+                        let _ = instance.provider_auth_init(&creds_json);
+                    }
+                }
+            }
+        }
+
+        instance
+            .provider_auth_status()
+            .map(|s| {
+                matches!(
+                    s,
+                    ProviderAuthStatus::NotRequired | ProviderAuthStatus::Authenticated
+                )
+            })
+            .unwrap_or(false)
     }
 
     /// Get the configuration hint for a provider
@@ -176,7 +232,7 @@ impl ProviderInfo {
 
     /// Get all known providers with their availability status
     pub fn get_all_providers() -> Vec<ProviderInfo> {
-        vec![
+        let mut providers = vec![
             {
                 let available = Self::check_provider_availability("openai");
                 ProviderInfo::new(
@@ -261,7 +317,111 @@ impl ProviderInfo {
                     },
                 )
             },
-        ]
+        ];
+
+        // Add plugin providers
+        providers.extend(Self::get_plugin_providers());
+
+        providers
+    }
+
+    /// Get providers from installed plugins
+    fn get_plugin_providers() -> Vec<ProviderInfo> {
+        use crate::plugins::{PluginHost, PluginRegistry, PluginType, ProviderAuthStatus};
+
+        let registry = match PluginRegistry::new() {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut providers = Vec::new();
+
+        for plugin in registry.provider_plugins() {
+            // Try to load and get provider info
+            let mut host = match PluginHost::new() {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+
+            if host.load(plugin).is_err() {
+                continue;
+            }
+
+            let instance = match host.get_mut(plugin.id()) {
+                Some(i) => i,
+                None => continue,
+            };
+
+            // Get provider info from plugin
+            let info = match instance.provider_info() {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+
+            // Check auth status
+            let auth_status = instance
+                .provider_auth_status()
+                .unwrap_or(ProviderAuthStatus::NotAuthenticated);
+            // IMPORTANT UX: plugin providers should be selectable even when not authenticated,
+            // so users can browse models and then authenticate when they try to chat.
+            //
+            // We still compute auth_status for hints and to help the UI display readiness.
+            let authenticated = matches!(
+                auth_status,
+                ProviderAuthStatus::NotRequired | ProviderAuthStatus::Authenticated
+            );
+
+            // Try to auto-init with Gemini CLI credentials if applicable
+            let authenticated = if !authenticated && plugin.id().contains("gemini") {
+                if let Some(creds_path) =
+                    dirs::home_dir().map(|h| h.join(".gemini").join("oauth_creds.json"))
+                {
+                    if creds_path.exists() {
+                        if let Ok(creds_json) = std::fs::read_to_string(&creds_path) {
+                            let _ = instance.provider_auth_init(&creds_json);
+                            // Re-check status
+                            instance
+                                .provider_auth_status()
+                                .map(|s| {
+                                    matches!(
+                                        s,
+                                        ProviderAuthStatus::NotRequired
+                                            | ProviderAuthStatus::Authenticated
+                                    )
+                                })
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                authenticated
+            };
+
+            let hint = if authenticated {
+                None
+            } else {
+                Some(format!(
+                    "Authentication required (status: {:?}). You can still pick a model; authenticate before chatting.",
+                    auth_status
+                ))
+            };
+
+            providers.push(ProviderInfo::new(
+                plugin.id(),
+                &info.display_name,
+                &info.description,
+                true, // selectable (installed & loadable)
+                hint,
+            ));
+        }
+
+        providers
     }
 }
 

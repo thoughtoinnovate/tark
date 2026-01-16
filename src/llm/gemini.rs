@@ -2,56 +2,403 @@
 //!
 //! SECURITY: API keys are ONLY sent to official Google endpoints.
 //! The GEMINI_API_KEY is never sent to any third-party services.
+//!
+//! # Authentication Modes
+//!
+//! Gemini has two distinct API endpoints with different auth requirements:
+//!
+//! ## 1. Standard API (API Key users)
+//! - Endpoint: `generativelanguage.googleapis.com` (OpenAI-compatible format)
+//! - Auth: API key via `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+//! - Uses: `OpenAiCompatProvider` internally
+//!
+//! ## 2. Cloud Code Assist API (OAuth users)
+//! - Endpoint: `cloudcode-pa.googleapis.com` (native Gemini format)
+//! - Auth: OAuth Bearer token with `cloud-platform` scope
+//! - Uses: `CloudCodeAssistProvider` internally (native format required)
+//!
+//! # Why CloudCodeAssist is Required for OAuth
+//!
+//! The OpenAI-compat endpoint (`generativelanguage.googleapis.com/v1beta/openai/`)
+//! returns 401 Unauthorized when using OAuth Bearer tokens. The standard Gemini
+//! endpoint requires `generative-language` scopes, but Gemini CLI OAuth flow
+//! provides `cloud-platform` scopes which only work with CloudCodeAssist.
+//!
+//! CloudCodeAssist is the endpoint used by Gemini CLI and is designed for OAuth.
+//!
+//! # Thinking/Reasoning Limitations
+//!
+//! **CloudCodeAssist (OAuth)**: Does NOT support visible thinking output
+//! - The API rejects the `thinkingConfig` parameter ("Unknown name" error)
+//! - Models may reason internally but thinking content is not exposed
+//! - Only `thoughtSignature` (encrypted metadata) is returned
+//!
+//! **OpenAI-compat (API key)**: DOES support thinking via `reasoning_effort`
+//! - Pass "low", "medium", or "high" to enable thinking
+//! - Thinking content is returned in response parts marked with `thought: true`
 
 #![allow(dead_code)]
 
 use super::{
-    CodeIssue, CompletionResult, LlmProvider, LlmResponse, Message, RefactoringSuggestion, Role,
-    StreamCallback, StreamEvent, StreamingResponseBuilder, TokenUsage, ToolCall, ToolDefinition,
+    openai_compat::{AuthMethod, OpenAiCompatConfig, OpenAiCompatProvider},
+    streaming::SseDecoder,
+    CodeIssue, CompletionResult, ContentPart, LlmError, LlmProvider, LlmResponse, Message,
+    MessageContent, RefactoringSuggestion, Role, StreamCallback, StreamEvent,
+    StreamingResponseBuilder, ThinkSettings, TokenUsage, ToolCall, ToolDefinition,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::env;
 
-/// Official Google Gemini API endpoint
-const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// OpenAI-compatible endpoint for Gemini
+const GEMINI_OPENAI_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 
+/// Cloud Code Assist API endpoint (OAuth mode) - uses native Gemini format
+const CLOUD_CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
+
+/// API mode for Gemini provider
+#[derive(Debug, Clone)]
+pub enum GeminiApiMode {
+    /// Standard API using OpenAI-compatible endpoint
+    Standard,
+    /// Cloud Code Assist API (cloudcode-pa.googleapis.com) - OAuth Bearer token
+    /// Includes project_id for request wrapping
+    CloudCodeAssist { project_id: String },
+}
+
+/// Authentication method for Gemini
+#[derive(Debug, Clone)]
+pub enum GeminiAuth {
+    /// API key
+    ApiKey(String),
+    /// OAuth Bearer token (passed in Authorization header)
+    Bearer(String),
+}
+
+/// Gemini provider that supports both Standard (OpenAI-compat) and CloudCodeAssist modes
 pub struct GeminiProvider {
-    client: reqwest::Client,
-    api_key: String,
+    /// Inner provider - either OpenAI-compat or CloudCodeAssist native
+    inner: GeminiInner,
     model: String,
-    max_tokens: usize,
+}
+
+enum GeminiInner {
+    /// Standard mode uses OpenAI-compatible endpoint
+    OpenAiCompat(OpenAiCompatProvider),
+    /// CloudCodeAssist uses native Gemini format
+    CloudCodeAssist(CloudCodeAssistProvider),
 }
 
 impl GeminiProvider {
+    /// Create a new GeminiProvider using Standard API mode (OpenAI-compatible)
+    ///
+    /// Credentials are resolved in this priority:
+    /// 1. GEMINI_API_KEY or GOOGLE_API_KEY environment variable
+    /// 2. OAuth token from `~/.local/share/tark/tokens/gemini.json`
+    ///
+    /// If no credentials are found, returns an error with setup instructions.
     pub fn new() -> Result<Self> {
-        let api_key =
-            env::var("GEMINI_API_KEY").context("GEMINI_API_KEY environment variable not set")?;
+        // Try API key first (highest priority)
+        if let Ok(api_key) = env::var("GEMINI_API_KEY").or_else(|_| env::var("GOOGLE_API_KEY")) {
+            let provider = OpenAiCompatProvider::new(
+                OpenAiCompatConfig::new(
+                    "gemini",
+                    GEMINI_OPENAI_URL,
+                    AuthMethod::BearerToken(api_key),
+                )
+                .with_model("gemini-2.5-flash")
+                .with_max_tokens(8192),
+            );
+            return Ok(Self {
+                inner: GeminiInner::OpenAiCompat(provider),
+                model: "gemini-2.5-flash".to_string(),
+            });
+        }
 
-        Ok(Self {
-            client: reqwest::Client::new(),
-            api_key,
-            model: "gemini-2.0-flash-exp".to_string(),
-            max_tokens: 8192,
-        })
+        // Try OAuth token
+        let token_path = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("tark")
+            .join("tokens")
+            .join("gemini.json");
+
+        if token_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&token_path) {
+                if let Ok(stored) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(access_token) = stored["access_token"].as_str() {
+                        // Check if expired
+                        let expires_at = stored["expires_at"].as_u64().unwrap_or(0);
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        if expires_at > now + 300 {
+                            // Token valid for at least 5 more minutes
+                            let provider = OpenAiCompatProvider::new(
+                                OpenAiCompatConfig::new(
+                                    "gemini",
+                                    GEMINI_OPENAI_URL,
+                                    AuthMethod::BearerToken(access_token.to_string()),
+                                )
+                                .with_model("gemini-2.5-flash")
+                                .with_max_tokens(8192),
+                            );
+                            return Ok(Self {
+                                inner: GeminiInner::OpenAiCompat(provider),
+                                model: "gemini-2.5-flash".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // No valid credentials found
+        anyhow::bail!(
+            "Gemini authentication required.\n\n\
+            Option 1 - OAuth (recommended):\n  \
+            tark auth gemini\n\n\
+            Option 2 - API Key:\n  \
+            export GEMINI_API_KEY=\"your-api-key\"\n  \
+            Get key: https://aistudio.google.com/apikey"
+        )
+    }
+
+    /// Create a new GeminiProvider using Cloud Code Assist API mode
+    ///
+    /// This mode uses OAuth Bearer token authentication and the Cloud Code Assist
+    /// API endpoint (cloudcode-pa.googleapis.com). This is the same API used by
+    /// the Gemini CLI and provides access to preview models.
+    ///
+    /// # Arguments
+    /// * `access_token` - Valid OAuth access token
+    /// * `project_id` - Google Cloud project ID (discovered via loadCodeAssist)
+    pub fn with_cloud_code_assist(access_token: String, project_id: String) -> Self {
+        let provider = CloudCodeAssistProvider::new(access_token.clone(), project_id);
+        Self {
+            inner: GeminiInner::CloudCodeAssist(provider),
+            model: "gemini-2.5-flash".to_string(),
+        }
     }
 
     pub fn with_model(mut self, model: &str) -> Self {
         self.model = model.to_string();
+        match &mut self.inner {
+            GeminiInner::OpenAiCompat(p) => {
+                // Update model on the existing provider
+                *p = p.clone().with_model(model);
+            }
+            GeminiInner::CloudCodeAssist(p) => {
+                p.model = model.to_string();
+            }
+        }
         self
     }
 
     pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
-        self.max_tokens = max_tokens;
+        match &mut self.inner {
+            GeminiInner::OpenAiCompat(p) => {
+                *p = p.clone().with_max_tokens(max_tokens);
+            }
+            GeminiInner::CloudCodeAssist(p) => {
+                p.max_tokens = max_tokens;
+            }
+        }
         self
     }
 
+    /// Get the current API mode
+    pub fn api_mode(&self) -> GeminiApiMode {
+        match &self.inner {
+            GeminiInner::OpenAiCompat(_) => GeminiApiMode::Standard,
+            GeminiInner::CloudCodeAssist(p) => GeminiApiMode::CloudCodeAssist {
+                project_id: p.project_id.clone(),
+            },
+        }
+    }
+}
+
+impl Clone for OpenAiCompatProvider {
+    fn clone(&self) -> Self {
+        // This is a workaround since OpenAiCompatProvider doesn't derive Clone
+        // We need to reconstruct it - this is only used in with_model
+        Self::new(
+            OpenAiCompatConfig::new(
+                self.provider_name(),
+                GEMINI_OPENAI_URL,
+                AuthMethod::BearerToken(String::new()),
+            )
+            .with_model(self.model())
+            .with_max_tokens(8192),
+        )
+    }
+}
+
+#[async_trait]
+impl LlmProvider for GeminiProvider {
+    fn name(&self) -> &str {
+        "gemini"
+    }
+
+    fn supports_native_thinking(&self) -> bool {
+        self.model.contains("thinking")
+            || self.model.contains("gemini-2.5")
+            || self.model.contains("gemini-3")
+    }
+
+    async fn supports_native_thinking_async(&self) -> bool {
+        // Try models.dev first for future-proof detection
+        let db = super::models_db();
+        if db.supports_reasoning("google", &self.model).await {
+            return true;
+        }
+        // Fallback to hardcoded check
+        self.supports_native_thinking()
+    }
+
+    async fn chat(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+    ) -> Result<LlmResponse> {
+        match &self.inner {
+            GeminiInner::OpenAiCompat(p) => p.chat(messages, tools).await,
+            GeminiInner::CloudCodeAssist(p) => p.chat(messages, tools).await,
+        }
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat_streaming(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<LlmResponse> {
+        match &self.inner {
+            GeminiInner::OpenAiCompat(p) => {
+                p.chat_streaming(messages, tools, callback, interrupt_check)
+                    .await
+            }
+            GeminiInner::CloudCodeAssist(p) => {
+                p.chat_streaming(messages, tools, callback, interrupt_check)
+                    .await
+            }
+        }
+    }
+
+    async fn chat_streaming_with_thinking(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        settings: &ThinkSettings,
+    ) -> Result<LlmResponse> {
+        match &self.inner {
+            GeminiInner::OpenAiCompat(p) => {
+                p.chat_streaming_with_thinking(messages, tools, callback, interrupt_check, settings)
+                    .await
+            }
+            GeminiInner::CloudCodeAssist(p) => {
+                p.chat_streaming_with_thinking(messages, tools, callback, interrupt_check, settings)
+                    .await
+            }
+        }
+    }
+
+    async fn complete_fim(
+        &self,
+        prefix: &str,
+        suffix: &str,
+        language: &str,
+    ) -> Result<CompletionResult> {
+        match &self.inner {
+            GeminiInner::OpenAiCompat(p) => p.complete_fim(prefix, suffix, language).await,
+            GeminiInner::CloudCodeAssist(p) => p.complete_fim(prefix, suffix, language).await,
+        }
+    }
+
+    async fn explain_code(&self, code: &str, context: &str) -> Result<String> {
+        match &self.inner {
+            GeminiInner::OpenAiCompat(p) => p.explain_code(code, context).await,
+            GeminiInner::CloudCodeAssist(p) => p.explain_code(code, context).await,
+        }
+    }
+
+    async fn suggest_refactorings(
+        &self,
+        code: &str,
+        context: &str,
+    ) -> Result<Vec<RefactoringSuggestion>> {
+        match &self.inner {
+            GeminiInner::OpenAiCompat(p) => p.suggest_refactorings(code, context).await,
+            GeminiInner::CloudCodeAssist(p) => p.suggest_refactorings(code, context).await,
+        }
+    }
+
+    async fn review_code(&self, code: &str, language: &str) -> Result<Vec<CodeIssue>> {
+        match &self.inner {
+            GeminiInner::OpenAiCompat(p) => p.review_code(code, language).await,
+            GeminiInner::CloudCodeAssist(p) => p.review_code(code, language).await,
+        }
+    }
+}
+
+// ============================================================================
+// CloudCodeAssist Provider (Native Gemini Format)
+// ============================================================================
+
+/// Provider for Cloud Code Assist API using native Gemini format
+///
+/// This is kept separate because CloudCodeAssist uses a different endpoint
+/// and response format that doesn't follow OpenAI conventions.
+struct CloudCodeAssistProvider {
+    client: reqwest::Client,
+    access_token: String,
+    project_id: String,
+    model: String,
+    max_tokens: usize,
+}
+
+impl CloudCodeAssistProvider {
+    fn new(access_token: String, project_id: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            access_token,
+            project_id,
+            model: "gemini-2.5-flash".to_string(),
+            max_tokens: 8192,
+        }
+    }
+
+    /// Convert messages to native Gemini format
+    ///
+    /// IMPORTANT: This version correctly handles:
+    /// - thoughtSignature as a SIBLING of functionCall, not nested inside it
+    /// - Multiple consecutive tool results grouped into a single user turn
+    ///   (Gemini requires function call count == function response count per turn)
     fn convert_messages(&self, messages: &[Message]) -> (Option<String>, Vec<GeminiContent>) {
         let mut system_instruction = None;
         let mut contents = Vec::new();
+        // Buffer for collecting consecutive tool results
+        let mut pending_tool_parts: Vec<GeminiPartRaw> = Vec::new();
 
         for msg in messages {
+            // Before processing non-Tool messages, flush any pending tool results
+            if msg.role != Role::Tool && !pending_tool_parts.is_empty() {
+                contents.push(GeminiContent {
+                    role: "user".to_string(),
+                    parts: std::mem::take(&mut pending_tool_parts),
+                });
+            }
+
             match msg.role {
                 Role::System => {
                     if let Some(text) = msg.content.as_text() {
@@ -62,27 +409,115 @@ impl GeminiProvider {
                     if let Some(text) = msg.content.as_text() {
                         contents.push(GeminiContent {
                             role: "user".to_string(),
-                            parts: vec![GeminiPart::Text {
-                                text: text.to_string(),
+                            parts: vec![GeminiPartRaw {
+                                text: Some(text.to_string()),
+                                thought: None,
+                                thought_signature: None,
+                                function_call: None,
+                                function_response: None,
                             }],
                         });
                     }
                 }
                 Role::Assistant => {
-                    if let Some(text) = msg.content.as_text() {
+                    let mut parts = Vec::new();
+
+                    match &msg.content {
+                        MessageContent::Text(text) => {
+                            if !text.is_empty() {
+                                parts.push(GeminiPartRaw {
+                                    text: Some(text.clone()),
+                                    thought: None,
+                                    thought_signature: None,
+                                    function_call: None,
+                                    function_response: None,
+                                });
+                            }
+                        }
+                        MessageContent::Parts(content_parts) => {
+                            for part in content_parts {
+                                match part {
+                                    ContentPart::Text { text } => {
+                                        if !text.is_empty() {
+                                            parts.push(GeminiPartRaw {
+                                                text: Some(text.clone()),
+                                                thought: None,
+                                                thought_signature: None,
+                                                function_call: None,
+                                                function_response: None,
+                                            });
+                                        }
+                                    }
+                                    ContentPart::ToolUse {
+                                        name,
+                                        input,
+                                        thought_signature,
+                                        ..
+                                    } => {
+                                        // FIXED: thoughtSignature is a SIBLING of functionCall
+                                        parts.push(GeminiPartRaw {
+                                            text: None,
+                                            thought: None,
+                                            thought_signature: thought_signature.clone(),
+                                            function_call: Some(GeminiFunctionCallInner {
+                                                name: name.clone(),
+                                                args: input.clone(),
+                                            }),
+                                            function_response: None,
+                                        });
+                                    }
+                                    ContentPart::ToolResult { .. } => {
+                                        // Tool results are handled in Role::Tool
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !parts.is_empty() {
                         contents.push(GeminiContent {
                             role: "model".to_string(),
-                            parts: vec![GeminiPart::Text {
-                                text: text.to_string(),
-                            }],
+                            parts,
                         });
                     }
                 }
                 Role::Tool => {
-                    // Gemini handles tool results differently, skip for now
-                    continue;
+                    // Collect tool results into pending buffer
+                    // They'll be flushed as a single user turn when we hit a non-Tool message
+                    if let (Some(tool_call_id), Some(text)) =
+                        (&msg.tool_call_id, msg.content.as_text())
+                    {
+                        // Extract function name from tool_call_id (format: "gemini_{name}")
+                        let function_name = tool_call_id
+                            .strip_prefix("gemini_")
+                            .unwrap_or(tool_call_id)
+                            .to_string();
+
+                        // Parse the result as JSON if possible, otherwise wrap as string
+                        let response_value = serde_json::from_str(text)
+                            .unwrap_or_else(|_| serde_json::json!({ "result": text }));
+
+                        pending_tool_parts.push(GeminiPartRaw {
+                            text: None,
+                            thought: None,
+                            thought_signature: None,
+                            function_call: None,
+                            function_response: Some(GeminiFunctionResponse {
+                                name: function_name,
+                                response: response_value,
+                            }),
+                        });
+                    }
                 }
             }
+        }
+
+        // Flush any remaining tool results at the end
+        if !pending_tool_parts.is_empty() {
+            contents.push(GeminiContent {
+                role: "user".to_string(),
+                parts: pending_tool_parts,
+            });
         }
 
         (system_instruction, contents)
@@ -99,52 +534,48 @@ impl GeminiProvider {
             .collect()
     }
 
-    async fn send_request(&self, request: GeminiRequest) -> Result<GeminiResponse> {
-        let url = format!(
-            "{}/{}:generateContent?key={}",
-            GEMINI_API_BASE, self.model, self.api_key
-        );
+    /// Parse retry-after time from error message
+    fn parse_retry_after(error_text: &str) -> Option<u64> {
+        let patterns = [
+            r"reset after (\d+)s",
+            r"retry in (\d+)",
+            r"wait (\d+) second",
+            r"(\d+)s\.",
+        ];
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send request to Gemini API")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Gemini API error ({}): {}", status, error_text);
+        for pattern in patterns {
+            if let Ok(re) = regex::Regex::new(pattern) {
+                if let Some(caps) = re.captures(error_text) {
+                    if let Some(m) = caps.get(1) {
+                        if let Ok(secs) = m.as_str().parse::<u64>() {
+                            return Some(secs);
+                        }
+                    }
+                }
+            }
         }
-
-        response
-            .json::<GeminiResponse>()
-            .await
-            .context("Failed to parse Gemini API response")
+        None
     }
 }
 
 #[async_trait]
-impl LlmProvider for GeminiProvider {
+impl LlmProvider for CloudCodeAssistProvider {
     fn name(&self) -> &str {
         "gemini"
     }
 
     fn supports_native_thinking(&self) -> bool {
         self.model.contains("thinking")
+            || self.model.contains("gemini-2.5")
+            || self.model.contains("gemini-3")
     }
 
     async fn supports_native_thinking_async(&self) -> bool {
-        // Try models.dev first for future-proof detection
         let db = super::models_db();
         if db.supports_reasoning("google", &self.model).await {
             return true;
         }
-        // Fallback to hardcoded check
-        self.model.contains("thinking")
+        self.supports_native_thinking()
     }
 
     async fn chat(
@@ -157,13 +588,20 @@ impl LlmProvider for GeminiProvider {
         let mut request = GeminiRequest {
             contents,
             system_instruction: system_instruction.map(|text| GeminiSystemInstruction {
-                parts: vec![GeminiPart::Text { text }],
+                parts: vec![GeminiPartRaw {
+                    text: Some(text),
+                    thought: None,
+                    thought_signature: None,
+                    function_call: None,
+                    function_response: None,
+                }],
             }),
             generation_config: Some(GeminiGenerationConfig {
                 max_output_tokens: Some(self.max_tokens),
                 temperature: Some(1.0),
             }),
             tools: None,
+            thinking_config: None,
         };
 
         if let Some(tools) = tools {
@@ -174,28 +612,77 @@ impl LlmProvider for GeminiProvider {
             }
         }
 
-        let response = self.send_request(request).await?;
+        let url = format!("{}:generateContent", CLOUD_CODE_ASSIST_BASE);
 
-        let usage = response.usage_metadata.map(|u| TokenUsage {
-            input_tokens: u.prompt_token_count,
-            output_tokens: u.candidates_token_count,
-            total_tokens: u.total_token_count,
+        let wrapped_request = serde_json::json!({
+            "project": self.project_id,
+            "model": self.model,
+            "request": request
         });
 
-        if let Some(candidate) = response.candidates.first() {
+        let response = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.access_token))
+            .header("User-Agent", "google-api-nodejs-client/9.15.1")
+            .header("X-Goog-Api-Client", "gl-node/22.17.0")
+            .header(
+                "Client-Metadata",
+                "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
+            )
+            .json(&wrapped_request)
+            .send()
+            .await
+            .context("Failed to send request to Cloud Code Assist API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Cloud Code Assist API error ({}): {}", status, error_text);
+        }
+
+        let wrapper: CloudCodeAssistResponse = response
+            .json()
+            .await
+            .context("Failed to parse Cloud Code Assist API response")?;
+
+        let api_response = wrapper.response;
+
+        let usage = api_response.usage_metadata.and_then(|u| {
+            match (
+                u.prompt_token_count,
+                u.candidates_token_count,
+                u.total_token_count,
+            ) {
+                (Some(input), Some(output), Some(total)) => Some(TokenUsage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    total_tokens: total,
+                }),
+                _ => None,
+            }
+        });
+
+        if let Some(candidate) = api_response.candidates.first() {
             let mut text_parts = Vec::new();
             let mut tool_calls = Vec::new();
 
-            for part in &candidate.content.parts {
-                match part {
-                    GeminiPart::Text { text } => {
-                        text_parts.push(text.clone());
+            if let Some(content) = &candidate.content {
+                for part in &content.parts {
+                    if let Some(text) = &part.text {
+                        // Skip thought content for now (marked with thought: true)
+                        if part.thought != Some(true) {
+                            text_parts.push(text.clone());
+                        }
                     }
-                    GeminiPart::FunctionCall { function_call } => {
+                    if let Some(fc) = &part.function_call {
                         tool_calls.push(ToolCall {
-                            id: format!("gemini_{}", function_call.name), // Gemini doesn't provide IDs
-                            name: function_call.name.clone(),
-                            arguments: function_call.args.clone(),
+                            id: format!("gemini_{}", fc.name),
+                            name: fc.name.clone(),
+                            arguments: fc.args.clone(),
+                            // FIXED: Get thought_signature from sibling field
+                            thought_signature: part.thought_signature.clone(),
                         });
                     }
                 }
@@ -237,6 +724,24 @@ impl LlmProvider for GeminiProvider {
         callback: StreamCallback,
         interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<LlmResponse> {
+        self.chat_streaming_with_thinking(
+            messages,
+            tools,
+            callback,
+            interrupt_check,
+            &ThinkSettings::off(),
+        )
+        .await
+    }
+
+    async fn chat_streaming_with_thinking(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        settings: &ThinkSettings,
+    ) -> Result<LlmResponse> {
         use futures::StreamExt;
         use tokio::time::{timeout, Duration};
 
@@ -248,14 +753,33 @@ impl LlmProvider for GeminiProvider {
         let mut request = GeminiRequest {
             contents,
             system_instruction: system_instruction.map(|text| GeminiSystemInstruction {
-                parts: vec![GeminiPart::Text { text }],
+                parts: vec![GeminiPartRaw {
+                    text: Some(text),
+                    thought: None,
+                    thought_signature: None,
+                    function_call: None,
+                    function_response: None,
+                }],
             }),
             generation_config: Some(GeminiGenerationConfig {
                 max_output_tokens: Some(self.max_tokens),
                 temperature: Some(1.0),
             }),
             tools: None,
+            thinking_config: None,
         };
+
+        // Note: CloudCodeAssist endpoint does NOT support thinkingConfig parameter
+        // The API returns "Unknown name" error if we include it
+        // Thinking/reasoning is handled internally by compatible models (gemini-2.5+)
+        // but we cannot explicitly enable it via this endpoint
+        if settings.enabled && settings.budget_tokens > 0 {
+            tracing::debug!(
+                "CloudCodeAssist: thinking config requested but not supported by endpoint. \
+                 Model {} may still use internal reasoning.",
+                self.model
+            );
+        }
 
         if let Some(tools) = tools {
             if !tools.is_empty() {
@@ -265,96 +789,157 @@ impl LlmProvider for GeminiProvider {
             }
         }
 
-        let url = format!(
-            "{}/{}:streamGenerateContent?key={}&alt=sse",
-            GEMINI_API_BASE, self.model, self.api_key
-        );
+        // Use SSE format for proper streaming
+        let url = format!("{}:streamGenerateContent?alt=sse", CLOUD_CODE_ASSIST_BASE);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send streaming request to Gemini API")?;
+        let wrapped_request = serde_json::json!({
+            "project": self.project_id,
+            "model": self.model,
+            "request": request
+        });
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            callback(StreamEvent::Error(format!(
-                "Gemini API error ({}): {}",
-                status, error_text
-            )));
-            anyhow::bail!("Gemini API error ({}): {}", status, error_text);
-        }
+        // Retry logic with exponential backoff for 429 rate limit errors
+        let retry_delays = [1, 5, 10, 20, 30, 60];
+        let mut last_error = String::new();
+
+        let response = 'retry: {
+            for (attempt, &delay) in std::iter::once(&0).chain(retry_delays.iter()).enumerate() {
+                if delay > 0 {
+                    callback(StreamEvent::TextDelta(format!(
+                        "\n⏳ Rate limited. Retrying in {} seconds (attempt {}/{})...\n",
+                        delay,
+                        attempt,
+                        retry_delays.len() + 1
+                    )));
+                    tokio::time::sleep(Duration::from_secs(delay)).await;
+
+                    if let Some(check) = interrupt_check {
+                        if check() {
+                            return Err(anyhow::anyhow!("Interrupted during rate limit retry"));
+                        }
+                    }
+                }
+
+                let result = self
+                    .client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", format!("Bearer {}", self.access_token))
+                    .header("User-Agent", "google-api-nodejs-client/9.15.1")
+                    .header("X-Goog-Api-Client", "gl-node/22.17.0")
+                    .header(
+                        "Client-Metadata",
+                        "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
+                    )
+                    .json(&wrapped_request)
+                    .send()
+                    .await;
+
+                match result {
+                    Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                        let error_text = resp.text().await.unwrap_or_default();
+                        let wait_msg = if let Some(secs) = Self::parse_retry_after(&error_text) {
+                            format!("Rate limit exceeded. Quota resets in {}s.", secs)
+                        } else {
+                            "Rate limit exceeded.".to_string()
+                        };
+                        last_error = format!("429 Too Many Requests: {}", wait_msg);
+                        tracing::warn!("Rate limited (attempt {}): {}", attempt + 1, last_error);
+                        continue;
+                    }
+                    Ok(resp) if !resp.status().is_success() => {
+                        let status = resp.status();
+                        let error_text = resp.text().await.unwrap_or_default();
+                        callback(StreamEvent::Error(format!(
+                            "Cloud Code Assist API error ({}): {}",
+                            status, error_text
+                        )));
+                        return Err(LlmError::from_http_status(status, error_text).into());
+                    }
+                    Ok(resp) => break 'retry resp,
+                    Err(e) => {
+                        return Err(LlmError::from_network_error(e).into());
+                    }
+                }
+            }
+
+            let err_msg = format!(
+                "Rate limit exceeded after {} retries. {}",
+                retry_delays.len(),
+                last_error
+            );
+            callback(StreamEvent::Error(err_msg.clone()));
+            return Err(LlmError::RateLimited(err_msg).into());
+        };
 
         let mut builder = StreamingResponseBuilder::new();
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut decoder = SseDecoder::new();
 
         let mut last_activity_at = std::time::Instant::now();
         loop {
-            // Check for user interrupt frequently so Ctrl+C/Esc+Esc are responsive
             if let Some(check) = interrupt_check {
                 if check() {
                     return Ok(builder.build());
                 }
             }
 
-            // Enforce per-chunk timeout: if we haven't received any bytes recently, abort.
             if last_activity_at.elapsed() >= STREAM_CHUNK_TIMEOUT {
-                anyhow::bail!(
-                    "Stream timeout - no response from Gemini for {} seconds",
+                return Err(LlmError::Network(format!(
+                    "Stream timeout - no response from Cloud Code Assist for {} seconds",
                     STREAM_CHUNK_TIMEOUT.as_secs()
-                );
+                ))
+                .into());
             }
 
-            // Use a short poll interval so interrupts can be observed quickly even when
-            // the server is silent, while still enforcing an overall 60s no-data timeout.
             let chunk_result = match timeout(INTERRUPT_POLL_INTERVAL, stream.next()).await {
                 Ok(Some(res)) => res,
-                Ok(None) => break,  // Stream ended
-                Err(_) => continue, // Poll interval elapsed - re-check interrupt/timeout
+                Ok(None) => break,
+                Err(_) => continue,
             };
 
             last_activity_at = std::time::Instant::now();
             let chunk = chunk_result.context("Error reading stream chunk")?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
 
-            buffer.push_str(&chunk_str);
-
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim().to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
-                if line.is_empty() {
-                    continue;
-                }
-
-                if let Some(json_str) = line.strip_prefix("data: ") {
-                    if let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(json_str) {
-                        if let Some(candidate) = chunk.candidates.first() {
-                            for part in &candidate.content.parts {
-                                match part {
-                                    GeminiPart::Text { text } => {
+            for payload_json in decoder.push(&chunk) {
+                // Cloud Code Assist wraps response in {"response": {...}}
+                if let Ok(chunk) = serde_json::from_str::<CloudCodeAssistStreamChunk>(&payload_json)
+                {
+                    if let Some(candidates) = &chunk.response.candidates {
+                        if let Some(candidate) = candidates.first() {
+                            if let Some(content) = &candidate.content {
+                                for part in &content.parts {
+                                    // Handle text content
+                                    if let Some(text) = &part.text {
                                         if !text.is_empty() {
-                                            let event = StreamEvent::TextDelta(text.clone());
-                                            builder.process(&event);
-                                            callback(event);
+                                            // Check if this is thinking content
+                                            if part.thought == Some(true) {
+                                                let event =
+                                                    StreamEvent::ThinkingDelta(text.clone());
+                                                builder.process(&event);
+                                                callback(event);
+                                            } else {
+                                                let event = StreamEvent::TextDelta(text.clone());
+                                                builder.process(&event);
+                                                callback(event);
+                                            }
                                         }
                                     }
-                                    GeminiPart::FunctionCall { function_call } => {
-                                        let id = format!("gemini_{}", function_call.name);
+
+                                    // Handle function calls
+                                    if let Some(fc) = &part.function_call {
+                                        let id = format!("gemini_{}", fc.name);
+                                        // FIXED: Get thought_signature from sibling field
                                         let event = StreamEvent::ToolCallStart {
                                             id: id.clone(),
-                                            name: function_call.name.clone(),
+                                            name: fc.name.clone(),
+                                            thought_signature: part.thought_signature.clone(),
                                         };
                                         builder.process(&event);
                                         callback(event);
 
-                                        let args_str = serde_json::to_string(&function_call.args)
-                                            .unwrap_or_default();
+                                        let args_str =
+                                            serde_json::to_string(&fc.args).unwrap_or_default();
                                         let event = StreamEvent::ToolCallDelta {
                                             id: id.clone(),
                                             arguments_delta: args_str,
@@ -368,14 +953,81 @@ impl LlmProvider for GeminiProvider {
                                 }
                             }
                         }
+                    }
 
-                        if let Some(usage) = chunk.usage_metadata {
+                    // Only update usage if we have actual token counts (final chunk)
+                    if let Some(usage) = chunk.response.usage_metadata {
+                        if let (Some(input), Some(output), Some(total)) = (
+                            usage.prompt_token_count,
+                            usage.candidates_token_count,
+                            usage.total_token_count,
+                        ) {
                             builder.usage = Some(TokenUsage {
-                                input_tokens: usage.prompt_token_count,
-                                output_tokens: usage.candidates_token_count,
-                                total_tokens: usage.total_token_count,
+                                input_tokens: input,
+                                output_tokens: output,
+                                total_tokens: total,
                             });
                         }
+                    }
+                }
+            }
+        }
+
+        // Flush remaining events
+        for payload_json in decoder.finish() {
+            if let Ok(chunk) = serde_json::from_str::<CloudCodeAssistStreamChunk>(&payload_json) {
+                if let Some(candidates) = &chunk.response.candidates {
+                    if let Some(candidate) = candidates.first() {
+                        if let Some(content) = &candidate.content {
+                            for part in &content.parts {
+                                if let Some(text) = &part.text {
+                                    if !text.is_empty() {
+                                        if part.thought == Some(true) {
+                                            let event = StreamEvent::ThinkingDelta(text.clone());
+                                            builder.process(&event);
+                                            callback(event);
+                                        } else {
+                                            let event = StreamEvent::TextDelta(text.clone());
+                                            builder.process(&event);
+                                            callback(event);
+                                        }
+                                    }
+                                }
+
+                                if let Some(fc) = &part.function_call {
+                                    let id = format!("gemini_{}", fc.name);
+                                    callback(StreamEvent::ToolCallStart {
+                                        id: id.clone(),
+                                        name: fc.name.clone(),
+                                        thought_signature: part.thought_signature.clone(),
+                                    });
+
+                                    let args_str =
+                                        serde_json::to_string(&fc.args).unwrap_or_default();
+                                    callback(StreamEvent::ToolCallDelta {
+                                        id: id.clone(),
+                                        arguments_delta: args_str,
+                                    });
+
+                                    callback(StreamEvent::ToolCallComplete { id });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Only update usage if we have actual token counts (final chunk)
+                if let Some(usage) = chunk.response.usage_metadata {
+                    if let (Some(input), Some(output), Some(total)) = (
+                        usage.prompt_token_count,
+                        usage.candidates_token_count,
+                        usage.total_token_count,
+                    ) {
+                        builder.usage = Some(TokenUsage {
+                            input_tokens: input,
+                            output_tokens: output,
+                            total_tokens: total,
+                        });
                     }
                 }
             }
@@ -396,50 +1048,15 @@ impl LlmProvider for GeminiProvider {
              Output ONLY the completion text. Language: {language}"
         );
 
-        let user_content = format!("{prefix}<CURSOR>{suffix}");
+        let messages = vec![
+            Message::system(system),
+            Message::user(format!("{prefix}<CURSOR>{suffix}")),
+        ];
 
-        let request = GeminiRequest {
-            contents: vec![GeminiContent {
-                role: "user".to_string(),
-                parts: vec![GeminiPart::Text { text: user_content }],
-            }],
-            system_instruction: Some(GeminiSystemInstruction {
-                parts: vec![GeminiPart::Text { text: system }],
-            }),
-            generation_config: Some(GeminiGenerationConfig {
-                max_output_tokens: Some(256),
-                temperature: Some(0.2),
-            }),
-            tools: None,
-        };
+        let response = self.chat(&messages, None).await?;
 
-        let response = self.send_request(request).await?;
-
-        let text = if let Some(candidate) = response.candidates.first() {
-            candidate
-                .content
-                .parts
-                .iter()
-                .filter_map(|p| {
-                    if let GeminiPart::Text { text } = p {
-                        Some(text.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("")
-                .trim()
-                .to_string()
-        } else {
-            String::new()
-        };
-
-        let usage = response.usage_metadata.map(|u| TokenUsage {
-            input_tokens: u.prompt_token_count,
-            output_tokens: u.candidates_token_count,
-            total_tokens: u.total_token_count,
-        });
+        let text = response.text().unwrap_or("").trim().to_string();
+        let usage = response.usage().cloned();
 
         Ok(CompletionResult { text, usage })
     }
@@ -479,7 +1096,6 @@ impl LlmProvider for GeminiProvider {
             if let Ok(suggestions) = serde_json::from_str::<Vec<RefactoringSuggestion>>(text) {
                 return Ok(suggestions);
             }
-            // Try to extract JSON from markdown
             if let Some(json_start) = text.find('[') {
                 if let Some(json_end) = text.rfind(']') {
                     let json_str = &text[json_start..=json_end];
@@ -523,7 +1139,9 @@ impl LlmProvider for GeminiProvider {
     }
 }
 
-// Gemini API types
+// ============================================================================
+// Native Gemini API Types (for CloudCodeAssist)
+// ============================================================================
 
 #[derive(Debug, Serialize)]
 struct GeminiRequest {
@@ -534,35 +1152,56 @@ struct GeminiRequest {
     generation_config: Option<GeminiGenerationConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<GeminiTools>>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingConfig")]
+    thinking_config: Option<GeminiThinkingConfig>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiThinkingConfig {
+    thinking_budget: i32,
+    include_thoughts: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GeminiSystemInstruction {
-    parts: Vec<GeminiPart>,
+    parts: Vec<GeminiPartRaw>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GeminiContent {
     role: String,
-    parts: Vec<GeminiPart>,
+    parts: Vec<GeminiPartRaw>,
+}
+
+/// Raw Gemini part structure with thoughtSignature as SIBLING of functionCall
+///
+/// This matches the actual API response format where thoughtSignature
+/// is at the same level as functionCall, not nested inside it.
+#[derive(Debug, Serialize, Deserialize)]
+struct GeminiPartRaw {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought: Option<bool>,
+    #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
+    #[serde(rename = "functionCall", skip_serializing_if = "Option::is_none")]
+    function_call: Option<GeminiFunctionCallInner>,
+    #[serde(rename = "functionResponse", skip_serializing_if = "Option::is_none")]
+    function_response: Option<GeminiFunctionResponse>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-enum GeminiPart {
-    Text {
-        text: String,
-    },
-    FunctionCall {
-        #[serde(rename = "functionCall")]
-        function_call: GeminiFunctionCall,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct GeminiFunctionCall {
+struct GeminiFunctionCallInner {
     name: String,
     args: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GeminiFunctionResponse {
+    name: String,
+    response: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -594,33 +1233,101 @@ struct GeminiResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct GeminiCandidate {
-    content: GeminiContent,
+struct CloudCodeAssistResponse {
+    response: GeminiResponse,
 }
 
 #[derive(Debug, Deserialize)]
-struct GeminiUsageMetadata {
-    #[serde(rename = "promptTokenCount")]
-    prompt_token_count: u32,
-    #[serde(rename = "candidatesTokenCount")]
-    candidates_token_count: u32,
-    #[serde(rename = "totalTokenCount")]
-    total_token_count: u32,
+struct CloudCodeAssistStreamChunk {
+    response: GeminiStreamChunkInner,
 }
 
 #[derive(Debug, Deserialize)]
-struct GeminiStreamChunk {
-    candidates: Vec<GeminiCandidate>,
+struct GeminiStreamChunkInner {
+    candidates: Option<Vec<GeminiCandidate>>,
     #[serde(rename = "usageMetadata")]
     usage_metadata: Option<GeminiUsageMetadata>,
 }
+
+#[derive(Debug, Deserialize)]
+struct GeminiCandidate {
+    content: Option<GeminiContent>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct GeminiUsageMetadata {
+    /// Token counts are optional in intermediate streaming chunks
+    /// CloudCodeAssist only sends them in the final chunk
+    #[serde(rename = "promptTokenCount", default)]
+    prompt_token_count: Option<u32>,
+    #[serde(rename = "candidatesTokenCount", default)]
+    candidates_token_count: Option<u32>,
+    #[serde(rename = "totalTokenCount", default)]
+    total_token_count: Option<u32>,
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_gemini_response() {
+    fn test_parse_gemini_response_with_thought_signature_sibling() {
+        // This test verifies the FIXED parsing where thoughtSignature is a sibling
+        let json = r#"{
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "thoughtSignature": "sig_123",
+                        "functionCall": {
+                            "name": "test_function",
+                            "args": {"key": "value"}
+                        }
+                    }]
+                }
+            }]
+        }"#;
+
+        let response: GeminiResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.candidates.len(), 1);
+        let content = response.candidates[0].content.as_ref().unwrap();
+        let part = &content.parts[0];
+
+        // Verify thoughtSignature is captured at the sibling level
+        assert_eq!(part.thought_signature.as_deref(), Some("sig_123"));
+        assert!(part.function_call.is_some());
+        let fc = part.function_call.as_ref().unwrap();
+        assert_eq!(fc.name, "test_function");
+    }
+
+    #[test]
+    fn test_parse_thought_content() {
+        let json = r#"{
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"text": "Let me think about this...", "thought": true},
+                        {"text": "Here is my answer."}
+                    ]
+                }
+            }]
+        }"#;
+
+        let response: GeminiResponse = serde_json::from_str(json).unwrap();
+        let content = response.candidates[0].content.as_ref().unwrap();
+
+        assert_eq!(content.parts.len(), 2);
+        assert_eq!(content.parts[0].thought, Some(true));
+        assert_eq!(content.parts[1].thought, None);
+    }
+
+    #[test]
+    fn test_parse_text_response() {
         let json = r#"{
             "candidates": [{
                 "content": {
@@ -639,35 +1346,18 @@ mod tests {
         assert_eq!(response.candidates.len(), 1);
         assert!(response.usage_metadata.is_some());
         let usage = response.usage_metadata.unwrap();
-        assert_eq!(usage.prompt_token_count, 10);
-        assert_eq!(usage.candidates_token_count, 5);
-        assert_eq!(usage.total_token_count, 15);
+        assert_eq!(usage.prompt_token_count, Some(10));
+        assert_eq!(usage.candidates_token_count, Some(5));
+        assert_eq!(usage.total_token_count, Some(15));
     }
 
     #[test]
-    fn test_parse_gemini_function_call() {
-        let json = r#"{
-            "candidates": [{
-                "content": {
-                    "role": "model",
-                    "parts": [{
-                        "functionCall": {
-                            "name": "test_function",
-                            "args": {"key": "value"}
-                        }
-                    }]
-                }
-            }]
-        }"#;
-
-        let response: GeminiResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(response.candidates.len(), 1);
-        let part = &response.candidates[0].content.parts[0];
-        match part {
-            GeminiPart::FunctionCall { function_call } => {
-                assert_eq!(function_call.name, "test_function");
-            }
-            _ => panic!("Expected FunctionCall"),
-        }
+    fn test_usage_metadata_optional_fields() {
+        // CloudCodeAssist sends partial usage in intermediate chunks
+        let json = r#"{"trafficType": "PROVISIONED_THROUGHPUT"}"#;
+        let usage: GeminiUsageMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.prompt_token_count, None);
+        assert_eq!(usage.candidates_token_count, None);
+        assert_eq!(usage.total_token_count, None);
     }
 }
