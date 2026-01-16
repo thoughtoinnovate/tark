@@ -44,3 +44,4 @@ dist/
 web/**/node_modules/
 web/**/dist/
 web/**/.vite/
+web/ui/mocks/package-lock.json
