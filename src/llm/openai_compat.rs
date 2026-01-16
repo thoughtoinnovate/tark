@@ -63,7 +63,7 @@ impl OpenAiCompatConfig {
             base_url: base_url.into(),
             auth,
             default_model: String::new(),
-            max_tokens: 4096,
+            max_tokens: 4096, // Fallback default; config overrides this
             custom_headers: Vec::new(),
             supports_streaming: true,
             supports_tools: true,

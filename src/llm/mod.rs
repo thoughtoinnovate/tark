@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+use crate::config::Config;
+
 pub mod auth;
 mod claude;
 mod copilot;
@@ -229,6 +231,7 @@ pub fn create_provider(name: &str) -> Result<Box<dyn LlmProvider>> {
 
 /// Create an LLM provider with options
 /// - `silent`: When true, suppress CLI output (for TUI usage)
+/// - Loads max_tokens from config file for each provider
 pub fn create_provider_with_options(
     name: &str,
     silent: bool,
@@ -240,17 +243,20 @@ pub fn create_provider_with_options(
         return Ok(provider);
     }
 
+    // Load config to get max_tokens settings
+    let config = Config::load().unwrap_or_default();
+
     // Then try built-in providers
     match name.to_lowercase().as_str() {
         "claude" | "anthropic" => {
-            let mut p = ClaudeProvider::new()?;
+            let mut p = ClaudeProvider::new()?.with_max_tokens(config.llm.claude.max_tokens);
             if let Some(m) = model {
                 p = p.with_model(m);
             }
             Ok(Box::new(p))
         }
         "openai" | "gpt" => {
-            let mut p = OpenAiProvider::new()?;
+            let mut p = OpenAiProvider::new()?.with_max_tokens(config.llm.openai.max_tokens);
             if let Some(m) = model {
                 p = p.with_model(m);
             }
@@ -264,21 +270,24 @@ pub fn create_provider_with_options(
             Ok(Box::new(p))
         }
         "copilot" | "github" => {
-            let mut p = CopilotProvider::new()?.with_silent(silent);
+            let mut p = CopilotProvider::new()?
+                .with_silent(silent)
+                .with_max_tokens(config.llm.copilot.max_tokens);
             if let Some(m) = model {
                 p = p.with_model(m);
             }
             Ok(Box::new(p))
         }
         "gemini" | "google" => {
-            let mut p = GeminiProvider::new()?;
+            let mut p = GeminiProvider::new()?.with_max_tokens(config.llm.gemini.max_tokens);
             if let Some(m) = model {
                 p = p.with_model(m);
             }
             Ok(Box::new(p))
         }
         "openrouter" => {
-            let mut p = OpenRouterProvider::new()?;
+            let mut p =
+                OpenRouterProvider::new()?.with_max_tokens(config.llm.openrouter.max_tokens);
             if let Some(m) = model {
                 p = p.with_model(m);
             }

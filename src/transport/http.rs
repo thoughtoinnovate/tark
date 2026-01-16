@@ -374,8 +374,12 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
     })?;
 
     let tools = ToolRegistry::with_defaults(working_dir.clone(), config.tools.shell_enabled);
-    let chat_agent =
+    let mut chat_agent =
         ChatAgent::new(provider, tools).with_max_iterations(config.agent.max_iterations);
+
+    // Apply thinking configuration and default think level from config
+    chat_agent.set_thinking_config(config.thinking.clone());
+    chat_agent.set_think_level_sync(config.thinking.effective_default_level_name());
 
     // Use the actual working provider, not the default
     let default_provider = actual_provider;
@@ -877,6 +881,11 @@ async fn handle_chat(
 
         let new_agent = ChatAgent::with_mode(provider, tools, mode)
             .with_max_iterations(state.config.agent.max_iterations);
+        // Apply thinking configuration and default think level from config
+        // (keeps server behavior consistent with TUI/CLI)
+        let mut new_agent = new_agent;
+        new_agent.set_thinking_config(state.config.thinking.clone());
+        new_agent.set_think_level_sync(state.config.thinking.effective_default_level_name());
 
         // Update all stored state
         {

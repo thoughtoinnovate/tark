@@ -456,6 +456,7 @@ impl MessageList {
     }
 
     /// Focus the next block in the message list (expands it if collapsed)
+    /// Collapses all other blocks and scrolls to show the focused block
     /// Returns true if focus changed
     pub fn focus_next_block(&mut self) -> bool {
         // Get all block IDs from click targets
@@ -472,29 +473,35 @@ impl MessageList {
 
         let current_focus = self.block_state.focused_block().map(|s| s.to_string());
 
-        let (next_id, next_type) = if let Some(ref current) = current_focus {
+        let (next_idx, next_id) = if let Some(ref current) = current_focus {
             // Find current position and get next
             let current_idx = block_ids
                 .iter()
                 .position(|(_, id, _)| id == current)
                 .unwrap_or(0);
             let next_idx = (current_idx + 1) % block_ids.len();
-            (block_ids[next_idx].1.clone(), block_ids[next_idx].2)
+            (next_idx, block_ids[next_idx].1.clone())
         } else {
             // No current focus, focus first block
-            (block_ids[0].1.clone(), block_ids[0].2)
+            (0, block_ids[0].1.clone())
         };
 
-        // Expand the block if collapsed
-        if !self.block_state.is_expanded(&next_id, next_type) {
-            self.block_state.set(&next_id, true);
+        // Collapse all other blocks, expand only the focused one
+        for (_, id, _) in &block_ids {
+            self.block_state.set(id, id == &next_id);
         }
 
         self.block_state.set_focused_block(Some(next_id));
+
+        // Scroll to show the focused block
+        let target_line = block_ids[next_idx].0;
+        self.scroll_to_line(target_line);
+
         true
     }
 
     /// Focus the previous block in the message list (expands it if collapsed)
+    /// Collapses all other blocks and scrolls to show the focused block
     /// Returns true if focus changed
     pub fn focus_prev_block(&mut self) -> bool {
         // Get all block IDs from click targets
@@ -511,7 +518,7 @@ impl MessageList {
 
         let current_focus = self.block_state.focused_block().map(|s| s.to_string());
 
-        let (prev_id, prev_type) = if let Some(ref current) = current_focus {
+        let (prev_idx, prev_id) = if let Some(ref current) = current_focus {
             // Find current position and get previous
             let current_idx = block_ids
                 .iter()
@@ -523,19 +530,24 @@ impl MessageList {
             } else {
                 current_idx - 1
             };
-            (block_ids[prev_idx].1.clone(), block_ids[prev_idx].2)
+            (prev_idx, block_ids[prev_idx].1.clone())
         } else {
             // No current focus, focus last block
-            let last = block_ids.last().unwrap();
-            (last.1.clone(), last.2)
+            let last_idx = block_ids.len() - 1;
+            (last_idx, block_ids[last_idx].1.clone())
         };
 
-        // Expand the block if collapsed
-        if !self.block_state.is_expanded(&prev_id, prev_type) {
-            self.block_state.set(&prev_id, true);
+        // Collapse all other blocks, expand only the focused one
+        for (_, id, _) in &block_ids {
+            self.block_state.set(id, id == &prev_id);
         }
 
         self.block_state.set_focused_block(Some(prev_id));
+
+        // Scroll to show the focused block
+        let target_line = block_ids[prev_idx].0;
+        self.scroll_to_line(target_line);
+
         true
     }
 
@@ -648,6 +660,14 @@ impl MessageList {
     /// Scroll to the bottom
     pub fn scroll_to_bottom(&mut self, width: u16) {
         self.scroll_offset = self.max_scroll(width);
+    }
+
+    /// Scroll to ensure a specific line is visible
+    /// Centers the line in the viewport if possible
+    fn scroll_to_line(&mut self, line: usize) {
+        let half_height = (self.visible_height / 2) as usize;
+        // Try to center the line in the viewport
+        self.scroll_offset = line.saturating_sub(half_height);
     }
 
     /// Select the next message

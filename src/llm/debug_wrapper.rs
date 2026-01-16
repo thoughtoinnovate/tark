@@ -27,6 +27,12 @@ impl DebugProviderWrapper {
             .create(true)
             .append(true)
             .open(log_path)?;
+
+        // Enable raw response logging to a separate file
+        // This captures the raw streaming payloads from LLM providers
+        let raw_log_path = log_path.with_file_name("llm_raw_response.log");
+        super::raw_log::set_raw_log_path(Some(raw_log_path));
+
         Ok(Self {
             inner,
             log_file: Arc::new(Mutex::new(file)),

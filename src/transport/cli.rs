@@ -228,6 +228,10 @@ pub async fn run_chat(initial_message: Option<String>, working_dir: &str) -> Res
     let mut agent =
         ChatAgent::new(provider, tools).with_max_iterations(config.agent.max_iterations);
 
+    // Apply thinking configuration and default think level from config
+    agent.set_thinking_config(config.thinking.clone());
+    agent.set_think_level_sync(config.thinking.effective_default_level_name());
+
     // Handle initial message if provided
     if let Some(msg) = initial_message {
         println!("> {}\n", msg);

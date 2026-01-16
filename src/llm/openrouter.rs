@@ -38,7 +38,7 @@ impl OpenRouterProvider {
                 AuthMethod::BearerToken(api_key),
             )
             .with_model("anthropic/claude-sonnet-4")
-            .with_max_tokens(4096)
+            .with_max_tokens(4096) // Fallback default; config overrides this
             .with_header("HTTP-Referer", "https://github.com/tark-ai/tark")
             .with_header("X-Title", "Tark"),
         );

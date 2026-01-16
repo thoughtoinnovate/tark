@@ -269,7 +269,7 @@ impl ToolOrchestrator {
 
                 if state.consecutive_duplicates >= self.config.max_consecutive_duplicates {
                     self.context.add_assistant(
-                        "I notice I'm getting the same results repeatedly. Let me summarize what I found.",
+                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed.",
                     );
                     return Ok(false); // Stop
                 }
@@ -307,22 +307,25 @@ impl ToolOrchestrator {
 
     /// Sanitize context before sending to LLM
     ///
-    /// Removes assistant messages with no text content to prevent confusing the LLM.
-    /// Empty assistant messages cause the LLM to think it hasn't responded yet,
-    /// leading to infinite tool call loops.
+    /// Removes assistant messages with no meaningful content to prevent confusing the LLM.
+    /// Empty assistant messages (no text AND no tool calls) cause issues.
+    /// However, we MUST keep assistant messages that contain tool calls, even without text,
+    /// because they are required for the tool results to be properly associated.
     fn sanitize_context_for_llm(&self, messages: &[Message]) -> Vec<Message> {
         messages
             .iter()
             .filter(|msg| {
                 if msg.role == Role::Assistant {
-                    // Keep only if has text content
+                    // Keep if has text content OR tool calls
                     match &msg.content {
                         MessageContent::Text(t) => !t.is_empty(),
                         MessageContent::Parts(parts) => {
-                            // Keep if has any text parts (skip tool-only messages)
-                            parts.iter().any(
-                                |p| matches!(p, ContentPart::Text { text } if !text.is_empty()),
-                            )
+                            // Keep if has any text parts OR any tool use parts
+                            // Tool use parts are REQUIRED for tool results to be associated correctly
+                            parts.iter().any(|p| {
+                                matches!(p, ContentPart::Text { text } if !text.is_empty())
+                                    || matches!(p, ContentPart::ToolUse { .. })
+                            })
                         }
                     }
                 } else {

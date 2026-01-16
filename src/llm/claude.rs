@@ -35,7 +35,7 @@ impl ClaudeProvider {
             client: reqwest::Client::new(),
             api_key,
             model: "claude-sonnet-4-20250514".to_string(),
-            max_tokens: 4096,
+            max_tokens: 4096, // Fallback default; config overrides this
         })
     }
 
@@ -69,11 +69,47 @@ impl ClaudeProvider {
                     }
                 }
                 Role::Assistant => {
-                    if let Some(text) = msg.content.as_text() {
-                        claude_messages.push(ClaudeMessage {
-                            role: "assistant".to_string(),
-                            content: ClaudeContent::Text(text.to_string()),
-                        });
+                    match &msg.content {
+                        super::types::MessageContent::Text(text) => {
+                            if !text.is_empty() {
+                                claude_messages.push(ClaudeMessage {
+                                    role: "assistant".to_string(),
+                                    content: ClaudeContent::Text(text.to_string()),
+                                });
+                            }
+                        }
+                        super::types::MessageContent::Parts(parts) => {
+                            let mut blocks = Vec::new();
+                            for part in parts {
+                                match part {
+                                    super::types::ContentPart::Text { text } => {
+                                        if !text.is_empty() {
+                                            blocks.push(ClaudeContentBlock::Text {
+                                                text: text.clone(),
+                                            });
+                                        }
+                                    }
+                                    super::types::ContentPart::ToolUse {
+                                        id, name, input, ..
+                                    } => {
+                                        blocks.push(ClaudeContentBlock::ToolUse {
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                            input: input.clone(),
+                                        });
+                                    }
+                                    super::types::ContentPart::ToolResult { .. } => {
+                                        // Tool results are handled in Role::Tool
+                                    }
+                                }
+                            }
+                            if !blocks.is_empty() {
+                                claude_messages.push(ClaudeMessage {
+                                    role: "assistant".to_string(),
+                                    content: ClaudeContent::Blocks(blocks),
+                                });
+                            }
+                        }
                     }
                 }
                 Role::Tool => {
@@ -967,5 +1003,113 @@ mod tests {
         let usage = response.usage.unwrap();
         assert_eq!(usage.input_tokens, 20);
         assert_eq!(usage.output_tokens, 10);
+    }
+
+    #[test]
+    fn test_convert_messages_preserves_tool_calls() {
+        use crate::llm::types::{ContentPart, Message, MessageContent, Role};
+
+        let provider = ClaudeProvider {
+            api_key: "test".to_string(),
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            client: reqwest::Client::new(),
+            max_tokens: 1000,
+        };
+
+        // Create an assistant message with tool calls
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: MessageContent::Text("test".to_string()),
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::ToolUse {
+                    id: "call_123".to_string(),
+                    name: "test_tool".to_string(),
+                    input: serde_json::json!({"arg": "value"}),
+                    thought_signature: None,
+                }]),
+                tool_call_id: None,
+            },
+        ];
+
+        let (_, claude_messages) = provider.convert_messages(&messages);
+
+        // Verify the tool call was preserved
+        assert_eq!(claude_messages.len(), 2);
+
+        // Check the assistant message
+        if let ClaudeContent::Blocks(blocks) = &claude_messages[1].content {
+            assert_eq!(blocks.len(), 1);
+            match &blocks[0] {
+                ClaudeContentBlock::ToolUse { id, name, input } => {
+                    assert_eq!(id, "call_123");
+                    assert_eq!(name, "test_tool");
+                    assert_eq!(input.get("arg").and_then(|v| v.as_str()), Some("value"));
+                }
+                _ => panic!("Expected ToolUse block"),
+            }
+        } else {
+            panic!("Expected Blocks content for assistant message");
+        }
+    }
+
+    #[test]
+    fn test_convert_messages_with_text_and_tool_calls() {
+        use crate::llm::types::{ContentPart, Message, MessageContent, Role};
+
+        let provider = ClaudeProvider {
+            api_key: "test".to_string(),
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            client: reqwest::Client::new(),
+            max_tokens: 1000,
+        };
+
+        // Create an assistant message with both text and tool calls
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Let me check that.".to_string(),
+                },
+                ContentPart::ToolUse {
+                    id: "call_456".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "test.txt"}),
+                    thought_signature: None,
+                },
+            ]),
+            tool_call_id: None,
+        }];
+
+        let (_, claude_messages) = provider.convert_messages(&messages);
+
+        // Verify both text and tool call were preserved
+        assert_eq!(claude_messages.len(), 1);
+
+        if let ClaudeContent::Blocks(blocks) = &claude_messages[0].content {
+            assert_eq!(blocks.len(), 2);
+
+            // Check text block
+            match &blocks[0] {
+                ClaudeContentBlock::Text { text } => {
+                    assert_eq!(text, "Let me check that.");
+                }
+                _ => panic!("Expected Text block"),
+            }
+
+            // Check tool use block
+            match &blocks[1] {
+                ClaudeContentBlock::ToolUse { id, name, .. } => {
+                    assert_eq!(id, "call_456");
+                    assert_eq!(name, "read_file");
+                }
+                _ => panic!("Expected ToolUse block"),
+            }
+        } else {
+            panic!("Expected Blocks content");
+        }
     }
 }

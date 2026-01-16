@@ -556,9 +556,21 @@ impl<'a> QuestionnaireWidget<'a> {
         Rect::new(x, y, width, height)
     }
 
+    /// Truncate text to fit within the given width
+    fn truncate_to_width(text: &str, max_width: usize) -> String {
+        if text.len() <= max_width {
+            text.to_string()
+        } else if max_width > 3 {
+            format!("{}...", &text[..max_width - 3])
+        } else {
+            text.chars().take(max_width).collect()
+        }
+    }
+
     /// Render options for single-select
     fn render_single_select(&self, options: &[OptionItem], inner: Rect, buf: &mut Buffer) {
         let mut y = inner.y;
+        let max_width = inner.width as usize;
 
         for (i, option) in options.iter().enumerate() {
             if y >= inner.y + inner.height {
@@ -573,7 +585,10 @@ impl<'a> QuestionnaireWidget<'a> {
             // Radio button
             let radio = if is_selected { "(●) " } else { "( ) " };
 
-            let line = format!("{}{}{}", cursor, radio, option.label);
+            let prefix_len = cursor.chars().count() + radio.chars().count();
+            let label_max = max_width.saturating_sub(prefix_len);
+            let truncated_label = Self::truncate_to_width(&option.label, label_max);
+            let line = format!("{}{}{}", cursor, radio, truncated_label);
 
             let style = if is_selected {
                 Style::default()
@@ -591,6 +606,7 @@ impl<'a> QuestionnaireWidget<'a> {
     /// Render options for multi-select
     fn render_multi_select(&self, options: &[OptionItem], inner: Rect, buf: &mut Buffer) {
         let mut y = inner.y;
+        let max_width = inner.width as usize;
 
         for (i, option) in options.iter().enumerate() {
             if y >= inner.y + inner.height {
@@ -606,7 +622,10 @@ impl<'a> QuestionnaireWidget<'a> {
             // Checkbox
             let checkbox = if is_checked { "[x] " } else { "[ ] " };
 
-            let line = format!("{}{}{}", cursor, checkbox, option.label);
+            let prefix_len = cursor.chars().count() + checkbox.chars().count();
+            let label_max = max_width.saturating_sub(prefix_len);
+            let truncated_label = Self::truncate_to_width(&option.label, label_max);
+            let line = format!("{}{}{}", cursor, checkbox, truncated_label);
 
             let style = if is_cursor {
                 Style::default()
@@ -623,9 +642,11 @@ impl<'a> QuestionnaireWidget<'a> {
         }
     }
 
-    /// Render free-text input
+    /// Render free-text input with text wrapping
     fn render_free_text(&self, placeholder: Option<&str>, inner: Rect, buf: &mut Buffer) {
         let text = self.state.text_buffer();
+        let max_width = inner.width as usize;
+        let max_height = inner.height as usize;
 
         let display_text = if text.is_empty() {
             placeholder.unwrap_or("Type your answer...")
@@ -639,9 +660,52 @@ impl<'a> QuestionnaireWidget<'a> {
             Style::default().fg(Color::White)
         };
 
-        // Draw input box
-        let input_line = format!("▶ {}_", display_text);
-        buf.set_string(inner.x, inner.y, &input_line, style);
+        // Wrap text across multiple lines
+        let prefix = "▶ ";
+        let prefix_len = prefix.chars().count();
+        let first_line_width = max_width.saturating_sub(prefix_len);
+        let continuation_width = max_width.saturating_sub(2); // "  " indent for continuation
+
+        let mut lines: Vec<String> = Vec::new();
+        let mut remaining = display_text;
+
+        // First line with prefix
+        if remaining.len() <= first_line_width {
+            lines.push(format!("{}{}", prefix, remaining));
+            remaining = "";
+        } else {
+            let (first, rest) = remaining.split_at(first_line_width.min(remaining.len()));
+            lines.push(format!("{}{}", prefix, first));
+            remaining = rest;
+        }
+
+        // Continuation lines with indent
+        while !remaining.is_empty() && lines.len() < max_height {
+            if remaining.len() <= continuation_width {
+                lines.push(format!("  {}", remaining));
+                remaining = "";
+            } else {
+                let (chunk, rest) = remaining.split_at(continuation_width.min(remaining.len()));
+                lines.push(format!("  {}", chunk));
+                remaining = rest;
+            }
+        }
+
+        // Add cursor indicator to last line
+        if let Some(last) = lines.last_mut() {
+            last.push('_');
+        }
+
+        // Render all lines
+        for (i, line) in lines.iter().enumerate() {
+            if i >= max_height {
+                break;
+            }
+            let y = inner.y + i as u16;
+            // Truncate line if it somehow exceeds width (safety)
+            let truncated = Self::truncate_to_width(line, max_width);
+            buf.set_string(inner.x, y, &truncated, style);
+        }
     }
 
     /// Render keybind hints
@@ -663,8 +727,12 @@ impl<'a> QuestionnaireWidget<'a> {
             hints.to_string()
         };
 
+        // Truncate hints to fit within the area
+        let max_width = area.width.saturating_sub(2) as usize;
+        let truncated_hints = Self::truncate_to_width(&nav_hints, max_width);
+
         let style = Style::default().fg(Color::DarkGray);
-        buf.set_string(area.x + 1, area.y, &nav_hints, style);
+        buf.set_string(area.x + 1, area.y, &truncated_hints, style);
     }
 }
 

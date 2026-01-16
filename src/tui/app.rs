@@ -889,11 +889,19 @@ impl TuiApp {
         // Sync agent mode and approval mode from session
         app.sync_agent_mode_from_bridge();
         app.sync_trust_level_from_bridge();
+        app.sync_think_level_from_bridge();
 
         // Restore messages from current session on startup (Requirements 6.1, 6.6)
         app.restore_messages_from_session();
 
         Ok(app)
+    }
+
+    /// Sync think level from AgentBridge to UI state
+    fn sync_think_level_from_bridge(&mut self) {
+        if let Some(ref bridge) = self.agent_bridge {
+            self.state.think_level = bridge.think_level().to_string();
+        }
     }
 
     /// Create a new TUI application with a specific configuration
@@ -3338,16 +3346,8 @@ impl TuiApp {
                 if let Some(ref bridge) = self.agent_bridge {
                     let thinking_config = bridge.thinking_config().clone();
                     let new_level = if self.state.think_level == "off" {
-                        // Use "medium" as default toggle level, or first available level
-                        if thinking_config.get_level("medium").is_some() {
-                            "medium".to_string()
-                        } else {
-                            thinking_config
-                                .level_names()
-                                .first()
-                                .map(|s: &&str| s.to_string())
-                                .unwrap_or_else(|| "off".to_string())
-                        }
+                        // Use configured default level (validated; returns "off" on misconfig)
+                        thinking_config.effective_default_level_name()
                     } else {
                         "off".to_string()
                     };

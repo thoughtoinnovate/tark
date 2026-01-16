@@ -75,6 +75,20 @@ pub enum AgentEvent {
     AuthFailed { provider: String, error: String },
 }
 
+fn emit_final_text_if_missing(
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    did_stream_text: bool,
+    response_text: &str,
+) {
+    if did_stream_text {
+        return;
+    }
+    if response_text.trim().is_empty() {
+        return;
+    }
+    let _ = event_tx.send(AgentEvent::TextChunk(response_text.to_string()));
+}
+
 /// Summary info from agent response
 #[derive(Debug, Clone)]
 pub struct AgentResponseInfo {
@@ -477,6 +491,9 @@ impl AgentBridge {
 
         // Set thinking configuration
         agent.set_thinking_config(config.thinking.clone());
+
+        // Initialize think level from config (makes default-on work and persists across restarts)
+        agent.set_think_level_sync(config.thinking.effective_default_level_name());
 
         // Restore session messages if any
         if !current_session.messages.is_empty() {
@@ -1131,8 +1148,14 @@ impl AgentBridge {
         let tool_call_tx = tool_tx.clone();
         let tool_complete_tx = tool_tx.clone();
 
+        // Track whether any text was actually streamed. Some responses can complete with tool
+        // calls, errors, or non-delta text; we still want the final assistant message to show.
+        let did_stream_text = Arc::new(AtomicBool::new(false));
+        let did_stream_text_tx = did_stream_text.clone();
+
         // Create streaming callbacks
         let on_text = move |chunk: String| {
+            did_stream_text_tx.store(true, Ordering::SeqCst);
             let _ = text_tx.send(AgentEvent::TextChunk(chunk));
         };
 
@@ -1185,6 +1208,14 @@ impl AgentBridge {
                 if response.text.contains("interrupted") {
                     let _ = event_tx.send(AgentEvent::Interrupted);
                 } else {
+                    // If nothing was streamed, emit the final response text so the user sees it.
+                    // The Completed event does not include text.
+                    emit_final_text_if_missing(
+                        &event_tx,
+                        did_stream_text.load(Ordering::SeqCst),
+                        &response.text,
+                    );
+
                     // Add assistant response to session with tool call history
                     let tool_calls: Vec<ToolCallRecord> = response
                         .tool_call_log
@@ -1924,6 +1955,26 @@ mod tests {
         assert_eq!(bridge.model_name(), "llama3.2");
         assert_eq!(bridge.current_session.provider, "ollama");
         assert_eq!(bridge.current_session.model, "llama3.2");
+    }
+
+    #[test]
+    fn test_emit_final_text_if_missing() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+
+        // If nothing streamed, we should emit a final TextChunk
+        emit_final_text_if_missing(&tx, false, "hello");
+        match rx.try_recv().expect("expected one event") {
+            AgentEvent::TextChunk(s) => assert_eq!(s, "hello"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // If text already streamed, don't emit
+        emit_final_text_if_missing(&tx, true, "ignored");
+        assert!(rx.try_recv().is_err());
+
+        // If response text is empty/whitespace, don't emit
+        emit_final_text_if_missing(&tx, false, "   ");
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

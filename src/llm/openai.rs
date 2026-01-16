@@ -52,7 +52,7 @@ impl OpenAiProvider {
             client: reqwest::Client::new(),
             api_key,
             model: "gpt-4o".to_string(), // Default to gpt-4o for backward compatibility
-            max_tokens: 4096,
+            max_tokens: 4096,            // Fallback default; config overrides this
         })
     }
 
@@ -300,13 +300,26 @@ impl OpenAiProvider {
                     Role::User => "user",
                     Role::Assistant => "assistant",
                     Role::Tool => {
-                        // Convert tool results to user messages with plain text
-                        // The Responses API doesn't have special function result types
-                        // Tool results are just sent as regular text from the user
-                        if let Some(text) = msg.content.as_text() {
+                        // Convert tool results to user messages with labeled text
+                        // The Responses API doesn't accept function_call_output as input type
+                        // Include the call_id so the model can correlate results with calls
+                        if let (Some(text), Some(call_id)) =
+                            (msg.content.as_text(), &msg.tool_call_id)
+                        {
                             return Some(ResponsesMessage {
                                 role: "user".to_string(),
-                                content: ResponsesContent::Text(text.to_string()),
+                                content: ResponsesContent::Text(format!(
+                                    "[Tool result for call_id={}]:\n{}",
+                                    call_id, text
+                                )),
+                            });
+                        } else if let Some(text) = msg.content.as_text() {
+                            return Some(ResponsesMessage {
+                                role: "user".to_string(),
+                                content: ResponsesContent::Text(format!(
+                                    "[Tool result]:\n{}",
+                                    text
+                                )),
                             });
                         } else {
                             tracing::warn!("Tool message missing content, skipping");
@@ -327,9 +340,18 @@ impl OpenAiProvider {
                                     content_parts
                                         .push(ResponsesContentPart::Text { text: text.clone() });
                                 }
-                                ContentPart::ToolUse { .. } => {
-                                    // Skip tool calls - they're outputs, not inputs
-                                    // The Responses API doesn't accept "function_call" in input
+                                ContentPart::ToolUse {
+                                    id, name, input, ..
+                                } => {
+                                    // The Responses API doesn't accept 'function_call' as an input type
+                                    // Serialize tool calls as text so the model can see what it did
+                                    let args_str = serde_json::to_string(input).unwrap_or_default();
+                                    content_parts.push(ResponsesContentPart::Text {
+                                        text: format!(
+                                            "[Previous tool call: {} (id={}) with args: {}]",
+                                            name, id, args_str
+                                        ),
+                                    });
                                 }
                                 ContentPart::ToolResult {
                                     tool_use_id: _,
@@ -765,6 +787,9 @@ impl LlmProvider for OpenAiProvider {
             .get_reasoning_effort(settings)
             .map(|effort| ReasoningConfig {
                 effort: Some(effort),
+                // Request reasoning summaries for models that support it (o3, o4-mini, GPT-5)
+                // This enables thinking blocks to be displayed in the TUI
+                summary: Some("auto".to_string()),
             });
 
         let mut request = ResponsesApiRequest {
@@ -913,6 +938,9 @@ impl LlmProvider for OpenAiProvider {
             .get_reasoning_effort(settings)
             .map(|effort| ReasoningConfig {
                 effort: Some(effort),
+                // Request reasoning summaries for models that support it (o3, o4-mini, GPT-5)
+                // This enables thinking blocks to be displayed in the TUI
+                summary: Some("auto".to_string()),
             });
 
         let mut request = ResponsesApiRequest {
@@ -1592,6 +1620,8 @@ enum ResponsesContentPart {
         name: String,
         arguments: String,
     },
+    #[serde(rename = "function_call_output")]
+    FunctionCallOutput { call_id: String, output: String },
 }
 
 /// Tool definition for Responses API
@@ -1605,11 +1635,16 @@ struct ResponsesTool {
     parameters: serde_json::Value,
 }
 
-/// Reasoning configuration for o-series models
+/// Reasoning configuration for o-series and GPT-5 models
 #[derive(Debug, Serialize)]
 struct ReasoningConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<String>, // "low", "medium", "high"
+    /// Request reasoning summaries to be included in the response
+    /// Supported values: "auto", "concise", "detailed"
+    /// Note: Not all models support this (o3, o4-mini, GPT-5 do; o1 does not)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
 }
 
 /// Response from Responses API
@@ -2451,5 +2486,142 @@ mod tests {
         };
 
         assert!(!provider.supports_reasoning());
+    }
+
+    #[test]
+    fn test_convert_messages_to_responses_preserves_tool_calls() {
+        use crate::llm::types::{ContentPart, Message, MessageContent, Role};
+
+        // Create an assistant message with tool calls
+        let messages = &[
+            Message {
+                role: Role::User,
+                content: MessageContent::Text("test".to_string()),
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::ToolUse {
+                    id: "call_123".to_string(),
+                    name: "test_tool".to_string(),
+                    input: serde_json::json!({"arg": "value"}),
+                    thought_signature: None,
+                }]),
+                tool_call_id: None,
+            },
+        ];
+
+        // Convert to Responses API format
+        let responses_messages: Vec<ResponsesMessage> = messages
+            .iter()
+            .filter_map(|msg| {
+                let role = match msg.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                    Role::Tool => return None,
+                    Role::System => return None,
+                };
+
+                let content = match &msg.content {
+                    MessageContent::Text(text) => ResponsesContent::Text(text.clone()),
+                    MessageContent::Parts(parts) => {
+                        let mut content_parts = Vec::new();
+                        for part in parts {
+                            match part {
+                                ContentPart::Text { text } => {
+                                    content_parts
+                                        .push(ResponsesContentPart::Text { text: text.clone() });
+                                }
+                                ContentPart::ToolUse {
+                                    id, name, input, ..
+                                } => {
+                                    // Serialize as text - API doesn't accept function_call as input
+                                    let args_str = serde_json::to_string(input).unwrap_or_default();
+                                    content_parts.push(ResponsesContentPart::Text {
+                                        text: format!(
+                                            "[Previous tool call: {} (id={}) with args: {}]",
+                                            name, id, args_str
+                                        ),
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                        if content_parts.is_empty() {
+                            ResponsesContent::Text(String::new())
+                        } else {
+                            ResponsesContent::Parts(content_parts)
+                        }
+                    }
+                };
+
+                Some(ResponsesMessage {
+                    role: role.to_string(),
+                    content,
+                })
+            })
+            .collect();
+
+        // Verify the tool call was preserved as text
+        assert_eq!(responses_messages.len(), 2);
+
+        // Check the assistant message contains the tool call as text
+        match &responses_messages[1].content {
+            ResponsesContent::Parts(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    ResponsesContentPart::Text { text } => {
+                        assert!(text.contains("test_tool"));
+                        assert!(text.contains("call_123"));
+                    }
+                    _ => panic!("Expected Text part"),
+                }
+            }
+            _ => panic!("Expected Parts content for assistant message"),
+        }
+    }
+
+    #[test]
+    fn test_convert_tool_results_to_labeled_text() {
+        use crate::llm::types::{Message, MessageContent, Role};
+
+        // Create a tool result message
+        let messages = &[Message {
+            role: Role::Tool,
+            content: MessageContent::Text("tool output".to_string()),
+            tool_call_id: Some("call_123".to_string()),
+        }];
+
+        // Convert to Responses API format
+        let responses_messages: Vec<ResponsesMessage> = messages
+            .iter()
+            .filter_map(|msg| {
+                if msg.role == Role::Tool {
+                    if let (Some(text), Some(call_id)) = (msg.content.as_text(), &msg.tool_call_id)
+                    {
+                        return Some(ResponsesMessage {
+                            role: "user".to_string(),
+                            content: ResponsesContent::Text(format!(
+                                "[Tool result for call_id={}]:\n{}",
+                                call_id, text
+                            )),
+                        });
+                    }
+                }
+                None
+            })
+            .collect();
+
+        // Verify the tool result was converted to labeled text
+        assert_eq!(responses_messages.len(), 1);
+        assert_eq!(responses_messages[0].role, "user");
+
+        match &responses_messages[0].content {
+            ResponsesContent::Text(text) => {
+                assert!(text.contains("call_123"));
+                assert!(text.contains("tool output"));
+            }
+            _ => panic!("Expected Text content"),
+        }
     }
 }

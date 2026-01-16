@@ -162,7 +162,7 @@ impl CopilotProvider {
             token,
             token_path,
             model: "gpt-4o".to_string(),
-            max_tokens: 4096,
+            max_tokens: 4096,        // Fallback default; config overrides this
             auth_timeout_secs: 1800, // 30 minutes default
             silent: false,
         })

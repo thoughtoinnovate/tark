@@ -333,6 +333,12 @@ Example - User says "help with plan to improve UX":
     {id: "feedback", type: "free_text", text: "Any specific user feedback or issues?"}
   ]
 
+🔄 TOOL EFFICIENCY - AVOID LOOPS:
+- NEVER call the same tool with identical arguments twice in a row
+- If a tool returns the same content you've already seen, STOP and summarize your findings
+- After 2-3 tool calls that don't yield new information, conclude with what you learned
+- If you're stuck in a loop, explain what you found and ask the user for guidance
+
 ✅ ALWAYS:
 - DISCOVER the codebase before creating plans (list directories, read key files)
 - When user asks for a "plan" → use `save_plan` tool (NOT propose_change, NOT markdown files)
@@ -399,6 +405,12 @@ Example:
 ❌ WRONG: "What specific areas would you like me to explain?"
 ✅ RIGHT: Call ask_user with questions like:
   {type: "multi_select", text: "Which areas should I explain?", options: ["Architecture", "Data flow", "APIs", "Testing"]}
+
+🔄 TOOL EFFICIENCY - AVOID LOOPS:
+- NEVER call the same tool with identical arguments twice in a row
+- If a tool returns the same content you've already seen, STOP and summarize your findings
+- After 2-3 tool calls that don't yield new information, conclude with what you learned
+- If you're stuck in a loop, explain what you found and ask the user for guidance
 
 Be thorough and cautious. Explain implications of changes."#
             .to_string(),
@@ -533,6 +545,12 @@ Example - User says "add authentication":
 - Say you "can't create diagrams" - YOU CAN with Mermaid/PlantUML!
 - Run dangerous shell commands (they will be blocked anyway)
 - Ask questions in chat text - USE ask_user tool instead!
+
+🔄 TOOL EFFICIENCY - AVOID LOOPS:
+- NEVER call the same tool with identical arguments twice in a row
+- If a tool returns the same content you've already seen, STOP and summarize your findings
+- After 2-3 tool calls that don't yield new information, conclude with what you learned
+- If you're stuck in a loop, explain what you found and ask the user for guidance
 
 ✅ ALWAYS DO THIS:
 - Try 3+ different search patterns before concluding something doesn't exist
@@ -1383,7 +1401,7 @@ impl ChatAgent {
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
                                     // Force the agent to summarize instead of looping
                                     self.context.add_assistant(
-                                        "I notice I'm getting the same results repeatedly. Let me summarize what I found."
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
                                     );
                                     // Break out of the tool execution loop
                                     break;
@@ -1582,7 +1600,7 @@ impl ChatAgent {
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
                                     // Force the agent to summarize instead of looping
                                     self.context.add_assistant(
-                                        "I notice I'm getting the same results repeatedly. Let me summarize what I found."
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
                                     );
                                     // Break out of the tool execution loop
                                     break;
@@ -1857,7 +1875,7 @@ impl ChatAgent {
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
                                     // Force the agent to summarize instead of looping
                                     self.context.add_assistant(
-                                        "I notice I'm getting the same results repeatedly. Let me summarize what I found."
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
                                     );
                                     // Break out of the tool execution loop
                                     break;
@@ -2010,7 +2028,7 @@ impl ChatAgent {
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
                                     // Force the agent to summarize instead of looping
                                     self.context.add_assistant(
-                                        "I notice I'm getting the same results repeatedly. Let me summarize what I found."
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
                                     );
                                     // Break out of the tool execution loop
                                     break;
@@ -2363,7 +2381,7 @@ impl ChatAgent {
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
                                     // Force the agent to summarize instead of looping
                                     self.context.add_assistant(
-                                        "I notice I'm getting the same results repeatedly. Let me summarize what I found."
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
                                     );
                                     // Break out of the tool execution loop
                                     break;
@@ -2516,7 +2534,7 @@ impl ChatAgent {
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
                                     // Force the agent to summarize instead of looping
                                     self.context.add_assistant(
-                                        "I notice I'm getting the same results repeatedly. Let me summarize what I found."
+                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
                                     );
                                     // Break out of the tool execution loop
                                     break;
