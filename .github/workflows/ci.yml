@@ -144,7 +144,10 @@ jobs:
       - name: Install E2E dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y asciinema expect imagemagick bc
+          # Core tools + fonts for Unicode icons and emoji support in recordings
+          sudo apt-get install -y asciinema expect imagemagick bc \
+            fonts-noto-color-emoji fonts-symbola fontconfig
+          fc-cache -f
           cargo install --git https://github.com/asciinema/agg || cargo install agg || true
       
       - name: Build with test-sim
@@ -186,7 +189,10 @@ jobs:
       - name: Install E2E dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y asciinema expect imagemagick bc
+          # Core tools + fonts for Unicode icons and emoji support in recordings
+          sudo apt-get install -y asciinema expect imagemagick bc \
+            fonts-noto-color-emoji fonts-symbola fontconfig
+          fc-cache -f
           cargo install --git https://github.com/asciinema/agg || cargo install agg || true
       
       - name: Build with test-sim
