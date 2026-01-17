@@ -6,7 +6,7 @@
 
 ## 🎯 Mission
 
-You are implementing a **new** Terminal User Interface (TUI) in Rust using Ratatui, following a **Test-Driven Development (TDD)** approach with **Behavior-Driven Development (BDD)** feature files as specifications. Your goals are to:
+You are implementing a **new** new Terminal User Interface (TUI) in Rust using Ratatui, which will be access using 'tark tui' following a **Test-Driven Development (TDD)** approach with **Behavior-Driven Development (BDD)** feature files as specifications. Your goals are to:
 
 1. **Follow TDD** - Write/run tests FIRST, then implement (RED-GREEN-REFACTOR)
 2. **Use Feature Files** - 15 BDD feature files define ALL requirements (245+ scenarios)
