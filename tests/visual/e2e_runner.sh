@@ -87,11 +87,19 @@ install_deps() {
         log_info "Detected Linux"
         if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y asciinema expect imagemagick bc
+            # Core tools + fonts for Unicode icons and emoji support in recordings
+            sudo apt-get install -y asciinema expect imagemagick bc \
+                fonts-noto-color-emoji fonts-symbola fontconfig
+            # Refresh font cache
+            fc-cache -f 2>/dev/null || true
         elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y asciinema expect ImageMagick bc
+            sudo dnf install -y asciinema expect ImageMagick bc \
+                google-noto-emoji-fonts gdouros-symbola-fonts fontconfig
+            fc-cache -f 2>/dev/null || true
         elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -S --noconfirm asciinema expect imagemagick bc
+            sudo pacman -S --noconfirm asciinema expect imagemagick bc \
+                noto-fonts-emoji ttf-symbola fontconfig
+            fc-cache -f 2>/dev/null || true
         fi
     fi
     
