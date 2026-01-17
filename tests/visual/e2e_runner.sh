@@ -132,6 +132,8 @@ generate_expect_script() {
 #!/usr/bin/expect -f
 set timeout 30
 log_user 1
+set env(TERM) xterm-256color
+set env(COLORTERM) truecolor
 spawn ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Hello, can you help me?\r"
@@ -146,6 +148,7 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 45
 log_user 1
+set env(TERM) xterm-256color
 spawn env TARK_SIM_SCENARIO=streaming ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Explain Rust closures in detail please\r"
@@ -160,6 +163,7 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 45
 log_user 1
+set env(TERM) xterm-256color
 spawn env TARK_SIM_SCENARIO=tool ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Search for TODO in this project\r"
@@ -174,6 +178,7 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 60
 log_user 1
+set env(TERM) xterm-256color
 spawn ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "My name is Alice\r"
@@ -190,6 +195,7 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 30
 log_user 1
+set env(TERM) xterm-256color
 spawn env TARK_SIM_SCENARIO=error_timeout ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Trigger an error\r"
@@ -204,6 +210,7 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 60
 log_user 1
+set env(TERM) xterm-256color
 spawn env TARK_SIM_SCENARIO=thinking ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Think deeply about this problem\r"
@@ -218,6 +225,7 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 30
 log_user 1
+set env(TERM) xterm-256color
 spawn ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "/help\r"
@@ -233,6 +241,7 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 30
 log_user 1
+set env(TERM) xterm-256color
 spawn env TARK_SIM_SCENARIO=${sim_scenario} ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Test message for ${scenario}\r"
@@ -268,8 +277,9 @@ run_scenario() {
     # Clean up old files
     rm -f "$cast_file" "$gif_file" "$animated_cast"
     
-    # Record
-    if ! asciinema rec --overwrite --cols 120 --rows 40 --idle-time-limit 2 \
+    # Record with proper terminal type for colors
+    # TERM=dumb (default in expect) disables colors, so we force xterm-256color
+    if ! TERM=xterm-256color asciinema rec --overwrite --cols 120 --rows 40 --idle-time-limit 2 \
         --command "$exp_script" "$cast_file" 2>&1 | tee "$log_file"; then
         log_error "Recording failed for $scenario"
         return 1
@@ -302,6 +312,8 @@ run_scenario() {
     fi
     
     # Extract snapshots (coalesce to flatten frame optimizations)
+    # Note: GIFs are limited to 256 colors (indexed palette), so we use
+    # -define png:color-type=6 to force RGBA TrueColor output for proper color display
     if [ -f "$gif_file" ] && command -v convert >/dev/null 2>&1; then
         log_info "Extracting snapshots..."
         
@@ -310,15 +322,19 @@ run_scenario() {
         
         if [ "$TOTAL_FRAMES" -gt 3 ]; then
             # Coalesce frame 3 (TUI should be visible) for initial
-            convert "$gif_file" -coalesce -delete 0-2 -delete 1--1 "$CURRENT_DIR/${scenario}_initial.png" 2>/dev/null || true
+            convert "$gif_file" -coalesce -delete 0-2 -delete 1--1 \
+                -define png:color-type=6 "$CURRENT_DIR/${scenario}_initial.png" 2>/dev/null || true
             
             # Coalesce second-to-last frame for final (before exit, with response)
             FINAL_IDX=$((TOTAL_FRAMES - 2))
-            convert "$gif_file" -coalesce -delete 0-$((FINAL_IDX-1)) -delete 1--1 "$CURRENT_DIR/${scenario}_final.png" 2>/dev/null || true
+            convert "$gif_file" -coalesce -delete 0-$((FINAL_IDX-1)) -delete 1--1 \
+                -define png:color-type=6 "$CURRENT_DIR/${scenario}_final.png" 2>/dev/null || true
         else
             # Fallback for short recordings
-            convert "$gif_file" -coalesce -delete 1--1 "$CURRENT_DIR/${scenario}_initial.png" 2>/dev/null || true
-            convert "$gif_file" -coalesce -delete 0-$((TOTAL_FRAMES-2)) "$CURRENT_DIR/${scenario}_final.png" 2>/dev/null || true
+            convert "$gif_file" -coalesce -delete 1--1 \
+                -define png:color-type=6 "$CURRENT_DIR/${scenario}_initial.png" 2>/dev/null || true
+            convert "$gif_file" -coalesce -delete 0-$((TOTAL_FRAMES-2)) \
+                -define png:color-type=6 "$CURRENT_DIR/${scenario}_final.png" 2>/dev/null || true
         fi
     fi
     
