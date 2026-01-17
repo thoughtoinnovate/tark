@@ -4,7 +4,7 @@
 
 This document provides a comprehensive mapping of the Terminal UI (React/TypeScript) to a Rust Ratatui TUI implementation. It serves as a reference guide for AI agents to recreate the interface using Ratatui.
 
-> **Note**: Both **agent name** (default: "Innodrupe") and **user name** (auto-detected from `$USER`/`$USERNAME`) are **fully configurable**. See the [Application Configuration](#application-configuration) section for details.
+> **Note**: Both **agent name** (default: "Tark") and **user name** (auto-detected from `$USER`/`$USERNAME`) are **fully configurable**. See the [Application Configuration](#application-configuration) section for details.
 
 ---
 
@@ -33,8 +33,8 @@ The agent name, user name, and branding are **fully configurable**. This allows 
 
 ```typescript
 export interface AppConfig {
-  agentName: string;       // Full name in header (e.g., "Innodrupe Terminal")
-  agentNameShort: string;  // Short name in messages (e.g., "Innodrupe")
+  agentName: string;       // Full name in header (e.g., "Tark Terminal")
+  agentNameShort: string;  // Short name in messages (e.g., "Tark")
   version: string;         // Version string (e.g., "2.1.0")
   defaultPath: string;     // Working directory in header
   headerIcon: string;      // Icon next to agent name
@@ -45,10 +45,10 @@ export interface AppConfig {
 
 // Default configuration
 export const defaultAppConfig: AppConfig = {
-  agentName: "Innodrupe Terminal",
-  agentNameShort: "Innodrupe",
+  agentName: "Tark Terminal",
+  agentNameShort: "Tark",
   version: "2.1.0",
-  defaultPath: "~/innodrupe/core/engine",
+  defaultPath: "~/tark/workspace",
   headerIcon: "🖥",
   agentIcon: "🤖",
   userName: "You",         // Auto-detected from $USER/$USERNAME in Ratatui
@@ -78,10 +78,10 @@ impl Default for AppConfig {
             .unwrap_or_else(|_| "You".to_string());
         
         Self {
-            agent_name: "Innodrupe Terminal".to_string(),
-            agent_name_short: "Innodrupe".to_string(),
+            agent_name: "Tark Terminal".to_string(),
+            agent_name_short: "Tark".to_string(),
             version: "2.1.0".to_string(),
-            default_path: "~/innodrupe/core/engine".to_string(),
+            default_path: "~/tark/workspace".to_string(),
             header_icon: "🖥".to_string(),
             agent_icon: "🤖".to_string(),
             user_name,  // Auto-detected!
@@ -95,16 +95,28 @@ impl Default for AppConfig {
 
 | Location | Field | Example |
 |----------|-------|---------|
-| Terminal Header (title) | `agentName` | "🖥 INNODRUPE TERMINAL" |
-| Terminal Header (path) | `defaultPath` | "~/innodrupe/core/engine" |
-| Agent Message Label | `agentNameShort` | "Innodrupe" |
-| User Message Label | `userName` | Auto-detected (e.g., "john", "hvashisht") |
-| System Init Message | `agentNameShort` + `version` | "Innodrupe Core v2.1.0 initialized" |
+| Terminal Header (title) | `agentName` | "🖥 TARK TERMINAL" |
+| Terminal Header (path) | `defaultPath` | "~/tark/workspace" |
+| Agent Message Label | `agentNameShort` | "Tark" |
+| User Message Label | `userName` | Auto-detected (e.g., "john", "user") |
+| System Init Message | `agentNameShort` + `version` | "Tark Core v2.1.0 initialized" |
 | Message Icon | `agentIcon` | 🤖 |
 
 ### Customization Examples
 
-**Change to "CodePilot":**
+**Default Configuration (Tark):**
+```typescript
+export const defaultAppConfig: AppConfig = {
+  agentName: "Tark Terminal",
+  agentNameShort: "Tark",
+  version: "2.1.0",
+  defaultPath: "~/tark/workspace",
+  headerIcon: "🖥",
+  agentIcon: "🤖",
+};
+```
+
+**Alternative: "CodePilot":**
 ```typescript
 export const defaultAppConfig: AppConfig = {
   agentName: "CodePilot Terminal",
@@ -113,18 +125,6 @@ export const defaultAppConfig: AppConfig = {
   defaultPath: "~/workspace",
   headerIcon: "🚀",
   agentIcon: "🤖",
-};
-```
-
-**Change to "DevAssist":**
-```typescript
-export const defaultAppConfig: AppConfig = {
-  agentName: "DevAssist Terminal",
-  agentNameShort: "DevAssist",
-  version: "3.0.0",
-  defaultPath: "~/dev",
-  headerIcon: "⚡",
-  agentIcon: "🧙",
 };
 ```
 
@@ -204,7 +204,7 @@ When comparing your implementation to screenshots:
 
 Below is an ASCII representation of the target TUI appearance. This is what your implementation should look like:
 
-> **Note**: "INNODRUPE TERMINAL" is the default agent name. This is **configurable** via `AppConfig`.
+> **Note**: "TARK TERMINAL" is the default agent name. This is **configurable** via `AppConfig`.
 
 ```
 ╭─ {config.agent_name} ─────────────────────────────────────────────────────────────────╮╭─ Panel ──────────────────╮
@@ -215,7 +215,7 @@ Below is an ASCII representation of the target TUI appearance. This is what your
 │                                                                                       ││   ✨ gemini-1.5-pro      │
 │  👤 Analyze the Terminal.tsx file and suggest improvements                            ││   ☁ gemini-oauth         │
 │                                                                                       ││   💰 $0.015 (3 models)   │
-│  🤖 I'll analyze the Terminal.tsx file for you.                                       ││                          │
+│  🤖 Tark: I'll analyze the Terminal.tsx file for you.                                 ││                          │
 │                                                                                       ││ ▼  Context        1.0k  │
 │     Looking at the code structure, I can see this is a React component that           ││    1,833 / 1M tokens    │
 │     implements the main terminal interface. Here are my suggestions:                  ││   ▼ Loaded Files (8)     │
@@ -687,7 +687,7 @@ impl App {
             terminal_output: vec![
                 TerminalLine {
                     line_type: LineType::System,
-                    content: "Innodrupe Core v2.1.0 initialized".to_string(),
+                    content: "Tark Core v2.1.0 initialized".to_string(),
                     meta: None,
                     details: None,
                 },
@@ -1224,13 +1224,13 @@ impl App {
             Constraint::Percentage(50),
         ]).split(area);
         
-        let title = Paragraph::new("🖥 INNODRUPE TERMINAL")
+        let title = Paragraph::new("🖥 TARK TERMINAL")
             .style(Style::default()
                 .fg(colors::TEXT_SECONDARY)
                 .add_modifier(Modifier::BOLD));
         frame.render_widget(title, chunks[0]);
         
-        let path = Paragraph::new("~/innodrupe/core/engine")
+        let path = Paragraph::new("~/tark/workspace")
             .style(Style::default().fg(colors::TEXT_MUTED))
             .alignment(Alignment::Right);
         frame.render_widget(path, chunks[1]);
@@ -2313,7 +2313,7 @@ impl App {
 
 ## Conclusion
 
-This guide provides a comprehensive mapping from the React-based InnoDrupe Terminal UI to a Ratatui TUI implementation. Follow the implementation checklist and refer to the code examples to build the TUI step by step.
+This guide provides a comprehensive mapping from the React-based Tark Terminal UI to a Ratatui TUI implementation. Follow the implementation checklist and refer to the code examples to build the TUI step by step.
 
 Key takeaways:
 1. **Layout**: Use `Layout` for splits, `Block` for borders
