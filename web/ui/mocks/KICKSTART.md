@@ -4,30 +4,149 @@
 
 ---
 
-## ⚠️ CRITICAL: Test the REAL App, Not Mocks
+## 🚨🚨🚨 CRITICAL: Test the REAL `tark tui` App - NEVER Mocks! 🚨🚨🚨
 
-**DO NOT create stub/mock step definitions that always pass!**
+**THIS IS THE MOST IMPORTANT RULE. READ IT MULTIPLE TIMES.**
 
-The cucumber tests MUST:
-1. **Render actual widgets** using `TestBackend` from ratatui
-2. **Verify actual terminal output** - check characters, colors, positions
-3. **Run the real `tark tui` command** for E2E tests
-4. **Compare against reference screenshots** for visual verification
+### ⛔ ABSOLUTE REQUIREMENT: Run BDD Against ACTUAL `tark tui`
 
-**WRONG approach (mocks):**
+**Every BDD test MUST run against the REAL `tark tui` command, not mock objects!**
+
+```bash
+# ✅ CORRECT: BDD tests invoke the REAL tark tui binary
+cargo test --test cucumber_tui  # This MUST spawn ./target/release/tark tui
+
+# ❌ WRONG: BDD tests only test mock objects in memory
+# (If your tests pass without `tark tui` existing, YOUR TESTS ARE BROKEN!)
+```
+
+### 🔴 What "No Mocks" Means
+
+| Term | What It Means | Allowed? |
+|------|---------------|----------|
+| **TUI Mocks** | Fake step definitions that don't test real TUI | ❌ **NEVER** |
+| **Test Stubs** | `assert!(true)` or hardcoded returns | ❌ **NEVER** |
+| **Memory-only tests** | Tests that don't render to terminal/TestBackend | ❌ **NEVER** |
+| **`tark_sim` provider** | LLM simulation for predictable AI responses | ✅ **ALLOWED** (only for LLM) |
+| **`TestBackend`** | Ratatui's in-memory terminal for verification | ✅ **ALLOWED** (real rendering) |
+
+### ⚠️ Clarification: "Mocks" vs "tark_sim"
+
+**The ONLY mock allowed is `tark_sim` - and it's ONLY for LLM simulation:**
+
+```bash
+# tark_sim is ONLY for simulating LLM responses (not TUI behavior!)
+./target/release/tark tui --provider tark_sim
+
+# This makes AI responses predictable for testing
+# BUT the TUI itself is REAL - not mocked!
+```
+
+**`tark_sim` does NOT mock:**
+- ❌ TUI rendering (real widgets must render)
+- ❌ Keyboard input (real events must be handled)
+- ❌ Layout/styling (real Ratatui code must run)
+- ❌ State management (real AppState must work)
+
+**`tark_sim` ONLY mocks:**
+- ✅ LLM API calls (returns predictable responses)
+- ✅ Network requests to AI providers
+
+### The cucumber tests MUST:
+
+1. **Spawn the REAL `tark tui` binary** - Not just instantiate objects in memory
+2. **Render actual widgets** using `TestBackend` from ratatui  
+3. **Verify actual terminal output** - check characters, colors, positions
+4. **Run against the compiled binary** for E2E tests
+5. **Compare against reference screenshots** for visual verification
+
+### ❌ WRONG approach (mocks that always pass):
+
 ```rust
 fn has_header(&self) -> bool {
-    true  // ❌ This always passes - useless!
+    true  // ❌ USELESS - This always passes without testing anything!
+}
+
+#[then("I should see the terminal header")]
+async fn see_header(world: &mut TuiWorld) {
+    assert!(true);  // ❌ USELESS - No actual verification!
+}
+
+#[then("the status bar should show Build mode")]
+async fn status_bar_mode(world: &mut TuiWorld) {
+    // ❌ WRONG - Just checking a mock field, not real rendering
+    assert_eq!(world.mock_mode, "Build");
 }
 ```
 
-**RIGHT approach (real rendering):**
+### ✅ RIGHT approach (test REAL `tark tui`):
+
 ```rust
 fn has_header(&self) -> bool {
     // ✅ Actually render and check the buffer
     let buffer = self.render_to_test_backend();
     buffer.cell((0, 0)).symbol() == "╭"  // Check actual rendered output
 }
+
+#[then("I should see the terminal header")]
+async fn see_header(world: &mut TuiWorld) {
+    // ✅ Render the REAL TuiApp and verify buffer contents
+    let buffer = world.app.render_to_buffer();
+    assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "╭",
+        "Expected rounded corner at top-left of REAL rendered output");
+}
+
+#[then("the status bar should show Build mode")]
+async fn status_bar_mode(world: &mut TuiWorld) {
+    // ✅ Read from REAL rendered terminal buffer
+    let buffer = world.app.render_to_buffer();
+    let status_line = read_line_from_buffer(buffer, world.height - 1);
+    assert!(status_line.contains("Build"), 
+        "Status bar should show 'Build' in REAL rendered output");
+}
+```
+
+### 🔍 How to Verify You're Testing Real TUI
+
+**Self-check after implementing each feature:**
+
+```bash
+# 1. Delete src/tui_new/ temporarily
+mv src/tui_new src/tui_new_backup
+
+# 2. Run BDD tests
+cargo test --test cucumber_tui
+
+# 3. If tests PASS → YOUR TESTS ARE BROKEN (testing mocks, not real TUI)
+# 4. If tests FAIL → Good! Tests actually verify real implementation
+
+# 5. Restore
+mv src/tui_new_backup src/tui_new
+```
+
+**If BDD tests pass without the TUI implementation existing, you have written useless mock tests!**
+
+---
+
+## 🛑 STOP: Read This Before Every Feature
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  AFTER EVERY FEATURE IMPLEMENTATION, YOU MUST:                             ║
+║                                                                            ║
+║  1. cargo build --release --features test-sim                              ║
+║  2. cargo test --test cucumber_tui -- features/XX.feature                  ║
+║     ⚠️  Tests MUST run against REAL `tark tui` binary!                     ║
+║     ⚠️  If tests pass without binary existing, TESTS ARE BROKEN!           ║
+║  3. ./tests/visual/tui_e2e_runner.sh --scenario XX                         ║
+║  4. Verify: tests/visual/tui/snapshots/XX/ has PNG files                   ║
+║  5. Verify: tests/visual/tui/recordings/XX/ has GIF files                  ║
+║  6. git add & commit snapshots + recordings                                ║
+║                                                                            ║
+║  MOCKS CLARIFICATION:                                                      ║
+║  • tark_sim = LLM simulation ONLY (allowed for predictable AI responses)   ║
+║  • TUI Mocks = NEVER ALLOWED (step definitions must test real rendering)   ║
+╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
 ---
@@ -142,6 +261,85 @@ Without a working `tark tui` command, tests are just testing mocks!
 ```
 
 **NEVER skip steps.** If tests pass before implementation (step 2), the test is wrong or incomplete.
+
+---
+
+## 🔁 MANDATORY: Test Real TUI After EVERY Feature
+
+**After implementing EACH feature, you MUST run BDD against the REAL `tark tui`:**
+
+### Per-Feature Testing Checklist (REQUIRED)
+
+```bash
+# After implementing feature XX (e.g., 01_terminal_layout):
+
+# 1. BUILD the real binary
+cargo build --release --features test-sim
+
+# 2. RUN BDD tests against REAL tark tui
+cargo test --test cucumber_tui -- features/XX_feature_name.feature
+
+# ⚠️ These tests MUST spawn ./target/release/tark tui internally!
+# ⚠️ If tests pass without the binary, tests are WRONG!
+
+# 3. RUN E2E visual test
+./tests/visual/tui_e2e_runner.sh --scenario XX_feature_name
+
+# 4. VERIFY snapshot captured
+ls -la tests/visual/tui/snapshots/XX_feature_name/
+
+# 5. VERIFY recording captured  
+ls -la tests/visual/tui/recordings/XX_feature_name/
+
+# 6. COMMIT artifacts
+git add tests/visual/tui/snapshots/XX_feature_name/
+git add tests/visual/tui/recordings/XX_feature_name/
+git commit -m "feat(tui): add feature XX with BDD tests and snapshots"
+```
+
+### Snapshot & Recording Directory Structure
+
+**EVERY feature scenario MUST produce artifacts in these directories:**
+
+```
+tests/visual/tui/
+├── snapshots/                           # PNG snapshots (COMMITTED to git)
+│   ├── 01_terminal_layout/              # Feature-specific directory
+│   │   ├── main_layout_initial.png
+│   │   ├── main_layout_final.png
+│   │   ├── header_rendering.png
+│   │   └── scroll_behavior.png
+│   ├── 02_status_bar/
+│   │   ├── mode_selector_build.png
+│   │   ├── mode_selector_plan.png
+│   │   └── working_indicator.png
+│   ├── 03_message_display/
+│   │   └── ...
+│   └── ... (one directory per feature)
+│
+├── recordings/                          # GIF recordings (COMMITTED to git)
+│   ├── 01_terminal_layout/
+│   │   ├── main_layout.gif
+│   │   ├── scroll_interaction.gif
+│   │   └── resize_behavior.gif
+│   ├── 02_status_bar/
+│   │   └── ...
+│   └── ... (one directory per feature)
+│
+├── current/                             # Latest run (GITIGNORED)
+└── diffs/                               # Visual diffs (GITIGNORED)
+```
+
+### ⚠️ FAILURE CONDITIONS
+
+**Stop and fix if ANY of these occur:**
+
+| Condition | Problem | Action |
+|-----------|---------|--------|
+| BDD passes without `tark tui` binary | Tests are mocks | Rewrite step definitions to test real TUI |
+| No snapshots in `snapshots/XX/` | E2E not capturing | Fix tui_e2e_runner.sh scenario |
+| No recordings in `recordings/XX/` | Recording failed | Check asciinema/agg setup |
+| Snapshot doesn't match reference | Visual regression | Fix TUI rendering to match reference |
 
 ---
 
@@ -385,18 +583,21 @@ When you encounter an unimplemented step:
 
 1. Open `common_steps.rs`
 2. Add the step with appropriate attribute (`#[given]`, `#[when]`, `#[then]`)
-3. Implement the step logic **that tests REAL rendering**
+3. **Implement the step logic that tests REAL `tark tui` rendering**
 4. Wire it to the `TuiWorld` state
+
+**⚠️ REMINDER: Step definitions must test the REAL TUI, not mocks!**
 
 Example:
 
 ```rust
 #[then(regex = r"the status bar should show (.+)")]
 async fn status_bar_shows(world: &mut TuiWorld, expected: String) {
-    let buffer = world.render();
+    // ✅ CORRECT: Render REAL TuiApp to TestBackend
+    let buffer = world.render();  // This calls real TuiApp::render()
     let height = world.terminal_size.1;
     
-    // Read the status bar line (last line)
+    // ✅ CORRECT: Read from REAL rendered buffer
     let status_line: String = (0..world.terminal_size.0)
         .map(|x| buffer.cell((x, height - 1)).unwrap().symbol())
         .collect();
@@ -404,6 +605,26 @@ async fn status_bar_shows(world: &mut TuiWorld, expected: String) {
     assert!(status_line.contains(&expected), 
         "Expected status bar to contain '{}', got '{}'", expected, status_line);
 }
+
+// ❌ WRONG: Do NOT do this!
+#[then(regex = r"the status bar should show (.+)")]
+async fn status_bar_shows_WRONG(world: &mut TuiWorld, expected: String) {
+    // ❌ WRONG: This tests a mock field, not real rendering!
+    assert!(world.mock_status.contains(&expected));
+}
+```
+
+### Self-Verification: Are Your Steps Testing Real TUI?
+
+```bash
+# Quick test to verify step definitions test real TUI:
+
+# 1. Comment out TuiApp::render() implementation
+# 2. Run cucumber tests
+# 3. If tests PASS → Your steps are mocks (BROKEN!)
+# 4. If tests FAIL → Your steps test real TUI (CORRECT!)
+
+# Your steps must FAIL when TUI rendering is broken!
 ```
 
 ---
@@ -1076,19 +1297,69 @@ cd tests/visual
 
 ### Understanding Test Output
 
+**⚠️ CRITICAL: Per-Feature Directory Structure**
+
+Each feature MUST have its own directory in both `snapshots/` and `recordings/`:
+
 ```
 tests/visual/tui/
-├── recordings/            # GIF animations (gitignored except demos)
-│   ├── terminal_layout.gif
-│   └── status_bar.gif
-├── snapshots/             # Baseline PNGs (committed to git)
-│   ├── terminal_layout_initial.png
-│   ├── terminal_layout_final.png
-│   └── ...
-├── current/               # Latest run PNGs (gitignored)
-│   └── ... (same structure as snapshots/)
-└── diffs/                 # Visual diff images (gitignored)
-    └── diff_status_bar_final.png
+├── snapshots/                              # ✅ COMMITTED to git
+│   ├── 01_terminal_layout/                 # Feature 01 directory
+│   │   ├── main_layout_initial.png
+│   │   ├── main_layout_final.png
+│   │   ├── header_rendering.png
+│   │   ├── scroll_top.png
+│   │   └── scroll_bottom.png
+│   ├── 02_status_bar/                      # Feature 02 directory
+│   │   ├── mode_build.png
+│   │   ├── mode_plan.png
+│   │   ├── mode_ask.png
+│   │   └── working_indicator.png
+│   ├── 03_message_display/
+│   │   ├── system_message.png
+│   │   ├── user_message.png
+│   │   ├── agent_message.png
+│   │   ├── tool_message.png
+│   │   ├── thinking_block.png
+│   │   └── command_message.png
+│   ├── ... (04-15 feature directories)
+│   └── complete_feature_test/              # 🎯 FINAL COMPLETE TEST
+│       └── complete_demo_final.png
+│
+├── recordings/                             # ✅ COMMITTED to git
+│   ├── 01_terminal_layout/
+│   │   ├── layout_demo.gif
+│   │   └── scroll_demo.gif
+│   ├── 02_status_bar/
+│   │   └── mode_switching.gif
+│   ├── ... (04-15 feature directories)
+│   └── complete_feature_test/              # 🎯 FINAL COMPLETE TEST
+│       ├── complete_feature_test.cast      # Raw asciinema
+│       └── complete_feature_test.gif       # Full demo (~2-3 min)
+│
+├── current/                                # ❌ GITIGNORED (latest run)
+│   └── ... (same structure, for comparison)
+│
+└── diffs/                                  # ❌ GITIGNORED (visual diffs)
+    └── diff_status_bar_mode_build.png
+```
+
+### Verification After Each Feature
+
+```bash
+# After implementing feature 02 (status_bar):
+
+# 1. Run E2E for this feature
+./tests/visual/tui_e2e_runner.sh --scenario 02_status_bar
+
+# 2. Verify directories created
+ls tests/visual/tui/snapshots/02_status_bar/
+# Expected: mode_build.png, mode_plan.png, ...
+
+ls tests/visual/tui/recordings/02_status_bar/
+# Expected: mode_switching.gif
+
+# 3. If directories are EMPTY or MISSING → E2E runner is broken!
 ```
 
 ### Creating New E2E Scenarios
@@ -1688,7 +1959,7 @@ Run this command sequence to validate everything:
 cargo clean
 cargo build --release --features test-sim
 
-# 2. Run all BDD tests
+# 2. Run all BDD tests against REAL tark tui
 cargo test --test cucumber_tui
 
 # 3. Run all E2E tests
@@ -1704,6 +1975,145 @@ cd ../..
 
 # All should pass with no errors
 ```
+
+---
+
+## 🎬 REQUIRED: Complete Feature Recording
+
+**After ALL 15 features are implemented and tested, create a COMPLETE feature demonstration:**
+
+### Complete Recording Requirements
+
+```bash
+# After ALL features pass (features 01-15):
+
+# 1. Create complete demonstration recording
+./tests/visual/tui_e2e_runner.sh --scenario complete_feature_test
+
+# 2. This recording MUST demonstrate ALL features:
+#    - Terminal layout (01)
+#    - Status bar interactions (02)
+#    - All 7 message types (03)
+#    - Input area with context files (04)
+#    - All 5 modals (05-09)
+#    - All 3 question types (10-12)
+#    - Sidebar panels (13)
+#    - Theme switching (14)
+#    - Keyboard shortcuts (15)
+
+# 3. Verify complete recording exists
+ls -la tests/visual/tui/recordings/complete_feature_test/
+# Should contain:
+#   - complete_feature_test.gif (full demo ~2-3 min)
+#   - complete_feature_test.cast (raw asciinema recording)
+```
+
+### Complete Recording Structure
+
+```
+tests/visual/tui/recordings/
+├── 01_terminal_layout/          # Individual feature recordings
+├── 02_status_bar/
+├── ...
+├── 15_keyboard_shortcuts/
+└── complete_feature_test/       # 🎯 FINAL COMPLETE RECORDING
+    ├── complete_feature_test.cast   # Raw asciinema
+    ├── complete_feature_test.gif    # Animated demo
+    └── complete_feature_test_summary.png  # Final state snapshot
+```
+
+### Complete Recording Script
+
+The `complete_feature_test` scenario in `tui_e2e_runner.sh` should:
+
+```bash
+# Example expect script for complete_feature_test
+#!/usr/bin/expect -f
+set timeout 180
+
+spawn ./target/release/tark tui --provider tark_sim
+sleep 2
+
+# Feature 01: Terminal layout
+send "Hello, testing terminal layout\r"
+sleep 2
+
+# Feature 02: Status bar
+send "\x01m"  # Ctrl+A m for mode selector
+sleep 1
+send "\x1b"   # Escape to close
+
+# Feature 03: Messages - send various types
+send "Show me different message types\r"
+sleep 3
+
+# Feature 04: Input area
+send "@file.txt Test context file\r"
+sleep 2
+
+# Feature 05-09: Modals
+send "/provider\r"
+sleep 1
+send "\x1b"
+send "/model\r"
+sleep 1
+send "\x1b"
+send "/theme\r"
+sleep 1
+send "j"  # Navigate down
+send "\r" # Select theme
+sleep 1
+send "/help\r"
+sleep 2
+send "\x1b"
+
+# Feature 10-12: Questions (triggered by LLM sim)
+# ... interaction with question responses ...
+
+# Feature 13: Sidebar
+send "\x01b"  # Ctrl+A b for sidebar toggle
+sleep 1
+send "\x01b"
+
+# Feature 14: Theme switching (already done above)
+
+# Feature 15: Keyboard shortcuts demo
+send "gg"     # Scroll to top
+sleep 0.5
+send "G"      # Scroll to bottom
+sleep 0.5
+send "?"      # Help
+sleep 1
+send "\x1b"
+
+# Exit
+send "/exit\r"
+expect eof
+```
+
+### Commit Complete Recording
+
+```bash
+# After complete recording is captured:
+git add tests/visual/tui/recordings/complete_feature_test/
+git commit -m "feat(tui): add complete feature demonstration recording
+
+- All 15 features demonstrated in sequence
+- 270 BDD scenarios passing
+- Visual regression tests green
+- Complete TUI implementation verified"
+```
+
+### ✅ Definition of Done
+
+**The TUI implementation is COMPLETE when:**
+
+1. ✅ All 270 BDD scenarios pass against REAL `tark tui`
+2. ✅ All 15 feature directories exist in `snapshots/` with PNGs
+3. ✅ All 15 feature directories exist in `recordings/` with GIFs
+4. ✅ `complete_feature_test/` recording demonstrates all features
+5. ✅ Visual regression passes (RMSE < 0.1)
+6. ✅ All artifacts committed to git
 
 ---
 
