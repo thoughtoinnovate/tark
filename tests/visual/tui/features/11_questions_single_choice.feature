@@ -33,7 +33,7 @@ Feature: Single Choice Questions (Radio)
     Given a single choice question is displayed
     Then options should have radio button style "○"
     And text should indicate "Select one"
-    Or the visual style should imply single selection
+    And the visual style should imply single selection
 
   # =============================================================================
   # OPTION SELECTION
@@ -102,7 +102,7 @@ Feature: Single Choice Questions (Radio)
     Given no option is selected
     When I press "Enter" on the submit action
     Then a warning should appear "Please select an option"
-    Or submit should be prevented
+    And submit should be prevented
 
   Scenario: Display answered question state
     Given I submitted selection "React"

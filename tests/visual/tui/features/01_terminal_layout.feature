@@ -38,7 +38,7 @@ Feature: Terminal Layout
   Scenario: Minimum terminal size handling
     Given the terminal is resized to 60 columns and 15 rows
     Then the application should display a "terminal too small" warning
-    Or the layout should gracefully degrade
+    And the layout should gracefully degrade
 
   # =============================================================================
   # SIDEBAR INTEGRATION

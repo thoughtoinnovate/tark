@@ -74,7 +74,7 @@ Feature: Sidebar Panel
     Given "config.toml" is in context
     When I click on "config.toml" in the sidebar
     Then a preview of the file should be shown
-    Or the file path should be copied to clipboard
+    And the file path should be copied to clipboard
 
   Scenario: Empty context state
     Given no files are in context
@@ -135,7 +135,7 @@ Feature: Sidebar Panel
   Scenario: No git changes state
     Given there are no uncommitted changes
     Then the "Git Changes" panel should show "No changes"
-    Or show "Working tree clean"
+    And show "Working tree clean"
 
   # =============================================================================
   # PANEL NAVIGATION

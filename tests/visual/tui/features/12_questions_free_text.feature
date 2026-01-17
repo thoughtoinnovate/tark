@@ -72,7 +72,7 @@ Feature: Free Text Questions
     Given the input is empty
     When I press "Enter"
     Then a warning should appear "Please enter a response"
-    Or a default value should be used if specified
+    And a default value should be used if specified
 
   Scenario: Display answered question state
     Given I submitted answer "my-api-key-123"
@@ -131,7 +131,7 @@ Feature: Free Text Questions
     Given I have typed partial text
     When I press "Escape"
     Then the input should be cleared
-    Or focus should leave the question
+    And focus should leave the question
 
   Scenario: Navigate to previous question with Shift+Tab
     Given there are multiple questions

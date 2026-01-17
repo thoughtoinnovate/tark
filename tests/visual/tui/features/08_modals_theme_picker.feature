@@ -47,7 +47,7 @@ Feature: Theme Picker Modal
   Scenario: Themes grouped by type
     Given the theme picker modal is open
     Then themes should be organized into "Dark" and "Light" sections
-    Or themes should show a light/dark indicator
+    And themes should show a light/dark indicator
 
   Scenario: Highlight current theme
     Given the current theme is "Catppuccin Mocha"

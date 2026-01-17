@@ -241,6 +241,12 @@ async fn input_focused(world: &mut TuiWorld) {
     world.app.set_input_mode(InputMode::Insert);
 }
 
+#[given("the status bar is visible at the bottom of the terminal")]
+async fn status_bar_visible(world: &mut TuiWorld) {
+    // Status bar is always visible in the TUI layout
+    assert!(world.has_status_bar());
+}
+
 #[given("thinking mode is enabled")]
 async fn thinking_enabled(world: &mut TuiWorld) {
     world.app.thinking_display = true;

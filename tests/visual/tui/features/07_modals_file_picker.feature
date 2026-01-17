@@ -116,7 +116,7 @@ Feature: File Picker Modal
     Then "main.rs" should show a checkmark or "added" indicator
     When I select "main.rs" again
     Then it should be removed from context (toggle behavior)
-    Or it should show "already added" message
+    And it should show "already added" message
 
   # =============================================================================
   # KEYBOARD NAVIGATION

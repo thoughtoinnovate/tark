@@ -38,7 +38,7 @@ Feature: Multiple Choice Questions (Checkbox)
   Scenario: Question indicates multi-select capability
     Given a multiple choice question is displayed
     Then text should indicate "Select all that apply"
-    Or checkboxes should indicate multiple selection is allowed
+    And checkboxes should indicate multiple selection is allowed
 
   # =============================================================================
   # OPTION SELECTION
@@ -110,7 +110,7 @@ Feature: Multiple Choice Questions (Checkbox)
     Given no options are selected
     When I press "Enter"
     Then a warning should appear "Please select at least one option"
-    Or the submit should be prevented
+    And the submit should be prevented
 
   Scenario: Display answered question state
     Given I submitted selections "Authentication, Database"
