@@ -311,14 +311,18 @@ run_scenario() {
     fi
     
     # Convert to GIF
+    # Use Symbola font for Unicode icons (◆, ◇, ▶, ✓, etc.) and Noto for emoji (⚠️, 🔧, etc.)
     log_info "Converting to GIF..."
+    AGG_FONT_FAMILY="DejaVu Sans Mono,Symbola,Noto Color Emoji"
     if command -v agg >/dev/null 2>&1; then
         agg --font-size 14 --cols 120 --rows 40 --theme monokai \
+            --font-family "$AGG_FONT_FAMILY" \
             "$animated_cast" "$gif_file" 2>&1 || {
             log_warn "agg failed, GIF not generated"
         }
     elif [ -f "$HOME/.cargo/bin/agg" ]; then
         "$HOME/.cargo/bin/agg" --font-size 14 --cols 120 --rows 40 --theme monokai \
+            --font-family "$AGG_FONT_FAMILY" \
             "$animated_cast" "$gif_file" 2>&1 || {
             log_warn "agg failed, GIF not generated"
         }
