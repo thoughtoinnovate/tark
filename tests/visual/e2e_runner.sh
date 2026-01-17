@@ -133,7 +133,6 @@ generate_expect_script() {
 set timeout 30
 log_user 1
 set env(TERM) xterm-256color
-set env(COLORTERM) truecolor
 spawn ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Hello, can you help me?\r"
@@ -178,7 +177,6 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 60
 log_user 1
-set env(TERM) xterm-256color
 spawn ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "My name is Alice\r"
@@ -195,7 +193,6 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 30
 log_user 1
-set env(TERM) xterm-256color
 spawn env TARK_SIM_SCENARIO=error_timeout ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Trigger an error\r"
@@ -210,7 +207,6 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 60
 log_user 1
-set env(TERM) xterm-256color
 spawn env TARK_SIM_SCENARIO=thinking ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Think deeply about this problem\r"
@@ -225,7 +221,6 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 30
 log_user 1
-set env(TERM) xterm-256color
 spawn ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "/help\r"
@@ -241,7 +236,6 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 30
 log_user 1
-set env(TERM) xterm-256color
 spawn env TARK_SIM_SCENARIO=${sim_scenario} ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Test message for ${scenario}\r"
@@ -320,21 +314,37 @@ run_scenario() {
         # Get total frame count
         TOTAL_FRAMES=$(identify "$gif_file" 2>/dev/null | wc -l || echo 0)
         
-        if [ "$TOTAL_FRAMES" -gt 3 ]; then
-            # Coalesce frame 3 (TUI should be visible) for initial
+        if [ "$TOTAL_FRAMES" -le 0 ]; then
+            log_warn "GIF has no frames, skipping snapshot extraction"
+        elif [ "$TOTAL_FRAMES" -eq 1 ]; then
+            # Single frame: use it for both initial and final
+            convert "$gif_file" -coalesce \
+                -define png:color-type=6 "$CURRENT_DIR/${scenario}_initial.png" 2>/dev/null || true
+            convert "$gif_file" -coalesce \
+                -define png:color-type=6 "$CURRENT_DIR/${scenario}_final.png" 2>/dev/null || true
+        elif [ "$TOTAL_FRAMES" -eq 2 ]; then
+            # Two frames: use frame 0 for initial, frame 1 for final
+            convert "$gif_file" -coalesce -delete 1--1 \
+                -define png:color-type=6 "$CURRENT_DIR/${scenario}_initial.png" 2>/dev/null || true
+            convert "$gif_file" -coalesce -delete 0-0 \
+                -define png:color-type=6 "$CURRENT_DIR/${scenario}_final.png" 2>/dev/null || true
+        elif [ "$TOTAL_FRAMES" -eq 3 ]; then
+            # Three frames: frame 0 for initial, frame 2 for final
+            convert "$gif_file" -coalesce -delete 1--1 \
+                -define png:color-type=6 "$CURRENT_DIR/${scenario}_initial.png" 2>/dev/null || true
+            convert "$gif_file" -coalesce -delete 0-1 \
+                -define png:color-type=6 "$CURRENT_DIR/${scenario}_final.png" 2>/dev/null || true
+        else
+            # 4+ frames: frame 3 for initial, second-to-last for final
             convert "$gif_file" -coalesce -delete 0-2 -delete 1--1 \
                 -define png:color-type=6 "$CURRENT_DIR/${scenario}_initial.png" 2>/dev/null || true
             
-            # Coalesce second-to-last frame for final (before exit, with response)
+            # Calculate final frame index (avoiding negative numbers)
             FINAL_IDX=$((TOTAL_FRAMES - 2))
-            convert "$gif_file" -coalesce -delete 0-$((FINAL_IDX-1)) -delete 1--1 \
-                -define png:color-type=6 "$CURRENT_DIR/${scenario}_final.png" 2>/dev/null || true
-        else
-            # Fallback for short recordings
-            convert "$gif_file" -coalesce -delete 1--1 \
-                -define png:color-type=6 "$CURRENT_DIR/${scenario}_initial.png" 2>/dev/null || true
-            convert "$gif_file" -coalesce -delete 0-$((TOTAL_FRAMES-2)) \
-                -define png:color-type=6 "$CURRENT_DIR/${scenario}_final.png" 2>/dev/null || true
+            if [ "$FINAL_IDX" -ge 0 ]; then
+                convert "$gif_file" -coalesce -delete 0-$((FINAL_IDX-1)) -delete 1--1 \
+                    -define png:color-type=6 "$CURRENT_DIR/${scenario}_final.png" 2>/dev/null || true
+            fi
         fi
     fi
     
