@@ -133,6 +133,8 @@ generate_expect_script() {
 set timeout 30
 log_user 1
 set env(TERM) xterm-256color
+set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Hello, can you help me?\r"
@@ -148,6 +150,8 @@ EXPEOF
 set timeout 45
 log_user 1
 set env(TERM) xterm-256color
+set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn env TARK_SIM_SCENARIO=streaming ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Explain Rust closures in detail please\r"
@@ -163,6 +167,8 @@ EXPEOF
 set timeout 45
 log_user 1
 set env(TERM) xterm-256color
+set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn env TARK_SIM_SCENARIO=tool ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Search for TODO in this project\r"
@@ -177,6 +183,9 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 60
 log_user 1
+set env(TERM) xterm-256color
+set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "My name is Alice\r"
@@ -193,6 +202,9 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 30
 log_user 1
+set env(TERM) xterm-256color
+set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn env TARK_SIM_SCENARIO=error_timeout ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Trigger an error\r"
@@ -207,6 +219,9 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 60
 log_user 1
+set env(TERM) xterm-256color
+set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn env TARK_SIM_SCENARIO=thinking ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Think deeply about this problem\r"
@@ -221,6 +236,9 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 30
 log_user 1
+set env(TERM) xterm-256color
+set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "/help\r"
@@ -236,6 +254,9 @@ EXPEOF
 #!/usr/bin/expect -f
 set timeout 30
 log_user 1
+set env(TERM) xterm-256color
+set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn env TARK_SIM_SCENARIO=${sim_scenario} ./target/release/tark chat --provider tark_sim --cwd /tmp
 sleep 3
 send "Test message for ${scenario}\r"

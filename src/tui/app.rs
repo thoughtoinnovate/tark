@@ -1526,6 +1526,12 @@ impl TuiApp {
 
     /// Set up the terminal for TUI rendering
     fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
+        // Force color output if TARK_FORCE_COLOR=1 is set
+        // This is needed for E2E test recordings where TTY detection fails
+        if std::env::var("TARK_FORCE_COLOR").map_or(false, |v| v == "1") {
+            crossterm::style::force_color_output(true);
+        }
+
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         // Enable bracketed paste to receive pasted text as a single event
