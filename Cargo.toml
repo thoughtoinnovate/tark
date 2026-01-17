@@ -106,6 +106,12 @@ sha2 = { version = "0.10", optional = true }
 assert_cmd = "2"
 predicates = "3"
 proptest = "1.5"
+cucumber = "0.21"
+futures = "0.3"
+
+[[test]]
+name = "cucumber_tui"
+harness = false
 
 [features]
 default = []
