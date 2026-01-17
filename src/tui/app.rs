@@ -1528,7 +1528,7 @@ impl TuiApp {
     fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
         // Force color output if TARK_FORCE_COLOR=1 is set
         // This is needed for E2E test recordings where TTY detection fails
-        if std::env::var("TARK_FORCE_COLOR").map_or(false, |v| v == "1") {
+        if std::env::var("TARK_FORCE_COLOR").is_ok_and(|v| v == "1") {
             crossterm::style::force_color_output(true);
         }
 
