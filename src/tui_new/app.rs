@@ -694,7 +694,10 @@ impl<B: Backend> TuiApp<B> {
                                         }
                                         None => {}
                                     }
-                                } else if matches!(self.state.focused_component, FocusedComponent::Input) {
+                                } else if matches!(
+                                    self.state.focused_component,
+                                    FocusedComponent::Input
+                                ) {
                                     self.state.submit_input();
                                 }
                             }
