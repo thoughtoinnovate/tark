@@ -169,8 +169,9 @@ impl Widget for MessageArea<'_> {
             lines.push(Line::from(""));
         }
 
-        // Apply scroll offset
-        let visible_lines: Vec<Line> = lines.into_iter().skip(self.scroll_offset).collect();
+        // Apply scroll offset (multiply by 2 since each message produces 2 lines: content + empty)
+        let line_offset = self.scroll_offset * 2;
+        let visible_lines: Vec<Line> = lines.into_iter().skip(line_offset).collect();
 
         let paragraph = Paragraph::new(visible_lines);
         paragraph.render(inner, buf);
