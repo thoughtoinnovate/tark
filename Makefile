@@ -21,6 +21,12 @@ help:
 	@echo "  make fmt           - Format code"
 	@echo "  make clean         - Clean build artifacts"
 	@echo ""
+	@echo "E2E Tests (asciinema + agg):"
+	@echo "  make e2e           - Run E2E visual tests (P1 core)"
+	@echo "  make e2e-smoke     - Run P0 smoke tests (fast)"
+	@echo "  make e2e-core      - Run P0+P1 core tests"
+	@echo "  make help-e2e      - Show all E2E test commands"
+	@echo ""
 	@echo "Docker:"
 	@echo "  make docker-build  - Build Docker image locally"
 	@echo "  make docker-run    - Run tark in Docker container"
@@ -129,6 +135,93 @@ build-release:
 test:
 	@echo "Running tests..."
 	cargo test
+
+# E2E Visual Tests - Uses asciinema + agg + expect
+# No VHS/Chromium required - works in headless environments
+.PHONY: build-test e2e e2e-deps e2e-chat e2e-tui e2e-all e2e-smoke e2e-core e2e-extended e2e-verify e2e-update e2e-clean e2e-list help-e2e
+
+# Install E2E test dependencies (asciinema, agg, expect, ImageMagick)
+e2e-deps:
+	@echo "Installing E2E dependencies..."
+	./tests/visual/e2e_runner.sh --install-deps
+
+build-test:
+	@echo "Building with test-sim feature..."
+	cargo build --release --features test-sim
+
+# One-stop command: build + run core tests
+e2e: build-test
+	./tests/visual/e2e_runner.sh --tier p1
+
+# Run chat E2E tests (all tiers)
+e2e-chat: build-test
+	./tests/visual/e2e_runner.sh --tier all
+
+# Run TUI E2E tests (future)
+e2e-tui:
+	@echo "TUI E2E tests not yet implemented"
+	@echo "BDD features ready: tests/visual/tui/features/"
+
+# Run all E2E tests (chat + tui)
+e2e-all: e2e-chat e2e-tui
+
+# P0 smoke tests (fast - for every commit)
+e2e-smoke: build-test
+	./tests/visual/e2e_runner.sh --tier p0
+
+# P0+P1 core tests (for PRs)
+e2e-core: build-test
+	./tests/visual/e2e_runner.sh --tier p1
+
+# P0+P1+P2 extended tests
+e2e-extended: build-test
+	./tests/visual/e2e_runner.sh --tier p2
+
+# Compare current snapshots against baseline
+e2e-verify:
+	./tests/visual/e2e_runner.sh --verify
+
+# Update baseline snapshots from current
+e2e-update:
+	./tests/visual/e2e_runner.sh --update-baseline
+
+# Clean generated files
+e2e-clean:
+	./tests/visual/e2e_runner.sh --clean
+
+# List available scenarios
+e2e-list:
+	./tests/visual/e2e_runner.sh --list
+
+help-e2e:
+	@echo "E2E Visual Tests (asciinema + agg)"
+	@echo "==================================="
+	@echo ""
+	@echo "Quick Start:"
+	@echo "  make e2e-deps         - Install asciinema, agg, expect, ImageMagick"
+	@echo "  make e2e-smoke        - Run quick smoke test (P0)"
+	@echo "  make e2e              - Run core tests (P1)"
+	@echo ""
+	@echo "Test Tiers:"
+	@echo "  make e2e-smoke        - P0 smoke tests (fast, every commit)"
+	@echo "  make e2e-core         - P0+P1 core tests (for PRs)"
+	@echo "  make e2e-extended     - P0+P1+P2 extended tests"
+	@echo ""
+	@echo "Commands:"
+	@echo "  make e2e-chat         - Run all chat E2E tests"
+	@echo "  make e2e-tui          - Run TUI E2E tests (future)"
+	@echo "  make e2e-all          - Run all E2E tests"
+	@echo "  make e2e-list         - List available scenarios"
+	@echo ""
+	@echo "Verification:"
+	@echo "  make e2e-verify       - Compare snapshots vs baseline"
+	@echo "  make e2e-update       - Update baseline images"
+	@echo "  make e2e-clean        - Remove generated files"
+	@echo ""
+	@echo "Outputs:"
+	@echo "  tests/visual/chat/recordings/*.gif  - Animated GIF recordings"
+	@echo "  tests/visual/chat/current/*.png     - Current run snapshots"
+	@echo "  tests/visual/chat/snapshots/        - Baseline images"
 
 lint:
 	@echo "Running clippy..."

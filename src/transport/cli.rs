@@ -760,6 +760,48 @@ pub async fn run_auth_logout(provider: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run the NEW TUI (TDD implementation)
+///
+/// This starts the new Terminal UI built with Test-Driven Development.
+/// Uses the tui_new module instead of the legacy tui module.
+pub async fn run_tui_new(
+    working_dir: &str,
+    _provider: Option<String>,
+    _model: Option<String>,
+    _debug: bool,
+) -> Result<()> {
+    use crate::tui_new::TuiApp;
+    use crossterm::{
+        execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    };
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::Terminal;
+    use std::io::stdout;
+
+    let working_dir = PathBuf::from(working_dir).canonicalize()?;
+    tracing::info!("Starting NEW TUI, cwd: {:?}", working_dir);
+
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let terminal = Terminal::new(backend)?;
+
+    // Create and run the TUI app
+    let mut app = TuiApp::new(terminal);
+
+    // Run the main loop
+    let result = app.run();
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(std::io::stdout(), LeaveAlternateScreen)?;
+
+    result.map_err(|e| anyhow::anyhow!("TUI error: {}", e))
+}
+
 /// Check authentication status for all providers
 pub async fn run_auth_status() -> Result<()> {
     use colored::Colorize;

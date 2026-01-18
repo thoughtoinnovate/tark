@@ -29,9 +29,27 @@ coverage/
 *.profraw
 usage.db
 
+# E2E Visual Test artifacts (generated, not baseline)
+tests/visual/*/recordings/*.gif
+tests/visual/*/recordings/*.cast
+tests/visual/*/current/
+tests/visual/*/diffs/
+tests/visual/logs/
+tests/visual/sandbox/
+
 # AI coding agent folders
 .tark/
 .kiro/
 
 # Local plugins (plugins should be installed from external repos)
 plugins/
+
+# Web/Node.js
+node_modules/
+dist/
+.vite/
+*.local
+web/**/node_modules/
+web/**/dist/
+web/**/.vite/
+web/ui/mocks/package-lock.json

@@ -130,6 +130,35 @@ tark/
   - Bug fixes → Regression tests
   - Refactors → Maintain existing test coverage
 
+### TUI Testing (CRITICAL)
+
+**⚠️ Cucumber/BDD step definitions can CHEAT by directly manipulating state instead of testing real code paths.**
+
+For TUI features, you MUST:
+
+1. **Write real behavior tests in `tests/tui_real_behavior.rs`**
+   ```rust
+   // ✅ GOOD - Tests actual code path
+   #[test]
+   fn test_slash_help_opens_help_modal() {
+       let mut app = create_test_app();
+       app.state_mut().insert_str("/help");
+       app.state_mut().submit_input();  // Calls REAL method
+       assert_eq!(app.state().active_modal, Some(ModalType::Help));
+   }
+   ```
+
+2. **Don't trust cucumber tests alone** - They may pass while real app is broken
+
+3. **Manual smoke test after EVERY TUI change**:
+   ```bash
+   cargo build --release
+   ./target/release/tark tui
+   # Verify: /help, /model, /theme, ?, Escape, Enter all work
+   ```
+
+4. **If manual test fails, fix `src/tui_new/app.rs`** - Not the test step definitions
+
 ### Versioning
 
 - **Keep versions in sync**:

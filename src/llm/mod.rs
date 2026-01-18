@@ -20,6 +20,12 @@ mod raw_log;
 pub mod streaming;
 mod types;
 
+// Test simulation provider (feature-gated)
+#[cfg(feature = "test-sim")]
+pub mod tark_sim;
+#[cfg(feature = "test-sim")]
+pub use tark_sim::TarkSimProvider;
+
 pub use claude::ClaudeProvider;
 pub use copilot::CopilotProvider;
 pub use debug_wrapper::DebugProviderWrapper;
@@ -288,6 +294,14 @@ pub fn create_provider_with_options(
         "openrouter" => {
             let mut p =
                 OpenRouterProvider::new()?.with_max_tokens(config.llm.openrouter.max_tokens);
+            if let Some(m) = model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
+        #[cfg(feature = "test-sim")]
+        "tark_sim" | "sim" | "test" => {
+            let mut p = TarkSimProvider::new();
             if let Some(m) = model {
                 p = p.with_model(m);
             }
