@@ -20,6 +20,6 @@ pub use modal::{
 #[allow(unused_imports)]
 pub use question::{QuestionOption, QuestionType, QuestionWidget};
 #[allow(unused_imports)]
-pub use sidebar::{SessionInfo, Sidebar, SidebarPanel};
+pub use sidebar::{GitChange, GitStatus, SessionInfo, Sidebar, SidebarPanel, Task, TaskStatus};
 pub use status_bar::StatusBar;
 pub use terminal_frame::TerminalFrame;

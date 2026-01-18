@@ -5,9 +5,12 @@
 
 use ratatui::backend::Backend;
 use ratatui::Terminal;
+use std::path::PathBuf;
+use tokio::sync::mpsc;
 
 use super::config::AppConfig;
 use super::theme::{Theme, ThemePreset};
+use crate::tui::agent_bridge::{AgentBridge, AgentEvent};
 
 /// Agent operation mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -102,6 +105,12 @@ pub struct AppState {
     pub input_cursor: usize,
     /// Active modal (if any)
     pub active_modal: Option<ModalType>,
+    /// Theme picker selected index
+    pub theme_picker_selected: usize,
+    /// Theme picker search filter
+    pub theme_picker_filter: String,
+    /// Original theme before preview (for canceling)
+    pub theme_before_preview: Option<ThemePreset>,
     /// Message scroll offset
     pub scroll_offset: usize,
     /// Whether agent is currently processing
@@ -128,6 +137,10 @@ pub struct AppState {
     pub saved_input: String,
     /// Context files (files added via @mention)
     pub context_files: Vec<String>,
+    /// Sidebar state
+    pub sidebar_selected_panel: usize,
+    pub sidebar_selected_item: Option<usize>,
+    pub sidebar_expanded_panels: [bool; 4],
 }
 
 /// Types of modals that can be displayed
@@ -158,6 +171,9 @@ impl Default for AppState {
             input_text: String::new(),
             input_cursor: 0,
             active_modal: None,
+            theme_picker_selected: 0,
+            theme_picker_filter: String::new(),
+            theme_before_preview: None,
             scroll_offset: 0,
             agent_processing: false,
             task_queue_count: 0,
@@ -180,6 +196,9 @@ impl Default for AppState {
             history_index: None,
             saved_input: String::new(),
             context_files: Vec::new(),
+            sidebar_selected_panel: 0,
+            sidebar_selected_item: None,
+            sidebar_expanded_panels: [true, true, true, true],
         }
     }
 }
@@ -234,25 +253,186 @@ impl AppState {
         self.agent_mode = mode;
     }
 
-    /// Set build mode
-    pub fn set_build_mode(&mut self, mode: BuildMode) {
-        self.build_mode = mode;
-    }
-
-    /// Set theme
+    /// Switch to a new theme
     pub fn set_theme(&mut self, preset: ThemePreset) {
         self.theme_preset = preset;
         self.theme = Theme::from_preset(preset);
+    }
+
+    /// Cycle to next theme
+    pub fn next_theme(&mut self) {
+        let all_themes = ThemePreset::all();
+        let current_idx = all_themes
+            .iter()
+            .position(|&t| t == self.theme_preset)
+            .unwrap_or(0);
+        let next_idx = (current_idx + 1) % all_themes.len();
+        self.set_theme(all_themes[next_idx]);
+    }
+
+    /// Cycle to previous theme
+    pub fn prev_theme(&mut self) {
+        let all_themes = ThemePreset::all();
+        let current_idx = all_themes
+            .iter()
+            .position(|&t| t == self.theme_preset)
+            .unwrap_or(0);
+        let prev_idx = if current_idx == 0 {
+            all_themes.len() - 1
+        } else {
+            current_idx - 1
+        };
+        self.set_theme(all_themes[prev_idx]);
+    }
+
+    /// Preview theme (temporary, for theme picker navigation)
+    pub fn preview_theme(&mut self, preset: ThemePreset) {
+        self.theme = Theme::from_preset(preset);
+        // Don't update theme_preset, just the visual theme
+    }
+
+    /// Apply theme permanently (called when confirming selection)
+    pub fn apply_theme(&mut self, preset: ThemePreset) {
+        self.theme_preset = preset;
+        self.theme = Theme::from_preset(preset);
+        self.theme_before_preview = None;
+    }
+
+    /// Get filtered themes based on search query
+    pub fn get_filtered_themes(&self) -> Vec<ThemePreset> {
+        let all_themes = ThemePreset::all();
+        if self.theme_picker_filter.is_empty() {
+            all_themes
+        } else {
+            let filter_lower = self.theme_picker_filter.to_lowercase();
+            all_themes
+                .into_iter()
+                .filter(|t| t.display_name().to_lowercase().contains(&filter_lower))
+                .collect()
+        }
+    }
+
+    // ==== Sidebar Navigation Methods ====
+
+    /// Navigate to next panel in sidebar
+    pub fn sidebar_next_panel(&mut self) {
+        self.sidebar_selected_panel = (self.sidebar_selected_panel + 1) % 4;
+        self.sidebar_selected_item = None;
+    }
+
+    /// Navigate to previous panel in sidebar
+    pub fn sidebar_prev_panel(&mut self) {
+        self.sidebar_selected_panel = if self.sidebar_selected_panel == 0 {
+            3
+        } else {
+            self.sidebar_selected_panel - 1
+        };
+        self.sidebar_selected_item = None;
+    }
+
+    /// Navigate to next item within current panel
+    pub fn sidebar_next_item(&mut self) {
+        if !self.sidebar_expanded_panels[self.sidebar_selected_panel] {
+            return;
+        }
+
+        let max_items = match self.sidebar_selected_panel {
+            0 => 3, // Session: branch + cost info
+            1 => self.context_files.len(),
+            2 => 8, // Tasks (from mock data)
+            3 => 5, // Git changes (from mock data)
+            _ => 0,
+        };
+
+        if let Some(item) = self.sidebar_selected_item {
+            if item + 1 < max_items {
+                self.sidebar_selected_item = Some(item + 1);
+            }
+        } else if max_items > 0 {
+            self.sidebar_selected_item = Some(0);
+        }
+    }
+
+    /// Navigate to previous item within current panel
+    pub fn sidebar_prev_item(&mut self) {
+        if let Some(item) = self.sidebar_selected_item {
+            if item > 0 {
+                self.sidebar_selected_item = Some(item - 1);
+            } else {
+                self.sidebar_selected_item = None;
+            }
+        }
+    }
+
+    /// Enter into selected panel (expand and select first item)
+    pub fn sidebar_enter_panel(&mut self) {
+        if !self.sidebar_expanded_panels[self.sidebar_selected_panel] {
+            // Expand collapsed panel
+            self.sidebar_expanded_panels[self.sidebar_selected_panel] = true;
+        } else if self.sidebar_selected_item.is_none() {
+            // Enter into panel (select first item)
+            self.sidebar_selected_item = Some(0);
+        } else {
+            // Toggle panel
+            self.sidebar_expanded_panels[self.sidebar_selected_panel] =
+                !self.sidebar_expanded_panels[self.sidebar_selected_panel];
+            self.sidebar_selected_item = None;
+        }
+    }
+
+    /// Exit from panel items back to panel header
+    pub fn sidebar_exit_panel(&mut self) {
+        if self.sidebar_selected_item.is_some() {
+            self.sidebar_selected_item = None;
+        } else {
+            // Collapse panel
+            self.sidebar_expanded_panels[self.sidebar_selected_panel] = false;
+        }
+    }
+
+    /// Toggle sidebar panel expansion
+    pub fn sidebar_toggle_panel(&mut self, panel_idx: usize) {
+        if panel_idx < 4 {
+            self.sidebar_expanded_panels[panel_idx] = !self.sidebar_expanded_panels[panel_idx];
+            if !self.sidebar_expanded_panels[panel_idx] {
+                self.sidebar_selected_item = None;
+            }
+        }
+    }
+
+    /// Set build mode
+    pub fn set_build_mode(&mut self, mode: BuildMode) {
+        self.build_mode = mode;
     }
 
     /// Open a modal
     pub fn open_modal(&mut self, modal: ModalType) {
         self.active_modal = Some(modal);
         self.focused_component = FocusedComponent::Modal;
+
+        // Initialize modal state
+        if modal == ModalType::ThemePicker {
+            let all_themes = ThemePreset::all();
+            self.theme_picker_selected = all_themes
+                .iter()
+                .position(|&t| t == self.theme_preset)
+                .unwrap_or(0);
+            self.theme_picker_filter.clear();
+            // Save current theme for preview/cancel
+            self.theme_before_preview = Some(self.theme_preset);
+        }
     }
 
     /// Close the active modal
     pub fn close_modal(&mut self) {
+        // Restore original theme if canceling theme picker
+        if self.active_modal == Some(ModalType::ThemePicker) {
+            if let Some(original_theme) = self.theme_before_preview {
+                self.set_theme(original_theme);
+            }
+            self.theme_before_preview = None;
+        }
+
         self.active_modal = None;
         self.focused_component = FocusedComponent::Input;
     }
@@ -343,12 +523,23 @@ impl AppState {
                     }
                 }
             } else {
-                // Regular message
-                self.messages.push(Message::new(MessageRole::User, text));
+                // Regular message - add user message
+                self.messages
+                    .push(Message::new(MessageRole::User, text.clone()));
+
+                // Add simulated agent response for demo
+                self.messages.push(Message::new(
+                    MessageRole::Agent,
+                    format!("You said: {}", text),
+                ));
             }
 
-            // Auto-scroll to bottom
-            self.scroll_offset = self.messages.len().saturating_sub(1);
+            // Auto-scroll to bottom (scroll to show last message)
+            if self.messages.len() > 5 {
+                self.scroll_offset = self.messages.len().saturating_sub(5);
+            } else {
+                self.scroll_offset = 0;
+            }
         }
     }
 
@@ -462,20 +653,58 @@ impl AppState {
 }
 
 /// Main TUI Application
-#[derive(Debug)]
 pub struct TuiApp<B: Backend> {
     /// Terminal instance
     terminal: Terminal<B>,
     /// Application state
     pub state: AppState,
+    /// Agent bridge for LLM integration
+    agent_bridge: Option<AgentBridge>,
+    /// Receiver for agent events (streaming responses, tool calls, etc.)
+    agent_event_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
+    /// Working directory for file operations
+    working_dir: PathBuf,
+    /// Current provider name
+    current_provider: Option<String>,
+    /// Current model name
+    current_model: Option<String>,
 }
 
 impl<B: Backend> TuiApp<B> {
     /// Create a new TUI application
     pub fn new(terminal: Terminal<B>) -> Self {
+        Self::with_working_dir(
+            terminal,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        )
+    }
+
+    /// Create a new TUI application with specified working directory
+    pub fn with_working_dir(terminal: Terminal<B>, working_dir: PathBuf) -> Self {
+        // Initialize AgentBridge for LLM communication
+        let (agent_bridge, llm_connected) =
+            match AgentBridge::new_with_interaction(working_dir.clone()) {
+                Ok((bridge, _interaction_rx)) => {
+                    // TODO: Store interaction_rx for future questionnaire support
+                    (Some(bridge), true)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to initialize AgentBridge: {}", e);
+                    (None, false)
+                }
+            };
+
+        let mut state = AppState::new();
+        state.llm_connected = llm_connected;
+
         Self {
             terminal,
-            state: AppState::new(),
+            state,
+            agent_bridge,
+            agent_event_rx: None,
+            working_dir,
+            current_provider: None,
+            current_model: None,
         }
     }
 
@@ -502,8 +731,9 @@ impl<B: Backend> TuiApp<B> {
     /// Render the UI to the terminal
     pub fn render(&mut self) -> std::io::Result<()> {
         use super::widgets::{
-            FilePickerModal, Header, HelpModal, InputWidget, MessageArea, ModelPickerModal,
-            ProviderPickerModal, StatusBar, TerminalFrame, ThemePickerModal,
+            FilePickerModal, GitChange, GitStatus, Header, HelpModal, InputWidget, MessageArea,
+            ModelPickerModal, ProviderPickerModal, SessionInfo, Sidebar, StatusBar, Task,
+            TaskStatus, TerminalFrame, ThemePickerModal,
         };
         use ratatui::layout::{Constraint, Direction, Layout};
 
@@ -512,6 +742,8 @@ impl<B: Backend> TuiApp<B> {
         let config = &state.config;
         let messages = &state.messages;
         let active_modal = state.active_modal;
+        let sidebar_visible = state.sidebar_visible;
+        let context_files = state.context_files.clone();
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -528,16 +760,31 @@ impl<B: Backend> TuiApp<B> {
                 height: area.height.saturating_sub(2),
             };
 
+            // Horizontal split: Main Terminal | Sidebar (when visible)
+            let (main_area, sidebar_area) = if sidebar_visible && inner.width > 80 {
+                // Only show sidebar if terminal is wide enough
+                let horizontal_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Min(60),    // Main terminal area
+                        Constraint::Length(35), // Sidebar panel
+                    ])
+                    .split(inner);
+                (horizontal_chunks[0], Some(horizontal_chunks[1]))
+            } else {
+                (inner, None)
+            };
+
             // Vertical layout: Header | Messages | Input | Status
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(2), // Header
                     Constraint::Min(5),    // Message area
-                    Constraint::Length(3), // Input area
+                    Constraint::Length(5), // Input area (increased for multi-line)
                     Constraint::Length(1), // Status bar
                 ])
-                .split(inner);
+                .split(main_area);
 
             // Render header
             let header = Header::new(config, theme);
@@ -562,9 +809,104 @@ impl<B: Backend> TuiApp<B> {
                 .agent_mode(state.agent_mode)
                 .build_mode(state.build_mode)
                 .thinking(state.thinking_enabled)
-                .queue(state.task_queue_count)
+                .queue(if state.task_queue_count > 0 {
+                    state.task_queue_count
+                } else {
+                    7
+                }) // Show 7 for demo
                 .processing(state.agent_processing);
             frame.render_widget(status, chunks[3]);
+
+            // Render sidebar if visible
+            if let Some(sidebar_rect) = sidebar_area {
+                let is_sidebar_focused = state.focused_component == FocusedComponent::Panel;
+                let current_theme_name = state.theme_preset.display_name().to_string();
+
+                let mut sidebar = Sidebar::new(theme)
+                    .visible(true)
+                    .theme_name(current_theme_name)
+                    .focused(is_sidebar_focused)
+                    .selected_panel(state.sidebar_selected_panel)
+                    .session_info(SessionInfo {
+                        branch: "main".to_string(),
+                        total_cost: 0.015,
+                        model_count: 3,
+                    })
+                    .context_files(context_files.clone())
+                    .tokens(1833, 1_000_000)
+                    .tasks(vec![
+                        Task {
+                            name: "Understanding the codebase architecture".to_string(),
+                            status: TaskStatus::Active,
+                        },
+                        Task {
+                            name: "Which is the most complex component?".to_string(),
+                            status: TaskStatus::Queued,
+                        },
+                        Task {
+                            name: "Refactor the gaming class structure".to_string(),
+                            status: TaskStatus::Queued,
+                        },
+                        Task {
+                            name: "Optimize database queries".to_string(),
+                            status: TaskStatus::Queued,
+                        },
+                        Task {
+                            name: "Fix authentication bug".to_string(),
+                            status: TaskStatus::Queued,
+                        },
+                        Task {
+                            name: "Update documentation".to_string(),
+                            status: TaskStatus::Queued,
+                        },
+                        Task {
+                            name: "Review pull requests".to_string(),
+                            status: TaskStatus::Queued,
+                        },
+                        Task {
+                            name: "Implement dark mode toggle".to_string(),
+                            status: TaskStatus::Queued,
+                        },
+                    ]);
+
+                // Set expanded state for each panel
+                sidebar.expanded_panels = state.sidebar_expanded_panels;
+                sidebar.selected_item = state.sidebar_selected_item;
+
+                let sidebar = sidebar.git_changes(vec![
+                    GitChange {
+                        file: "src/components/Sidebar.tsx".to_string(),
+                        status: GitStatus::Modified,
+                        additions: 45,
+                        deletions: 12,
+                    },
+                    GitChange {
+                        file: "src/utils/helpers.ts".to_string(),
+                        status: GitStatus::Added,
+                        additions: 0,
+                        deletions: 0,
+                    },
+                    GitChange {
+                        file: "public/legacy-logo.svg".to_string(),
+                        status: GitStatus::Deleted,
+                        additions: 0,
+                        deletions: 0,
+                    },
+                    GitChange {
+                        file: "src/styles/globals.css".to_string(),
+                        status: GitStatus::Modified,
+                        additions: 10,
+                        deletions: 5,
+                    },
+                    GitChange {
+                        file: "README.md".to_string(),
+                        status: GitStatus::Modified,
+                        additions: 2,
+                        deletions: 1,
+                    },
+                ]);
+                frame.render_widget(sidebar, sidebar_rect);
+            }
 
             // Render modal if active (on top of everything)
             if let Some(modal_type) = active_modal {
@@ -578,7 +920,12 @@ impl<B: Backend> TuiApp<B> {
                         frame.render_widget(picker, area);
                     }
                     ModalType::ThemePicker => {
-                        let picker = ThemePickerModal::new(theme);
+                        let picker = ThemePickerModal::new(
+                            theme,
+                            state.theme_preset,
+                            &state.theme_picker_filter,
+                        )
+                        .selected(state.theme_picker_selected);
                         frame.render_widget(picker, area);
                     }
                     ModalType::ModelPicker => {
@@ -629,11 +976,52 @@ impl<B: Backend> TuiApp<B> {
                             }
                             // Tab to cycle focus
                             (KeyCode::Tab, _) => {
-                                self.state.focus_next();
+                                if !self.state.is_modal_open() {
+                                    self.state.focus_next();
+                                }
                             }
                             // Backtab to cycle focus backwards
                             (KeyCode::BackTab, _) => {
-                                self.state.focus_previous();
+                                if !self.state.is_modal_open() {
+                                    self.state.focus_previous();
+                                }
+                            }
+                            // Vim keys (j/k) for sidebar navigation
+                            (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                                if self.state.focused_component == FocusedComponent::Panel {
+                                    if self.state.sidebar_selected_item.is_some() {
+                                        // Navigate within panel
+                                        self.state.sidebar_next_item();
+                                    } else {
+                                        // Navigate between panels
+                                        self.state.sidebar_next_panel();
+                                    }
+                                }
+                            }
+                            (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                                if self.state.focused_component == FocusedComponent::Panel {
+                                    if self.state.sidebar_selected_item.is_some() {
+                                        // Navigate within panel
+                                        self.state.sidebar_prev_item();
+                                    } else {
+                                        // Navigate between panels
+                                        self.state.sidebar_prev_panel();
+                                    }
+                                }
+                            }
+                            // Enter to toggle/enter panels
+                            (KeyCode::Char('l'), KeyModifiers::NONE) | (KeyCode::Right, _) => {
+                                if self.state.focused_component == FocusedComponent::Panel {
+                                    self.state.sidebar_enter_panel();
+                                }
+                            }
+                            // Escape or h to exit panel
+                            (KeyCode::Char('h'), KeyModifiers::NONE)
+                            | (KeyCode::Left, _)
+                            | (KeyCode::Char('-'), KeyModifiers::NONE) => {
+                                if self.state.focused_component == FocusedComponent::Panel {
+                                    self.state.sidebar_exit_panel();
+                                }
                             }
                             // Toggle thinking with Ctrl+T
                             (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
@@ -653,7 +1041,15 @@ impl<B: Backend> TuiApp<B> {
                             }
                             // Input handling in insert mode
                             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                                if matches!(self.state.focused_component, FocusedComponent::Input) {
+                                if self.state.active_modal == Some(ModalType::ThemePicker) {
+                                    // Typing in theme picker search
+                                    self.state.theme_picker_filter.push(c);
+                                    // Reset selection when filter changes
+                                    self.state.theme_picker_selected = 0;
+                                } else if matches!(
+                                    self.state.focused_component,
+                                    FocusedComponent::Input
+                                ) {
                                     self.state.insert_char(c);
                                     // @ triggers file picker
                                     if c == '@' {
@@ -663,12 +1059,25 @@ impl<B: Backend> TuiApp<B> {
                             }
                             // Backspace
                             (KeyCode::Backspace, _) => {
-                                if matches!(self.state.focused_component, FocusedComponent::Input) {
+                                if self.state.active_modal == Some(ModalType::ThemePicker) {
+                                    // Delete from theme picker search
+                                    self.state.theme_picker_filter.pop();
+                                    self.state.theme_picker_selected = 0;
+                                } else if matches!(
+                                    self.state.focused_component,
+                                    FocusedComponent::Input
+                                ) {
                                     self.state.delete_char_before();
                                 }
                             }
+                            // Shift+Enter to insert newline in input
+                            (KeyCode::Enter, KeyModifiers::SHIFT) => {
+                                if matches!(self.state.focused_component, FocusedComponent::Input) {
+                                    self.state.insert_char('\n');
+                                }
+                            }
                             // Enter to submit or select in modal
-                            (KeyCode::Enter, _) => {
+                            (KeyCode::Enter, KeyModifiers::NONE) => {
                                 if self.state.is_modal_open() {
                                     // Handle modal selection
                                     match self.state.active_modal {
@@ -685,8 +1094,15 @@ impl<B: Backend> TuiApp<B> {
                                             self.state.close_modal();
                                         }
                                         Some(ModalType::ThemePicker) => {
-                                            // Apply theme and close
-                                            self.state.close_modal();
+                                            // Apply selected theme permanently and close
+                                            let filtered_themes = self.state.get_filtered_themes();
+                                            if let Some(&selected_theme) = filtered_themes
+                                                .get(self.state.theme_picker_selected)
+                                            {
+                                                self.state.apply_theme(selected_theme);
+                                            }
+                                            self.state.active_modal = None;
+                                            self.state.focused_component = FocusedComponent::Input;
                                         }
                                         Some(ModalType::Help) => {
                                             // Close help
@@ -699,6 +1115,50 @@ impl<B: Backend> TuiApp<B> {
                                     FocusedComponent::Input
                                 ) {
                                     self.state.submit_input();
+                                }
+                            }
+                            // Arrow keys for navigation
+                            (KeyCode::Up, _) => {
+                                if self.state.focused_component == FocusedComponent::Panel {
+                                    // Sidebar navigation
+                                    if self.state.sidebar_selected_item.is_some() {
+                                        self.state.sidebar_prev_item();
+                                    } else {
+                                        self.state.sidebar_prev_panel();
+                                    }
+                                } else if self.state.active_modal == Some(ModalType::ThemePicker) {
+                                    if self.state.theme_picker_selected > 0 {
+                                        self.state.theme_picker_selected -= 1;
+                                        // Live preview the theme
+                                        let filtered_themes = self.state.get_filtered_themes();
+                                        if let Some(&theme) =
+                                            filtered_themes.get(self.state.theme_picker_selected)
+                                        {
+                                            self.state.preview_theme(theme);
+                                        }
+                                    }
+                                }
+                            }
+                            (KeyCode::Down, _) => {
+                                if self.state.focused_component == FocusedComponent::Panel {
+                                    // Sidebar navigation
+                                    if self.state.sidebar_selected_item.is_some() {
+                                        self.state.sidebar_next_item();
+                                    } else {
+                                        self.state.sidebar_next_panel();
+                                    }
+                                } else if self.state.active_modal == Some(ModalType::ThemePicker) {
+                                    let filtered_themes = self.state.get_filtered_themes();
+                                    if self.state.theme_picker_selected + 1 < filtered_themes.len()
+                                    {
+                                        self.state.theme_picker_selected += 1;
+                                        // Live preview the theme
+                                        if let Some(&theme) =
+                                            filtered_themes.get(self.state.theme_picker_selected)
+                                        {
+                                            self.state.preview_theme(theme);
+                                        }
+                                    }
                                 }
                             }
                             _ => {}

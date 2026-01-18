@@ -113,6 +113,10 @@ futures = "0.3"
 name = "cucumber_tui_new"
 harness = false
 
+[[test]]
+name = "ui_backend_bdd"
+harness = false
+
 [features]
 default = []
 test-sim = ["gherkin", "tiktoken-rs", "sha2"]

@@ -29,6 +29,9 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Force color output for all recordings
+export TARK_FORCE_COLOR=1
+
 # Directories - uses tests/visual/tui/ (new TUI)
 # Note: tests/visual/chat/ is for old chat TUI
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -176,6 +179,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 # Show initial layout with rounded corners
@@ -194,6 +198,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 # Status bar should show mode, provider, thinking toggle
@@ -212,6 +217,7 @@ set timeout 45
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui --provider tark_sim
 sleep 3
 send "Hello, can you help me?\r"
@@ -230,6 +236,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 send "This is a test message"
@@ -252,6 +259,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 send "/model\r"
@@ -272,6 +280,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 send "/model\r"
@@ -294,6 +303,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui --cwd /tmp
 sleep 3
 send "@"
@@ -314,6 +324,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 send "/theme\r"
@@ -334,6 +345,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 send "/help\r"
@@ -354,6 +366,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 # Toggle sidebar with Ctrl+B
@@ -375,6 +388,7 @@ set timeout 45
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 set env(TARK_SIM_SCENARIO) question_multi
 spawn ./target/release/tark tui --provider tark_sim
 sleep 3
@@ -401,6 +415,7 @@ set timeout 45
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 set env(TARK_SIM_SCENARIO) question_single
 spawn ./target/release/tark tui --provider tark_sim
 sleep 3
@@ -425,6 +440,7 @@ set timeout 45
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 set env(TARK_SIM_SCENARIO) question_text
 spawn ./target/release/tark tui --provider tark_sim
 sleep 3
@@ -449,6 +465,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 # Open theme picker
@@ -476,6 +493,7 @@ set timeout 60
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 set env(TARK_SIM_SCENARIO) echo
 spawn ./target/release/tark tui --provider tark_sim
 sleep 3
@@ -497,6 +515,7 @@ set timeout 60
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 set env(TARK_SIM_SCENARIO) streaming
 spawn ./target/release/tark tui --provider tark_sim
 sleep 3
@@ -518,6 +537,7 @@ set timeout 60
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 set env(TARK_SIM_SCENARIO) tool
 spawn ./target/release/tark tui --provider tark_sim --cwd /tmp
 sleep 3
@@ -539,6 +559,7 @@ set timeout 60
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 set env(TARK_SIM_SCENARIO) thinking
 spawn ./target/release/tark tui --provider tark_sim
 sleep 3
@@ -560,6 +581,7 @@ set timeout 60
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 set env(TARK_SIM_SCENARIO) error_timeout
 spawn ./target/release/tark tui --provider tark_sim
 sleep 3
@@ -581,6 +603,7 @@ set timeout 60
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 set env(TARK_SIM_SCENARIO) error_rate_limit
 spawn ./target/release/tark tui --provider tark_sim
 sleep 3
@@ -602,6 +625,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 # Test Tab focus cycling
@@ -631,6 +655,7 @@ set timeout 30
 log_user 1
 set env(TERM) xterm-256color
 set env(COLORTERM) truecolor
+set env(TARK_FORCE_COLOR) 1
 spawn ./target/release/tark tui
 sleep 3
 send "Test message for ${scenario}\r"
@@ -674,8 +699,8 @@ run_scenario() {
     rm -f "$cast_file" "$gif_file" "$animated_cast"
     mkdir -p "$(dirname "$cast_file")"
     
-    # Record with asciinema
-    if ! TERM=xterm-256color asciinema rec --overwrite --cols 120 --rows 40 --idle-time-limit 2 \
+    # Record with asciinema (TARK_FORCE_COLOR enables colored output)
+    if ! TERM=xterm-256color COLORTERM=truecolor TARK_FORCE_COLOR=1 asciinema rec --overwrite --cols 120 --rows 40 --idle-time-limit 2 \
         --command "$exp_script" "$cast_file" 2>&1 | tee "$log_file"; then
         log_error "Recording failed for $scenario"
         return 1

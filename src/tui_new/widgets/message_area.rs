@@ -6,12 +6,13 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget},
 };
 
 use crate::tui_new::theme::Theme;
+use crate::tui_new::widgets::question::QuestionWidget;
 
 /// Message role/type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,8 @@ pub struct Message {
     pub content: String,
     /// Whether this message is collapsed (for thinking/tool)
     pub collapsed: bool,
+    /// Optional question widget for interactive questions
+    pub question: Option<QuestionWidget>,
 }
 
 impl Message {
@@ -50,6 +53,7 @@ impl Message {
             role,
             content: content.into(),
             collapsed: false,
+            question: None,
         }
     }
 
@@ -66,6 +70,17 @@ impl Message {
     /// Create an agent message
     pub fn agent(content: impl Into<String>) -> Self {
         Self::new(MessageRole::Agent, content)
+    }
+
+    /// Create a question message
+    pub fn question(question: QuestionWidget) -> Self {
+        let content = question.text.clone();
+        Self {
+            role: MessageRole::Question,
+            content,
+            collapsed: false,
+            question: Some(question),
+        }
     }
 }
 
@@ -117,7 +132,20 @@ impl<'a> MessageArea<'a> {
         }
     }
 
-    /// Get color for message role
+    /// Get role label for message
+    fn role_label(&self, role: MessageRole) -> &'static str {
+        match role {
+            MessageRole::System => "System",
+            MessageRole::User => "You",
+            MessageRole::Agent => "Innodrupe",
+            MessageRole::Tool => "Tool",
+            MessageRole::Thinking => "Thinking",
+            MessageRole::Question => "Question",
+            MessageRole::Command => "Command",
+        }
+    }
+
+    /// Get foreground color for message role
     fn role_color(&self, role: MessageRole) -> ratatui::style::Color {
         match role {
             MessageRole::System => self.theme.system_fg,
@@ -127,6 +155,20 @@ impl<'a> MessageArea<'a> {
             MessageRole::Thinking => self.theme.thinking_fg,
             MessageRole::Question => self.theme.question_fg,
             MessageRole::Command => self.theme.command_fg,
+        }
+    }
+
+    /// Get background color for message bubble (user and agent only)
+    fn role_bg_color(&self, role: MessageRole) -> Option<ratatui::style::Color> {
+        match role {
+            // User: blue tint (darker shade of blue)
+            MessageRole::User => Some(Color::Rgb(45, 60, 83)),
+            // Agent: green tint (darker shade of green)
+            MessageRole::Agent => Some(Color::Rgb(45, 75, 55)),
+            // Thinking: gray background
+            MessageRole::Thinking => Some(Color::Rgb(55, 55, 65)),
+            // Others: no background
+            _ => None,
         }
     }
 }
@@ -156,18 +198,160 @@ impl Widget for MessageArea<'_> {
 
         for msg in self.messages.iter() {
             let icon = self.role_icon(msg.role);
-            let color = self.role_color(msg.role);
+            let label = self.role_label(msg.role);
+            let fg_color = self.role_color(msg.role);
+            let bg_color = self.role_bg_color(msg.role);
 
-            // Add message with icon
-            let line = Line::from(vec![
-                Span::styled(format!("{} ", icon), Style::default().fg(color)),
-                Span::styled(&msg.content, Style::default().fg(self.theme.text_primary)),
-            ]);
-            lines.push(line);
+            // Handle question messages specially
+            if msg.role == MessageRole::Question {
+                if let Some(ref question) = msg.question {
+                    if question.answered {
+                        // Answered state: show "✓ Answered: <selections>"
+                        let answer_text = match question.question_type {
+                            crate::tui_new::widgets::question::QuestionType::MultipleChoice
+                            | crate::tui_new::widgets::question::QuestionType::SingleChoice => {
+                                let selections: Vec<String> = question
+                                    .selected
+                                    .iter()
+                                    .map(|&idx| question.options[idx].text.clone())
+                                    .collect();
+                                selections.join(", ")
+                            }
+                            crate::tui_new::widgets::question::QuestionType::FreeText => {
+                                question.free_text_answer.clone()
+                            }
+                        };
+
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
+                            Span::styled(
+                                format!("{}", msg.content),
+                                Style::default().fg(self.theme.text_primary),
+                            ),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled("✓ Answered: ", Style::default().fg(self.theme.green)),
+                            Span::styled(
+                                answer_text,
+                                Style::default()
+                                    .fg(self.theme.text_primary)
+                                    .bg(Color::Rgb(45, 75, 55)),
+                            ),
+                        ]));
+                    } else {
+                        // Unanswered: show question header (full widget would need more space)
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
+                            Span::styled(
+                                &msg.content,
+                                Style::default().fg(self.theme.text_primary),
+                            ),
+                        ]));
+                        // Add options preview
+                        for (idx, opt) in question.options.iter().enumerate() {
+                            let checkbox = if question.selected.contains(&idx) {
+                                "●"
+                            } else {
+                                "○"
+                            };
+                            lines.push(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(
+                                    format!("{} ", checkbox),
+                                    Style::default().fg(fg_color),
+                                ),
+                                Span::styled(
+                                    &opt.text,
+                                    Style::default().fg(self.theme.text_secondary),
+                                ),
+                            ]));
+                        }
+                    }
+                } else {
+                    // Fallback if no question widget attached
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
+                        Span::styled(&msg.content, Style::default().fg(self.theme.text_primary)),
+                    ]));
+                }
+                lines.push(Line::from(""));
+                continue;
+            }
+
+            // Check if this message type is collapsible
+            let is_collapsible = matches!(msg.role, MessageRole::Thinking | MessageRole::Tool);
+
+            if is_collapsible {
+                // Collapsible message with chevron indicator
+                let chevron = if msg.collapsed { "▶" } else { "▼" };
+
+                let header_line = Line::from(vec![
+                    Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
+                    Span::styled(
+                        format!("{} {} ", chevron, label),
+                        Style::default().fg(self.theme.text_primary),
+                    ),
+                ]);
+                lines.push(header_line);
+
+                // Show content only if not collapsed
+                if !msg.collapsed {
+                    if let Some(bg) = bg_color {
+                        lines.push(Line::from(Span::styled(
+                            &msg.content,
+                            Style::default().fg(self.theme.text_secondary).bg(bg),
+                        )));
+                    } else {
+                        lines.push(Line::from(Span::styled(
+                            &msg.content,
+                            Style::default().fg(self.theme.text_secondary),
+                        )));
+                    }
+                }
+            } else {
+                // Regular message with role icon, label, and content
+                let mut spans = vec![
+                    // Icon with colored background for user/agent
+                    Span::styled(
+                        format!("{} ", icon),
+                        if bg_color.is_some() {
+                            Style::default().fg(fg_color).bg(fg_color)
+                        } else {
+                            Style::default().fg(fg_color)
+                        },
+                    ),
+                    // Role label
+                    Span::styled(
+                        format!("{}", label),
+                        Style::default().fg(self.theme.text_primary),
+                    ),
+                    Span::raw(" "),
+                ];
+
+                // Add message content with bubble background for user/agent
+                if let Some(bg) = bg_color {
+                    spans.push(Span::styled(
+                        &msg.content,
+                        Style::default().fg(self.theme.text_primary).bg(bg),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        &msg.content,
+                        Style::default().fg(self.theme.text_primary),
+                    ));
+                }
+
+                let line = Line::from(spans);
+                lines.push(line);
+            }
 
             // Add empty line between messages
             lines.push(Line::from(""));
         }
+
+        // Store total line count before filtering
+        let total_lines = lines.len();
 
         // Apply scroll offset (multiply by 2 since each message produces 2 lines: content + empty)
         let line_offset = self.scroll_offset * 2;
@@ -176,11 +360,16 @@ impl Widget for MessageArea<'_> {
         let paragraph = Paragraph::new(visible_lines);
         paragraph.render(inner, buf);
 
-        // Render scrollbar if needed
-        if self.messages.len() > inner.height as usize {
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+        // Always render scrollbar when content exceeds viewport
+        if total_lines > inner.height as usize {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .style(Style::default().fg(self.theme.text_muted))
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+
             let mut scrollbar_state =
-                ScrollbarState::new(self.messages.len()).position(self.scroll_offset);
+                ScrollbarState::new(total_lines.saturating_sub(inner.height as usize))
+                    .position(line_offset);
 
             let scrollbar_area = Rect {
                 x: area.x + area.width.saturating_sub(1),

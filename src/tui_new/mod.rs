@@ -14,8 +14,13 @@
 
 mod app;
 mod config;
+mod controller;
 mod events;
+pub mod git_info;
+pub mod modals;
+mod renderer;
 mod theme;
+mod utils;
 pub mod widgets;
 
 // Re-export main types
@@ -24,7 +29,11 @@ pub use app::{AgentMode, AppState, BuildMode, FocusedComponent, InputMode, Modal
 #[allow(unused_imports)]
 pub use config::AppConfig;
 #[allow(unused_imports)]
+pub use controller::TuiController;
+#[allow(unused_imports)]
 pub use events::{Event, EventHandler};
+#[allow(unused_imports)]
+pub use renderer::TuiRenderer;
 #[allow(unused_imports)]
 pub use theme::{Theme, ThemePreset};
 

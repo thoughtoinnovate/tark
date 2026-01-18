@@ -5,7 +5,7 @@
 
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     style::Style,
     text::{Line, Span},
     widgets::{Paragraph, Widget},
@@ -40,7 +40,7 @@ impl<'a> StatusBar<'a> {
         Self {
             agent_mode: AgentMode::Build,
             build_mode: BuildMode::Balanced,
-            model_name: "claude-sonnet-4",
+            model_name: "Claude 3.5 Sonnet",
             provider_name: "Anthropic",
             thinking_enabled: true,
             queue_count: 0,
@@ -125,95 +125,111 @@ impl Widget for StatusBar<'_> {
             return;
         }
 
-        // Layout: [Mode] [BuildMode?] [Model/Provider] [Working?] [Queue?] [Thinking] [Help]
-        let chunks = Layout::horizontal([
-            Constraint::Length(12), // Agent mode
-            Constraint::Length(12), // Build mode (conditional)
-            Constraint::Min(20),    // Model/Provider
-            Constraint::Length(12), // Working indicator
-            Constraint::Length(8),  // Queue
-            Constraint::Length(4),  // Thinking
-            Constraint::Length(3),  // Help
-        ])
-        .split(area);
+        // Build the complete status bar as a single line (left to right):
+        // agent • Build ▼  🟢 Balanced ▼  🧠  ≡ 7    ● Working...    • Model Provider  ⊙
+        let mut spans = vec![];
 
-        // Agent mode
-        let mode_text = Line::from(vec![
-            Span::styled(
-                format!("{} ", self.agent_mode_icon()),
-                Style::default().fg(self.theme.cyan),
-            ),
-            Span::styled(
-                self.agent_mode_str(),
-                Style::default().fg(self.theme.text_primary),
-            ),
-            Span::styled(" ▼", Style::default().fg(self.theme.text_muted)),
-        ]);
-        Paragraph::new(mode_text).render(chunks[0], buf);
+        // 1. Agent label (small, muted)
+        spans.push(Span::styled(
+            "agent ",
+            Style::default().fg(self.theme.text_muted),
+        ));
 
-        // Build mode (only in Build agent mode)
+        // 2. Agent mode (• Build ▼)
+        spans.push(Span::styled("• ", Style::default().fg(self.theme.yellow)));
+        spans.push(Span::styled(
+            self.agent_mode_str(),
+            Style::default().fg(self.theme.yellow),
+        ));
+        spans.push(Span::styled(
+            " ▼ ",
+            Style::default().fg(self.theme.text_muted),
+        ));
+
+        // 3. Build mode (only if Build agent mode)
         if self.agent_mode == AgentMode::Build {
-            let build_text = Line::from(vec![
-                Span::styled(
-                    self.build_mode_str(),
-                    Style::default().fg(self.theme.text_secondary),
-                ),
-                Span::styled(" ▼", Style::default().fg(self.theme.text_muted)),
-            ]);
-            Paragraph::new(build_text).render(chunks[1], buf);
-        }
-
-        // Model/Provider
-        let model_text = Line::from(vec![
-            Span::styled(
-                self.provider_name,
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled("🟢 ", Style::default().fg(self.theme.green)));
+            spans.push(Span::styled(
+                self.build_mode_str(),
+                Style::default().fg(self.theme.green),
+            ));
+            spans.push(Span::styled(
+                " ▼",
                 Style::default().fg(self.theme.text_muted),
-            ),
-            Span::styled(" / ", Style::default().fg(self.theme.text_muted)),
-            Span::styled(
-                self.model_name,
-                Style::default().fg(self.theme.text_primary),
-            ),
-            Span::styled(" ▼", Style::default().fg(self.theme.text_muted)),
-        ]);
-        Paragraph::new(model_text).render(chunks[2], buf);
-
-        // Working indicator
-        if self.is_processing {
-            let working_text = Line::from(vec![
-                Span::styled("● ", Style::default().fg(self.theme.green)),
-                Span::styled("Working...", Style::default().fg(self.theme.text_secondary)),
-            ]);
-            Paragraph::new(working_text).render(chunks[3], buf);
+            ));
         }
 
-        // Queue indicator
-        if self.queue_count > 0 {
-            let queue_text = Line::from(vec![
-                Span::styled("📋 ", Style::default().fg(self.theme.yellow)),
-                Span::styled(
-                    self.queue_count.to_string(),
-                    Style::default().fg(self.theme.text_primary),
-                ),
-            ]);
-            Paragraph::new(queue_text).render(chunks[4], buf);
-        }
-
-        // Thinking toggle
+        // 4. Indicators section (brain + queue)
+        spans.push(Span::raw("  "));
         let thinking_color = if self.thinking_enabled {
             self.theme.yellow
         } else {
             self.theme.text_muted
         };
-        let thinking_text = Line::from(Span::styled("🧠", Style::default().fg(thinking_color)));
-        Paragraph::new(thinking_text).render(chunks[5], buf);
+        spans.push(Span::styled("🧠", Style::default().fg(thinking_color)));
 
-        // Help button
-        let help_text = Line::from(Span::styled(
-            "?",
+        if self.queue_count > 0 {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                "≡ ",
+                Style::default().fg(self.theme.text_muted),
+            ));
+            spans.push(Span::styled(
+                self.queue_count.to_string(),
+                Style::default().fg(self.theme.text_primary),
+            ));
+        }
+
+        // 5. Working indicator (with padding for centering)
+        if self.is_processing {
+            spans.push(Span::raw("    "));
+            spans.push(Span::styled("● ", Style::default().fg(self.theme.green)));
+            spans.push(Span::styled(
+                "Working...",
+                Style::default().fg(self.theme.text_secondary),
+            ));
+        }
+
+        // Calculate right section width for alignment
+        let model_provider_text = format!(
+            "• {} {}  ⊙",
+            self.model_name,
+            self.provider_name.to_uppercase()
+        );
+        let left_width: usize = spans.iter().map(|s| s.width()).sum();
+        let total_width = area.width as usize;
+        let right_width = model_provider_text.len();
+
+        if total_width > left_width + right_width {
+            let padding = total_width - left_width - right_width;
+            spans.push(Span::raw(" ".repeat(padding)));
+        }
+
+        // 6. Model/Provider (right-aligned)
+        spans.push(Span::styled(
+            "• ",
             Style::default().fg(self.theme.text_muted),
         ));
-        Paragraph::new(help_text).render(chunks[6], buf);
+        spans.push(Span::styled(
+            self.model_name,
+            Style::default().fg(self.theme.text_primary),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            self.provider_name.to_uppercase(),
+            Style::default().fg(self.theme.text_muted),
+        ));
+
+        // 7. Help button
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "⊙",
+            Style::default().fg(self.theme.text_muted),
+        ));
+
+        let line = Line::from(spans);
+        Paragraph::new(line).render(area, buf);
     }
 }
 
