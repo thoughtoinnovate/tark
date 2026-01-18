@@ -20,6 +20,7 @@ pub mod storage;
 pub mod tools;
 pub mod transport;
 pub mod tui;
+pub mod tui_new;
 
 pub use config::Config;
 pub use services::PlanService;

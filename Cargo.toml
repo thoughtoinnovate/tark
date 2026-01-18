@@ -110,7 +110,7 @@ cucumber = "0.21"
 futures = "0.3"
 
 [[test]]
-name = "cucumber_tui"
+name = "cucumber_tui_new"
 harness = false
 
 [features]

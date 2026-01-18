@@ -14,6 +14,7 @@ mod storage;
 mod tools;
 mod transport;
 mod tui;
+mod tui_new;
 
 #[derive(Parser)]
 #[command(name = "tark")]
@@ -77,6 +78,25 @@ enum Commands {
         model: Option<String>,
 
         /// Enable debug logging to tark-debug.log
+        #[arg(long)]
+        debug: bool,
+    },
+
+    /// NEW: Interactive TUI mode (TDD implementation)
+    Tui {
+        /// Working directory for file operations
+        #[arg(short, long)]
+        cwd: Option<String>,
+
+        /// LLM provider to use
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// Model to use
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Enable debug logging
         #[arg(long)]
         debug: bool,
     },
@@ -313,6 +333,19 @@ async fn main() -> Result<()> {
                 transport::plugin_cli::run_plugin_disable(&plugin_id).await?;
             }
         },
+        Commands::Tui {
+            cwd,
+            provider,
+            model,
+            debug,
+        } => {
+            let working_dir = cwd.unwrap_or_else(|| ".".to_string());
+            tracing::info!(
+                "Starting NEW TUI (TDD implementation), cwd: {}",
+                working_dir
+            );
+            transport::cli::run_tui_new(&working_dir, provider, model, debug).await?;
+        }
     }
 
     Ok(())
