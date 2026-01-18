@@ -113,11 +113,13 @@ impl Widget for &Sidebar {
             .split(area);
 
         // Session panel
-        let session_text = [format!("Session: {}", self.session_info.session_id),
+        let session_text = [
+            format!("Session: {}", self.session_info.session_id),
             format!("Provider: {}", self.session_info.provider),
             format!("Model: {}", self.session_info.model),
             format!("Cost: ${:.4}", self.session_info.total_cost),
-            format!("Tokens: {}", self.session_info.total_tokens)];
+            format!("Tokens: {}", self.session_info.total_tokens),
+        ];
         let session_para = Paragraph::new(session_text.join("\n"))
             .block(Block::default().borders(Borders::ALL).title("📊 Session"));
         session_para.render(chunks[0], buf);
