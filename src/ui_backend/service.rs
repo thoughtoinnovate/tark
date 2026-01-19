@@ -1,57 +1,36 @@
 //! Application Service - Business Logic
 //!
-//! This service handles all business logic operations, delegating to the appropriate
-//! backend modules (AgentBridge, Storage, ToolRegistry, etc.).
+//! This service handles all business logic operations using the service architecture:
+//! - ConversationService for chat
+//! - SessionService for session lifecycle
+//! - CatalogService for provider/model discovery
 
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::core::agent_bridge::{AgentBridge, AgentEvent as BridgeEvent};
 use crate::core::attachments::{resolve_file_path, AttachmentConfig, AttachmentManager};
+use crate::core::session_manager::SessionManager;
+use crate::storage::TarkStorage;
 
-use super::commands::{AgentMode, BuildMode, Command};
+use super::commands::{BuildMode, Command};
+use super::conversation::ConversationService;
 use super::events::AppEvent;
-use super::state::SharedState;
+use super::git_service::GitService;
+use super::session_service::SessionService;
+use super::state::{ModalType, SharedState};
 use super::types::{AttachmentInfo, GitChangeInfo, Message, MessageRole, ModelInfo, ProviderInfo};
-
-/// Convert AgentBridge events to AppEvents
-fn bridge_event_to_app_event(event: BridgeEvent) -> Option<AppEvent> {
-    match event {
-        BridgeEvent::Started => Some(AppEvent::LlmStarted),
-        BridgeEvent::TextChunk(chunk) => Some(AppEvent::LlmTextChunk(chunk)),
-        BridgeEvent::ThinkingChunk(chunk) => Some(AppEvent::LlmThinkingChunk(chunk)),
-        BridgeEvent::ToolCallStarted { tool, args } => {
-            Some(AppEvent::ToolStarted { name: tool, args })
-        }
-        BridgeEvent::ToolCallCompleted {
-            tool,
-            result_preview,
-        } => Some(AppEvent::ToolCompleted {
-            name: tool,
-            result: result_preview,
-        }),
-        BridgeEvent::ToolCallFailed { tool, error } => {
-            Some(AppEvent::ToolFailed { name: tool, error })
-        }
-        BridgeEvent::Completed(info) => Some(AppEvent::LlmCompleted {
-            text: info.text,
-            input_tokens: info.input_tokens,
-            output_tokens: info.output_tokens,
-        }),
-        BridgeEvent::Error(err) => Some(AppEvent::LlmError(err)),
-        BridgeEvent::Interrupted => Some(AppEvent::LlmInterrupted),
-        _ => None, // Other events not mapped yet
-    }
-}
 
 /// Application Service - Business Logic Layer
 ///
-/// This service sits between the UI and the core backend, providing a clean API
-/// for all business operations without exposing UI-specific details.
+/// Coordinates multiple services to provide the full application functionality.
 pub struct AppService {
-    /// Agent bridge for LLM communication
-    agent_bridge: Option<AgentBridge>,
+    /// Conversation service for chat operations
+    conversation_svc: Option<Arc<ConversationService>>,
+
+    /// Session service for session lifecycle
+    session_svc: Option<Arc<SessionService>>,
 
     /// Shared application state
     state: SharedState,
@@ -59,20 +38,24 @@ pub struct AppService {
     /// Event channel for async updates to UI
     event_tx: mpsc::UnboundedSender<AppEvent>,
 
-    /// Receiver for agent bridge events
-    agent_event_rx: Option<mpsc::UnboundedReceiver<BridgeEvent>>,
-
     /// Working directory
     working_dir: PathBuf,
 
     /// Attachment manager for handling file attachments
     attachment_manager: AttachmentManager,
+
+    /// BFF Services
+    catalog: super::CatalogService,
+    storage: super::StorageFacade,
+    tools: super::ToolExecutionService,
+    git: GitService,
 }
 
 impl std::fmt::Debug for AppService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppService")
-            .field("agent_bridge", &self.agent_bridge.is_some())
+            .field("conversation_svc", &self.conversation_svc.is_some())
+            .field("session_svc", &self.session_svc.is_some())
             .field("state", &self.state)
             .field("working_dir", &self.working_dir)
             .finish()
@@ -100,40 +83,66 @@ impl AppService {
         event_tx: mpsc::UnboundedSender<AppEvent>,
         provider: Option<String>,
         model: Option<String>,
-        debug: bool,
+        _debug: bool,
     ) -> Result<Self> {
         let state = SharedState::new();
 
-        // Initialize AgentBridge with debug support
-        let (agent_bridge, agent_event_rx) = match AgentBridge::with_provider_and_interaction(
-            working_dir.clone(),
-            provider.clone(),
-            model.clone(),
-            debug,
-        ) {
-            Ok((bridge, _interaction_rx)) => {
+        // Initialize storage
+        let storage_facade = super::StorageFacade::new(&working_dir)?;
+        let tark_storage = TarkStorage::new(&working_dir)?;
+
+        // Initialize ChatAgent
+        let chat_agent_result = (|| -> Result<crate::agent::ChatAgent> {
+            // Create LLM provider
+            let provider_name = provider.clone().unwrap_or_else(|| "openai".to_string());
+            let llm_provider = crate::llm::create_provider_with_options(
+                &provider_name,
+                true, // silent
+                model.as_deref(),
+            )?;
+
+            // Create tool registry
+            let tools = crate::tools::ToolRegistry::for_mode(
+                working_dir.clone(),
+                crate::core::types::AgentMode::Build,
+                true, // shell_enabled
+            );
+
+            Ok(crate::agent::ChatAgent::new(Arc::from(llm_provider), tools))
+        })();
+
+        let (conversation_svc, session_svc) = match chat_agent_result {
+            Ok(chat_agent) => {
+                // Initialize ConversationService
+                let conv_svc = Arc::new(ConversationService::new(chat_agent, event_tx.clone()));
+
+                // Initialize SessionManager
+                let session_mgr = SessionManager::new(tark_storage);
+
+                // Initialize SessionService
+                let sess_svc = Arc::new(SessionService::new(session_mgr, conv_svc.clone()));
+
                 state.set_llm_connected(true);
 
-                // Set provider/model in state
-                if let Some(ref p) = provider {
-                    state.set_provider(Some(p.clone()));
-                    tracing::info!("LLM provider set to: {}", p);
+                // Set initial provider and model in state
+                if let Some(ref prov) = provider {
+                    state.set_provider(Some(prov.clone()));
+                } else {
+                    state.set_provider(Some("openai".to_string()));
                 }
-                if let Some(ref m) = model {
-                    state.set_model(Some(m.clone()));
-                    tracing::info!("LLM model set to: {}", m);
+                if let Some(ref mdl) = model {
+                    state.set_model(Some(mdl.clone()));
                 }
 
-                tracing::info!("AgentBridge initialized successfully");
-                (Some(bridge), None) // TODO: Wire up agent events
+                tracing::info!("Services initialized successfully");
+
+                (Some(conv_svc), Some(sess_svc))
             }
             Err(e) => {
                 let error_msg = format!("Failed to initialize LLM: {}", e);
                 tracing::error!("{}", error_msg);
                 state.set_llm_connected(false);
 
-                // Add error message to state so user sees it
-                use super::types::{Message, MessageRole};
                 let system_msg = Message {
                     role: MessageRole::System,
                     content: format!(
@@ -153,13 +162,22 @@ impl AppService {
         // Initialize attachment manager with default config
         let attachment_manager = AttachmentManager::new(AttachmentConfig::default());
 
+        // Initialize BFF services
+        let catalog = super::CatalogService::new();
+        let tools = super::ToolExecutionService::new(super::commands::AgentMode::default(), None);
+        let git = GitService::new(working_dir.clone());
+
         Ok(Self {
-            agent_bridge,
+            conversation_svc,
+            session_svc,
             state,
             event_tx,
-            agent_event_rx,
             working_dir,
             attachment_manager,
+            catalog,
+            storage: storage_facade,
+            tools,
+            git,
         })
     }
 
@@ -182,16 +200,6 @@ impl AppService {
                 let next = current.next();
                 self.state.set_agent_mode(next);
 
-                // Update AgentBridge tool registry for new mode
-                if let Some(ref mut bridge) = self.agent_bridge {
-                    let mode_enum = match next {
-                        AgentMode::Build => crate::tui::agent_bridge::AgentMode::Build,
-                        AgentMode::Plan => crate::tui::agent_bridge::AgentMode::Plan,
-                        AgentMode::Ask => crate::tui::agent_bridge::AgentMode::Ask,
-                    };
-                    let _ = bridge.set_mode(mode_enum);
-                }
-
                 self.event_tx
                     .send(AppEvent::StatusChanged(format!(
                         "Agent mode: {}",
@@ -201,16 +209,6 @@ impl AppService {
             }
             Command::SetAgentMode(mode) => {
                 self.state.set_agent_mode(mode);
-
-                // Update AgentBridge tool registry for new mode
-                if let Some(ref mut bridge) = self.agent_bridge {
-                    let mode_enum = match mode {
-                        AgentMode::Build => crate::tui::agent_bridge::AgentMode::Build,
-                        AgentMode::Plan => crate::tui::agent_bridge::AgentMode::Plan,
-                        AgentMode::Ask => crate::tui::agent_bridge::AgentMode::Ask,
-                    };
-                    let _ = bridge.set_mode(mode_enum);
-                }
 
                 self.event_tx
                     .send(AppEvent::StatusChanged(format!(
@@ -226,16 +224,6 @@ impl AppService {
                 let next = current.next();
                 self.state.set_build_mode(next);
 
-                // Map BuildMode to TrustLevel in AgentBridge
-                if let Some(ref mut bridge) = self.agent_bridge {
-                    let trust = match next {
-                        BuildMode::Manual => crate::tools::TrustLevel::Manual,
-                        BuildMode::Balanced => crate::tools::TrustLevel::Balanced,
-                        BuildMode::Careful => crate::tools::TrustLevel::Careful,
-                    };
-                    bridge.set_trust_level(trust);
-                }
-
                 self.event_tx
                     .send(AppEvent::StatusChanged(format!(
                         "Build mode: {}",
@@ -246,21 +234,31 @@ impl AppService {
             Command::SetBuildMode(mode) => {
                 self.state.set_build_mode(mode);
 
-                // Map BuildMode to TrustLevel in AgentBridge
-                if let Some(ref mut bridge) = self.agent_bridge {
-                    let trust = match mode {
-                        BuildMode::Manual => crate::tools::TrustLevel::Manual,
-                        BuildMode::Balanced => crate::tools::TrustLevel::Balanced,
-                        BuildMode::Careful => crate::tools::TrustLevel::Careful,
-                    };
-                    bridge.set_trust_level(trust);
-                }
-
                 self.event_tx
                     .send(AppEvent::StatusChanged(format!(
                         "Build mode: {}",
                         mode.display_name()
                     )))
+                    .ok();
+            }
+            Command::OpenTrustLevelSelector => {
+                self.state.set_active_modal(Some(ModalType::TrustLevel));
+                self.state
+                    .set_trust_level_selected(self.state.trust_level().index());
+            }
+            Command::SetTrustLevel(level) => {
+                self.state.set_trust_level(level);
+
+                let build_mode = match level {
+                    crate::tools::TrustLevel::Manual => BuildMode::Manual,
+                    crate::tools::TrustLevel::Balanced => BuildMode::Balanced,
+                    crate::tools::TrustLevel::Careful => BuildMode::Careful,
+                };
+                self.state.set_build_mode(build_mode);
+
+                self.state.set_active_modal(None);
+                self.event_tx
+                    .send(AppEvent::StatusChanged(format!("Trust level: {:?}", level)))
                     .ok();
             }
 
@@ -273,23 +271,15 @@ impl AppService {
                 let enabled = !self.state.thinking_enabled();
                 self.state.set_thinking_enabled(enabled);
 
-                // Wire to agent's think level
-                if let Some(ref mut bridge) = self.agent_bridge {
-                    if enabled {
-                        // Enable default thinking level
-                        bridge.set_think_level_sync("normal".to_string());
-                    } else {
-                        // Disable thinking
-                        bridge.set_think_level_sync("off".to_string());
-                    }
-                }
-
                 self.event_tx
                     .send(AppEvent::StatusChanged(format!(
                         "Thinking blocks: {}",
                         if enabled { "enabled" } else { "disabled" }
                     )))
                     .ok();
+            }
+            Command::SetVimMode(mode) => {
+                self.state.set_vim_mode(mode);
             }
 
             // Input handling
@@ -299,6 +289,14 @@ impl AppService {
                 text.insert(cursor, c);
                 self.state.set_input_text(text);
                 self.state.set_input_cursor(cursor + c.len_utf8());
+
+                // @ triggers file picker
+                if c == '@' {
+                    self.refresh_file_picker("");
+                    self.state.set_file_picker_filter(String::new());
+                    self.state.set_file_picker_selected(0);
+                    self.state.set_active_modal(Some(ModalType::FilePicker));
+                }
             }
             Command::DeleteCharBefore => {
                 let mut text = self.state.input_text();
@@ -341,16 +339,13 @@ impl AppService {
                 let text = self.state.input_text();
                 let cursor = self.state.input_cursor();
 
-                // Find next word boundary (skip current word, find start of next word)
                 let mut new_cursor = cursor;
                 let chars: Vec<char> = text.chars().collect();
 
-                // Skip current word
                 while new_cursor < chars.len() && !chars[new_cursor].is_whitespace() {
                     new_cursor += chars[new_cursor].len_utf8();
                 }
 
-                // Skip whitespace
                 while new_cursor < chars.len() && chars[new_cursor].is_whitespace() {
                     new_cursor += chars[new_cursor].len_utf8();
                 }
@@ -365,7 +360,6 @@ impl AppService {
                     return Ok(());
                 }
 
-                // Find previous word boundary
                 let chars: Vec<char> = text.chars().collect();
                 let mut byte_pos = 0;
                 let mut positions: Vec<usize> = vec![0];
@@ -375,19 +369,16 @@ impl AppService {
                     positions.push(byte_pos);
                 }
 
-                // Find char index from byte position
                 let char_idx = positions
                     .iter()
                     .position(|&p| p >= cursor)
                     .unwrap_or(chars.len());
                 let mut new_char_idx = char_idx.saturating_sub(1);
 
-                // Skip whitespace backwards
                 while new_char_idx > 0 && chars[new_char_idx].is_whitespace() {
                     new_char_idx -= 1;
                 }
 
-                // Skip word backwards
                 while new_char_idx > 0 && !chars[new_char_idx - 1].is_whitespace() {
                     new_char_idx -= 1;
                 }
@@ -417,6 +408,25 @@ impl AppService {
                     return Ok(());
                 }
 
+                // If already processing, queue the message
+                if self.state.llm_processing() {
+                    self.state.queue_message(text.clone());
+                    self.state.clear_input();
+
+                    // Add queued indicator message
+                    let queue_count = self.state.queued_message_count();
+                    let queue_msg = Message {
+                        role: MessageRole::System,
+                        content: format!("⏳ Message queued ({} in queue)", queue_count),
+                        thinking: None,
+                        collapsed: false,
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    };
+                    self.state.add_message(queue_msg.clone());
+                    self.event_tx.send(AppEvent::MessageAdded(queue_msg)).ok();
+                    return Ok(());
+                }
+
                 // Add user message
                 let user_msg = Message {
                     role: MessageRole::User,
@@ -436,135 +446,55 @@ impl AppService {
                 // Clear input
                 self.state.clear_input();
 
-                // Send to LLM
-                if let Some(ref mut bridge) = self.agent_bridge {
+                // Send to LLM via ConversationService
+                if let Some(ref conv_svc) = self.conversation_svc {
                     self.state.set_llm_processing(true);
 
-                    // Get pending attachments (consumes them from manager)
-                    let attachments = self.attachment_manager.prepare_for_send();
-                    let has_attachments = !attachments.is_empty();
-
-                    // Clear context files from state since attachments are being sent
-                    if has_attachments {
-                        self.state.clear_context_files();
-                    }
-
-                    // Create channel for AgentBridge events
-                    let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel();
-                    let app_event_tx = self.event_tx.clone();
+                    let conv_svc = conv_svc.clone();
+                    let text = text.clone();
+                    let event_tx = self.event_tx.clone();
                     let state = self.state.clone();
 
-                    // Spawn task to bridge AgentEvents to AppEvents
+                    // Spawn task for async message sending
                     tokio::spawn(async move {
-                        let mut accumulated_text = String::new();
-                        let mut accumulated_thinking = String::new();
+                        if let Err(e) = conv_svc.send_message(&text).await {
+                            tracing::error!("Failed to send message: {}", e);
+                            let error_msg = Message {
+                                role: MessageRole::System,
+                                content: format!("❌ Failed to send message: {}", e),
+                                thinking: None,
+                                collapsed: false,
+                                timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            };
+                            state.add_message(error_msg.clone());
+                            let _ = event_tx.send(AppEvent::MessageAdded(error_msg));
+                            let _ = event_tx.send(AppEvent::LlmError(e.to_string()));
+                        }
+                        state.set_llm_processing(false);
 
-                        while let Some(event) = bridge_rx.recv().await {
-                            // Accumulate text for final message
-                            if let BridgeEvent::TextChunk(ref chunk) = event {
-                                accumulated_text.push_str(chunk);
-                            }
-                            if let BridgeEvent::ThinkingChunk(ref chunk) = event {
-                                accumulated_thinking.push_str(chunk);
-                            }
-
-                            // Handle completion
-                            if let BridgeEvent::Completed(_) = event {
-                                // Create assistant message
-                                let assistant_msg = Message {
-                                    role: MessageRole::Assistant,
-                                    content: accumulated_text.clone(),
-                                    thinking: if accumulated_thinking.is_empty() {
-                                        None
-                                    } else {
-                                        Some(accumulated_thinking.clone())
-                                    },
-                                    collapsed: false,
-                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                                };
-                                state.add_message(assistant_msg.clone());
-                                let _ = app_event_tx.send(AppEvent::MessageAdded(assistant_msg));
-                                state.set_llm_processing(false);
-                            }
-
-                            // Handle error
-                            if let BridgeEvent::Error(ref err) = event {
-                                // Show error as system message
-                                let error_msg = Message {
-                                    role: MessageRole::System,
-                                    content: format!("Error: {}", err),
-                                    thinking: None,
-                                    collapsed: false,
-                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                                };
-                                state.add_message(error_msg.clone());
-                                let _ = app_event_tx.send(AppEvent::MessageAdded(error_msg));
-                                state.set_llm_processing(false);
-                            }
-
-                            // Handle interruption
-                            if let BridgeEvent::Interrupted = event {
-                                let interrupted_msg = Message {
-                                    role: MessageRole::System,
-                                    content: "Interrupted by user".to_string(),
-                                    thinking: None,
-                                    collapsed: false,
-                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                                };
-                                state.add_message(interrupted_msg.clone());
-                                let _ = app_event_tx.send(AppEvent::MessageAdded(interrupted_msg));
-                                state.set_llm_processing(false);
-                            }
-
-                            // Forward event to AppEvent
-                            if let Some(app_event) = bridge_event_to_app_event(event) {
-                                let _ = app_event_tx.send(app_event);
-                            }
+                        // Process next queued message if any
+                        if let Some(_next_msg) = state.pop_queued_message() {
+                            let _ = event_tx.send(AppEvent::TaskQueueUpdated {
+                                count: state.queued_message_count(),
+                            });
+                            // Trigger sending the queued message
+                            // Note: This will be handled by the controller polling for events
                         }
                     });
-
-                    // Send message to AgentBridge with or without attachments
-                    let result = if has_attachments {
-                        let config = self.attachment_manager.config().clone();
-                        bridge
-                            .send_message_with_attachments(&text, attachments, bridge_tx, &config)
-                            .await
-                    } else {
-                        bridge.send_message_streaming(&text, bridge_tx).await
-                    };
-
-                    if let Err(e) = result {
-                        tracing::error!("Failed to send message to LLM: {}", e);
-                        // Show error as system message
-                        let error_msg = Message {
-                            role: MessageRole::System,
-                            content: format!("❌ Failed to send message: {}\n\nCheck your API key configuration and network connection.", e),
-                            thinking: None,
-                            collapsed: false,
-                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                        };
-                        self.state.add_message(error_msg.clone());
-                        self.event_tx.send(AppEvent::MessageAdded(error_msg)).ok();
-                        self.event_tx.send(AppEvent::LlmError(e.to_string())).ok();
-                        self.state.set_llm_processing(false);
-                    }
                 } else {
-                    // No AgentBridge - show error
-                    tracing::warn!("Attempted to send message but AgentBridge is not initialized");
+                    tracing::warn!(
+                        "Attempted to send message but ConversationService is not initialized"
+                    );
                     let error_msg = Message {
                         role: MessageRole::System,
-                        content: "⚠️  LLM not connected. Please configure your API key.\n\nRun 'tark auth <provider>' to set up authentication.".to_string(),
+                        content: "⚠️  LLM not connected. Please configure your API key."
+                            .to_string(),
                         thinking: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
                     self.state.add_message(error_msg.clone());
                     self.event_tx.send(AppEvent::MessageAdded(error_msg)).ok();
-                    self.event_tx
-                        .send(AppEvent::LlmError(
-                            "LLM not connected. Please configure an API key.".to_string(),
-                        ))
-                        .ok();
                 }
             }
 
@@ -577,48 +507,159 @@ impl AppService {
             }
 
             // Context files / Attachments
-            Command::AddContextFile(path) => {
-                // Use AttachmentManager to properly load and process the file
-                match self.add_attachment(&path) {
-                    Ok(info) => {
-                        self.event_tx
-                            .send(AppEvent::ContextFileAdded(info.path.clone()))
-                            .ok();
-                        self.event_tx
-                            .send(AppEvent::StatusChanged(format!(
-                                "Added: {} ({})",
-                                info.filename, info.size_display
-                            )))
-                            .ok();
-                    }
-                    Err(e) => {
-                        let error_msg = Message {
-                            role: MessageRole::System,
-                            content: format!("Failed to attach file: {}", e),
-                            thinking: None,
-                            collapsed: false,
-                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                        };
-                        self.state.add_message(error_msg.clone());
-                        self.event_tx.send(AppEvent::MessageAdded(error_msg)).ok();
-                    }
+            Command::AddContextFile(path) => match self.add_attachment(&path) {
+                Ok(info) => {
+                    self.event_tx
+                        .send(AppEvent::ContextFileAdded(info.path.clone()))
+                        .ok();
+                    self.event_tx
+                        .send(AppEvent::StatusChanged(format!(
+                            "Added: {} ({})",
+                            info.filename, info.size_display
+                        )))
+                        .ok();
                 }
-            }
+                Err(e) => {
+                    let error_msg = Message {
+                        role: MessageRole::System,
+                        content: format!("Failed to attach file: {}", e),
+                        thinking: None,
+                        collapsed: false,
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    };
+                    self.state.add_message(error_msg.clone());
+                    self.event_tx.send(AppEvent::MessageAdded(error_msg)).ok();
+                }
+            },
             Command::RemoveContextFile(path) => {
                 self.remove_attachment(&path);
                 self.state.remove_context_file(&path);
                 self.event_tx.send(AppEvent::ContextFileRemoved(path)).ok();
             }
+            Command::RemoveContextByIndex(index) => {
+                let context_files = self.state.context_files();
+                if let Some(file) = context_files.get(index) {
+                    let path = file.path.clone();
+                    self.remove_attachment(&path);
+                    self.state.remove_context_file(&path);
+                    self.event_tx.send(AppEvent::ContextFileRemoved(path)).ok();
+                }
+            }
+
+            // Git operations
+            Command::OpenGitDiff(file_path) => match self.git.get_file_diff(&file_path) {
+                Ok(diff) => {
+                    let msg = Message {
+                        role: MessageRole::System,
+                        content: format!("Diff for {}:\n\n{}", file_path, diff),
+                        thinking: None,
+                        collapsed: false,
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    };
+                    self.state.add_message(msg);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get diff: {}", e);
+                }
+            },
+            Command::StageGitFile(file_path) => match self.git.stage_file(&file_path) {
+                Ok(_) => {
+                    self.event_tx
+                        .send(AppEvent::StatusChanged(format!("Staged: {}", file_path)))
+                        .ok();
+                    self.refresh_sidebar_data().await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to stage file: {}", e);
+                    self.event_tx
+                        .send(AppEvent::StatusChanged(format!("Failed to stage: {}", e)))
+                        .ok();
+                }
+            },
+
+            // File picker navigation
+            Command::FilePickerUp => {
+                let selected = self.state.file_picker_selected();
+                if selected > 0 {
+                    self.state.set_file_picker_selected(selected - 1);
+                }
+            }
+            Command::FilePickerDown => {
+                let selected = self.state.file_picker_selected();
+                let files = self.state.file_picker_files();
+                if selected + 1 < files.len() {
+                    self.state.set_file_picker_selected(selected + 1);
+                }
+            }
+            Command::FilePickerSelect => {
+                let files = self.state.file_picker_files();
+                let selected = self.state.file_picker_selected();
+                if let Some(file_path) = files.get(selected) {
+                    match self.add_attachment(file_path) {
+                        Ok(info) => {
+                            self.event_tx
+                                .send(AppEvent::ContextFileAdded(info.path.clone()))
+                                .ok();
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to add file to context: {}", e);
+                        }
+                    }
+                    self.state.set_active_modal(None);
+                }
+            }
+            Command::UpdateFilePickerFilter(filter) => {
+                self.state.set_file_picker_filter(filter.clone());
+                self.state.set_file_picker_selected(0);
+                self.refresh_file_picker(&filter);
+            }
 
             // Interruption
             Command::Interrupt => {
-                if let Some(ref bridge) = self.agent_bridge {
-                    bridge.interrupt();
+                if let Some(ref conv_svc) = self.conversation_svc {
+                    conv_svc.interrupt();
                 }
                 self.state.set_llm_processing(false);
                 self.event_tx
                     .send(AppEvent::StatusChanged("Interrupted".to_string()))
                     .ok();
+            }
+
+            // Approval actions
+            Command::ApproveOperation => {
+                if let Some(mut approval) = self.state.pending_approval() {
+                    approval.approve();
+                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_active_modal(None);
+                    self.event_tx
+                        .send(AppEvent::StatusChanged("Operation approved".to_string()))
+                        .ok();
+                }
+            }
+            Command::DenyOperation => {
+                if let Some(mut approval) = self.state.pending_approval() {
+                    approval.reject();
+                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_active_modal(None);
+                    self.event_tx
+                        .send(AppEvent::StatusChanged("Operation denied".to_string()))
+                        .ok();
+                }
+            }
+
+            // Questionnaire actions
+            Command::QuestionUp => {}
+            Command::QuestionDown => {}
+            Command::QuestionToggle => {}
+            Command::QuestionSubmit => {
+                if let Some(q) = self.state.active_questionnaire() {
+                    let answer = q.get_answer();
+                    self.state.answer_questionnaire(answer);
+                    self.state.set_active_questionnaire(None);
+                    self.event_tx
+                        .send(AppEvent::StatusChanged("Answer submitted".to_string()))
+                        .ok();
+                }
             }
 
             // History navigation
@@ -627,6 +668,51 @@ impl AppService {
             }
             Command::HistoryNext => {
                 self.state.navigate_history_next();
+            }
+
+            // Session operations
+            Command::NewSession => {
+                if let Some(ref session_svc) = self.session_svc {
+                    let session_svc = session_svc.clone();
+                    let event_tx = self.event_tx.clone();
+                    let state = self.state.clone();
+
+                    tokio::spawn(async move {
+                        match session_svc.create_new().await {
+                            Ok(info) => {
+                                state.clear_input();
+                                let _ = event_tx.send(AppEvent::StatusChanged(format!(
+                                    "New session: {}",
+                                    info.session_id
+                                )));
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to create session: {}", e);
+                            }
+                        }
+                    });
+                }
+            }
+            Command::SwitchSession(session_id) => {
+                if let Some(ref session_svc) = self.session_svc {
+                    let session_svc = session_svc.clone();
+                    let event_tx = self.event_tx.clone();
+                    let _state = self.state.clone();
+
+                    tokio::spawn(async move {
+                        match session_svc.switch_to(&session_id).await {
+                            Ok(info) => {
+                                let _ = event_tx.send(AppEvent::StatusChanged(format!(
+                                    "Switched to: {}",
+                                    info.session_id
+                                )));
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to switch session: {}", e);
+                            }
+                        }
+                    });
+                }
             }
 
             // Not yet implemented
@@ -638,273 +724,80 @@ impl AppService {
         Ok(())
     }
 
-    /// Get available LLM providers from models.dev
-    ///
-    /// Returns the list of providers filtered by config.enabled_providers.
-    /// Loads provider data exclusively from models.dev.
-    pub fn get_providers(&self) -> Vec<ProviderInfo> {
-        // Load config to check enabled_providers filter
-        let config = crate::config::Config::load().unwrap_or_default();
-        let enabled_providers = if config.llm.enabled_providers.is_empty() {
-            // If empty, show all providers
-            None
-        } else {
-            Some(config.llm.enabled_providers.clone())
-        };
-
-        // Get providers from models.dev
-        let models_db = crate::llm::models_db();
-
-        // Use runtime to block on async in sync context (acceptable for UI operations)
-        let all_provider_ids = tokio::runtime::Handle::try_current()
-            .ok()
-            .and_then(|_| {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(async { models_db.list_providers().await.ok() })
-                })
-            })
-            .unwrap_or_else(|| {
-                tracing::warn!("Failed to load providers from models.dev, using defaults");
-                // Fallback to config-enabled providers only
-                enabled_providers
-                    .clone()
-                    .unwrap_or_else(|| vec!["openai".to_string(), "google".to_string()])
-            });
-
-        // Filter by enabled_providers if configured
-        let provider_ids: Vec<String> = if let Some(ref enabled) = enabled_providers {
-            all_provider_ids
-                .into_iter()
-                .filter(|id| enabled.contains(id))
-                .collect()
-        } else {
-            all_provider_ids
-        };
-
-        tracing::info!(
-            "Loading {} providers: {:?}",
-            provider_ids.len(),
-            provider_ids
-        );
-
-        provider_ids
-            .iter()
-            .filter_map(|id| {
-                // Get provider info from models.dev
-                let provider_info = tokio::runtime::Handle::try_current().ok().and_then(|_| {
-                    tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current()
-                            .block_on(async { models_db.get_provider(id).await.ok().flatten() })
-                    })
-                });
-
-                // Skip if no provider info from models.dev
-                let info = provider_info?;
-
-                // Determine if provider is configured by checking env vars
-                let configured = if info.env.is_empty() {
-                    // No env vars required (e.g., ollama) - always configured
-                    true
-                } else {
-                    // Check if at least one required env var exists
-                    info.env
-                        .iter()
-                        .any(|env_var| std::env::var(env_var).is_ok())
-                };
-
-                // Get icon
-                let icon = Self::provider_icon(id);
-
-                // Generate description from model count
-                let description = if info.models.is_empty() {
-                    "AI models".to_string()
-                } else {
-                    format!("{} models available", info.models.len())
-                };
-
-                Some(ProviderInfo {
-                    id: id.clone(),
-                    name: info.name.clone(),
-                    description,
-                    configured,
-                    icon,
-                })
-            })
-            .collect()
+    /// Get available LLM providers
+    pub async fn get_providers(&self) -> Vec<ProviderInfo> {
+        self.catalog.list_providers().await
     }
 
-    /// Check if a provider is configured (fallback method)
-    fn is_provider_configured(provider_id: &str) -> bool {
-        match provider_id {
-            "openai" => std::env::var("OPENAI_API_KEY").is_ok(),
-            "anthropic" => std::env::var("ANTHROPIC_API_KEY").is_ok(),
-            "google" | "gemini" => {
-                std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok()
-            }
-            "openrouter" => std::env::var("OPENROUTER_API_KEY").is_ok(),
-            "ollama" => true, // Local, always available
-            _ => false,
-        }
-    }
-
-    /// Get display name for provider (fallback)
-    fn provider_display_name(provider_id: &str) -> String {
-        match provider_id {
-            "openai" => "OpenAI",
-            "anthropic" => "Anthropic",
-            "google" | "gemini" => "Google Gemini",
-            "openrouter" => "OpenRouter",
-            "ollama" => "Ollama",
-            _ => provider_id,
-        }
-        .to_string()
-    }
-
-    /// Get icon for provider
-    fn provider_icon(provider_id: &str) -> String {
-        match provider_id {
-            "openai" => "🔑",
-            "anthropic" => "🤖",
-            "google" | "gemini" => "💎",
-            "openrouter" => "🔀",
-            "ollama" => "🦙",
-            _ => "📦",
-        }
-        .to_string()
-    }
-
-    /// Get available models for a provider from models.dev
+    /// Get available models for a provider
     pub async fn get_models(&self, provider: &str) -> Vec<ModelInfo> {
-        // Try to get models from models.dev directly
-        let models_db = crate::llm::models_db();
+        self.catalog.list_models(provider).await
+    }
 
-        match models_db.list_models(provider).await {
-            Ok(models) if !models.is_empty() => models
-                .into_iter()
-                .map(|m| ModelInfo {
-                    id: m.id.clone(),
-                    name: m.name.clone(),
-                    description: m.capability_summary(),
-                    provider: provider.to_string(),
-                    context_window: m.limit.context as usize,
-                    max_tokens: m.limit.output as usize,
-                })
-                .collect(),
-            _ => {
-                // Fallback to AgentBridge if available
-                if let Some(ref bridge) = self.agent_bridge {
-                    let models = bridge.list_available_models().await;
-                    models
-                        .into_iter()
-                        .map(|(id, name, description)| ModelInfo {
-                            id: id.clone(),
-                            name,
-                            description,
-                            provider: provider.to_string(),
-                            context_window: 0,
-                            max_tokens: 0,
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                }
-            }
-        }
+    /// Get available tools for current agent mode
+    pub fn get_tools(&self) -> Vec<super::tool_execution::ToolInfo> {
+        let mode = self.state.agent_mode();
+        self.tools.list_tools(mode)
+    }
+
+    /// Refresh file picker with workspace files
+    pub fn refresh_file_picker(&self, filter: &str) {
+        use crate::core::attachments::search_workspace_files;
+
+        let files = search_workspace_files(&self.working_dir, filter, true);
+        let file_paths: Vec<String> = files
+            .iter()
+            .filter_map(|p| {
+                p.strip_prefix(&self.working_dir)
+                    .ok()
+                    .map(|rel| rel.to_string_lossy().to_string())
+            })
+            .collect();
+
+        self.state.set_file_picker_files(file_paths);
+        tracing::debug!("File picker refreshed with {} files", files.len());
     }
 
     /// Get current session information
-    pub fn get_session_info(&self) -> Option<super::types::SessionInfo> {
-        if let Some(ref bridge) = self.agent_bridge {
-            let session = bridge.current_session();
-            Some(super::types::SessionInfo {
-                session_id: session.id.clone(),
-                branch: "main".to_string(), // TODO: Get from git
-                total_cost: bridge.total_cost(),
-                model_count: 1, // TODO: Get actual model count
-                created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            })
+    pub async fn get_session_info(&self) -> Option<super::types::SessionInfo> {
+        if let Some(ref session_svc) = self.session_svc {
+            session_svc.get_current().await.into()
         } else {
             None
         }
     }
 
     /// Create a new session
-    pub fn new_session(&mut self) -> Result<()> {
-        if let Some(ref mut bridge) = self.agent_bridge {
-            bridge.new_session()?;
-        }
+    pub fn new_session(&self) -> Result<()> {
+        // TODO: Implement through SessionService
         Ok(())
     }
 
     /// Switch to a different session
-    pub fn switch_session(&mut self, session_id: &str) -> Result<()> {
-        if let Some(ref mut bridge) = self.agent_bridge {
-            bridge.switch_session(session_id)?;
-        }
+    pub fn switch_session(&self, _session_id: &str) -> Result<()> {
+        // TODO: Implement through SessionService
         Ok(())
     }
 
     /// List all sessions
     pub fn list_sessions(&self) -> Result<Vec<crate::storage::SessionMeta>> {
-        if let Some(ref bridge) = self.agent_bridge {
-            bridge.list_sessions()
-        } else {
-            Ok(vec![])
-        }
-    }
-
-    /// Save current session state
-    pub fn save_session(&self) -> Result<()> {
-        if let Some(ref _bridge) = self.agent_bridge {
-            // Session is auto-saved by AgentBridge after each message
-            tracing::debug!("Session auto-saved by AgentBridge");
-        }
-        Ok(())
-    }
-
-    /// Load a session by ID
-    pub fn load_session(&mut self, session_id: &str) -> Result<()> {
-        if let Some(ref mut bridge) = self.agent_bridge {
-            bridge.switch_session(session_id)?;
-
-            // Update state with loaded session info
-            let session = bridge.current_session();
-            self.state.set_provider(Some(session.provider.clone()));
-            self.state.set_model(Some(session.model.clone()));
-
-            // Messages will be loaded from storage automatically
-            tracing::info!("Switched to session: {}", session_id);
-        }
-        Ok(())
+        self.storage.list_sessions().map_err(|e| e.into())
     }
 
     /// Export current session to file
-    pub fn export_session(&self, path: &std::path::Path) -> Result<()> {
-        if let Some(ref bridge) = self.agent_bridge {
-            let session = bridge.current_session();
-            let messages = self.state.messages();
-
-            let export_data = serde_json::json!({
-                "session_id": session.id,
-                "provider": session.provider,
-                "model": session.model,
-                "messages": messages,
-                "context_files": self.state.context_files(),
-                "exported_at": chrono::Local::now().to_rfc3339(),
-            });
-
-            std::fs::write(path, serde_json::to_string_pretty(&export_data)?)?;
-            tracing::info!("Session exported to {:?}", path);
-        }
+    pub fn export_session(&self, _path: &std::path::Path) -> Result<()> {
+        // TODO: Implement session export through SessionService
         Ok(())
+    }
+
+    /// Import session from file
+    pub fn import_session(&self, _path: &std::path::Path) -> Result<super::types::SessionInfo> {
+        // TODO: Implement session import through SessionService
+        Err(anyhow::anyhow!("Import not yet implemented"))
     }
 
     /// Set the active provider
     pub async fn set_provider(&mut self, provider: &str) -> Result<()> {
-        if let Some(ref mut bridge) = self.agent_bridge {
-            bridge.set_provider(provider)?;
-        }
         self.state.set_provider(Some(provider.to_string()));
         self.event_tx
             .send(AppEvent::ProviderChanged(provider.to_string()))
@@ -914,9 +807,6 @@ impl AppService {
 
     /// Set the active model
     pub async fn set_model(&mut self, model: &str) -> Result<()> {
-        if let Some(ref mut bridge) = self.agent_bridge {
-            bridge.set_model(model);
-        }
         self.state.set_model(Some(model.to_string()));
         self.event_tx
             .send(AppEvent::ModelChanged(model.to_string()))
@@ -927,23 +817,17 @@ impl AppService {
     // ========== Attachment Management APIs ==========
 
     /// Add a file attachment by path
-    ///
-    /// Reads the file, processes it appropriately based on type,
-    /// and adds it to the pending attachments for the next message.
     pub fn add_attachment(&mut self, path_str: &str) -> Result<AttachmentInfo> {
         use crate::core::attachments::format_size;
 
-        // Resolve the file path (handles relative paths, ~, etc.)
         let resolved_path = resolve_file_path(path_str)
             .map_err(|e| anyhow::anyhow!("Failed to resolve path: {}", e))?;
 
-        // Attach file using the manager
         let attachment = self
             .attachment_manager
             .attach_file(&resolved_path)
             .map_err(|e| anyhow::anyhow!("Failed to attach file: {}", e))?;
 
-        // Create info for UI
         let info = AttachmentInfo {
             filename: attachment.filename.clone(),
             path: resolved_path.display().to_string(),
@@ -953,16 +837,18 @@ impl AppService {
             mime_type: attachment.file_type.mime_type().to_string(),
             is_image: matches!(
                 attachment.file_type,
-                crate::tui::attachments::AttachmentType::Image { .. }
+                crate::core::attachments::AttachmentType::Image { .. }
             ),
             added_at: chrono::Local::now().format("%H:%M:%S").to_string(),
         };
 
-        // Also add to state context files for UI display
         use super::types::ContextFile;
+        let token_count = info.size_bytes / 4;
+
         let context_file = ContextFile {
             path: info.path.clone(),
             size: info.size_bytes as usize,
+            token_count: token_count as usize,
             added_at: info.added_at.clone(),
         };
         self.state.add_context_file(context_file);
@@ -972,10 +858,8 @@ impl AppService {
 
     /// Remove a file attachment by path
     pub fn remove_attachment(&mut self, path: &str) {
-        // Find and remove from attachment manager by filename
         let pending = self.attachment_manager.pending();
         if let Some(pos) = pending.iter().position(|a| {
-            // Match by filename or full path
             a.filename == path
                 || pending
                     .iter()
@@ -995,7 +879,7 @@ impl AppService {
             .map(|a| AttachmentInfo {
                 filename: a.filename.clone(),
                 path: match &a.content {
-                    crate::tui::attachments::AttachmentContent::Path(p) => p.display().to_string(),
+                    crate::core::attachments::AttachmentContent::Path(p) => p.display().to_string(),
                     _ => a.filename.clone(),
                 },
                 size_display: format_size(a.size),
@@ -1004,7 +888,7 @@ impl AppService {
                 mime_type: a.file_type.mime_type().to_string(),
                 is_image: matches!(
                     a.file_type,
-                    crate::tui::attachments::AttachmentType::Image { .. }
+                    crate::core::attachments::AttachmentType::Image { .. }
                 ),
                 added_at: chrono::Local::now().format("%H:%M:%S").to_string(),
             })
@@ -1022,68 +906,46 @@ impl AppService {
         !self.attachment_manager.is_empty()
     }
 
-    /// Get attachment count
-    pub fn attachment_count(&self) -> usize {
-        self.attachment_manager.count()
-    }
-
-    /// Check if any pending attachments are images
-    pub fn has_image_attachments(&self) -> bool {
-        self.attachment_manager.has_images()
-    }
-
-    /// Try to add an image from clipboard
-    ///
-    /// Returns Ok(Some(info)) if an image was found and attached,
-    /// Ok(None) if no image was in the clipboard.
-    pub fn add_clipboard_image(&mut self) -> Result<Option<AttachmentInfo>> {
-        use crate::core::attachments::format_size;
-
-        match self.attachment_manager.attach_clipboard() {
-            Ok(Some(attachment)) => {
-                let info = AttachmentInfo {
-                    filename: attachment.filename.clone(),
-                    path: attachment.filename.clone(),
-                    size_display: format_size(attachment.size),
-                    size_bytes: attachment.size,
-                    type_icon: attachment.file_type.icon().to_string(),
-                    mime_type: attachment.file_type.mime_type().to_string(),
-                    is_image: true,
-                    added_at: chrono::Local::now().format("%H:%M:%S").to_string(),
-                };
-
-                // Add to state context files
-                use super::types::ContextFile;
-                let context_file = ContextFile {
-                    path: info.filename.clone(),
-                    size: info.size_bytes as usize,
-                    added_at: info.added_at.clone(),
-                };
-                self.state.add_context_file(context_file);
-
-                Ok(Some(info))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("Clipboard error: {}", e)),
-        }
-    }
-
-    /// Refresh all sidebar data (called on startup and after events)
-    pub fn refresh_sidebar_data(&self) {
-        // Update session info from AgentBridge
-        if let Some(info) = self.get_session_info() {
+    /// Refresh all sidebar data
+    pub async fn refresh_sidebar_data(&self) {
+        if let Some(info) = self.get_session_info().await {
             self.state.set_session(Some(info));
         }
 
-        // Update git changes from working directory
         let git_changes = crate::tui_new::git_info::get_git_changes(&self.working_dir);
         self.state.set_git_changes(git_changes);
-
-        // TODO: Update tasks from PlanService once integrated
     }
 
     /// Get git changes for the working directory
     pub fn get_git_changes(&self) -> Vec<GitChangeInfo> {
         crate::tui_new::git_info::get_git_changes(&self.working_dir)
+    }
+
+    /// Clear conversation history
+    pub async fn clear_conversation(&self) {
+        if let Some(ref conv_svc) = self.conversation_svc {
+            conv_svc.clear_history().await;
+        }
+    }
+
+    /// Load and restore the current active session
+    pub async fn load_active_session(&self) -> Result<()> {
+        if let Some(ref session_svc) = self.session_svc {
+            // Try to get current session info
+            if let Some(session_info) = session_svc.get_current().await.into() {
+                self.state.set_session(Some(session_info));
+                tracing::info!("Restored active session");
+            }
+        }
+        Ok(())
+    }
+
+    /// Save the current session
+    pub async fn save_current_session(&self) -> Result<()> {
+        if let Some(ref session_svc) = self.session_svc {
+            session_svc.save_current().await?;
+            tracing::info!("Saved current session");
+        }
+        Ok(())
     }
 }

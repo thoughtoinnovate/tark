@@ -11,6 +11,7 @@ use super::types::{
     AttachmentInfo, ContextFile, GitChangeInfo, Message, ModelInfo, ProviderInfo, SessionInfo,
     TaskInfo, ThemePreset,
 };
+use crate::tools::TrustLevel;
 
 /// Error notification level
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +61,20 @@ impl FocusedComponent {
     }
 }
 
+/// Vim editing mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VimMode {
+    /// Insert mode - typing
+    #[default]
+    Insert,
+    /// Normal mode - navigation
+    Normal,
+    /// Visual mode - selection
+    Visual,
+    /// Command mode - slash commands
+    Command,
+}
+
 /// Types of modals that can be displayed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalType {
@@ -68,6 +83,88 @@ pub enum ModalType {
     FilePicker,
     ThemePicker,
     Help,
+    Approval,
+    TrustLevel,
+    Tools,
+    Plugin,
+    DeviceFlow,
+}
+
+/// Active OAuth device flow session
+#[derive(Debug, Clone)]
+pub struct DeviceFlowSession {
+    pub provider: String,
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_url: String,
+    pub expires_at: std::time::Instant,
+    pub interval: std::time::Duration,
+}
+
+/// Conversation-related state (grouped)
+#[derive(Debug, Clone, Default)]
+pub struct ConversationState {
+    pub messages: Vec<Message>,
+    pub focused_message: usize,
+    pub messages_scroll_offset: usize,
+    pub streaming_content: Option<String>,
+    pub streaming_thinking: Option<String>,
+}
+
+/// Provider/model catalog state (grouped)
+#[derive(Debug, Clone, Default)]
+pub struct CatalogState {
+    pub current_provider: Option<String>,
+    pub current_model: Option<String>,
+    pub available_providers: Vec<ProviderInfo>,
+    pub available_models: Vec<ModelInfo>,
+    pub device_flow_session: Option<DeviceFlowSession>,
+}
+
+/// UI-specific state (grouped)
+#[derive(Debug, Clone)]
+pub struct UiState {
+    pub focused_component: FocusedComponent,
+    pub active_modal: Option<ModalType>,
+    pub sidebar_visible: bool,
+    pub theme: ThemePreset,
+    pub status_message: Option<String>,
+
+    // Picker states
+    pub theme_picker_selected: usize,
+    pub theme_picker_filter: String,
+    pub theme_before_preview: Option<ThemePreset>,
+    pub provider_picker_selected: usize,
+    pub provider_picker_filter: String,
+    pub model_picker_selected: usize,
+    pub model_picker_filter: String,
+
+    // Sidebar state
+    pub sidebar_selected_panel: usize,
+    pub sidebar_selected_item: Option<usize>,
+    pub sidebar_expanded_panels: [bool; 4],
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            focused_component: FocusedComponent::default(),
+            active_modal: None,
+            sidebar_visible: true,
+            theme: ThemePreset::CatppuccinMocha,
+            status_message: None,
+            theme_picker_selected: 0,
+            theme_picker_filter: String::new(),
+            theme_before_preview: None,
+            provider_picker_selected: 0,
+            provider_picker_filter: String::new(),
+            model_picker_selected: 0,
+            model_picker_filter: String::new(),
+            sidebar_selected_panel: 0,
+            sidebar_selected_item: None,
+            sidebar_expanded_panels: [false; 4],
+        }
+    }
 }
 
 /// Shared application state (thread-safe)
@@ -88,17 +185,24 @@ struct StateInner {
     pub agent_mode: AgentMode,
     pub build_mode: BuildMode,
     pub thinking_enabled: bool,
+    pub trust_level: TrustLevel,
+    pub trust_level_selected: usize,
 
     // ========== LLM State ==========
     pub current_provider: Option<String>,
     pub current_model: Option<String>,
     pub llm_connected: bool,
     pub llm_processing: bool,
+    pub device_flow_session: Option<DeviceFlowSession>,
 
     // ========== Messages ==========
     pub messages: Vec<Message>,
     pub focused_message: usize,
     pub messages_scroll_offset: usize,
+
+    // ========== Streaming State (BFF owns this, renderer reads only) ==========
+    pub streaming_content: Option<String>,
+    pub streaming_thinking: Option<String>,
 
     // ========== Input State ==========
     pub input_text: String,
@@ -113,6 +217,7 @@ struct StateInner {
     pub status_message: Option<String>,
     pub focused_component: FocusedComponent,
     pub active_modal: Option<ModalType>,
+    pub vim_mode: VimMode,
 
     // ========== Theme Picker State ==========
     pub theme_picker_selected: usize,
@@ -125,10 +230,19 @@ struct StateInner {
     pub model_picker_selected: usize,
     pub model_picker_filter: String,
 
+    // ========== File Picker State ==========
+    pub file_picker_files: Vec<String>,
+    pub file_picker_filter: String,
+    pub file_picker_selected: usize,
+
+    // ========== Tools Modal State ==========
+    pub tools_selected: usize,
+
     // ========== Sidebar State ==========
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
     pub sidebar_expanded_panels: [bool; 4],
+    pub sidebar_scroll_offset: usize,
 
     // ========== Context ==========
     pub context_files: Vec<ContextFile>,
@@ -164,6 +278,9 @@ struct StateInner {
     // ========== Rate Limiting ==========
     pub rate_limit_retry_at: Option<std::time::Instant>,
     pub rate_limit_pending_message: Option<String>,
+
+    // ========== Message Queue ==========
+    pub message_queue: Vec<String>,
 }
 
 impl Default for SharedState {
@@ -181,13 +298,18 @@ impl SharedState {
                 agent_mode: AgentMode::Build,
                 build_mode: BuildMode::Balanced,
                 thinking_enabled: false,
+                trust_level: TrustLevel::default(),
+                trust_level_selected: 1, // Default to Balanced (index 1)
                 current_provider: None,
                 current_model: None,
                 llm_connected: false,
                 llm_processing: false,
+                device_flow_session: None,
                 messages: Vec::new(),
                 focused_message: 0,
                 messages_scroll_offset: 0,
+                streaming_content: None,
+                streaming_thinking: None,
                 input_text: String::new(),
                 input_cursor: 0,
                 input_history: Vec::new(),
@@ -198,6 +320,7 @@ impl SharedState {
                 status_message: None,
                 focused_component: FocusedComponent::Input,
                 active_modal: None,
+                vim_mode: VimMode::Insert,
                 theme_picker_selected: 0,
                 theme_picker_filter: String::new(),
                 theme_before_preview: None,
@@ -205,9 +328,14 @@ impl SharedState {
                 provider_picker_filter: String::new(),
                 model_picker_selected: 0,
                 model_picker_filter: String::new(),
+                file_picker_files: Vec::new(),
+                file_picker_filter: String::new(),
+                file_picker_selected: 0,
+                tools_selected: 0,
                 sidebar_selected_panel: 0,
                 sidebar_selected_item: None,
                 sidebar_expanded_panels: [true, true, true, true],
+                sidebar_scroll_offset: 0,
                 context_files: Vec::new(),
                 tokens_used: 0,
                 tokens_total: 1_000_000,
@@ -223,6 +351,7 @@ impl SharedState {
                 pending_approval: None,
                 rate_limit_retry_at: None,
                 rate_limit_pending_message: None,
+                message_queue: Vec::new(),
             })),
         }
     }
@@ -259,6 +388,14 @@ impl SharedState {
         self.read_inner().build_mode
     }
 
+    pub fn trust_level(&self) -> TrustLevel {
+        self.read_inner().trust_level
+    }
+
+    pub fn trust_level_selected(&self) -> usize {
+        self.read_inner().trust_level_selected
+    }
+
     pub fn thinking_enabled(&self) -> bool {
         self.read_inner().thinking_enabled
     }
@@ -278,6 +415,68 @@ impl SharedState {
     pub fn current_model(&self) -> Option<String> {
         self.read_inner().current_model.clone()
     }
+
+    pub fn device_flow_session(&self) -> Option<DeviceFlowSession> {
+        self.read_inner().device_flow_session.clone()
+    }
+
+    pub fn set_device_flow_session(&self, session: Option<DeviceFlowSession>) {
+        self.write_inner().device_flow_session = session;
+    }
+
+    // ========== Grouped State Accessors ==========
+    // New grouped accessors for better state organization
+    // Old individual accessors remain for backward compatibility
+
+    /// Get conversation state (messages, streaming)
+    pub fn conversation(&self) -> ConversationState {
+        let inner = self.read_inner();
+        ConversationState {
+            messages: inner.messages.clone(),
+            focused_message: inner.focused_message,
+            messages_scroll_offset: inner.messages_scroll_offset,
+            streaming_content: inner.streaming_content.clone(),
+            streaming_thinking: inner.streaming_thinking.clone(),
+        }
+    }
+
+    /// Get catalog state (providers, models, device flow)
+    pub fn catalog(&self) -> CatalogState {
+        let inner = self.read_inner();
+        CatalogState {
+            current_provider: inner.current_provider.clone(),
+            current_model: inner.current_model.clone(),
+            available_providers: inner.available_providers.clone(),
+            available_models: inner.available_models.clone(),
+            device_flow_session: inner.device_flow_session.clone(),
+        }
+    }
+
+    /// Get UI state (focus, modals, theme, pickers, sidebar)
+    pub fn ui(&self) -> UiState {
+        let inner = self.read_inner();
+        UiState {
+            focused_component: inner.focused_component,
+            active_modal: inner.active_modal,
+            sidebar_visible: inner.sidebar_visible,
+            theme: inner.theme,
+            status_message: inner.status_message.clone(),
+            theme_picker_selected: inner.theme_picker_selected,
+            theme_picker_filter: inner.theme_picker_filter.clone(),
+            theme_before_preview: inner.theme_before_preview,
+            provider_picker_selected: inner.provider_picker_selected,
+            provider_picker_filter: inner.provider_picker_filter.clone(),
+            model_picker_selected: inner.model_picker_selected,
+            model_picker_filter: inner.model_picker_filter.clone(),
+            sidebar_selected_panel: inner.sidebar_selected_panel,
+            sidebar_selected_item: inner.sidebar_selected_item,
+            sidebar_expanded_panels: inner.sidebar_expanded_panels,
+        }
+    }
+
+    // ========== Legacy Individual Accessors (Backward Compatible) ==========
+    // These continue to work and delegate to the flat fields
+    // Eventually, new code should use grouped accessors above
 
     pub fn messages(&self) -> Vec<Message> {
         self.read_inner().messages.clone()
@@ -299,6 +498,10 @@ impl SharedState {
 
     pub fn messages_scroll_offset(&self) -> usize {
         self.read_inner().messages_scroll_offset
+    }
+
+    pub fn focused_message(&self) -> usize {
+        self.read_inner().focused_message
     }
 
     pub fn input_text(&self) -> String {
@@ -337,6 +540,10 @@ impl SharedState {
         self.read_inner().active_modal
     }
 
+    pub fn vim_mode(&self) -> VimMode {
+        self.read_inner().vim_mode
+    }
+
     pub fn theme_picker_selected(&self) -> usize {
         self.read_inner().theme_picker_selected
     }
@@ -357,6 +564,10 @@ impl SharedState {
         self.read_inner().sidebar_expanded_panels
     }
 
+    pub fn sidebar_scroll_offset(&self) -> usize {
+        self.read_inner().sidebar_scroll_offset
+    }
+
     pub fn theme_before_preview(&self) -> Option<ThemePreset> {
         self.read_inner().theme_before_preview
     }
@@ -375,6 +586,22 @@ impl SharedState {
 
     pub fn model_picker_filter(&self) -> String {
         self.read_inner().model_picker_filter.clone()
+    }
+
+    pub fn file_picker_files(&self) -> Vec<String> {
+        self.read_inner().file_picker_files.clone()
+    }
+
+    pub fn file_picker_filter(&self) -> String {
+        self.read_inner().file_picker_filter.clone()
+    }
+
+    pub fn file_picker_selected(&self) -> usize {
+        self.read_inner().file_picker_selected
+    }
+
+    pub fn tools_selected(&self) -> usize {
+        self.read_inner().tools_selected
     }
 
     pub fn error_notification(&self) -> Option<ErrorNotification> {
@@ -433,6 +660,14 @@ impl SharedState {
         self.read_inner().tokens_total
     }
 
+    pub fn streaming_content(&self) -> Option<String> {
+        self.read_inner().streaming_content.clone()
+    }
+
+    pub fn streaming_thinking(&self) -> Option<String> {
+        self.read_inner().streaming_thinking.clone()
+    }
+
     // ========== Setters ==========
 
     pub fn set_should_quit(&self, value: bool) {
@@ -445,6 +680,14 @@ impl SharedState {
 
     pub fn set_build_mode(&self, mode: BuildMode) {
         self.write_inner().build_mode = mode;
+    }
+
+    pub fn set_trust_level(&self, level: TrustLevel) {
+        self.write_inner().trust_level = level;
+    }
+
+    pub fn set_trust_level_selected(&self, selected: usize) {
+        self.write_inner().trust_level_selected = selected;
     }
 
     pub fn set_thinking_enabled(&self, enabled: bool) {
@@ -489,6 +732,10 @@ impl SharedState {
 
     pub fn add_message(&self, message: Message) {
         self.write_inner().messages.push(message);
+    }
+
+    pub fn clear_messages(&self) {
+        self.write_inner().messages.clear();
     }
 
     pub fn set_messages_scroll_offset(&self, offset: usize) {
@@ -585,6 +832,10 @@ impl SharedState {
         self.write_inner().active_modal = modal;
     }
 
+    pub fn set_vim_mode(&self, mode: VimMode) {
+        self.write_inner().vim_mode = mode;
+    }
+
     pub fn set_theme_picker_selected(&self, selected: usize) {
         self.write_inner().theme_picker_selected = selected;
     }
@@ -609,6 +860,10 @@ impl SharedState {
         self.write_inner().sidebar_expanded_panels = panels;
     }
 
+    pub fn set_sidebar_scroll_offset(&self, offset: usize) {
+        self.write_inner().sidebar_scroll_offset = offset;
+    }
+
     pub fn set_provider_picker_selected(&self, selected: usize) {
         self.write_inner().provider_picker_selected = selected;
     }
@@ -623,6 +878,22 @@ impl SharedState {
 
     pub fn set_model_picker_filter(&self, filter: String) {
         self.write_inner().model_picker_filter = filter;
+    }
+
+    pub fn set_file_picker_files(&self, files: Vec<String>) {
+        self.write_inner().file_picker_files = files;
+    }
+
+    pub fn set_file_picker_filter(&self, filter: String) {
+        self.write_inner().file_picker_filter = filter;
+    }
+
+    pub fn set_file_picker_selected(&self, selected: usize) {
+        self.write_inner().file_picker_selected = selected;
+    }
+
+    pub fn set_tools_selected(&self, selected: usize) {
+        self.write_inner().tools_selected = selected;
     }
 
     pub fn set_session(&self, session: Option<SessionInfo>) {
@@ -727,6 +998,55 @@ impl SharedState {
         }
         None
     }
+
+    pub fn set_streaming_content(&self, content: Option<String>) {
+        self.write_inner().streaming_content = content;
+    }
+
+    pub fn append_streaming_content(&self, chunk: &str) {
+        let mut inner = self.write_inner();
+        if let Some(ref mut content) = inner.streaming_content {
+            content.push_str(chunk);
+        } else {
+            inner.streaming_content = Some(chunk.to_string());
+        }
+    }
+
+    pub fn set_streaming_thinking(&self, thinking: Option<String>) {
+        self.write_inner().streaming_thinking = thinking;
+    }
+
+    pub fn append_streaming_thinking(&self, chunk: &str) {
+        let mut inner = self.write_inner();
+        if let Some(ref mut thinking) = inner.streaming_thinking {
+            thinking.push_str(chunk);
+        } else {
+            inner.streaming_thinking = Some(chunk.to_string());
+        }
+    }
+
+    pub fn clear_streaming(&self) {
+        let mut inner = self.write_inner();
+        inner.streaming_content = None;
+        inner.streaming_thinking = None;
+    }
+
+    pub fn queue_message(&self, msg: String) {
+        self.write_inner().message_queue.push(msg);
+    }
+
+    pub fn pop_queued_message(&self) -> Option<String> {
+        let mut inner = self.write_inner();
+        if inner.message_queue.is_empty() {
+            None
+        } else {
+            Some(inner.message_queue.remove(0))
+        }
+    }
+
+    pub fn queued_message_count(&self) -> usize {
+        self.read_inner().message_queue.len()
+    }
 }
 
 #[cfg(test)]
@@ -807,11 +1127,13 @@ mod tests {
         let file1 = ContextFile {
             path: "file1.rs".to_string(),
             size: 100,
+            token_count: 25,
             added_at: "12:00:00".to_string(),
         };
         let file2 = ContextFile {
             path: "file2.rs".to_string(),
             size: 200,
+            token_count: 50,
             added_at: "12:01:00".to_string(),
         };
 

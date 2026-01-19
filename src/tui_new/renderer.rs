@@ -6,6 +6,7 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::backend::Backend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 use std::time::Duration;
 
@@ -14,11 +15,12 @@ use crate::ui_backend::{
     AppEvent, Command, FocusedComponent, MessageRole as UiMessageRole, ModalType, SharedState,
 };
 
+use super::modals::{ApprovalModal, DeviceFlowModal, PluginModal, ToolsModal, TrustModal};
 use super::theme::Theme;
 use super::widgets::{
     FilePickerModal, GitChange, GitStatus, Header, HelpModal, InputWidget, MessageArea,
-    ModelPickerModal, ProviderPickerModal, SessionInfo, Sidebar, StatusBar, Task, TaskStatus,
-    TerminalFrame, ThemePickerModal,
+    ModelPickerModal, ProviderPickerModal, QuestionOption, QuestionWidget, SessionInfo, Sidebar,
+    StatusBar, Task, TaskStatus, TerminalFrame, ThemePickerModal,
 };
 
 /// Click target for hit testing
@@ -39,8 +41,6 @@ pub struct TuiRenderer<B: Backend> {
     terminal: Terminal<B>,
     /// Current theme (cached for rendering)
     theme: Theme,
-    /// Last rendered streaming message content (for incremental updates)
-    streaming_message: Option<String>,
 }
 
 impl<B: Backend> TuiRenderer<B> {
@@ -49,7 +49,6 @@ impl<B: Backend> TuiRenderer<B> {
         Self {
             terminal,
             theme: Theme::default(),
-            streaming_message: None,
         }
     }
 
@@ -94,16 +93,95 @@ impl<B: Backend> TuiRenderer<B> {
             // Mode cycling
             (KeyCode::Char('m'), KeyModifiers::CONTROL) => Some(Command::CycleBuildMode),
 
+            // Approval mode (Alt+A or Shift+A) - only in Build mode
+            (KeyCode::Char('a'), KeyModifiers::ALT) | (KeyCode::Char('A'), KeyModifiers::SHIFT) => {
+                if state.agent_mode() == crate::ui_backend::AgentMode::Build {
+                    Some(Command::OpenTrustLevelSelector)
+                } else {
+                    None
+                }
+            }
+
             // UI toggles
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(Command::ToggleSidebar),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(Command::ToggleThinking),
 
-            // Escape to close modal or clear input
+            // Vim keybindings for messages panel and sidebar (must be before general char handler)
+            (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                match state.focused_component() {
+                    FocusedComponent::Messages if state.vim_mode() == VimMode::Normal => {
+                        Some(Command::ScrollDown)
+                    }
+                    FocusedComponent::Panel if state.vim_mode() == VimMode::Normal => {
+                        Some(Command::SidebarDown)
+                    }
+                    _ => None,
+                }
+            }
+            (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                match state.focused_component() {
+                    FocusedComponent::Messages if state.vim_mode() == VimMode::Normal => {
+                        Some(Command::ScrollUp)
+                    }
+                    FocusedComponent::Panel if state.vim_mode() == VimMode::Normal => {
+                        Some(Command::SidebarUp)
+                    }
+                    _ => None,
+                }
+            }
+            (KeyCode::Char('y'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                if state.focused_component() == FocusedComponent::Messages
+                    && state.vim_mode() == VimMode::Normal
+                {
+                    Some(Command::YankMessage)
+                } else {
+                    None
+                }
+            }
+            (KeyCode::Char('G'), KeyModifiers::SHIFT) => {
+                use crate::ui_backend::VimMode;
+                if state.focused_component() == FocusedComponent::Messages
+                    && state.vim_mode() == VimMode::Normal
+                {
+                    // Scroll to bottom
+                    let msg_count = state.message_count();
+                    if msg_count > 0 {
+                        state.set_messages_scroll_offset(msg_count.saturating_sub(1));
+                    }
+                    None
+                } else {
+                    None
+                }
+            }
+            (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                if state.focused_component() == FocusedComponent::Messages
+                    && state.vim_mode() == VimMode::Normal
+                {
+                    // Scroll to top
+                    state.set_messages_scroll_offset(0);
+                    None
+                } else {
+                    None
+                }
+            }
+
+            // Escape to close modal or switch to Normal mode
             (KeyCode::Esc, _) => {
                 if state.active_modal().is_some() {
                     Some(Command::CloseModal)
                 } else {
-                    Some(Command::ClearInput)
+                    use crate::ui_backend::VimMode;
+                    // Switch to Normal mode when in Input or Messages
+                    match state.focused_component() {
+                        FocusedComponent::Input | FocusedComponent::Messages => {
+                            Some(Command::SetVimMode(VimMode::Normal))
+                        }
+                        _ => Some(Command::ClearInput),
+                    }
                 }
             }
 
@@ -116,8 +194,18 @@ impl<B: Backend> TuiRenderer<B> {
                 }
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
-                if state.active_modal().is_some() {
-                    Some(Command::ConfirmModal)
+                if state.active_questionnaire().is_some() {
+                    Some(Command::QuestionSubmit)
+                } else if let Some(modal) = state.active_modal() {
+                    match modal {
+                        ModalType::TrustLevel => {
+                            let selected = state.trust_level_selected();
+                            let level = crate::tools::TrustLevel::from_index(selected);
+                            Some(Command::SetTrustLevel(level))
+                        }
+                        ModalType::FilePicker => Some(Command::FilePickerSelect),
+                        _ => Some(Command::ConfirmModal),
+                    }
                 } else if matches!(state.focused_component(), FocusedComponent::Input) {
                     let text = state.input_text();
                     Some(Command::SendMessage(text))
@@ -128,27 +216,88 @@ impl<B: Backend> TuiRenderer<B> {
 
             // Text editing (only in input focus)
             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                match state.active_modal() {
-                    Some(ModalType::ThemePicker)
-                    | Some(ModalType::ProviderPicker)
-                    | Some(ModalType::ModelPicker) => Some(Command::ModalFilter(c.to_string())),
-                    _ if matches!(state.focused_component(), FocusedComponent::Input) => {
-                        Some(Command::InsertChar(c))
+                // Questionnaire has priority
+                if state.active_questionnaire().is_some() && c == ' ' {
+                    Some(Command::QuestionToggle)
+                } else {
+                    match state.active_modal() {
+                        Some(ModalType::Approval) => {
+                            // Handle approval actions
+                            match c.to_ascii_lowercase() {
+                                'y' => Some(Command::ApproveOperation),
+                                'n' => Some(Command::DenyOperation),
+                                _ => None,
+                            }
+                        }
+                        Some(ModalType::FilePicker) => {
+                            // Update file picker filter
+                            let current_filter = state.file_picker_filter();
+                            Some(Command::UpdateFilePickerFilter(format!(
+                                "{}{}",
+                                current_filter, c
+                            )))
+                        }
+                        Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker) => Some(Command::ModalFilter(c.to_string())),
+                        _ => {
+                            use crate::ui_backend::VimMode;
+
+                            let vim_mode = state.vim_mode();
+                            let focused = state.focused_component();
+
+                            // Vim mode switching commands (work in Normal mode)
+                            if vim_mode == VimMode::Normal && focused == FocusedComponent::Input {
+                                match c {
+                                    'i' => return Some(Command::SetVimMode(VimMode::Insert)),
+                                    'v' => return Some(Command::SetVimMode(VimMode::Visual)),
+                                    'a' => {
+                                        // Enter insert mode after cursor
+                                        return Some(Command::SetVimMode(VimMode::Insert));
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // Text editing only works in Insert mode
+                            if vim_mode == VimMode::Insert && focused == FocusedComponent::Input {
+                                Some(Command::InsertChar(c))
+                            } else {
+                                None
+                            }
+                        }
                     }
-                    _ => None,
                 }
             }
 
             // Backspace
             (KeyCode::Backspace, _) => {
+                use crate::ui_backend::VimMode;
+
                 match state.active_modal() {
+                    Some(ModalType::FilePicker) => {
+                        let current_filter = state.file_picker_filter();
+                        if !current_filter.is_empty() {
+                            let mut filter = current_filter;
+                            filter.pop();
+                            Some(Command::UpdateFilePickerFilter(filter))
+                        } else {
+                            None
+                        }
+                    }
                     Some(ModalType::ThemePicker)
                     | Some(ModalType::ProviderPicker)
                     | Some(ModalType::ModelPicker) => Some(Command::ModalFilter(String::new())), // Signal to pop
-                    _ if matches!(state.focused_component(), FocusedComponent::Input) => {
-                        Some(Command::DeleteCharBefore)
+                    _ => {
+                        // Only allow backspace in Insert mode
+                        if state.vim_mode() == VimMode::Insert
+                            && matches!(state.focused_component(), FocusedComponent::Input)
+                        {
+                            Some(Command::DeleteCharBefore)
+                        } else {
+                            None
+                        }
                     }
-                    _ => None,
                 }
             }
 
@@ -161,20 +310,62 @@ impl<B: Backend> TuiRenderer<B> {
             (KeyCode::Right, KeyModifiers::CONTROL) => Some(Command::CursorWordForward),
 
             // Arrow key navigation (context-dependent)
-            (KeyCode::Up, _) => match state.active_modal() {
-                Some(ModalType::ThemePicker)
-                | Some(ModalType::ProviderPicker)
-                | Some(ModalType::ModelPicker) => Some(Command::ModalUp),
-                _ if matches!(state.focused_component(), FocusedComponent::Panel) => None,
-                _ => Some(Command::HistoryPrevious),
-            },
-            (KeyCode::Down, _) => match state.active_modal() {
-                Some(ModalType::ThemePicker)
-                | Some(ModalType::ProviderPicker)
-                | Some(ModalType::ModelPicker) => Some(Command::ModalDown),
-                _ if matches!(state.focused_component(), FocusedComponent::Panel) => None,
-                _ => Some(Command::HistoryNext),
-            },
+            (KeyCode::Up, _) => {
+                if state.active_questionnaire().is_some() {
+                    Some(Command::QuestionUp)
+                } else {
+                    match state.active_modal() {
+                        Some(ModalType::Tools) => {
+                            let selected = state.tools_selected();
+                            if selected > 0 {
+                                state.set_tools_selected(selected - 1);
+                            }
+                            None
+                        }
+                        Some(ModalType::TrustLevel) => {
+                            let selected = state.trust_level_selected();
+                            if selected > 0 {
+                                state.set_trust_level_selected(selected - 1);
+                            }
+                            None
+                        }
+                        Some(ModalType::FilePicker) => Some(Command::FilePickerUp),
+                        Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker) => Some(Command::ModalUp),
+                        _ if matches!(state.focused_component(), FocusedComponent::Panel) => None,
+                        _ => Some(Command::HistoryPrevious),
+                    }
+                }
+            }
+            (KeyCode::Down, _) => {
+                if state.active_questionnaire().is_some() {
+                    Some(Command::QuestionDown)
+                } else {
+                    match state.active_modal() {
+                        Some(ModalType::Tools) => {
+                            let selected = state.tools_selected();
+                            // Limit navigation based on actual tool count (handled in service)
+                            state.set_tools_selected(selected + 1);
+                            None
+                        }
+                        Some(ModalType::TrustLevel) => {
+                            let selected = state.trust_level_selected();
+                            if selected < 2 {
+                                // 0=Manual, 1=Balanced, 2=Careful
+                                state.set_trust_level_selected(selected + 1);
+                            }
+                            None
+                        }
+                        Some(ModalType::FilePicker) => Some(Command::FilePickerDown),
+                        Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker) => Some(Command::ModalDown),
+                        _ if matches!(state.focused_component(), FocusedComponent::Panel) => None,
+                        _ => Some(Command::HistoryNext),
+                    }
+                }
+            }
 
             _ => None,
         }
@@ -193,20 +384,26 @@ impl<B: Backend> TuiRenderer<B> {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
                 tracing::debug!("Scroll down event detected");
-                // If modal is active, scroll within modal
+                // Route scroll to the correct component
                 if state.active_modal().is_some() {
                     Some(Command::ModalDown)
                 } else {
-                    Some(Command::ScrollDown)
+                    match state.focused_component() {
+                        FocusedComponent::Panel => Some(Command::SidebarDown),
+                        _ => Some(Command::ScrollDown),
+                    }
                 }
             }
             MouseEventKind::ScrollUp => {
                 tracing::debug!("Scroll up event detected");
-                // If modal is active, scroll within modal
+                // Route scroll to the correct component
                 if state.active_modal().is_some() {
                     Some(Command::ModalUp)
                 } else {
-                    Some(Command::ScrollUp)
+                    match state.focused_component() {
+                        FocusedComponent::Panel => Some(Command::SidebarUp),
+                        _ => Some(Command::ScrollUp),
+                    }
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
@@ -240,10 +437,8 @@ impl<B: Backend> TuiRenderer<B> {
                 }
             }
             ClickTarget::StatusBar => {
-                // Click on status bar opens provider/model picker
-                // The status bar shows provider and model info on the right side
-                // For simplicity, any click on status bar opens provider picker
-                Some(Command::OpenProviderPicker)
+                // Determine which section of status bar was clicked
+                self.hit_test_status_bar(col, state)
             }
             ClickTarget::Modal => {
                 // Modal clicks will select items - handled in modal navigation
@@ -286,6 +481,48 @@ impl<B: Backend> TuiRenderer<B> {
         } else {
             None
         }
+    }
+
+    /// Hit test status bar to determine which icon/section was clicked
+    fn hit_test_status_bar(&self, col: u16, state: &SharedState) -> Option<Command> {
+        // Status bar layout (approximate positions):
+        // "agent • Build ▼  🟢 Balanced ▼  🧠  ≡ 7  VIM(INSERT)    ● Working...    • Model Provider  ⊙"
+        //  0-15: Agent mode area
+        //  16-35: Build mode area
+        //  36-39: Thinking icon (🧠)
+        //  40-50: Queue indicator
+        //  51-65: Vim mode
+        //  Right side (-30 to end): Provider/Model
+
+        let size = self.terminal.size().unwrap_or_default();
+        let status_width = size.width.saturating_sub(2); // Account for borders
+
+        // Relative position from start of status bar
+        let rel_col = col.saturating_sub(1); // Account for left border
+
+        // Agent mode area (0-15)
+        if rel_col < 15 {
+            return Some(Command::CycleAgentMode);
+        }
+
+        // Build mode area (16-35) - only if in Build agent mode
+        if (16..35).contains(&rel_col) && state.agent_mode() == crate::ui_backend::AgentMode::Build
+        {
+            return Some(Command::CycleBuildMode);
+        }
+
+        // Thinking icon (36-40)
+        if (36..40).contains(&rel_col) {
+            return Some(Command::ToggleThinking);
+        }
+
+        // Provider/Model on right (last 30 chars)
+        if rel_col > status_width.saturating_sub(30) {
+            return Some(Command::OpenProviderPicker);
+        }
+
+        // Default: no action
+        None
     }
 
     /// Perform hit testing to determine which component was clicked
@@ -453,22 +690,40 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 })
                 .collect();
 
+            let streaming_content = state.streaming_content();
+            let streaming_thinking = if thinking_enabled {
+                state.streaming_thinking()
+            } else {
+                None
+            };
+
             let message_area = MessageArea::new(&message_widgets, theme)
-                .focused(matches!(focused_component, FocusedComponent::Messages));
+                .agent_name(&config.agent_name_short)
+                .focused(matches!(focused_component, FocusedComponent::Messages))
+                .focused_index(state.focused_message())
+                .streaming_content(streaming_content)
+                .streaming_thinking(streaming_thinking);
             frame.render_widget(message_area, chunks[1]);
 
             // Render input area
+            let context_file_paths: Vec<String> =
+                context_files.iter().map(|f| f.path.clone()).collect();
             let input = InputWidget::new(&input_text, input_cursor, theme)
-                .focused(matches!(focused_component, FocusedComponent::Input));
+                .focused(matches!(focused_component, FocusedComponent::Input))
+                .context_files(context_file_paths);
             frame.render_widget(input, chunks[2]);
 
             // Render status bar
+            let vim_mode = state.vim_mode();
+            let queued_count = state.queued_message_count();
+
             let mut status = StatusBar::new(theme)
                 .agent_mode(agent_mode)
                 .build_mode(build_mode)
                 .thinking(thinking_enabled)
-                .queue(7) // Mock task queue count
-                .processing(llm_processing);
+                .queue(queued_count) // Show actual queue count
+                .processing(llm_processing)
+                .vim_mode(vim_mode);
 
             // Set provider and model if available
             if let Some(ref provider) = current_provider {
@@ -537,8 +792,20 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     .theme_name(current_theme_name)
                     .focused(is_sidebar_focused)
                     .selected_panel(state.sidebar_selected_panel())
+                    .vim_mode(vim_mode)
                     .session_info(session_info)
-                    .context_files(context_files.iter().map(|f| f.path.clone()).collect())
+                    .context_files(
+                        context_files
+                            .iter()
+                            .map(|f| {
+                                if f.token_count > 0 {
+                                    format!("{} ({} tokens)", f.path, f.token_count)
+                                } else {
+                                    f.path.clone()
+                                }
+                            })
+                            .collect(),
+                    )
                     .tokens(state.tokens_used(), state.tokens_total())
                     .tasks(tasks_widget)
                     .git_changes(git_changes_widget);
@@ -601,10 +868,89 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                         frame.render_widget(picker, area);
                     }
                     ModalType::FilePicker => {
-                        let picker = FilePickerModal::new(theme);
+                        let files = state.file_picker_files();
+                        let filter = state.file_picker_filter();
+                        let selected = state.file_picker_selected();
+                        let picker = FilePickerModal::new(theme)
+                            .files(&files)
+                            .filter(&filter)
+                            .selected(selected);
                         frame.render_widget(picker, area);
                     }
+                    ModalType::Approval => {
+                        if let Some(approval) = state.pending_approval() {
+                            let modal = ApprovalModal::new(theme, &approval);
+                            frame.render_widget(modal, area);
+                        }
+                    }
+                    ModalType::TrustLevel => {
+                        let current_level = state.trust_level();
+                        let selected = state.trust_level_selected();
+                        let modal = TrustModal::new(theme, current_level).selected(selected);
+                        frame.render_widget(modal, area);
+                    }
+                    ModalType::Tools => {
+                        // Get tools from service (via controller helper or store in state)
+                        // For now, create empty modal - tools should be cached in state
+                        let modal =
+                            ToolsModal::new(theme, agent_mode).selected(state.tools_selected());
+                        frame.render_widget(modal, area);
+                    }
+                    ModalType::Plugin => {
+                        let modal = PluginModal::new(theme);
+                        frame.render_widget(modal, area);
+                    }
+                    ModalType::DeviceFlow => {
+                        if let Some(session) = state.device_flow_session() {
+                            let modal = DeviceFlowModal::new(theme, &session);
+                            frame.render_widget(modal, area);
+                        }
+                    }
                 }
+            }
+
+            // Render questionnaire if active (on top of modals)
+            if let Some(q) = state.active_questionnaire() {
+                use super::widgets::QuestionType as WidgetQuestionType;
+                use crate::ui_backend::questionnaire::QuestionType as StateQuestionType;
+
+                // Convert QuestionnaireState to QuestionWidget
+                let widget_question_type = match q.question_type {
+                    StateQuestionType::SingleChoice => WidgetQuestionType::SingleChoice,
+                    StateQuestionType::MultipleChoice => WidgetQuestionType::MultipleChoice,
+                    StateQuestionType::FreeText => WidgetQuestionType::FreeText,
+                };
+
+                let options: Vec<QuestionOption> = q
+                    .options
+                    .iter()
+                    .map(|opt| QuestionOption {
+                        text: opt.text.clone(),
+                        value: opt.value.clone(),
+                    })
+                    .collect();
+
+                let question_widget = QuestionWidget {
+                    question_type: widget_question_type,
+                    text: q.question.clone(),
+                    options,
+                    selected: q.selected.iter().copied().collect(),
+                    focused_index: 0,
+                    free_text_answer: q.free_text_answer.clone(),
+                    answered: q.answered,
+                };
+
+                // Center the questionnaire
+                let question_width = area.width.min(70);
+                let question_height = area.height.min(20);
+                let question_area = Rect {
+                    x: (area.width.saturating_sub(question_width)) / 2,
+                    y: (area.height.saturating_sub(question_height)) / 2,
+                    width: question_width,
+                    height: question_height,
+                };
+
+                frame.render_widget(&question_widget, question_area);
             }
         })?;
 
@@ -631,21 +977,15 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
     }
 
     fn handle_event(&mut self, event: &AppEvent, _state: &SharedState) -> Result<()> {
+        // Renderer no longer accumulates streaming text.
+        // All accumulation happens in BFF layer (SharedState.streaming_content).
+        // Events are only used to trigger UI refresh.
         match event {
-            AppEvent::LlmTextChunk(chunk) => {
-                // Accumulate streaming text
-                if let Some(ref mut msg) = self.streaming_message {
-                    msg.push_str(chunk);
-                } else {
-                    self.streaming_message = Some(chunk.clone());
-                }
-            }
-            AppEvent::LlmCompleted { .. } => {
-                // Clear streaming state
-                self.streaming_message = None;
-            }
-            AppEvent::LlmError(_) => {
-                self.streaming_message = None;
+            AppEvent::LlmTextChunk(_)
+            | AppEvent::LlmThinkingChunk(_)
+            | AppEvent::LlmCompleted { .. }
+            | AppEvent::LlmError(_) => {
+                // Just trigger a render cycle - state is already updated by BFF
             }
             _ => {}
         }

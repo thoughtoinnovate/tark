@@ -3,16 +3,64 @@
 //! Displays chat messages with different styles for each role
 //! Feature: 03_message_display.feature
 
+#![allow(clippy::useless_format)]
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget},
 };
 
 use crate::tui_new::theme::Theme;
 use crate::tui_new::widgets::question::QuestionWidget;
+use ratatui::style::Color;
+
+/// Dim a color by a factor (0.0 = black, 1.0 = original color)
+fn dim_color(color: Color, factor: f32) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f32 * factor) as u8,
+            (g as f32 * factor) as u8,
+            (b as f32 * factor) as u8,
+        ),
+        _ => color,
+    }
+}
+
+/// Wrap text to fit within a given width
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    let mut result = Vec::new();
+
+    for line in text.lines() {
+        if line.is_empty() {
+            result.push(String::new());
+            continue;
+        }
+
+        let chars: Vec<char> = line.chars().collect();
+        if chars.len() <= max_width {
+            result.push(line.to_string());
+        } else {
+            // Wrap long lines
+            let mut start = 0;
+            while start < chars.len() {
+                let end = (start + max_width).min(chars.len());
+                let chunk: String = chars[start..end].iter().collect();
+                result.push(chunk);
+                start = end;
+            }
+        }
+    }
+
+    // Ensure at least one line
+    if result.is_empty() {
+        result.push(String::new());
+    }
+
+    result
+}
 
 /// Message role/type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +142,14 @@ pub struct MessageArea<'a> {
     theme: &'a Theme,
     /// Whether this area is focused
     focused: bool,
+    /// Streaming content (assistant is typing)
+    streaming_content: Option<String>,
+    /// Streaming thinking content
+    streaming_thinking: Option<String>,
+    /// Agent name for display
+    agent_name: &'a str,
+    /// Index of currently focused message
+    focused_message_index: usize,
 }
 
 impl<'a> MessageArea<'a> {
@@ -104,6 +160,10 @@ impl<'a> MessageArea<'a> {
             scroll_offset: 0,
             theme,
             focused: false,
+            streaming_content: None,
+            streaming_thinking: None,
+            agent_name: "Tark", // Default
+            focused_message_index: 0,
         }
     }
 
@@ -116,6 +176,30 @@ impl<'a> MessageArea<'a> {
     /// Set focused state
     pub fn focused(mut self, focused: bool) -> Self {
         self.focused = focused;
+        self
+    }
+
+    /// Set streaming content
+    pub fn streaming_content(mut self, content: Option<String>) -> Self {
+        self.streaming_content = content;
+        self
+    }
+
+    /// Set streaming thinking
+    pub fn streaming_thinking(mut self, thinking: Option<String>) -> Self {
+        self.streaming_thinking = thinking;
+        self
+    }
+
+    /// Set agent name
+    pub fn agent_name(mut self, name: &'a str) -> Self {
+        self.agent_name = name;
+        self
+    }
+
+    /// Set focused message index
+    pub fn focused_index(mut self, index: usize) -> Self {
+        self.focused_message_index = index;
         self
     }
 
@@ -133,11 +217,11 @@ impl<'a> MessageArea<'a> {
     }
 
     /// Get role label for message
-    fn role_label(&self, role: MessageRole) -> &'static str {
+    fn role_label(&self, role: MessageRole) -> &str {
         match role {
             MessageRole::System => "System",
             MessageRole::User => "You",
-            MessageRole::Agent => "Innodrupe",
+            MessageRole::Agent => self.agent_name, // Use configurable name
             MessageRole::Tool => "Tool",
             MessageRole::Thinking => "Thinking",
             MessageRole::Question => "Question",
@@ -158,17 +242,22 @@ impl<'a> MessageArea<'a> {
         }
     }
 
-    /// Get background color for message bubble (user and agent only)
-    fn role_bg_color(&self, role: MessageRole) -> Option<ratatui::style::Color> {
+    /// Get background color for message bubble
+    fn role_bg_color(&self, role: MessageRole) -> ratatui::style::Color {
         match role {
-            // User: blue tint (darker shade of blue)
-            MessageRole::User => Some(Color::Rgb(45, 60, 83)),
-            // Agent: green tint (darker shade of green)
-            MessageRole::Agent => Some(Color::Rgb(45, 75, 55)),
-            // Thinking: gray background
-            MessageRole::Thinking => Some(Color::Rgb(55, 55, 65)),
-            // Others: no background
-            _ => None,
+            MessageRole::User => self.theme.user_bubble_bg,
+            MessageRole::Agent => self.theme.agent_bubble_bg,
+            MessageRole::Thinking => self.theme.thinking_bubble_bg,
+            _ => self.theme.bg_dark,
+        }
+    }
+
+    /// Get border color for message bubble
+    fn role_border_color(&self, role: MessageRole) -> ratatui::style::Color {
+        match role {
+            MessageRole::User => self.theme.blue,
+            MessageRole::Agent => self.theme.green,
+            _ => self.theme.border,
         }
     }
 }
@@ -196,11 +285,14 @@ impl Widget for MessageArea<'_> {
         // Build lines from messages
         let mut lines: Vec<Line> = Vec::new();
 
-        for msg in self.messages.iter() {
+        for (msg_idx, msg) in self.messages.iter().enumerate() {
             let icon = self.role_icon(msg.role);
             let label = self.role_label(msg.role);
             let fg_color = self.role_color(msg.role);
             let bg_color = self.role_bg_color(msg.role);
+
+            // Check if this message is focused
+            let is_focused_msg = self.focused && msg_idx == self.focused_message_index;
 
             // Handle question messages specially
             if msg.role == MessageRole::Question {
@@ -236,7 +328,7 @@ impl Widget for MessageArea<'_> {
                                 answer_text,
                                 Style::default()
                                     .fg(self.theme.text_primary)
-                                    .bg(Color::Rgb(45, 75, 55)),
+                                    .bg(self.theme.agent_bubble_bg),
                             ),
                         ]));
                     } else {
@@ -297,57 +389,179 @@ impl Widget for MessageArea<'_> {
 
                 // Show content only if not collapsed
                 if !msg.collapsed {
-                    if let Some(bg) = bg_color {
-                        lines.push(Line::from(Span::styled(
-                            &msg.content,
-                            Style::default().fg(self.theme.text_secondary).bg(bg),
-                        )));
-                    } else {
-                        lines.push(Line::from(Span::styled(
-                            &msg.content,
-                            Style::default().fg(self.theme.text_secondary),
-                        )));
-                    }
+                    lines.push(Line::from(Span::styled(
+                        &msg.content,
+                        Style::default().fg(self.theme.text_secondary).bg(bg_color),
+                    )));
                 }
             } else {
                 // Regular message with role icon, label, and content
-                let mut spans = vec![
-                    // Icon with colored background for user/agent
-                    Span::styled(
+                // For User and Agent messages, create a bubble effect with background
+                if matches!(msg.role, MessageRole::User | MessageRole::Agent) {
+                    let bg = bg_color;
+                    let border_fg = self.role_border_color(msg.role);
+                    let glow_color = dim_color(border_fg, 0.5);
+
+                    // Fixed bubble width for consistent appearance
+                    let bubble_content_width: usize = 56;
+
+                    // Header line: icon with label (outside bubble)
+                    let mut header_spans = vec![];
+
+                    // Add cursor indicator if this message is focused
+                    if is_focused_msg {
+                        header_spans.push(Span::styled("> ", Style::default().fg(self.theme.cyan)));
+                    } else {
+                        header_spans.push(Span::raw(" "));
+                    }
+
+                    header_spans.push(Span::styled(
                         format!("{} ", icon),
-                        if bg_color.is_some() {
-                            Style::default().fg(fg_color).bg(fg_color)
-                        } else {
-                            Style::default().fg(fg_color)
-                        },
-                    ),
-                    // Role label
-                    Span::styled(
-                        format!("{}", label),
-                        Style::default().fg(self.theme.text_primary),
-                    ),
-                    Span::raw(" "),
-                ];
-
-                // Add message content with bubble background for user/agent
-                if let Some(bg) = bg_color {
-                    spans.push(Span::styled(
-                        &msg.content,
-                        Style::default().fg(self.theme.text_primary).bg(bg),
+                        Style::default().fg(border_fg),
                     ));
+                    header_spans.push(Span::styled(
+                        label,
+                        Style::default().fg(self.theme.text_secondary),
+                    ));
+
+                    lines.push(Line::from(header_spans));
+
+                    // Top border with rounded corners and glow
+                    let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(top_border, Style::default().fg(glow_color)),
+                    ]));
+
+                    // Wrap content into lines that fit the bubble
+                    let wrapped_lines = wrap_text(&msg.content, bubble_content_width - 2);
+
+                    // Content lines with side borders and full background
+                    for content_line in wrapped_lines {
+                        // Pad content to fill the bubble width exactly
+                        let char_count = content_line.chars().count();
+                        let padding = bubble_content_width - 2 - char_count;
+                        let padded = format!(" {}{} ", content_line, " ".repeat(padding));
+
+                        lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled("│", Style::default().fg(glow_color)),
+                            Span::styled(
+                                padded,
+                                Style::default().fg(self.theme.text_primary).bg(bg),
+                            ),
+                            Span::styled("│", Style::default().fg(glow_color)),
+                        ]));
+                    }
+
+                    // Bottom border with rounded corners and glow
+                    let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(bottom_border, Style::default().fg(glow_color)),
+                    ]));
                 } else {
+                    // System, Tool, Command messages: simple format
+                    let mut spans = vec![];
+
+                    // Add cursor indicator if this message is focused
+                    if is_focused_msg {
+                        spans.push(Span::styled("> ", Style::default().fg(self.theme.cyan)));
+                    }
+
+                    spans.push(Span::styled(
+                        format!("{} ", icon),
+                        Style::default().fg(fg_color),
+                    ));
+                    spans.push(Span::styled(
+                        label,
+                        Style::default().fg(self.theme.text_muted),
+                    ));
+                    spans.push(Span::raw(" "));
+
                     spans.push(Span::styled(
                         &msg.content,
                         Style::default().fg(self.theme.text_primary),
                     ));
-                }
 
-                let line = Line::from(spans);
-                lines.push(line);
+                    let line = Line::from(spans);
+                    lines.push(line);
+                }
             }
 
             // Add empty line between messages
             lines.push(Line::from(""));
+        }
+
+        // Add streaming content if present (assistant is typing)
+        if let Some(ref content) = self.streaming_content {
+            if !content.is_empty() {
+                let icon = self.role_icon(MessageRole::Agent);
+                let label = self.role_label(MessageRole::Agent);
+                let border_fg = self.role_border_color(MessageRole::Agent);
+                let glow_color = dim_color(border_fg, 0.5);
+                let bg = self.role_bg_color(MessageRole::Agent);
+                let bubble_content_width: usize = 56;
+
+                // Header line
+                let header_spans = vec![
+                    Span::styled(format!(" {} ", icon), Style::default().fg(border_fg)),
+                    Span::styled(label, Style::default().fg(self.theme.text_secondary)),
+                    Span::styled(" (typing...)", Style::default().fg(self.theme.text_muted)),
+                ];
+                lines.push(Line::from(header_spans));
+
+                // Top border
+                let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(top_border, Style::default().fg(glow_color)),
+                ]));
+
+                // Wrap streaming content
+                let wrapped_lines = wrap_text(content, bubble_content_width - 2);
+                for content_line in wrapped_lines {
+                    let char_count = content_line.chars().count();
+                    let padding = bubble_content_width - 2 - char_count;
+                    let padded = format!(" {}{} ", content_line, " ".repeat(padding));
+
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("│", Style::default().fg(glow_color)),
+                        Span::styled(padded, Style::default().fg(self.theme.text_primary).bg(bg)),
+                        Span::styled("│", Style::default().fg(glow_color)),
+                    ]));
+                }
+
+                // Bottom border
+                let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(bottom_border, Style::default().fg(glow_color)),
+                ]));
+                lines.push(Line::from(""));
+            }
+        }
+
+        // Add streaming thinking if present and thinking mode enabled
+        if let Some(ref thinking) = self.streaming_thinking {
+            if !thinking.is_empty() {
+                let icon = self.role_icon(MessageRole::Thinking);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", icon),
+                        Style::default().fg(self.theme.thinking_fg),
+                    ),
+                    Span::styled("▼ Thinking ", Style::default().fg(self.theme.text_primary)),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    thinking,
+                    Style::default()
+                        .fg(self.theme.text_secondary)
+                        .bg(self.theme.thinking_bubble_bg),
+                )));
+                lines.push(Line::from(""));
+            }
         }
 
         // Store total line count before filtering

@@ -100,6 +100,8 @@ pub struct Sidebar<'a> {
     pub selected_item: Option<usize>,
     /// Whether sidebar has focus
     pub focused: bool,
+    /// Current Vim mode
+    pub vim_mode: crate::ui_backend::VimMode,
 }
 
 /// Session information
@@ -128,6 +130,7 @@ impl<'a> Sidebar<'a> {
             selected_panel: 0,
             selected_item: None,
             focused: false,
+            vim_mode: crate::ui_backend::VimMode::Insert,
         }
     }
 
@@ -154,6 +157,11 @@ impl<'a> Sidebar<'a> {
 
     pub fn selected_panel(mut self, panel_idx: usize) -> Self {
         self.selected_panel = panel_idx;
+        self
+    }
+
+    pub fn vim_mode(mut self, mode: crate::ui_backend::VimMode) -> Self {
+        self.vim_mode = mode;
         self
     }
 
@@ -295,6 +303,26 @@ impl Widget for Sidebar<'_> {
         ]));
         all_lines.push(Line::from(""));
 
+        // VIM mode indicator
+        use crate::ui_backend::VimMode;
+        let vim_str = match self.vim_mode {
+            VimMode::Insert => "INSERT",
+            VimMode::Normal => "NORMAL",
+            VimMode::Visual => "VISUAL",
+            VimMode::Command => "COMMAND",
+        };
+        let vim_color = match self.vim_mode {
+            VimMode::Insert => self.theme.green,
+            VimMode::Normal => self.theme.blue,
+            VimMode::Visual => self.theme.purple,
+            VimMode::Command => self.theme.yellow,
+        };
+        all_lines.push(Line::from(vec![
+            Span::styled("  VIM: ", Style::default().fg(self.theme.text_muted)),
+            Span::styled(vim_str, Style::default().fg(vim_color)),
+        ]));
+        all_lines.push(Line::from(""));
+
         // ======== SESSION SECTION ========
         let session_expanded = self.expanded_panels[0];
         let session_selected = self.selected_panel == 0 && self.selected_item.is_none();
@@ -371,11 +399,35 @@ impl Widget for Sidebar<'_> {
         ]));
 
         if context_expanded {
+            // Calculate usage percentage
+            let usage_percent = if self.tokens_total > 0 {
+                self.tokens_used as f32 / self.tokens_total as f32 * 100.0
+            } else {
+                0.0
+            };
+
+            let usage_color = if usage_percent < 50.0 {
+                self.theme.green
+            } else if usage_percent < 80.0 {
+                self.theme.yellow
+            } else {
+                self.theme.red
+            };
+
             all_lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
                     format!("{} / {} tokens", self.tokens_used, self.tokens_total),
                     Style::default().fg(self.theme.text_muted),
+                ),
+            ]));
+            all_lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("Usage: {:.1}%", usage_percent),
+                    Style::default()
+                        .fg(usage_color)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
             all_lines.push(Line::from(vec![
@@ -569,7 +621,8 @@ impl Widget for Sidebar<'_> {
                 ),
             ]));
 
-            for (i, change) in self.git_changes.iter().enumerate().take(4) {
+            // Show up to 8 files instead of 4
+            for (i, change) in self.git_changes.iter().enumerate().take(8) {
                 let item_selected =
                     self.focused && self.selected_panel == 3 && self.selected_item == Some(i);
                 let item_style = if item_selected {
@@ -600,6 +653,14 @@ impl Widget for Sidebar<'_> {
                     Span::raw(" "),
                     Span::styled(status_text, Style::default().fg(status_color)),
                 ]));
+            }
+
+            // Show "...and N more" if there are more files
+            if git_count > 8 {
+                all_lines.push(Line::from(vec![Span::styled(
+                    format!("  ... and {} more", git_count - 8),
+                    Style::default().fg(self.theme.text_muted),
+                )]));
             }
         }
 

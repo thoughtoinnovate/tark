@@ -4,6 +4,9 @@
 
 use crossterm::event::KeyEvent;
 
+// Re-export canonical types from core (for backward compatibility)
+pub use crate::core::types::{AgentMode, BuildMode};
+
 /// User commands that can be executed
 ///
 /// These represent user actions translated from keybindings, mouse clicks,
@@ -47,6 +50,12 @@ pub enum Command {
     /// Set build mode explicitly
     SetBuildMode(BuildMode),
 
+    /// Open trust level selector modal
+    OpenTrustLevelSelector,
+
+    /// Set trust level
+    SetTrustLevel(crate::tools::TrustLevel),
+
     // ========== UI Toggles ==========
     /// Toggle sidebar visibility
     ToggleSidebar,
@@ -56,6 +65,21 @@ pub enum Command {
 
     /// Toggle theme picker modal
     ToggleThemePicker,
+
+    /// Toggle sidebar panel expansion (panel index: 0=Session, 1=Context, 2=Tasks, 3=Git)
+    ToggleSidebarPanel(usize),
+
+    /// Navigate up in sidebar
+    SidebarUp,
+
+    /// Navigate down in sidebar
+    SidebarDown,
+
+    /// Select item in sidebar
+    SidebarSelect,
+
+    /// Set Vim editing mode
+    SetVimMode(super::VimMode),
 
     // ========== Provider/Model Selection ==========
     /// Open provider picker modal
@@ -136,6 +160,29 @@ pub enum Command {
     /// Remove a file from context
     RemoveContextFile(String),
 
+    /// Remove context file by index (from sidebar)
+    RemoveContextByIndex(usize),
+
+    // ========== Git Operations ==========
+    /// Open git diff modal for a file
+    OpenGitDiff(String),
+
+    /// Stage a file for commit
+    StageGitFile(String),
+
+    // ========== File Picker Navigation ==========
+    /// Navigate up in file picker
+    FilePickerUp,
+
+    /// Navigate down in file picker
+    FilePickerDown,
+
+    /// Select current file in picker
+    FilePickerSelect,
+
+    /// Update file picker filter
+    UpdateFilePickerFilter(String),
+
     // ========== Input History ==========
     /// Navigate to previous input in history
     HistoryPrevious,
@@ -162,58 +209,52 @@ pub enum Command {
 
     /// Filter modal items (for search)
     ModalFilter(String),
-}
 
-/// Agent operation mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentMode {
-    Build,
-    Plan,
-    Ask,
-}
+    // ========== Approval Actions ==========
+    /// Approve pending operation
+    ApproveOperation,
 
-/// Build mode (only active in Build agent mode)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuildMode {
-    Manual,
-    Balanced,
-    Careful,
-}
+    /// Deny pending operation
+    DenyOperation,
 
-impl AgentMode {
-    pub fn next(&self) -> Self {
-        match self {
-            AgentMode::Build => AgentMode::Plan,
-            AgentMode::Plan => AgentMode::Ask,
-            AgentMode::Ask => AgentMode::Build,
-        }
-    }
+    // ========== Questionnaire Actions ==========
+    /// Navigate up in question options
+    QuestionUp,
 
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            AgentMode::Build => "Build",
-            AgentMode::Plan => "Plan",
-            AgentMode::Ask => "Ask",
-        }
-    }
-}
+    /// Navigate down in question options
+    QuestionDown,
 
-impl BuildMode {
-    pub fn next(&self) -> Self {
-        match self {
-            BuildMode::Manual => BuildMode::Balanced,
-            BuildMode::Balanced => BuildMode::Careful,
-            BuildMode::Careful => BuildMode::Manual,
-        }
-    }
+    /// Toggle current question option
+    QuestionToggle,
 
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            BuildMode::Manual => "Manual",
-            BuildMode::Balanced => "Balanced",
-            BuildMode::Careful => "Careful",
-        }
-    }
+    /// Submit questionnaire answer
+    QuestionSubmit,
+
+    // ========== Attachments ==========
+    /// Toggle attachment dropdown
+    ToggleAttachmentDropdown,
+
+    /// Add an attachment
+    AddAttachment(String),
+
+    /// Remove an attachment
+    RemoveAttachment(String),
+
+    /// Clear all attachments
+    ClearAttachments,
+
+    // ========== Session Management ==========
+    /// Create a new session
+    NewSession,
+
+    /// Switch to a different session
+    SwitchSession(String),
+
+    /// List all sessions
+    ListSessions,
+
+    /// Export current session to file
+    ExportSession(std::path::PathBuf),
 }
 
 /// Convert keyboard events to commands
@@ -232,6 +273,7 @@ pub fn key_to_command(key: KeyEvent) -> Option<Command> {
 
         // Mode cycling
         (KeyCode::Char('m'), KeyModifiers::CONTROL) => Some(Command::CycleBuildMode),
+        (KeyCode::Char('A'), KeyModifiers::SHIFT) => Some(Command::OpenTrustLevelSelector),
 
         // UI toggles
         (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(Command::ToggleSidebar),
