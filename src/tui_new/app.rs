@@ -602,6 +602,7 @@ impl AppState {
 }
 
 /// Main TUI Application
+#[derive(Debug)]
 pub struct TuiApp<B: Backend> {
     /// Terminal instance
     terminal: Terminal<B>,

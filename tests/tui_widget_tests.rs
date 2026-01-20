@@ -8,7 +8,7 @@ use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use ratatui::layout::Rect;
 use tark_cli::tui_new::widgets::*;
-use tark_cli::tui_new::theme::Theme;
+use tark_cli::tui_new::{Theme, AppConfig};
 
 /// Helper to render a widget and capture buffer
 fn render_widget<W>(widget: W, width: u16, height: u16) -> String
@@ -96,10 +96,11 @@ fn test_status_bar_plan_mode() {
 #[test]
 fn test_header_renders() {
     let theme = Theme::default();
-    let widget = Header::new(&theme, "tark");
+    let config = AppConfig::default();
+    let widget = Header::new(&config, &theme);
     let output = render_widget(widget, 80, 1);
     
-    assert!(output.contains("tark") || output.contains("🖥"), "Header should show title");
+    assert!(output.contains("tark") || output.contains("Tark") || output.contains("🖥"), "Header should show title");
 }
 
 // ============================================================================
@@ -124,7 +125,7 @@ fn test_terminal_frame_has_borders() {
 #[test]
 fn test_message_area_renders() {
     let theme = Theme::default();
-    let messages: Vec<MessageWidget> = vec![];
+    let messages: Vec<Message> = vec![];
     let widget = MessageArea::new(&messages, &theme);
     let output = render_widget(widget, 80, 20);
     

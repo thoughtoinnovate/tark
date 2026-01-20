@@ -5,6 +5,8 @@
 //! - Buffer reading: TestBackend buffer → String
 //! - PTY wrapper: Spawn real process for E2E tests
 
+#![allow(dead_code)]
+
 pub mod keys;
 pub mod buffer;
 pub mod pty;
@@ -12,9 +14,10 @@ pub mod pty;
 use anyhow::Result;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use std::path::PathBuf;
 
 use tark_cli::tui_new::TuiRenderer;
-use tark_cli::ui_backend::SharedState;
+use tark_cli::ui_backend::{SharedState, UiRenderer};
 
 /// In-memory test driver using TestBackend
 /// Used for integration tests with Cucumber
@@ -28,7 +31,7 @@ impl TestDriver {
     pub fn new(width: u16, height: u16) -> Result<Self> {
         let backend = TestBackend::new(width, height);
         let terminal = Terminal::new(backend)?;
-        let renderer = TuiRenderer::new(terminal);
+        let renderer = TuiRenderer::new(terminal, PathBuf::from("."));
         let state = SharedState::new();
         
         Ok(Self { renderer, state })
@@ -36,10 +39,10 @@ impl TestDriver {
 
     /// Press a key (e.g., "Ctrl+B", "?", "Enter")
     pub fn press(&mut self, key: &str) -> Result<()> {
-        let key_event = keys::parse(key)?;
+        let _key_event = keys::parse(key)?;
         
         // Convert key to command
-        if let Some(command) = self.renderer.poll_input(&self.state)? {
+        if let Some(_command) = self.renderer.poll_input(&self.state)? {
             // In a real scenario, we'd execute the command
             // For now, we'll need to integrate with TuiController
             // This is a simplified version

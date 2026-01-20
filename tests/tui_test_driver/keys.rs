@@ -123,7 +123,10 @@ pub fn to_terminal_bytes(key: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[allow(unused_imports)]
+    use super::{parse, to_terminal_bytes};
+    #[allow(unused_imports)]
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     #[test]
     fn test_parse_simple_keys() {

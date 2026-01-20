@@ -34,10 +34,10 @@ impl E2EWorld {
 async fn tui_is_running(w: &mut E2EWorld) {
     // Build the binary first if needed
     let _ = std::process::Command::new("cargo")
-        .args(&["build", "--release"])
+        .args(["build", "--release"])
         .status();
     
-    let pty = PtyDriver::spawn("./target/release/tark", &["tui"], 120, 40)
+    let pty = PtyDriver::spawn("./target/release/tark", ["tui"].as_slice(), 120, 40)
         .expect("Failed to spawn TUI");
     
     w.pty = Some(pty);
@@ -49,7 +49,7 @@ async fn tui_is_running(w: &mut E2EWorld) {
 #[given(regex = r"the terminal has at least (\d+) columns and (\d+) rows")]
 async fn terminal_size(w: &mut E2EWorld, cols: u16, rows: u16) {
     if w.pty.is_none() {
-        let pty = PtyDriver::spawn("./target/release/tark", &["tui"], cols, rows)
+        let pty = PtyDriver::spawn("./target/release/tark", ["tui"].as_slice(), cols, rows)
             .expect("Failed to spawn TUI");
         w.pty = Some(pty);
         std::thread::sleep(std::time::Duration::from_millis(1000));
