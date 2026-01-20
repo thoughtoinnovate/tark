@@ -3,7 +3,7 @@
 //! Spawns real process in a pseudo-terminal
 
 use anyhow::{anyhow, Result};
-use portable_pty::{CommandBuilder, PtyPair, PtySize, native_pty_system};
+use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
@@ -25,29 +25,29 @@ impl PtyDriver {
     /// Spawn a binary in a PTY
     pub fn spawn(binary: &str, args: &[&str], width: u16, height: u16) -> Result<Self> {
         let pty_system = native_pty_system();
-        
+
         let pair = pty_system.openpty(PtySize {
             rows: height,
             cols: width,
             pixel_width: 0,
             pixel_height: 0,
         })?;
-        
+
         let mut cmd = CommandBuilder::new(binary);
         for arg in args {
             cmd.arg(arg);
         }
-        
+
         // Set environment for colors
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TARK_FORCE_COLOR", "1");
-        
+
         pair.slave.spawn_command(cmd)?;
-        
+
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
-        
+
         Ok(Self {
             _pair: pair,
             reader,
@@ -74,7 +74,7 @@ impl PtyDriver {
     pub fn read_available(&mut self) -> Result<String> {
         let mut buf = vec![0u8; 4096];
         let mut output = Vec::new();
-        
+
         // Try to read what's available
         loop {
             match self.reader.read(&mut buf) {
@@ -84,7 +84,7 @@ impl PtyDriver {
                 Err(e) => return Err(e.into()),
             }
         }
-        
+
         Ok(String::from_utf8_lossy(&output).to_string())
     }
 
@@ -93,18 +93,18 @@ impl PtyDriver {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
         let mut accumulated = String::new();
-        
+
         while start.elapsed() < timeout {
             let output = self.read_available()?;
             accumulated.push_str(&output);
-            
+
             if accumulated.contains(text) {
                 return Ok(());
             }
-            
+
             std::thread::sleep(Duration::from_millis(50));
         }
-        
+
         Err(anyhow!(
             "Timeout waiting for '{}'. Got: {}",
             text,

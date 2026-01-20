@@ -28,7 +28,7 @@ fn capture_buffer(app: &mut TuiApp<TestBackend>) -> String {
     app.render().unwrap();
     let buf = app.terminal().backend().buffer();
     let area = buf.area();
-    
+
     let mut result = String::new();
     for y in 0..area.height {
         for x in 0..area.width {
@@ -88,21 +88,24 @@ fn snapshot_sidebar_visible() {
 #[test]
 fn snapshot_mode_build() {
     let mut app = create_test_app(100, 30);
-    app.state_mut().set_agent_mode(tark_cli::core::types::AgentMode::Build);
+    app.state_mut()
+        .set_agent_mode(tark_cli::core::types::AgentMode::Build);
     assert_snapshot!("mode_build", capture_buffer(&mut app));
 }
 
 #[test]
 fn snapshot_mode_plan() {
     let mut app = create_test_app(100, 30);
-    app.state_mut().set_agent_mode(tark_cli::core::types::AgentMode::Plan);
+    app.state_mut()
+        .set_agent_mode(tark_cli::core::types::AgentMode::Plan);
     assert_snapshot!("mode_plan", capture_buffer(&mut app));
 }
 
 #[test]
 fn snapshot_mode_ask() {
     let mut app = create_test_app(100, 30);
-    app.state_mut().set_agent_mode(tark_cli::core::types::AgentMode::Ask);
+    app.state_mut()
+        .set_agent_mode(tark_cli::core::types::AgentMode::Ask);
     assert_snapshot!("mode_ask", capture_buffer(&mut app));
 }
 
@@ -131,14 +134,16 @@ fn snapshot_empty_input() {
 #[test]
 fn snapshot_catppuccin_mocha() {
     let mut app = create_test_app(100, 30);
-    app.state_mut().set_theme(tark_cli::tui_new::ThemePreset::CatppuccinMocha);
+    app.state_mut()
+        .set_theme(tark_cli::tui_new::ThemePreset::CatppuccinMocha);
     assert_snapshot!("theme_catppuccin_mocha", capture_buffer(&mut app));
 }
 
 #[test]
 fn snapshot_nord_theme() {
     let mut app = create_test_app(100, 30);
-    app.state_mut().set_theme(tark_cli::tui_new::ThemePreset::Nord);
+    app.state_mut()
+        .set_theme(tark_cli::tui_new::ThemePreset::Nord);
     assert_snapshot!("theme_nord", capture_buffer(&mut app));
 }
 
@@ -160,7 +165,8 @@ fn snapshot_with_welcome_message() {
 #[test]
 fn snapshot_plan_mode_with_input() {
     let mut app = create_test_app(100, 30);
-    app.state_mut().set_agent_mode(tark_cli::core::types::AgentMode::Plan);
+    app.state_mut()
+        .set_agent_mode(tark_cli::core::types::AgentMode::Plan);
     app.state_mut().insert_str("Create a test plan");
     assert_snapshot!("plan_mode_with_input", capture_buffer(&mut app));
 }
@@ -168,7 +174,8 @@ fn snapshot_plan_mode_with_input() {
 #[test]
 fn snapshot_ask_mode_with_question() {
     let mut app = create_test_app(100, 30);
-    app.state_mut().set_agent_mode(tark_cli::core::types::AgentMode::Ask);
+    app.state_mut()
+        .set_agent_mode(tark_cli::core::types::AgentMode::Ask);
     app.state_mut().insert_str("What is rust?");
     assert_snapshot!("ask_mode_with_question", capture_buffer(&mut app));
 }

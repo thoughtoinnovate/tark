@@ -5,10 +5,10 @@
 //! Run: cargo test --test tui_widget_tests
 
 use ratatui::backend::TestBackend;
-use ratatui::Terminal;
 use ratatui::layout::Rect;
+use ratatui::Terminal;
 use tark_cli::tui_new::widgets::*;
-use tark_cli::tui_new::{Theme, AppConfig};
+use tark_cli::tui_new::{AppConfig, Theme};
 
 /// Helper to render a widget and capture buffer
 fn render_widget<W>(widget: W, width: u16, height: u16) -> String
@@ -17,17 +17,19 @@ where
 {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
-    
-    terminal.draw(|f| {
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        };
-        f.render_widget(widget, area);
-    }).unwrap();
-    
+
+    terminal
+        .draw(|f| {
+            let area = Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            };
+            f.render_widget(widget, area);
+        })
+        .unwrap();
+
     let buf = terminal.backend().buffer();
     let mut result = String::new();
     for y in 0..height {
@@ -48,7 +50,7 @@ fn test_input_widget_with_text() {
     let theme = Theme::default();
     let widget = InputWidget::new("Hello world", 5, &theme);
     let output = render_widget(widget, 80, 3);
-    
+
     assert!(output.contains("Hello world"), "Input should display text");
 }
 
@@ -57,7 +59,7 @@ fn test_input_widget_empty() {
     let theme = Theme::default();
     let widget = InputWidget::new("", 0, &theme);
     let output = render_widget(widget, 80, 3);
-    
+
     // Should have some kind of border or prompt
     assert!(output.contains("│") || output.contains("┌") || output.contains("─"));
 }
@@ -72,21 +74,26 @@ fn test_status_bar_shows_mode() {
     let widget = StatusBar::new(&theme)
         .agent_mode(tark_cli::core::types::AgentMode::Build)
         .build_mode(tark_cli::core::types::BuildMode::Balanced);
-    
+
     let output = render_widget(widget, 120, 1);
-    
-    assert!(output.contains("Build") || output.contains("🔨"), "Status should show Build mode");
+
+    assert!(
+        output.contains("Build") || output.contains("🔨"),
+        "Status should show Build mode"
+    );
 }
 
 #[test]
 fn test_status_bar_plan_mode() {
     let theme = Theme::default();
-    let widget = StatusBar::new(&theme)
-        .agent_mode(tark_cli::core::types::AgentMode::Plan);
-    
+    let widget = StatusBar::new(&theme).agent_mode(tark_cli::core::types::AgentMode::Plan);
+
     let output = render_widget(widget, 120, 1);
-    
-    assert!(output.contains("Plan") || output.contains("📋"), "Status should show Plan mode");
+
+    assert!(
+        output.contains("Plan") || output.contains("📋"),
+        "Status should show Plan mode"
+    );
 }
 
 // ============================================================================
@@ -99,8 +106,11 @@ fn test_header_renders() {
     let config = AppConfig::default();
     let widget = Header::new(&config, &theme);
     let output = render_widget(widget, 80, 1);
-    
-    assert!(output.contains("tark") || output.contains("Tark") || output.contains("🖥"), "Header should show title");
+
+    assert!(
+        output.contains("tark") || output.contains("Tark") || output.contains("🖥"),
+        "Header should show title"
+    );
 }
 
 // ============================================================================
@@ -112,14 +122,20 @@ fn test_terminal_frame_has_borders() {
     let theme = Theme::default();
     let widget = TerminalFrame::new(&theme);
     let output = render_widget(widget, 80, 24);
-    
+
     // Check for box drawing characters
-    assert!(output.contains("╭") || output.contains("┌"), "Frame should have top-left corner");
-    assert!(output.contains("╮") || output.contains("┐"), "Frame should have top-right corner");
+    assert!(
+        output.contains("╭") || output.contains("┌"),
+        "Frame should have top-left corner"
+    );
+    assert!(
+        output.contains("╮") || output.contains("┐"),
+        "Frame should have top-right corner"
+    );
 }
 
 // ============================================================================
-// MESSAGE AREA TESTS  
+// MESSAGE AREA TESTS
 // ============================================================================
 
 #[test]
@@ -128,7 +144,7 @@ fn test_message_area_renders() {
     let messages: Vec<Message> = vec![];
     let widget = MessageArea::new(&messages, &theme);
     let output = render_widget(widget, 80, 20);
-    
+
     // Should render without panic
     assert!(!output.is_empty());
 }

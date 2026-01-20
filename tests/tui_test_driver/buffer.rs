@@ -9,11 +9,7 @@ pub fn to_string(buf: &Buffer, width: u16, height: u16) -> String {
     let mut result = String::new();
     for y in 0..height {
         for x in 0..width {
-            result.push_str(
-                buf.cell((x, y))
-                    .map(|c| c.symbol())
-                    .unwrap_or(" ")
-            );
+            result.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
         }
         result.push('\n');
     }
@@ -41,11 +37,7 @@ pub fn region(buf: &Buffer, start_x: u16, start_y: u16, width: u16, height: u16)
     let mut result = String::new();
     for y in start_y..(start_y + height) {
         for x in start_x..(start_x + width) {
-            result.push_str(
-                buf.cell((x, y))
-                    .map(|c| c.symbol())
-                    .unwrap_or(" ")
-            );
+            result.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
         }
         result.push('\n');
     }

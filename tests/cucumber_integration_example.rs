@@ -31,7 +31,11 @@ impl IntegrationWorld {
         let terminal = Terminal::new(backend).unwrap();
         let mut app = TuiApp::new(terminal);
         app.state_mut().set_terminal_size(w, h);
-        Self { app, width: w, height: h }
+        Self {
+            app,
+            width: w,
+            height: h,
+        }
     }
 
     /// Helper: simulate pressing a key using REAL key event
@@ -66,7 +70,7 @@ async fn tui_running(w: &mut IntegrationWorld) {
 async fn sidebar_visible(w: &mut IntegrationWorld) {
     // BETTER: Use real key press if needed
     if !w.app.state().sidebar_visible {
-        w.press_key("Ctrl+B");  // Real key handling
+        w.press_key("Ctrl+B"); // Real key handling
     }
     assert!(w.app.state().sidebar_visible, "Sidebar should be visible");
 }
@@ -115,7 +119,10 @@ async fn should_see(w: &mut IntegrationWorld, text: String) {
 #[then("the sidebar should be visible")]
 async fn sidebar_should_be_visible(w: &mut IntegrationWorld) {
     assert!(w.app.state().sidebar_visible, "Sidebar should be visible");
-    assert!(w.buffer_contains("Session"), "Sidebar content should be visible");
+    assert!(
+        w.buffer_contains("Session"),
+        "Sidebar content should be visible"
+    );
 }
 
 #[then("the sidebar should be hidden")]

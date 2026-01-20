@@ -15,11 +15,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// - Function keys: "F1", "F12"
 pub fn parse(key: &str) -> Result<KeyEvent> {
     let key = key.trim();
-    
+
     // Parse modifiers
     let mut modifiers = KeyModifiers::NONE;
     let mut remaining = key;
-    
+
     loop {
         if remaining.starts_with("Ctrl+") || remaining.starts_with("ctrl+") {
             modifiers |= KeyModifiers::CONTROL;
@@ -34,7 +34,7 @@ pub fn parse(key: &str) -> Result<KeyEvent> {
             break;
         }
     }
-    
+
     let code = parse_key_code(remaining)?;
     Ok(KeyEvent::new(code, modifiers))
 }
@@ -78,7 +78,7 @@ fn parse_key_code(s: &str) -> Result<KeyCode> {
 /// This converts human-readable keys to the actual bytes a terminal would receive
 pub fn to_terminal_bytes(key: &str) -> Result<Vec<u8>> {
     let key = key.trim();
-    
+
     // Check for modifiers first
     if key.starts_with("Ctrl+") || key.starts_with("ctrl+") {
         let remaining = &key[5..];
@@ -89,7 +89,7 @@ pub fn to_terminal_bytes(key: &str) -> Result<Vec<u8>> {
             return Ok(vec![code]);
         }
     }
-    
+
     if key.starts_with("Shift+") || key.starts_with("shift+") {
         let remaining = &key[6..];
         if remaining.eq_ignore_ascii_case("tab") {
@@ -97,7 +97,7 @@ pub fn to_terminal_bytes(key: &str) -> Result<Vec<u8>> {
             return Ok(vec![0x1b, b'[', b'Z']);
         }
     }
-    
+
     // Special keys
     match key.to_lowercase().as_str() {
         "enter" | "return" => Ok(vec![b'\r']),
@@ -140,7 +140,7 @@ mod tests {
         let event = parse("Ctrl+C").unwrap();
         assert_eq!(event.code, KeyCode::Char('c'));
         assert!(event.modifiers.contains(KeyModifiers::CONTROL));
-        
+
         let event = parse("Ctrl+Shift+S").unwrap();
         assert_eq!(event.code, KeyCode::Char('s'));
         assert!(event.modifiers.contains(KeyModifiers::CONTROL));

@@ -7,8 +7,8 @@
 
 #![allow(dead_code)]
 
-pub mod keys;
 pub mod buffer;
+pub mod keys;
 pub mod pty;
 
 use anyhow::Result;
@@ -33,21 +33,21 @@ impl TestDriver {
         let terminal = Terminal::new(backend)?;
         let renderer = TuiRenderer::new(terminal, PathBuf::from("."));
         let state = SharedState::new();
-        
+
         Ok(Self { renderer, state })
     }
 
     /// Press a key (e.g., "Ctrl+B", "?", "Enter")
     pub fn press(&mut self, key: &str) -> Result<()> {
         let _key_event = keys::parse(key)?;
-        
+
         // Convert key to command
         if let Some(_command) = self.renderer.poll_input(&self.state)? {
             // In a real scenario, we'd execute the command
             // For now, we'll need to integrate with TuiController
             // This is a simplified version
         }
-        
+
         Ok(())
     }
 

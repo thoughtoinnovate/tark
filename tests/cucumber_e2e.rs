@@ -36,12 +36,12 @@ async fn tui_is_running(w: &mut E2EWorld) {
     let _ = std::process::Command::new("cargo")
         .args(["build", "--release"])
         .status();
-    
+
     let pty = PtyDriver::spawn("./target/release/tark", ["tui"].as_slice(), 120, 40)
         .expect("Failed to spawn TUI");
-    
+
     w.pty = Some(pty);
-    
+
     // Wait for app to start
     std::thread::sleep(std::time::Duration::from_millis(1000));
 }
@@ -101,7 +101,7 @@ async fn should_see_component_at(w: &mut E2EWorld, component: String, location: 
     if let Some(pty) = &mut w.pty {
         let screen = pty.read_screen().expect("Failed to read screen");
         w.last_output = screen.clone();
-        
+
         // Simple verification - in production we'd parse ANSI and check positions
         let contains_component = match component.as_str() {
             "header" => screen.contains("tark") || screen.contains("╭"),
@@ -110,13 +110,11 @@ async fn should_see_component_at(w: &mut E2EWorld, component: String, location: 
             "sidebar" => screen.contains("Session"),
             _ => false,
         };
-        
+
         assert!(
             contains_component,
             "Expected {} at {} in screen output. Got:\n{}",
-            component,
-            location,
-            screen
+            component, location, screen
         );
     }
 }
@@ -131,18 +129,17 @@ async fn component_hidden(w: &mut E2EWorld, component: String) {
     if let Some(pty) = &mut w.pty {
         let screen = pty.read_screen().expect("Failed to read screen");
         w.last_output = screen.clone();
-        
+
         let contains_component = match component.as_str() {
             "sidebar" => screen.contains("Session") && screen.contains("Context"),
             "help modal" => screen.contains("Shortcuts") || screen.contains("Help"),
             _ => false,
         };
-        
+
         assert!(
             !contains_component,
             "Expected {} to be hidden. Got:\n{}",
-            component,
-            screen
+            component, screen
         );
     }
 }
