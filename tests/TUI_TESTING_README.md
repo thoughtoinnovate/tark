@@ -98,6 +98,27 @@ Scenario: Toggle sidebar
   Then the sidebar should be hidden
 ```
 
+### Better Pattern for Integration Tests
+
+The existing `cucumber_tui_new.rs` uses direct state manipulation (fast but "cheats").
+For new tests, see `cucumber_integration_example.rs` which shows the better pattern:
+
+```rust
+// OLD WAY (cheats):
+#[given("the sidebar is visible")]
+async fn sidebar_visible(w: &mut TuiWorld) {
+    w.app.state_mut().sidebar_visible = true;  // ❌ Direct state
+}
+
+// NEW WAY (real behavior):
+#[given("the sidebar is visible")]
+async fn sidebar_visible(w: &mut IntegrationWorld) {
+    if !w.app.state().sidebar_visible {
+        w.press_key("Ctrl+B");  // ✅ Real key event
+    }
+}
+```
+
 ## Example: E2E Test
 
 ```gherkin

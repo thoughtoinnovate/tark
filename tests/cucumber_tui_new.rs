@@ -6,6 +6,21 @@
 //! Steps that cannot verify buffer content are marked as UNIMPLEMENTED
 //! and will be skipped until proper verification is added.
 //!
+//! ## Testing Pattern Evolution
+//!
+//! This file uses DIRECT STATE MANIPULATION for speed (e.g., `app.state_mut().sidebar_visible = true`).
+//! While functional, this "cheats" by bypassing real key handling.
+//!
+//! **Better Pattern:** Use the test driver for REAL KEY EVENTS.
+//! See `cucumber_integration_example.rs` for the improved pattern that:
+//! - Sends actual KeyEvents through the renderer
+//! - Executes real commands through TuiController
+//! - Tests the complete code path (no shortcuts)
+//!
+//! For new tests, prefer:
+//! - `tests/cucumber_e2e.rs` - E2E with real binary in PTY
+//! - `tests/cucumber_integration_example.rs` - Integration with test driver
+//!
 //! Run: cargo test --test cucumber_tui_new
 
 use cucumber::{given, then, when, World};
@@ -756,11 +771,11 @@ async fn press_key(w: &mut TuiWorld, key: String) {
                 let themes = [
                     ThemePreset::CatppuccinMocha,
                     ThemePreset::Nord,
-                    ThemePreset::GithubDark,
+                    ThemePreset::TokyoNight,
                     ThemePreset::Dracula,
                     ThemePreset::OneDark,
                     ThemePreset::GruvboxDark,
-                    ThemePreset::TokyoNight,
+                    ThemePreset::SolarizedDark,
                 ];
                 let idx = w.app.state().dropdown_index;
                 if idx < themes.len() {
@@ -2978,7 +2993,7 @@ async fn current_theme_is(w: &mut TuiWorld, theme: String) {
         "tokyo night" | "tokyo-night" => ThemePreset::TokyoNight,
         "gruvbox dark" | "gruvbox-dark" => ThemePreset::GruvboxDark,
         "one dark" | "one-dark" => ThemePreset::OneDark,
-        "github dark" | "github-dark" => ThemePreset::GithubDark,
+        "solarized dark" | "solarized-dark" => ThemePreset::SolarizedDark,
         "dracula" => ThemePreset::Dracula,
         _ => ThemePreset::CatppuccinMocha,
     };
