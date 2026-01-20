@@ -4,8 +4,9 @@
 
 use anyhow::Result;
 
+use super::commands::Command;
+use super::events::AppEvent;
 use super::state::SharedState;
-use super::types::{ModalContent, StatusInfo};
 
 /// Trait that all UI renderers must implement
 ///
@@ -17,15 +18,16 @@ pub trait UiRenderer {
     /// This is called on every frame to display the UI.
     fn render(&mut self, state: &SharedState) -> Result<()>;
 
-    /// Show a modal/dialog
+    /// Poll for user input and convert to commands
     ///
-    /// Displays a modal overlay (e.g., provider picker, model picker, help).
-    fn show_modal(&mut self, modal: ModalContent) -> Result<()>;
+    /// Returns a Command if user input is available, None otherwise.
+    /// This method should not block.
+    fn poll_input(&mut self, state: &SharedState) -> Result<Option<Command>>;
 
-    /// Update the status bar
+    /// Handle an application event
     ///
-    /// Sets the status message and indicators.
-    fn set_status(&mut self, status: StatusInfo) -> Result<()>;
+    /// Events are async notifications from the backend (e.g., LLM streaming).
+    fn handle_event(&mut self, event: &AppEvent, state: &SharedState) -> Result<()>;
 
     /// Get the current UI size
     ///
@@ -35,5 +37,5 @@ pub trait UiRenderer {
     /// Check if the UI should quit
     ///
     /// Returns true if the user requested to quit the application.
-    fn should_quit(&self) -> bool;
+    fn should_quit(&self, state: &SharedState) -> bool;
 }

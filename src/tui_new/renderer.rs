@@ -6,9 +6,9 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::backend::Backend;
-use ratatui::layout::Rect;
 use ratatui::Terminal;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::ui_backend::UiRenderer;
 use crate::ui_backend::{
@@ -19,9 +19,23 @@ use super::modals::{ApprovalModal, DeviceFlowModal, PluginModal, ToolsModal, Tru
 use super::theme::Theme;
 use super::widgets::{
     FilePickerModal, GitChange, GitStatus, Header, HelpModal, InputWidget, MessageArea,
-    ModelPickerModal, ProviderPickerModal, QuestionOption, QuestionWidget, SessionInfo, Sidebar,
-    StatusBar, Task, TaskStatus, TerminalFrame, ThemePickerModal,
+    ModelPickerModal, ProviderPickerModal, QuestionOption, QuestionWidget, SessionInfo,
+    SessionPickerModal, Sidebar, StatusBar, Task, TaskStatus, TerminalFrame, ThemePickerModal,
 };
+
+fn resolve_model_display_name(
+    state: &SharedState,
+    current_model: &Option<String>,
+) -> Option<String> {
+    current_model.as_ref().map(|model| {
+        state
+            .available_models()
+            .iter()
+            .find(|m| &m.id == model)
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| model.clone())
+    })
+}
 
 /// Click target for hit testing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,14 +55,20 @@ pub struct TuiRenderer<B: Backend> {
     terminal: Terminal<B>,
     /// Current theme (cached for rendering)
     theme: Theme,
+    /// Last time ESC was pressed (for double-ESC detection)
+    last_esc_time: Option<Instant>,
+    /// Working directory for git context
+    working_dir: PathBuf,
 }
 
 impl<B: Backend> TuiRenderer<B> {
     /// Create a new TUI renderer
-    pub fn new(terminal: Terminal<B>) -> Self {
+    pub fn new(terminal: Terminal<B>, working_dir: PathBuf) -> Self {
         Self {
             terminal,
             theme: Theme::default(),
+            last_esc_time: None,
+            working_dir,
         }
     }
 
@@ -75,10 +95,16 @@ impl<B: Backend> TuiRenderer<B> {
                 }
             }
             (KeyCode::Char('q'), KeyModifiers::CONTROL) => Some(Command::Quit),
-            (KeyCode::Char('?'), _) => Some(Command::ToggleHelp),
+            // Ctrl+? opens help (allows ? to be typed normally in input)
+            (KeyCode::Char('?'), KeyModifiers::CONTROL) => Some(Command::ToggleHelp),
 
-            // Focus management
+            // Focus management / Autocomplete
             (KeyCode::Tab, KeyModifiers::NONE) => {
+                // Check if autocomplete is active for slash commands
+                if state.autocomplete_active() {
+                    // Autocomplete will be handled by controller
+                    return Some(Command::AutocompleteSelect);
+                }
                 if state.active_modal().is_none() {
                     Some(Command::FocusNext)
                 } else {
@@ -91,10 +117,11 @@ impl<B: Backend> TuiRenderer<B> {
             }
 
             // Mode cycling
-            (KeyCode::Char('m'), KeyModifiers::CONTROL) => Some(Command::CycleBuildMode),
+            (KeyCode::Char('M'), KeyModifiers::CONTROL) => Some(Command::CycleBuildMode),
 
-            // Approval mode (Alt+A or Shift+A) - only in Build mode
-            (KeyCode::Char('a'), KeyModifiers::ALT) | (KeyCode::Char('A'), KeyModifiers::SHIFT) => {
+            // Approval mode (Ctrl+Shift+B) - only in Build mode
+            // Changed from Shift+A to avoid conflict with text input
+            (KeyCode::Char('B'), KeyModifiers::CONTROL) => {
                 if state.agent_mode() == crate::ui_backend::AgentMode::Build {
                     Some(Command::OpenTrustLevelSelector)
                 } else {
@@ -106,67 +133,163 @@ impl<B: Backend> TuiRenderer<B> {
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(Command::ToggleSidebar),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(Command::ToggleThinking),
 
-            // Vim keybindings for messages panel and sidebar (must be before general char handler)
+            // Vim keybindings for messages panel and sidebar
+            // These should only consume the key if actually used, otherwise fall through to insert
+            // IMPORTANT: Questionnaire takes priority over all these
             (KeyCode::Char('j'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
-                match state.focused_component() {
-                    FocusedComponent::Messages if state.vim_mode() == VimMode::Normal => {
-                        Some(Command::ScrollDown)
-                    }
-                    FocusedComponent::Panel if state.vim_mode() == VimMode::Normal => {
-                        Some(Command::SidebarDown)
-                    }
+                // Questionnaire takes priority - j navigates down
+                if state.active_questionnaire().is_some() {
+                    return Some(Command::QuestionDown);
+                }
+                // Check if approval modal is active
+                if state.active_modal() == Some(ModalType::Approval) {
+                    state.approval_select_next();
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal) => Some(Command::ScrollDown),
+                    (FocusedComponent::Panel, VimMode::Normal) => Some(Command::SidebarDown),
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('j')),
                     _ => None,
                 }
             }
             (KeyCode::Char('k'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
-                match state.focused_component() {
-                    FocusedComponent::Messages if state.vim_mode() == VimMode::Normal => {
-                        Some(Command::ScrollUp)
-                    }
-                    FocusedComponent::Panel if state.vim_mode() == VimMode::Normal => {
-                        Some(Command::SidebarUp)
-                    }
+                // Questionnaire takes priority - k navigates up
+                if state.active_questionnaire().is_some() {
+                    return Some(Command::QuestionUp);
+                }
+                // Check if approval modal is active
+                if state.active_modal() == Some(ModalType::Approval) {
+                    state.approval_select_prev();
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal) => Some(Command::ScrollUp),
+                    (FocusedComponent::Panel, VimMode::Normal) => Some(Command::SidebarUp),
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('k')),
                     _ => None,
                 }
             }
             (KeyCode::Char('y'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
-                if state.focused_component() == FocusedComponent::Messages
-                    && state.vim_mode() == VimMode::Normal
-                {
-                    Some(Command::YankMessage)
-                } else {
-                    None
+                // Questionnaire takes priority - block y from going to input
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('y');
+                    }
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal) => Some(Command::YankMessage),
+                    (FocusedComponent::Messages, VimMode::Visual) => Some(Command::YankMessage),
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('y')),
+                    _ => None,
                 }
             }
-            (KeyCode::Char('G'), KeyModifiers::SHIFT) => {
+            (KeyCode::Char('v'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
+                // Questionnaire takes priority - block v from going to input
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('v');
+                    }
+                    return None;
+                }
                 if state.focused_component() == FocusedComponent::Messages
                     && state.vim_mode() == VimMode::Normal
                 {
-                    // Scroll to bottom
-                    let msg_count = state.message_count();
-                    if msg_count > 0 {
-                        state.set_messages_scroll_offset(msg_count.saturating_sub(1));
-                    }
-                    None
+                    Some(Command::SetVimMode(VimMode::Visual))
                 } else {
                     None
                 }
             }
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
+                // Questionnaire takes priority - block g from going to input
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('g');
+                    }
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal) => {
+                        // Scroll to top
+                        state.set_messages_scroll_offset(0);
+                        None
+                    }
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('g')),
+                    _ => None,
+                }
+            }
+            (KeyCode::Char('G'), KeyModifiers::SHIFT) => {
+                use crate::ui_backend::VimMode;
+                // Questionnaire takes priority - block G from going to input
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('G');
+                    }
+                    return None;
+                }
                 if state.focused_component() == FocusedComponent::Messages
                     && state.vim_mode() == VimMode::Normal
                 {
-                    // Scroll to top
-                    state.set_messages_scroll_offset(0);
+                    // Scroll to bottom
+                    state.scroll_to_bottom();
                     None
                 } else {
                     None
                 }
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                use crate::ui_backend::VimMode;
+                // Ctrl+U is only for vim navigation in messages
+                if state.focused_component() == FocusedComponent::Messages
+                    && state.vim_mode() == VimMode::Normal
+                {
+                    // Page up (half page)
+                    let current = state.messages_scroll_offset();
+                    let total_lines = state.messages_total_lines();
+                    let viewport_height = state.messages_viewport_height();
+                    let max_offset = total_lines.saturating_sub(viewport_height);
+                    let normalized = if current == usize::MAX {
+                        max_offset
+                    } else {
+                        current
+                    };
+                    state.set_messages_scroll_offset(normalized.saturating_sub(10));
+                }
+                None
+            }
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                use crate::ui_backend::VimMode;
+                // Ctrl+D is only for vim navigation in messages
+                if state.focused_component() == FocusedComponent::Messages
+                    && state.vim_mode() == VimMode::Normal
+                {
+                    // Page down (half page)
+                    let current = state.messages_scroll_offset();
+                    let total_lines = state.messages_total_lines();
+                    let viewport_height = state.messages_viewport_height();
+                    let max_offset = total_lines.saturating_sub(viewport_height);
+                    let normalized = if current == usize::MAX {
+                        max_offset
+                    } else {
+                        current
+                    };
+                    state.set_messages_scroll_offset(normalized.saturating_add(10).min(max_offset));
+                }
+                None
             }
 
             // Escape to close modal or switch to Normal mode
@@ -204,11 +327,34 @@ impl<B: Backend> TuiRenderer<B> {
                             Some(Command::SetTrustLevel(level))
                         }
                         ModalType::FilePicker => Some(Command::FilePickerSelect),
+                        ModalType::Approval => {
+                            // Execute the selected action from unified list
+                            use crate::ui_backend::approval::ApprovalItem;
+                            if let Some(approval) = state.pending_approval() {
+                                match approval.get_selected_item() {
+                                    ApprovalItem::RunOnce => Some(Command::ApproveOperation),
+                                    ApprovalItem::AlwaysAllow => Some(Command::ApproveAlways),
+                                    ApprovalItem::Pattern(_) => Some(Command::ApproveSession),
+                                    ApprovalItem::Skip => Some(Command::DenyOperation),
+                                }
+                            } else {
+                                Some(Command::ApproveOperation)
+                            }
+                        }
                         _ => Some(Command::ConfirmModal),
                     }
                 } else if matches!(state.focused_component(), FocusedComponent::Input) {
-                    let text = state.input_text();
-                    Some(Command::SendMessage(text))
+                    if state.autocomplete_active() {
+                        Some(Command::AutocompleteConfirm)
+                    } else {
+                        let text = state.input_text();
+                        Some(Command::SendMessage(text))
+                    }
+                } else if matches!(state.focused_component(), FocusedComponent::Messages) {
+                    Some(Command::ToggleMessageCollapse)
+                } else if matches!(state.focused_component(), FocusedComponent::Panel) {
+                    // Toggle sidebar panel expansion
+                    Some(Command::SidebarSelect)
                 } else {
                     None
                 }
@@ -216,51 +362,151 @@ impl<B: Backend> TuiRenderer<B> {
 
             // Text editing (only in input focus)
             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                // Questionnaire has priority
-                if state.active_questionnaire().is_some() && c == ' ' {
-                    Some(Command::QuestionToggle)
+                if let Some(q) = state.active_questionnaire() {
+                    use crate::ui_backend::questionnaire::QuestionType;
+
+                    if q.question_type == QuestionType::FreeText {
+                        // Free text: all typing goes to the answer
+                        state.questionnaire_insert_char(c);
+                        None
+                    } else if q.is_editing_other() {
+                        // "Other" is focused and selected: typing goes to other_text
+                        state.questionnaire_insert_char(c);
+                        None
+                    } else if c == ' ' && q.question_type == QuestionType::MultipleChoice {
+                        // Space only toggles for multiple choice (checkboxes)
+                        // Single choice auto-selects on navigation, no space needed
+                        Some(Command::QuestionToggle)
+                    } else {
+                        // Block other keys from going to prompt when questionnaire is active
+                        None
+                    }
                 } else {
                     match state.active_modal() {
                         Some(ModalType::Approval) => {
                             // Handle approval actions
                             match c.to_ascii_lowercase() {
-                                'y' => Some(Command::ApproveOperation),
-                                'n' => Some(Command::DenyOperation),
+                                'r' => Some(Command::ApproveOperation),
+                                'a' => Some(Command::ApproveAlways),
+                                'p' => Some(Command::ApproveSession),
+                                's' => Some(Command::DenyOperation),
                                 _ => None,
                             }
                         }
                         Some(ModalType::FilePicker) => {
-                            // Update file picker filter
+                            // FilePicker is an overlay - pass through to input
+                            // Update both file picker filter and input
                             let current_filter = state.file_picker_filter();
-                            Some(Command::UpdateFilePickerFilter(format!(
-                                "{}{}",
-                                current_filter, c
-                            )))
+                            state.set_file_picker_filter(format!("{}{}", current_filter, c));
+
+                            // Also insert into input if focused on input
+                            if state.focused_component() == FocusedComponent::Input {
+                                Some(Command::InsertChar(c))
+                            } else {
+                                None
+                            }
                         }
                         Some(ModalType::ThemePicker)
                         | Some(ModalType::ProviderPicker)
-                        | Some(ModalType::ModelPicker) => Some(Command::ModalFilter(c.to_string())),
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker) => {
+                            Some(Command::ModalFilter(c.to_string()))
+                        }
                         _ => {
                             use crate::ui_backend::VimMode;
 
                             let vim_mode = state.vim_mode();
                             let focused = state.focused_component();
 
-                            // Vim mode switching commands (work in Normal mode)
+                            // Handle pending operator in Normal mode (e.g., dd, dw)
+                            if vim_mode == VimMode::Normal && focused == FocusedComponent::Input {
+                                if let Some(op) = state.pending_operator() {
+                                    state.set_pending_operator(None);
+                                    match (op, c) {
+                                        ('d', 'd') => return Some(Command::DeleteLine),
+                                        ('d', 'w') => return Some(Command::DeleteWord),
+                                        _ => {}
+                                    }
+                                }
+                            }
+
+                            // Vim mode commands (work in Normal mode for Input)
                             if vim_mode == VimMode::Normal && focused == FocusedComponent::Input {
                                 match c {
+                                    // Mode switching
                                     'i' => return Some(Command::SetVimMode(VimMode::Insert)),
                                     'v' => return Some(Command::SetVimMode(VimMode::Visual)),
                                     'a' => {
-                                        // Enter insert mode after cursor
+                                        // Enter insert mode after cursor (move right then insert)
+                                        state.move_cursor_right();
+                                        return Some(Command::SetVimMode(VimMode::Insert));
+                                    }
+                                    'A' => {
+                                        // Enter insert mode at end of line
+                                        state.move_cursor_to_line_end();
+                                        return Some(Command::SetVimMode(VimMode::Insert));
+                                    }
+                                    'I' => {
+                                        // Enter insert mode at start of line
+                                        state.move_cursor_to_line_start();
+                                        return Some(Command::SetVimMode(VimMode::Insert));
+                                    }
+                                    // Operator-pending commands
+                                    'd' => {
+                                        state.set_pending_operator(Some('d'));
+                                        return None;
+                                    }
+                                    // Navigation
+                                    'h' => return Some(Command::CursorLeft),
+                                    'l' => return Some(Command::CursorRight),
+                                    'w' => return Some(Command::CursorWordForward),
+                                    'b' => return Some(Command::CursorWordBackward),
+                                    '0' => return Some(Command::CursorToLineStart),
+                                    '$' => return Some(Command::CursorToLineEnd),
+                                    '^' => return Some(Command::CursorToLineStart), // First non-whitespace (simplified)
+                                    // Deletion
+                                    'x' => return Some(Command::DeleteCharAfter),
+                                    'X' => return Some(Command::DeleteCharBefore),
+                                    // Other common commands
+                                    'o' => {
+                                        // Open new line below and enter insert mode
+                                        state.move_cursor_to_line_end();
+                                        state.insert_newline();
+                                        return Some(Command::SetVimMode(VimMode::Insert));
+                                    }
+                                    'O' => {
+                                        // Open new line above and enter insert mode
+                                        state.move_cursor_to_line_start();
+                                        state.insert_newline();
+                                        state.move_cursor_up();
                                         return Some(Command::SetVimMode(VimMode::Insert));
                                     }
                                     _ => {}
                                 }
                             }
 
+                            // Visual mode selection + yank/delete
+                            if vim_mode == VimMode::Visual && focused == FocusedComponent::Input {
+                                match c {
+                                    'h' => return Some(Command::CursorLeft),
+                                    'l' => return Some(Command::CursorRight),
+                                    'w' => return Some(Command::CursorWordForward),
+                                    'b' => return Some(Command::CursorWordBackward),
+                                    '0' => return Some(Command::CursorToLineStart),
+                                    '$' => return Some(Command::CursorToLineEnd),
+                                    'y' => return Some(Command::YankSelection),
+                                    'd' => return Some(Command::DeleteSelection),
+                                    _ => {}
+                                }
+                            }
+
                             // Text editing only works in Insert mode
                             if vim_mode == VimMode::Insert && focused == FocusedComponent::Input {
+                                // Detect '/' at start of input for slash commands
+                                if c == '/' && state.input_text().is_empty() {
+                                    // Activate autocomplete for slash commands
+                                    state.activate_autocomplete("");
+                                }
                                 Some(Command::InsertChar(c))
                             } else {
                                 None
@@ -274,20 +520,42 @@ impl<B: Backend> TuiRenderer<B> {
             (KeyCode::Backspace, _) => {
                 use crate::ui_backend::VimMode;
 
+                if let Some(q) = state.active_questionnaire() {
+                    use crate::ui_backend::questionnaire::QuestionType;
+
+                    if q.question_type == QuestionType::FreeText || q.is_editing_other() {
+                        // Backspace in free text or "Other" input
+                        state.questionnaire_backspace();
+                        return None;
+                    }
+                    // For choice questions (not editing Other), block backspace from going to prompt
+                    return None;
+                }
+
                 match state.active_modal() {
+                    Some(ModalType::SessionPicker) if key.modifiers == KeyModifiers::SHIFT => {
+                        Some(Command::DeleteSessionSelected)
+                    }
                     Some(ModalType::FilePicker) => {
+                        // FilePicker is an overlay - pass through to input
                         let current_filter = state.file_picker_filter();
                         if !current_filter.is_empty() {
                             let mut filter = current_filter;
                             filter.pop();
-                            Some(Command::UpdateFilePickerFilter(filter))
+                            state.set_file_picker_filter(filter);
+                        }
+
+                        // Also delete from input if focused on input
+                        if state.focused_component() == FocusedComponent::Input {
+                            Some(Command::DeleteCharBefore)
                         } else {
                             None
                         }
                     }
                     Some(ModalType::ThemePicker)
                     | Some(ModalType::ProviderPicker)
-                    | Some(ModalType::ModelPicker) => Some(Command::ModalFilter(String::new())), // Signal to pop
+                    | Some(ModalType::ModelPicker)
+                    | Some(ModalType::SessionPicker) => Some(Command::ModalFilter(String::new())), // Signal to pop
                     _ => {
                         // Only allow backspace in Insert mode
                         if state.vim_mode() == VimMode::Insert
@@ -300,10 +568,29 @@ impl<B: Backend> TuiRenderer<B> {
                     }
                 }
             }
+            // Delete key
+            (KeyCode::Delete, _) => {
+                if state.active_modal() == Some(ModalType::SessionPicker) {
+                    return Some(Command::DeleteSessionSelected);
+                }
+                None
+            }
 
             // Cursor movement
-            (KeyCode::Left, KeyModifiers::NONE) => Some(Command::CursorLeft),
-            (KeyCode::Right, KeyModifiers::NONE) => Some(Command::CursorRight),
+            (KeyCode::Left, KeyModifiers::NONE) => {
+                if state.focused_component() == FocusedComponent::Messages {
+                    Some(Command::PrevMessage)
+                } else {
+                    Some(Command::CursorLeft)
+                }
+            }
+            (KeyCode::Right, KeyModifiers::NONE) => {
+                if state.focused_component() == FocusedComponent::Messages {
+                    Some(Command::NextMessage)
+                } else {
+                    Some(Command::CursorRight)
+                }
+            }
             (KeyCode::Home, _) => Some(Command::CursorToLineStart),
             (KeyCode::End, _) => Some(Command::CursorToLineEnd),
             (KeyCode::Left, KeyModifiers::CONTROL) => Some(Command::CursorWordBackward),
@@ -314,6 +601,11 @@ impl<B: Backend> TuiRenderer<B> {
                 if state.active_questionnaire().is_some() {
                     Some(Command::QuestionUp)
                 } else {
+                    if state.autocomplete_active()
+                        && matches!(state.focused_component(), FocusedComponent::Input)
+                    {
+                        return Some(Command::AutocompleteUp);
+                    }
                     match state.active_modal() {
                         Some(ModalType::Tools) => {
                             let selected = state.tools_selected();
@@ -329,11 +621,21 @@ impl<B: Backend> TuiRenderer<B> {
                             }
                             None
                         }
+                        Some(ModalType::Approval) => {
+                            state.approval_select_prev();
+                            None
+                        }
                         Some(ModalType::FilePicker) => Some(Command::FilePickerUp),
                         Some(ModalType::ThemePicker)
                         | Some(ModalType::ProviderPicker)
-                        | Some(ModalType::ModelPicker) => Some(Command::ModalUp),
-                        _ if matches!(state.focused_component(), FocusedComponent::Panel) => None,
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker) => Some(Command::ModalUp),
+                        _ if matches!(state.focused_component(), FocusedComponent::Panel) => {
+                            Some(Command::SidebarUp)
+                        }
+                        _ if matches!(state.focused_component(), FocusedComponent::Messages) => {
+                            Some(Command::PrevMessage)
+                        }
                         _ => Some(Command::HistoryPrevious),
                     }
                 }
@@ -342,6 +644,11 @@ impl<B: Backend> TuiRenderer<B> {
                 if state.active_questionnaire().is_some() {
                     Some(Command::QuestionDown)
                 } else {
+                    if state.autocomplete_active()
+                        && matches!(state.focused_component(), FocusedComponent::Input)
+                    {
+                        return Some(Command::AutocompleteDown);
+                    }
                     match state.active_modal() {
                         Some(ModalType::Tools) => {
                             let selected = state.tools_selected();
@@ -357,11 +664,21 @@ impl<B: Backend> TuiRenderer<B> {
                             }
                             None
                         }
+                        Some(ModalType::Approval) => {
+                            state.approval_select_next();
+                            None
+                        }
                         Some(ModalType::FilePicker) => Some(Command::FilePickerDown),
                         Some(ModalType::ThemePicker)
                         | Some(ModalType::ProviderPicker)
-                        | Some(ModalType::ModelPicker) => Some(Command::ModalDown),
-                        _ if matches!(state.focused_component(), FocusedComponent::Panel) => None,
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker) => Some(Command::ModalDown),
+                        _ if matches!(state.focused_component(), FocusedComponent::Panel) => {
+                            Some(Command::SidebarDown)
+                        }
+                        _ if matches!(state.focused_component(), FocusedComponent::Messages) => {
+                            Some(Command::NextMessage)
+                        }
                         _ => Some(Command::HistoryNext),
                     }
                 }
@@ -384,24 +701,32 @@ impl<B: Backend> TuiRenderer<B> {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
                 tracing::debug!("Scroll down event detected");
-                // Route scroll to the correct component
                 if state.active_modal().is_some() {
                     Some(Command::ModalDown)
                 } else {
-                    match state.focused_component() {
-                        FocusedComponent::Panel => Some(Command::SidebarDown),
+                    match self.hit_test(mouse.column, mouse.row, state) {
+                        ClickTarget::Sidebar => {
+                            if let Some(idx) = self.get_clicked_sidebar_panel(mouse.row, state) {
+                                state.set_sidebar_selected_panel(idx);
+                            }
+                            Some(Command::SidebarDown)
+                        }
                         _ => Some(Command::ScrollDown),
                     }
                 }
             }
             MouseEventKind::ScrollUp => {
                 tracing::debug!("Scroll up event detected");
-                // Route scroll to the correct component
                 if state.active_modal().is_some() {
                     Some(Command::ModalUp)
                 } else {
-                    match state.focused_component() {
-                        FocusedComponent::Panel => Some(Command::SidebarUp),
+                    match self.hit_test(mouse.column, mouse.row, state) {
+                        ClickTarget::Sidebar => {
+                            if let Some(idx) = self.get_clicked_sidebar_panel(mouse.row, state) {
+                                state.set_sidebar_selected_panel(idx);
+                            }
+                            Some(Command::SidebarUp)
+                        }
                         _ => Some(Command::ScrollUp),
                     }
                 }
@@ -410,6 +735,11 @@ impl<B: Backend> TuiRenderer<B> {
                 tracing::debug!("Left click event detected");
                 // Handle clicks - delegate to hit testing
                 self.handle_mouse_click(mouse.column, mouse.row, state)
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                tracing::debug!("Mouse drag event detected at row={}", mouse.row);
+                // Handle scrollbar dragging for messages area
+                self.handle_scrollbar_drag(mouse.column, mouse.row, state)
             }
             _ => {
                 tracing::debug!("Unhandled mouse event: {:?}", mouse.kind);
@@ -426,6 +756,13 @@ impl<B: Backend> TuiRenderer<B> {
             ClickTarget::Messages => Some(Command::FocusMessages),
             ClickTarget::Input => Some(Command::FocusInput),
             ClickTarget::Sidebar => {
+                // Check if theme header was clicked (first 2 lines of sidebar content)
+                let inner_y = 1u16;
+                if row >= inner_y && row < inner_y + 2 {
+                    // Theme header clicked
+                    return Some(Command::ToggleThemePicker);
+                }
+
                 // Determine which sidebar panel was clicked based on row
                 let panel_idx = self.get_clicked_sidebar_panel(row, state);
                 if let Some(idx) = panel_idx {
@@ -454,33 +791,37 @@ impl<B: Backend> TuiRenderer<B> {
 
     /// Determine which sidebar panel was clicked based on row position
     fn get_clicked_sidebar_panel(&self, row: u16, _state: &SharedState) -> Option<usize> {
-        let size = self.terminal.size().unwrap_or_default();
-
-        // Sidebar starts at inner_y (which is 1 for the border)
         let inner_y = 1u16;
-        let inner_height = size.height.saturating_sub(2);
 
-        // Calculate approximate panel positions
-        // Sidebar layout: each panel has a header line plus content
-        // We'll approximate: if clicked in top 25% -> panel 0, next 25% -> panel 1, etc.
-        if row < inner_y {
+        // Fixed panel heights (match Sidebar layout)
+        let header_h = 3u16;
+        let session_h = 6u16;
+        let context_h = 8u16;
+        let tasks_h = 8u16;
+        let git_h = 8u16;
+
+        if row < inner_y + header_h {
             return None;
         }
 
-        let relative_row = row - inner_y;
-        let quarter = inner_height / 4;
-
-        if relative_row < quarter {
-            Some(0) // Session panel
-        } else if relative_row < quarter * 2 {
-            Some(1) // Context panel
-        } else if relative_row < quarter * 3 {
-            Some(2) // Tasks panel
-        } else if relative_row < inner_height {
-            Some(3) // Git changes panel
-        } else {
-            None
+        let mut cursor = inner_y + header_h;
+        if row >= cursor && row < cursor + session_h {
+            return Some(0);
         }
+        cursor += session_h;
+        if row >= cursor && row < cursor + context_h {
+            return Some(1);
+        }
+        cursor += context_h;
+        if row >= cursor && row < cursor + tasks_h {
+            return Some(2);
+        }
+        cursor += tasks_h;
+        if row >= cursor && row < cursor + git_h {
+            return Some(3);
+        }
+
+        None
     }
 
     /// Hit test status bar to determine which icon/section was clicked
@@ -522,6 +863,53 @@ impl<B: Backend> TuiRenderer<B> {
         }
 
         // Default: no action
+        None
+    }
+
+    /// Handle scrollbar dragging
+    fn handle_scrollbar_drag(&self, col: u16, row: u16, state: &SharedState) -> Option<Command> {
+        let size = self.terminal.size().unwrap_or_default();
+
+        // Check if dragging in the messages area scrollbar region
+        // The scrollbar is at the right edge of the messages panel
+        let header_height = 2u16;
+        let input_height = 5u16;
+        let status_height = 1u16;
+
+        let messages_start_y = 1 + header_height;
+        let messages_end_y = size.height - status_height - input_height - 1;
+        let messages_height = messages_end_y.saturating_sub(messages_start_y);
+
+        // Check if the drag is in the messages scrollbar area (right edge)
+        let sidebar_visible = state.sidebar_visible();
+        let main_width = if sidebar_visible && size.width > 80 {
+            size.width.saturating_sub(37) // 35 for sidebar + 2 for borders
+        } else {
+            size.width.saturating_sub(2)
+        };
+
+        // Scrollbar is at the right edge of the main area
+        if col >= main_width
+            && col <= main_width + 1
+            && row >= messages_start_y
+            && row < messages_end_y
+        {
+            // Calculate scroll position based on mouse Y position
+            let relative_y = row.saturating_sub(messages_start_y);
+            let total_lines = state.messages_total_lines();
+            let viewport_height = state.messages_viewport_height();
+            let max_offset = total_lines.saturating_sub(viewport_height);
+
+            if messages_height > 0 && total_lines > 0 {
+                // Map Y position to scroll offset
+                let scroll_ratio = relative_y as f32 / messages_height as f32;
+                let new_offset = (scroll_ratio * max_offset as f32) as usize;
+                state.set_messages_scroll_offset(new_offset.min(max_offset));
+            }
+
+            return None; // State is already updated, no command needed
+        }
+
         None
     }
 
@@ -611,6 +999,8 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
     fn render(&mut self, state: &SharedState) -> Result<()> {
         use ratatui::layout::{Constraint, Direction, Layout};
 
+        let render_start = std::time::Instant::now();
+
         // Update theme if changed
         let theme_preset = state.theme();
         self.theme = Theme::from_preset(theme_preset);
@@ -683,9 +1073,12 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                         UiMessageRole::User => super::widgets::MessageRole::User,
                         UiMessageRole::Assistant => super::widgets::MessageRole::Agent,
                         UiMessageRole::System => super::widgets::MessageRole::System,
+                        UiMessageRole::Tool => super::widgets::MessageRole::Tool,
+                        UiMessageRole::Thinking => super::widgets::MessageRole::Thinking,
                     },
                     content: m.content.clone(),
                     collapsed: m.collapsed,
+                    timestamp: m.timestamp.clone(),
                     question: None, // TODO: map questions if needed
                 })
                 .collect();
@@ -701,8 +1094,12 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .agent_name(&config.agent_name_short)
                 .focused(matches!(focused_component, FocusedComponent::Messages))
                 .focused_index(state.focused_message())
+                .scroll(state.messages_scroll_offset())
+                .vim_mode(state.vim_mode())
                 .streaming_content(streaming_content)
                 .streaming_thinking(streaming_thinking);
+            let (total_lines, viewport_height) = message_area.metrics(chunks[1]);
+            state.set_messages_metrics(total_lines, viewport_height);
             frame.render_widget(message_area, chunks[1]);
 
             // Render input area
@@ -710,12 +1107,26 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 context_files.iter().map(|f| f.path.clone()).collect();
             let input = InputWidget::new(&input_text, input_cursor, theme)
                 .focused(matches!(focused_component, FocusedComponent::Input))
-                .context_files(context_file_paths);
+                .context_files(context_file_paths)
+                .selection(state.input_selection());
             frame.render_widget(input, chunks[2]);
 
+            // Render command autocomplete dropdown if active
+            if state.autocomplete_active() {
+                let mut ac_state = super::widgets::AutocompleteState::new();
+                let filter = state.autocomplete_filter();
+                ac_state.activate(&filter);
+                ac_state.selected = state.autocomplete_selected();
+                ac_state.matches = super::widgets::SlashCommand::find_matches(&filter);
+
+                let autocomplete = super::widgets::CommandAutocomplete::new(theme, &ac_state);
+                frame.render_widget(autocomplete, chunks[2]);
+            }
+
             // Render status bar
-            let vim_mode = state.vim_mode();
             let queued_count = state.queued_message_count();
+            // LLM is considered connected if we have a provider configured
+            let llm_connected = current_provider.is_some() && state.llm_connected();
 
             let mut status = StatusBar::new(theme)
                 .agent_mode(agent_mode)
@@ -723,14 +1134,15 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .thinking(thinking_enabled)
                 .queue(queued_count) // Show actual queue count
                 .processing(llm_processing)
-                .vim_mode(vim_mode);
+                .connected(llm_connected);
 
             // Set provider and model if available
             if let Some(ref provider) = current_provider {
                 status = status.provider(provider);
             }
-            if let Some(ref model) = current_model {
-                status = status.model(model);
+            let model_name_override = resolve_model_display_name(state, &current_model);
+            if let Some(name) = model_name_override.as_deref() {
+                status = status.model(name);
             }
 
             frame.render_widget(status, chunks[3]);
@@ -740,18 +1152,44 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 let is_sidebar_focused = focused_component == FocusedComponent::Panel;
                 let current_theme_name = theme_preset.display_name().to_string();
 
+                // Derive session name from first user message (first few words)
+                let session_name = messages
+                    .iter()
+                    .find(|m| matches!(m.role, UiMessageRole::User))
+                    .map(|m| {
+                        m.content
+                            .split_whitespace()
+                            .take(4)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+
+                let session_costs = state.session_cost_by_model();
+                let session_total_cost = state.session_cost_total();
+                let session_tokens = state.session_tokens_by_model();
+                let session_total_tokens = state.session_tokens_total();
+
                 // Get real session info from state
                 let session_info = state
                     .session()
                     .map(|s| SessionInfo {
+                        name: session_name.clone(),
                         branch: s.branch,
-                        total_cost: s.total_cost,
-                        model_count: s.model_count,
+                        total_cost: session_total_cost.max(s.total_cost),
+                        model_count: session_costs.len().max(s.model_count),
+                        model_costs: session_costs.clone(),
+                        total_tokens: session_total_tokens,
+                        model_tokens: session_tokens.clone(),
                     })
                     .unwrap_or_else(|| SessionInfo {
-                        branch: "main".to_string(),
-                        total_cost: 0.0,
-                        model_count: 0,
+                        name: session_name.clone(),
+                        branch: crate::tui_new::git_info::get_current_branch(&self.working_dir),
+                        total_cost: session_total_cost,
+                        model_count: session_costs.len(),
+                        model_costs: session_costs.clone(),
+                        total_tokens: session_total_tokens,
+                        model_tokens: session_tokens.clone(),
                     });
 
                 // Get real tasks from state
@@ -792,8 +1230,10 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     .theme_name(current_theme_name)
                     .focused(is_sidebar_focused)
                     .selected_panel(state.sidebar_selected_panel())
-                    .vim_mode(vim_mode)
+                    .vim_mode(state.vim_mode())
                     .session_info(session_info)
+                    .scroll_offset(state.sidebar_scroll_offset())
+                    .panel_scrolls(state.sidebar_panel_scrolls())
                     .context_files(
                         context_files
                             .iter()
@@ -867,6 +1307,30 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                             .filter(state.model_picker_filter());
                         frame.render_widget(picker, area);
                     }
+                    ModalType::SessionPicker => {
+                        let sessions = state.available_sessions();
+                        let sessions_data: Vec<_> = sessions
+                            .iter()
+                            .map(|s| {
+                                let name = if s.name.is_empty() {
+                                    format!("Session {}", s.created_at.format("%Y-%m-%d %H:%M"))
+                                } else {
+                                    s.name.clone()
+                                };
+                                let meta = format!(
+                                    "{} msgs · {}",
+                                    s.message_count,
+                                    s.updated_at.format("%Y-%m-%d %H:%M")
+                                );
+                                (name, s.id.clone(), meta, s.is_current)
+                            })
+                            .collect();
+                        let picker = SessionPickerModal::new(theme)
+                            .sessions(sessions_data)
+                            .selected(state.session_picker_selected())
+                            .filter(state.session_picker_filter());
+                        frame.render_widget(picker, area);
+                    }
                     ModalType::FilePicker => {
                         let files = state.file_picker_files();
                         let filter = state.file_picker_filter();
@@ -911,6 +1375,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 
             // Render questionnaire if active (on top of modals)
             if let Some(q) = state.active_questionnaire() {
+                use super::widgets::question::ThemedQuestion;
                 use super::widgets::QuestionType as WidgetQuestionType;
                 use crate::ui_backend::questionnaire::QuestionType as StateQuestionType;
 
@@ -921,9 +1386,16 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     StateQuestionType::FreeText => WidgetQuestionType::FreeText,
                 };
 
+                // Filter out any "Other" options from LLM - we provide our own with text input
                 let options: Vec<QuestionOption> = q
                     .options
                     .iter()
+                    .filter(|opt| {
+                        let text_lower = opt.text.to_lowercase();
+                        !text_lower.starts_with("other")
+                            && !text_lower.contains("other:")
+                            && !text_lower.contains("other...")
+                    })
                     .map(|opt| QuestionOption {
                         text: opt.text.clone(),
                         value: opt.value.clone(),
@@ -935,24 +1407,38 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     text: q.question.clone(),
                     options,
                     selected: q.selected.iter().copied().collect(),
-                    focused_index: 0,
+                    focused_index: q.focused_index,
                     free_text_answer: q.free_text_answer.clone(),
                     answered: q.answered,
+                    allow_other: q.allow_other,
+                    other_text: q.other_text.clone(),
+                    other_selected: q.other_selected,
+                    current_index: q.current_question_index,
+                    total_questions: q.total_questions,
+                    title: q.title.clone(),
                 };
 
-                // Center the questionnaire
-                let question_width = area.width.min(70);
-                let question_height = area.height.min(20);
-                let question_area = Rect {
-                    x: (area.width.saturating_sub(question_width)) / 2,
-                    y: (area.height.saturating_sub(question_height)) / 2,
-                    width: question_width,
-                    height: question_height,
-                };
-
-                frame.render_widget(&question_widget, question_area);
+                // ThemedQuestion handles its own centering, pass full area
+                let themed_question = ThemedQuestion::new(&question_widget, theme);
+                frame.render_widget(themed_question, area);
             }
         })?;
+
+        // Log render time with correlation_id if available
+        let render_time = render_start.elapsed();
+        if let Some(correlation_id) = state.current_correlation_id() {
+            if let Some(logger) = crate::debug_logger() {
+                let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                    correlation_id,
+                    crate::LogCategory::Tui,
+                    "render_frame",
+                )
+                .with_data(serde_json::json!({
+                    "frame_time_ms": render_time.as_millis()
+                }));
+                logger.log(entry);
+            }
+        }
 
         Ok(())
     }
@@ -962,10 +1448,75 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
+                    // Special handling for ESC key
+                    if key.code == KeyCode::Esc {
+                        let now = Instant::now();
+
+                        // Check for double-ESC (within 500ms)
+                        if let Some(last_esc) = self.last_esc_time {
+                            if now.duration_since(last_esc) < Duration::from_millis(500) {
+                                // Double-ESC detected - cancel agent if working
+                                self.last_esc_time = None;
+                                if state.llm_processing() {
+                                    return Ok(Some(Command::CancelAgent));
+                                }
+                            }
+                        }
+
+                        self.last_esc_time = Some(now);
+
+                        // First ESC: handle questionnaire first, then modal, then normal ESC
+                        if state.active_questionnaire().is_some() {
+                            return Ok(Some(Command::QuestionCancel));
+                        }
+                    }
+
                     return Ok(Self::key_to_command(key, state));
                 }
                 Event::Mouse(mouse) => {
+                    // Check for click outside questionnaire to dismiss it
+                    if let MouseEventKind::Down(_) = mouse.kind {
+                        if state.active_questionnaire().is_some() {
+                            // Check if click is outside the question modal
+                            // The modal is centered, so approximate the bounds
+                            let (width, height) = self.get_size();
+                            let modal_width = width.min(65);
+                            let modal_height = height.min(15); // Approximate
+                            let modal_x = (width.saturating_sub(modal_width)) / 2;
+                            let modal_y = (height.saturating_sub(modal_height)) / 2;
+
+                            let click_x = mouse.column;
+                            let click_y = mouse.row;
+
+                            // If click is outside modal bounds, cancel the questionnaire
+                            if click_x < modal_x
+                                || click_x >= modal_x + modal_width
+                                || click_y < modal_y
+                                || click_y >= modal_y + modal_height
+                            {
+                                return Ok(Some(Command::QuestionCancel));
+                            }
+                        }
+                    }
                     return Ok(self.mouse_to_command(mouse, state));
+                }
+                Event::Paste(text) => {
+                    // Questionnaire takes priority for paste
+                    if let Some(q) = state.active_questionnaire() {
+                        use crate::ui_backend::questionnaire::QuestionType;
+                        if q.question_type == QuestionType::FreeText || q.is_editing_other() {
+                            // Insert pasted text into questionnaire
+                            for c in text.chars() {
+                                state.questionnaire_insert_char(c);
+                            }
+                        }
+                        // Block paste from going to input
+                        return Ok(None);
+                    }
+                    // Paste should insert full text without submitting
+                    if matches!(state.focused_component(), FocusedComponent::Input) {
+                        return Ok(Some(Command::InsertText(text)));
+                    }
                 }
                 Event::Resize(_, _) => {
                     // Terminal resize handled automatically by ratatui
@@ -999,5 +1550,40 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 
     fn should_quit(&self, state: &SharedState) -> bool {
         state.should_quit()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui_backend::ModelInfo;
+
+    #[test]
+    fn test_model_display_name_ignores_picker_selection() {
+        let state = SharedState::new();
+        state.set_available_models(vec![
+            ModelInfo {
+                id: "model-a".to_string(),
+                name: "Model A".to_string(),
+                description: String::new(),
+                provider: "test".to_string(),
+                context_window: 0,
+                max_tokens: 0,
+            },
+            ModelInfo {
+                id: "model-b".to_string(),
+                name: "Model B".to_string(),
+                description: String::new(),
+                provider: "test".to_string(),
+                context_window: 0,
+                max_tokens: 0,
+            },
+        ]);
+
+        state.set_model(Some("model-a".to_string()));
+        state.set_model_picker_selected(1);
+
+        let name = resolve_model_display_name(&state, &state.current_model());
+        assert_eq!(name.as_deref(), Some("Model A"));
     }
 }

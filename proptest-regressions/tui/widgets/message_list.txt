@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc e2b778cc07a5872d0f202562628d97acd968e60241e7becec1db649d173b2682 # shrinks to messages = [ChatMessage { id: ac0f8d6d-14c1-41f3-a721-8b312d0a6d57, role: Assistant, content: "a", timestamp: 2026-01-02T14:40:22.297462719Z, is_streaming: false, tool_calls: [], tool_call_info: [] }], username = "k"

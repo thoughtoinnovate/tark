@@ -60,15 +60,15 @@ impl RiskLevel {
 /// Trust level determines when user confirmation is required.
 ///
 /// Three levels provide different amounts of agent autonomy:
-/// - `Balanced`: Auto-run reads & writes, prompt for shell/delete (default)
+/// - `Balanced`: Auto-run reads & writes, prompt for shell/delete
 /// - `Careful`: Auto-run reads only, prompt for all writes and above
 /// - `Manual`: Prompt for everything including reads
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TrustLevel {
     /// Auto-run reads & writes, prompt for risky/dangerous only (default)
-    #[default]
     Balanced,
     /// Auto-run reads only, prompt for writes and above
+    #[default]
     Careful,
     /// Prompt for everything including reads
     Manual,

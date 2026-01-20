@@ -11,6 +11,7 @@ use tark_cli::ui_backend::{AgentMode, AppEvent, AppService, BuildMode, Command, 
 /// Test world for UI Backend BDD tests
 #[derive(Debug, World)]
 #[world(init = Self::new)]
+#[allow(dead_code)]
 pub struct UiBackendWorld {
     /// AppService instance under test
     service: Option<AppService>,

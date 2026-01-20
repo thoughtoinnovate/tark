@@ -6,7 +6,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Widget},
@@ -119,15 +119,19 @@ impl<'a> HelpModal<'a> {
         vec![
             ("Ctrl+C / Ctrl+Q", "Quit application"),
             ("Enter", "Submit message"),
-            ("Escape", "Clear input / Close modal"),
-            ("Tab", "Next focus"),
-            ("Shift+Tab", "Previous focus"),
+            ("Shift+Enter", "Insert newline"),
+            ("Escape", "Clear input / Close modal / Normal mode"),
+            ("Tab", "Next focus / Autocomplete"),
+            ("Shift+Tab", "Cycle agent mode"),
             ("Ctrl+T", "Toggle thinking mode"),
             ("Ctrl+B", "Toggle sidebar"),
-            ("?", "Open this help"),
-            ("Page Up/Down", "Scroll messages"),
-            ("g g", "Scroll to top"),
-            ("G", "Scroll to bottom"),
+            ("Ctrl+Shift+M", "Cycle build mode"),
+            ("Ctrl+Shift+B", "Trust level selector (Build mode)"),
+            ("Ctrl+?", "Open this help"),
+            ("@filename", "Add file to context"),
+            ("/command", "Slash commands (try /help)"),
+            ("j/k", "Navigate messages (Normal mode)"),
+            ("g / G", "Scroll to top / bottom"),
         ]
     }
 }
@@ -169,28 +173,33 @@ impl Widget for HelpModal<'_> {
 /// Provider picker modal
 pub struct ProviderPickerModal<'a> {
     theme: &'a Theme,
-    providers: Vec<(&'a str, &'a str)>, // (name, icon)
+    providers: Vec<(String, String, String, bool)>, // (name, icon, description, configured)
     selected: usize,
+    filter: String,
 }
 
 impl<'a> ProviderPickerModal<'a> {
     pub fn new(theme: &'a Theme) -> Self {
         Self {
             theme,
-            providers: vec![
-                ("OpenAI", "🔑"),
-                ("Claude", "🤖"),
-                ("GitHub Copilot", "🐙"),
-                ("Google Gemini", "💎"),
-                ("OpenRouter", "🔀"),
-                ("Ollama", "🦙"),
-            ],
+            providers: vec![],
             selected: 0,
+            filter: String::new(),
         }
+    }
+
+    pub fn providers(mut self, providers: Vec<(String, String, String, bool)>) -> Self {
+        self.providers = providers;
+        self
     }
 
     pub fn selected(mut self, index: usize) -> Self {
         self.selected = index;
+        self
+    }
+
+    pub fn filter(mut self, filter: String) -> Self {
+        self.filter = filter;
         self
     }
 }
@@ -198,19 +207,57 @@ impl<'a> ProviderPickerModal<'a> {
 impl Widget for ProviderPickerModal<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut content: Vec<Line> = vec![
+            // Search bar header
             Line::from(vec![
-                Span::styled("▸ ", Style::default().fg(self.theme.cyan)),
+                Span::styled("Search: ", Style::default().fg(self.theme.text_muted)),
                 Span::styled(
-                    "Type to filter...",
-                    Style::default()
-                        .fg(self.theme.text_muted)
-                        .add_modifier(Modifier::DIM),
+                    if self.filter.is_empty() {
+                        "▏".to_string()
+                    } else {
+                        format!("{}▏", self.filter)
+                    },
+                    if self.filter.is_empty() {
+                        Style::default()
+                            .fg(self.theme.text_muted)
+                            .add_modifier(Modifier::DIM)
+                    } else {
+                        Style::default().fg(self.theme.text_primary)
+                    },
                 ),
+            ]),
+            Line::from(""),
+            // Navigation hints
+            Line::from(vec![
+                Span::styled("↑↓", Style::default().fg(self.theme.cyan)),
+                Span::styled(" Navigate  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("Enter", Style::default().fg(self.theme.green)),
+                Span::styled(" Select  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("Esc", Style::default().fg(self.theme.red)),
+                Span::styled(" Cancel", Style::default().fg(self.theme.text_muted)),
             ]),
             Line::from(""),
         ];
 
-        for (i, (name, icon)) in self.providers.iter().enumerate() {
+        // Apply filter to providers
+        let filtered_providers: Vec<_> = if self.filter.is_empty() {
+            self.providers.clone()
+        } else {
+            let filter_lower = self.filter.to_lowercase();
+            self.providers
+                .iter()
+                .filter(|(name, _, _, _)| name.to_lowercase().contains(&filter_lower))
+                .cloned()
+                .collect()
+        };
+
+        if filtered_providers.is_empty() {
+            content.push(Line::from(vec![Span::styled(
+                "  No providers match your search",
+                Style::default().fg(self.theme.text_muted),
+            )]));
+        }
+
+        for (i, (name, icon, description, configured)) in filtered_providers.iter().enumerate() {
             let is_selected = i == self.selected;
             let prefix = if is_selected { "▸ " } else { "  " };
 
@@ -218,6 +265,7 @@ impl Widget for ProviderPickerModal<'_> {
                 Style::default()
                     .fg(self.theme.cyan)
                     .add_modifier(Modifier::BOLD)
+                    .bg(Color::Rgb(45, 60, 83))
             } else {
                 Style::default().fg(self.theme.text_primary)
             };
@@ -228,17 +276,42 @@ impl Widget for ProviderPickerModal<'_> {
                 Style::default().fg(self.theme.text_secondary)
             };
 
+            let status_icon = if *configured { "✓" } else { "⚠" };
+            let status_color = if *configured {
+                self.theme.green
+            } else {
+                self.theme.yellow
+            };
+
             content.push(Line::from(vec![
                 Span::styled(prefix, name_style),
                 Span::styled(format!("{} ", icon), icon_style),
-                Span::styled(*name, name_style),
+                Span::styled(name.clone(), name_style),
+                Span::raw(" "),
+                Span::styled(status_icon, Style::default().fg(status_color)),
             ]));
+
+            // Add description line if selected
+            if is_selected && !description.is_empty() {
+                content.push(Line::from(vec![Span::styled(
+                    format!("    {}", description),
+                    Style::default()
+                        .fg(self.theme.text_muted)
+                        .add_modifier(Modifier::DIM),
+                )]));
+                if !*configured {
+                    content.push(Line::from(vec![Span::styled(
+                        "    Not configured - run 'tark auth <provider>'",
+                        Style::default().fg(self.theme.yellow),
+                    )]));
+                }
+            }
         }
 
-        let modal = Modal::new("Select Provider", self.theme)
+        let modal = Modal::new("Select LLM Provider", self.theme)
             .content(content)
-            .width(45)
-            .height(55);
+            .width(60)
+            .height(70);
 
         modal.render(area, buf);
     }
@@ -387,28 +460,33 @@ impl Widget for ThemePickerModal<'_> {
 /// Model picker modal
 pub struct ModelPickerModal<'a> {
     theme: &'a Theme,
-    models: Vec<(&'a str, &'a str, bool)>, // (name, capabilities, is_current)
+    models: Vec<(String, String, bool)>, // (name, description, is_current)
     selected: usize,
+    filter: String,
 }
 
 impl<'a> ModelPickerModal<'a> {
     pub fn new(theme: &'a Theme) -> Self {
         Self {
             theme,
-            models: vec![
-                ("GPT-4o", "tools, vision", false),
-                ("GPT-4 Turbo", "tools, vision", false),
-                ("Claude 3 Opus", "tools, vision", false),
-                ("Claude 3.5 Sonnet", "tools, vision", true),
-                ("Gemini Pro", "tools", false),
-                ("o1-preview", "reasoning", false),
-            ],
-            selected: 3, // Claude 3.5 Sonnet
+            models: vec![],
+            selected: 0,
+            filter: String::new(),
         }
+    }
+
+    pub fn models(mut self, models: Vec<(String, String, bool)>) -> Self {
+        self.models = models;
+        self
     }
 
     pub fn selected(mut self, index: usize) -> Self {
         self.selected = index;
+        self
+    }
+
+    pub fn filter(mut self, filter: String) -> Self {
+        self.filter = filter;
         self
     }
 }
@@ -416,19 +494,57 @@ impl<'a> ModelPickerModal<'a> {
 impl Widget for ModelPickerModal<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut content: Vec<Line> = vec![
+            // Search bar header
             Line::from(vec![
-                Span::styled("▸ ", Style::default().fg(self.theme.cyan)),
+                Span::styled("Search: ", Style::default().fg(self.theme.text_muted)),
                 Span::styled(
-                    "Type to filter...",
-                    Style::default()
-                        .fg(self.theme.text_muted)
-                        .add_modifier(Modifier::DIM),
+                    if self.filter.is_empty() {
+                        "▏".to_string()
+                    } else {
+                        format!("{}▏", self.filter)
+                    },
+                    if self.filter.is_empty() {
+                        Style::default()
+                            .fg(self.theme.text_muted)
+                            .add_modifier(Modifier::DIM)
+                    } else {
+                        Style::default().fg(self.theme.text_primary)
+                    },
                 ),
+            ]),
+            Line::from(""),
+            // Navigation hints
+            Line::from(vec![
+                Span::styled("↑↓", Style::default().fg(self.theme.cyan)),
+                Span::styled(" Navigate  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("Enter", Style::default().fg(self.theme.green)),
+                Span::styled(" Select  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("Esc", Style::default().fg(self.theme.red)),
+                Span::styled(" Cancel", Style::default().fg(self.theme.text_muted)),
             ]),
             Line::from(""),
         ];
 
-        for (i, (name, caps, is_current)) in self.models.iter().enumerate() {
+        // Apply filter to models
+        let filtered_models: Vec<_> = if self.filter.is_empty() {
+            self.models.clone()
+        } else {
+            let filter_lower = self.filter.to_lowercase();
+            self.models
+                .iter()
+                .filter(|(name, _, _)| name.to_lowercase().contains(&filter_lower))
+                .cloned()
+                .collect()
+        };
+
+        if filtered_models.is_empty() {
+            content.push(Line::from(Span::styled(
+                "  No models match your search",
+                Style::default().fg(self.theme.text_muted),
+            )));
+        }
+
+        for (i, (name, description, is_current)) in filtered_models.iter().enumerate() {
             let is_selected = i == self.selected;
             let prefix = if is_selected { "▸ " } else { "  " };
 
@@ -436,6 +552,7 @@ impl Widget for ModelPickerModal<'_> {
                 Style::default()
                     .fg(self.theme.cyan)
                     .add_modifier(Modifier::BOLD)
+                    .bg(Color::Rgb(45, 60, 83))
             } else {
                 Style::default().fg(self.theme.text_primary)
             };
@@ -444,28 +561,213 @@ impl Widget for ModelPickerModal<'_> {
 
             // Add current indicator
             if *is_current {
-                spans.push(Span::styled("● ", Style::default().fg(self.theme.yellow)));
+                spans.push(Span::styled("● ", Style::default().fg(self.theme.green)));
             } else {
                 spans.push(Span::raw("  "));
             }
 
-            spans.push(Span::styled(*name, name_style));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                format!("- {}", caps),
-                Style::default()
-                    .fg(self.theme.text_muted)
-                    .add_modifier(Modifier::DIM),
-            ));
+            spans.push(Span::styled(name.clone(), name_style));
 
             content.push(Line::from(spans));
+
+            // Add description on next line if selected
+            if is_selected && !description.is_empty() {
+                content.push(Line::from(vec![Span::styled(
+                    format!("    {}", description),
+                    Style::default()
+                        .fg(self.theme.text_muted)
+                        .add_modifier(Modifier::DIM),
+                )]));
+            }
+        }
+
+        // Show count at bottom
+        if !self.filter.is_empty() {
+            content.push(Line::from(""));
+            content.push(Line::from(vec![Span::styled(
+                format!(
+                    "  Showing {} of {} models",
+                    filtered_models.len(),
+                    self.models.len()
+                ),
+                Style::default().fg(self.theme.text_muted),
+            )]));
         }
 
         let modal = Modal::new("Select Model", self.theme)
             .content(content)
-            .width(55)
-            .height(55);
+            .width(65)
+            .height(70);
 
+        modal.render(area, buf);
+    }
+}
+
+/// Session picker modal
+pub struct SessionPickerModal<'a> {
+    theme: &'a Theme,
+    sessions: Vec<(String, String, String, bool)>, // (name, id, meta, is_current)
+    selected: usize,
+    filter: String,
+}
+
+impl<'a> SessionPickerModal<'a> {
+    pub fn new(theme: &'a Theme) -> Self {
+        Self {
+            theme,
+            sessions: vec![],
+            selected: 0,
+            filter: String::new(),
+        }
+    }
+
+    pub fn sessions(mut self, sessions: Vec<(String, String, String, bool)>) -> Self {
+        self.sessions = sessions;
+        self
+    }
+
+    pub fn selected(mut self, index: usize) -> Self {
+        self.selected = index;
+        self
+    }
+
+    pub fn filter(mut self, filter: String) -> Self {
+        self.filter = filter;
+        self
+    }
+}
+
+impl Widget for SessionPickerModal<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let popup_height = area.height * 70 / 100;
+        let inner_height = popup_height.saturating_sub(2);
+        let header_lines = 4usize;
+        let footer_lines = if self.filter.is_empty() { 0 } else { 2 };
+        let available_rows = inner_height
+            .saturating_sub((header_lines + footer_lines) as u16)
+            .max(1) as usize;
+
+        let mut content: Vec<Line> = vec![
+            Line::from(vec![
+                Span::styled("Search: ", Style::default().fg(self.theme.text_muted)),
+                Span::styled(
+                    if self.filter.is_empty() {
+                        "▏".to_string()
+                    } else {
+                        format!("{}▏", self.filter)
+                    },
+                    if self.filter.is_empty() {
+                        Style::default()
+                            .fg(self.theme.text_muted)
+                            .add_modifier(Modifier::DIM)
+                    } else {
+                        Style::default().fg(self.theme.text_primary)
+                    },
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("↑↓", Style::default().fg(self.theme.cyan)),
+                Span::styled(" Navigate  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("Enter", Style::default().fg(self.theme.green)),
+                Span::styled(" Switch  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("Del", Style::default().fg(self.theme.red)),
+                Span::styled(" Delete  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("Esc", Style::default().fg(self.theme.yellow)),
+                Span::styled(" Cancel", Style::default().fg(self.theme.text_muted)),
+            ]),
+            Line::from(""),
+        ];
+
+        let filtered_sessions: Vec<_> = if self.filter.is_empty() {
+            self.sessions.clone()
+        } else {
+            let filter_lower = self.filter.to_lowercase();
+            self.sessions
+                .iter()
+                .filter(|(name, id, _, _)| {
+                    name.to_lowercase().contains(&filter_lower)
+                        || id.to_lowercase().contains(&filter_lower)
+                })
+                .cloned()
+                .collect()
+        };
+
+        if filtered_sessions.is_empty() {
+            content.push(Line::from(Span::styled(
+                "  No sessions match your search",
+                Style::default().fg(self.theme.text_muted),
+            )));
+        }
+
+        let total = filtered_sessions.len();
+        let selected = self.selected.min(total.saturating_sub(1));
+        let window_start = selected.saturating_sub(available_rows / 2);
+        let window_end = (window_start + available_rows).min(total);
+
+        for (i, (name, id, meta, is_current)) in filtered_sessions
+            .iter()
+            .enumerate()
+            .skip(window_start)
+            .take(window_end.saturating_sub(window_start))
+        {
+            let is_selected = i == selected;
+            let prefix = if is_selected { "▸ " } else { "  " };
+            let row_style = if is_selected {
+                Style::default()
+                    .fg(self.theme.cyan)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(Color::Rgb(45, 60, 83))
+            } else {
+                Style::default().fg(self.theme.text_primary)
+            };
+
+            let mut spans = vec![Span::styled(prefix, row_style)];
+            if *is_current {
+                spans.push(Span::styled("● ", Style::default().fg(self.theme.green)));
+            } else {
+                spans.push(Span::raw("  "));
+            }
+
+            let display_name = if name.is_empty() {
+                id.clone()
+            } else {
+                name.clone()
+            };
+            spans.push(Span::styled(display_name, row_style));
+            content.push(Line::from(spans));
+
+            if is_selected {
+                let detail = if meta.is_empty() {
+                    id.clone()
+                } else {
+                    format!("{} · {}", id, meta)
+                };
+                content.push(Line::from(vec![Span::styled(
+                    format!("    {}", detail),
+                    Style::default()
+                        .fg(self.theme.text_muted)
+                        .add_modifier(Modifier::DIM),
+                )]));
+            }
+        }
+
+        if !self.filter.is_empty() {
+            content.push(Line::from(""));
+            content.push(Line::from(vec![Span::styled(
+                format!(
+                    "  Showing {} of {} sessions",
+                    filtered_sessions.len(),
+                    self.sessions.len()
+                ),
+                Style::default().fg(self.theme.text_muted),
+            )]));
+        }
+
+        let modal = Modal::new("Sessions", self.theme)
+            .content(content)
+            .width(70)
+            .height(70);
         modal.render(area, buf);
     }
 }
@@ -473,7 +775,8 @@ impl Widget for ModelPickerModal<'_> {
 /// File picker modal
 pub struct FilePickerModal<'a> {
     theme: &'a Theme,
-    files: Vec<&'a str>,
+    files: &'a [String],
+    filter: &'a str,
     selected: usize,
 }
 
@@ -481,60 +784,126 @@ impl<'a> FilePickerModal<'a> {
     pub fn new(theme: &'a Theme) -> Self {
         Self {
             theme,
-            files: vec![
-                "📁 src/",
-                "📁 tests/",
-                "📄 Cargo.toml",
-                "📄 README.md",
-                "📄 main.rs",
-            ],
+            files: &[],
+            filter: "",
             selected: 0,
         }
+    }
+
+    pub fn files(mut self, files: &'a [String]) -> Self {
+        self.files = files;
+        self
+    }
+
+    pub fn filter(mut self, filter: &'a str) -> Self {
+        self.filter = filter;
+        self
     }
 
     pub fn selected(mut self, index: usize) -> Self {
         self.selected = index;
         self
     }
+
+    fn get_file_icon(&self, path: &str) -> &'static str {
+        if path.ends_with('/') {
+            "📁"
+        } else if path.ends_with(".rs") {
+            "🦀"
+        } else if path.ends_with(".toml") {
+            "📦"
+        } else if path.ends_with(".md") {
+            "📄"
+        } else if path.ends_with(".lua") {
+            "🌙"
+        } else if path.ends_with(".ts") || path.ends_with(".tsx") {
+            "📜"
+        } else if path.ends_with(".json") {
+            "📋"
+        } else {
+            "📄"
+        }
+    }
 }
 
 impl Widget for FilePickerModal<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut content: Vec<Line> = vec![
+            // Search/filter header
             Line::from(vec![
-                Span::styled("▸ ", Style::default().fg(self.theme.cyan)),
+                Span::styled("Search: ", Style::default().fg(self.theme.text_muted)),
                 Span::styled(
-                    "Type to filter...",
-                    Style::default()
-                        .fg(self.theme.text_muted)
-                        .add_modifier(Modifier::DIM),
+                    if self.filter.is_empty() {
+                        "▏".to_string()
+                    } else {
+                        format!("{}▏", self.filter)
+                    },
+                    if self.filter.is_empty() {
+                        Style::default()
+                            .fg(self.theme.text_muted)
+                            .add_modifier(Modifier::DIM)
+                    } else {
+                        Style::default().fg(self.theme.text_primary)
+                    },
                 ),
+            ]),
+            Line::from(""),
+            // Navigation hints
+            Line::from(vec![
+                Span::styled("↑↓", Style::default().fg(self.theme.cyan)),
+                Span::styled(" Navigate  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("Enter", Style::default().fg(self.theme.green)),
+                Span::styled(" Select  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("Esc", Style::default().fg(self.theme.yellow)),
+                Span::styled(" Cancel", Style::default().fg(self.theme.text_muted)),
             ]),
             Line::from(""),
         ];
 
-        for (i, file_name) in self.files.iter().enumerate() {
-            let is_selected = i == self.selected;
-            let prefix = if is_selected { "▸ " } else { "  " };
-
-            let style = if is_selected {
-                Style::default()
-                    .fg(self.theme.cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(self.theme.text_primary)
-            };
-
+        if self.files.is_empty() {
             content.push(Line::from(Span::styled(
-                format!("{}{}", prefix, file_name),
-                style,
+                "  No files found",
+                Style::default().fg(self.theme.text_muted),
             )));
+        } else {
+            for (i, file_path) in self.files.iter().enumerate().take(15) {
+                let is_selected = i == self.selected;
+                let prefix = if is_selected { "▸ " } else { "  " };
+                let icon = self.get_file_icon(file_path);
+
+                let style = if is_selected {
+                    Style::default()
+                        .fg(self.theme.cyan)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(Color::Rgb(45, 60, 83))
+                } else {
+                    Style::default().fg(self.theme.text_primary)
+                };
+
+                content.push(Line::from(Span::styled(
+                    format!("{}{} {}", prefix, icon, file_path),
+                    style,
+                )));
+            }
+
+            if self.files.len() > 15 {
+                content.push(Line::from(Span::styled(
+                    format!("  ... {} more files", self.files.len() - 15),
+                    Style::default().fg(self.theme.text_muted),
+                )));
+            }
         }
 
-        let modal = Modal::new("Select File", self.theme)
+        let title = if self.files.is_empty() {
+            "Add Context File (No matches)"
+        } else {
+            "Add Context File"
+        };
+
+        let modal = Modal::new(title, self.theme)
             .content(content)
-            .width(55)
-            .height(60);
+            .width(60)
+            .height(65);
 
         modal.render(area, buf);
     }

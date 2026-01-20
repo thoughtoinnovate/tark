@@ -41,8 +41,11 @@ pub use plan::{
     GetPlanStatusTool, MarkTaskDoneTool, PreviewPlanTool, SavePlanTool, UpdatePlanTool,
 };
 pub use questionnaire::{
-    interaction_channel, ApprovalChoice, ApprovalPattern, ApprovalRequest, ApprovalResponse,
-    AskUserTool, InteractionReceiver, InteractionRequest, InteractionSender, SuggestedPattern,
+    interaction_channel, ApprovalPattern, AskUserTool, InteractionReceiver, InteractionSender,
+};
+#[allow(unused_imports)]
+pub use questionnaire::{
+    ApprovalChoice, ApprovalRequest, ApprovalResponse, InteractionRequest, SuggestedPattern,
 };
 pub use readonly::{FilePreviewTool, RipgrepTool, SafeShellTool};
 pub use risk::{MatchType, RiskLevel, TrustLevel};
@@ -57,47 +60,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Agent mode determines which tools are available
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum AgentMode {
-    /// Ask mode: read-only tools for exploring and answering questions
-    Ask,
-    /// Plan mode: read-only tools + propose_change for planning
-    Plan,
-    /// Build mode: all tools for executing changes
-    #[default]
-    Build,
-}
-
-impl AgentMode {
-    /// Get display label for this mode
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Ask => "Ask",
-            Self::Plan => "Plan",
-            Self::Build => "Build",
-        }
-    }
-
-    /// Get icon for this mode
-    pub fn icon(&self) -> &'static str {
-        match self {
-            Self::Ask => "❓",
-            Self::Plan => "📋",
-            Self::Build => "🔨",
-        }
-    }
-
-    /// Get description for this mode
-    pub fn description(&self) -> &'static str {
-        match self {
-            Self::Ask => "Read-only exploration and Q&A",
-            Self::Plan => "Read + propose changes (no execution)",
-            Self::Build => "Full access to read, write, and execute",
-        }
-    }
-}
+// Re-export canonical AgentMode from core::types
+pub use crate::core::types::AgentMode;
 
 /// Result of executing a tool
 #[derive(Debug, Clone)]
@@ -205,7 +169,7 @@ impl ToolRegistry {
         shell_enabled: bool,
         interaction_tx: Option<InteractionSender>,
     ) -> Self {
-        Self::for_mode_with_services(working_dir, mode, shell_enabled, interaction_tx, None)
+        Self::for_mode_with_services(working_dir, mode, shell_enabled, interaction_tx, None, None)
     }
 
     /// Create a registry with full service support including plan tools
@@ -219,11 +183,14 @@ impl ToolRegistry {
         shell_enabled: bool,
         interaction_tx: Option<InteractionSender>,
         plan_service: Option<Arc<PlanService>>,
+        approvals_path: Option<PathBuf>,
     ) -> Self {
         // Create approval gate if we have an interaction channel
         let approval_gate = interaction_tx.as_ref().map(|tx| {
-            let tark_dir = working_dir.join(".tark");
-            tokio::sync::Mutex::new(approval::ApprovalGate::new(tark_dir, Some(tx.clone())))
+            let storage_path = approvals_path
+                .clone()
+                .unwrap_or_else(|| working_dir.join(".tark").join("approvals.json"));
+            tokio::sync::Mutex::new(approval::ApprovalGate::new(storage_path, Some(tx.clone())))
         });
 
         let mut registry = Self {
@@ -386,14 +353,23 @@ impl ToolRegistry {
                 }
                 Ok(approval::ApprovalStatus::Denied) => {
                     tracing::info!("Tool '{}' denied by user", name);
+                    let request = gate.create_approval_request(name, &command, risk_level);
+                    let suggestions = serde_json::to_string_pretty(&request.suggested_patterns)
+                        .unwrap_or_else(|_| "[]".to_string());
                     return Ok(ToolResult::error(format!(
-                        "Operation denied by user: {} {}",
-                        name, command
+                        "Operation denied by user: {} {}\nSuggested patterns: {}",
+                        name, command, suggestions
                     )));
                 }
                 Ok(approval::ApprovalStatus::Blocked(reason)) => {
                     tracing::info!("Tool '{}' blocked: {}", name, reason);
-                    return Ok(ToolResult::error(format!("Operation blocked: {}", reason)));
+                    let request = gate.create_approval_request(name, &command, risk_level);
+                    let suggestions = serde_json::to_string_pretty(&request.suggested_patterns)
+                        .unwrap_or_else(|_| "[]".to_string());
+                    return Ok(ToolResult::error(format!(
+                        "Operation blocked: {}\nSuggested patterns: {}",
+                        reason, suggestions
+                    )));
                 }
                 Err(e) => {
                     tracing::warn!("Approval check failed, auto-approving: {}", e);
@@ -483,6 +459,14 @@ impl ToolRegistry {
             gate.trust_level
         } else {
             TrustLevel::default()
+        }
+    }
+
+    /// Update approval storage path (per session)
+    pub async fn set_approval_storage_path(&self, storage_path: PathBuf) {
+        if let Some(ref gate_mutex) = self.approval_gate {
+            let mut gate = gate_mutex.lock().await;
+            gate.set_storage_path(storage_path);
         }
     }
 }

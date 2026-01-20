@@ -128,8 +128,23 @@ pub enum Command {
     /// Insert newline
     InsertNewline,
 
+    /// Insert a full string (used for paste)
+    InsertText(String),
+
     /// Clear input
     ClearInput,
+
+    /// Delete current line (vim dd)
+    DeleteLine,
+
+    /// Delete word forward (vim dw)
+    DeleteWord,
+
+    /// Delete current selection (visual mode)
+    DeleteSelection,
+
+    /// Yank current selection (visual mode)
+    YankSelection,
 
     // ========== Message Navigation ==========
     /// Navigate to next message
@@ -201,6 +216,9 @@ pub enum Command {
     /// Confirm modal action
     ConfirmModal,
 
+    /// Delete the selected session from the session picker
+    DeleteSessionSelected,
+
     /// Navigate modal selection up
     ModalUp,
 
@@ -213,9 +231,15 @@ pub enum Command {
     // ========== Approval Actions ==========
     /// Approve pending operation
     ApproveOperation,
+    /// Approve with pattern for this session
+    ApproveSession,
+    /// Approve with pattern persistently
+    ApproveAlways,
 
     /// Deny pending operation
     DenyOperation,
+    /// Deny with pattern persistently
+    DenyAlways,
 
     // ========== Questionnaire Actions ==========
     /// Navigate up in question options
@@ -229,6 +253,13 @@ pub enum Command {
 
     /// Submit questionnaire answer
     QuestionSubmit,
+
+    /// Cancel/skip questionnaire (ESC)
+    QuestionCancel,
+
+    // ========== Agent Control ==========
+    /// Cancel ongoing agent operation (double-ESC)
+    CancelAgent,
 
     // ========== Attachments ==========
     /// Toggle attachment dropdown
@@ -255,6 +286,22 @@ pub enum Command {
 
     /// Export current session to file
     ExportSession(std::path::PathBuf),
+
+    // ========== Autocomplete ==========
+    /// Select autocomplete option (TAB)
+    AutocompleteSelect,
+
+    /// Confirm autocomplete option (ENTER)
+    AutocompleteConfirm,
+
+    /// Navigate autocomplete up
+    AutocompleteUp,
+
+    /// Navigate autocomplete down
+    AutocompleteDown,
+
+    /// Deactivate autocomplete
+    AutocompleteCancel,
 }
 
 /// Convert keyboard events to commands

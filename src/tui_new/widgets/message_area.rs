@@ -16,6 +16,55 @@ use ratatui::{
 use crate::tui_new::theme::Theme;
 use crate::tui_new::widgets::question::QuestionWidget;
 use ratatui::style::Color;
+use std::time::{Duration, Instant};
+
+/// Cursor blink interval
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
+
+/// Tool loading blink interval (faster for visual feedback)
+const TOOL_BLINK_INTERVAL: Duration = Duration::from_millis(400);
+
+/// Global cursor blink state for messages (shared across renders)
+static mut MSG_LAST_BLINK: Option<Instant> = None;
+static mut MSG_CURSOR_VISIBLE: bool = true;
+
+/// Global tool loading blink state (shared across renders)
+static mut TOOL_LAST_BLINK: Option<Instant> = None;
+static mut TOOL_INDICATOR_VISIBLE: bool = true;
+
+/// Get current cursor visibility state for messages (blinks every 530ms)
+fn get_message_cursor_visible() -> bool {
+    unsafe {
+        let now = Instant::now();
+        if let Some(last) = MSG_LAST_BLINK {
+            if now.duration_since(last) >= CURSOR_BLINK_INTERVAL {
+                MSG_CURSOR_VISIBLE = !MSG_CURSOR_VISIBLE;
+                MSG_LAST_BLINK = Some(now);
+            }
+        } else {
+            MSG_LAST_BLINK = Some(now);
+            MSG_CURSOR_VISIBLE = true;
+        }
+        MSG_CURSOR_VISIBLE
+    }
+}
+
+/// Get current tool loading indicator visibility state (blinks every 400ms)
+fn get_tool_indicator_visible() -> bool {
+    unsafe {
+        let now = Instant::now();
+        if let Some(last) = TOOL_LAST_BLINK {
+            if now.duration_since(last) >= TOOL_BLINK_INTERVAL {
+                TOOL_INDICATOR_VISIBLE = !TOOL_INDICATOR_VISIBLE;
+                TOOL_LAST_BLINK = Some(now);
+            }
+        } else {
+            TOOL_LAST_BLINK = Some(now);
+            TOOL_INDICATOR_VISIBLE = true;
+        }
+        TOOL_INDICATOR_VISIBLE
+    }
+}
 
 /// Dim a color by a factor (0.0 = black, 1.0 = original color)
 fn dim_color(color: Color, factor: f32) -> Color {
@@ -90,6 +139,8 @@ pub struct Message {
     pub content: String,
     /// Whether this message is collapsed (for thinking/tool)
     pub collapsed: bool,
+    /// Timestamp of the message (HH:MM:SS)
+    pub timestamp: String,
     /// Optional question widget for interactive questions
     pub question: Option<QuestionWidget>,
 }
@@ -101,6 +152,7 @@ impl Message {
             role,
             content: content.into(),
             collapsed: false,
+            timestamp: String::new(),
             question: None,
         }
     }
@@ -127,6 +179,7 @@ impl Message {
             role: MessageRole::Question,
             content,
             collapsed: false,
+            timestamp: String::new(),
             question: Some(question),
         }
     }
@@ -150,6 +203,8 @@ pub struct MessageArea<'a> {
     agent_name: &'a str,
     /// Index of currently focused message
     focused_message_index: usize,
+    /// Vim mode
+    vim_mode: crate::ui_backend::VimMode,
 }
 
 impl<'a> MessageArea<'a> {
@@ -164,6 +219,7 @@ impl<'a> MessageArea<'a> {
             streaming_thinking: None,
             agent_name: "Tark", // Default
             focused_message_index: 0,
+            vim_mode: crate::ui_backend::VimMode::Insert,
         }
     }
 
@@ -201,6 +257,359 @@ impl<'a> MessageArea<'a> {
     pub fn focused_index(mut self, index: usize) -> Self {
         self.focused_message_index = index;
         self
+    }
+
+    pub fn vim_mode(mut self, mode: crate::ui_backend::VimMode) -> Self {
+        self.vim_mode = mode;
+        self
+    }
+
+    pub fn metrics(&self, area: Rect) -> (usize, usize) {
+        let border_color = if self.focused {
+            self.theme.border_focused
+        } else {
+            self.theme.border
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .title(" Messages ");
+
+        let inner = block.inner(area);
+        if inner.height < 1 || inner.width < 1 {
+            return (0, 0);
+        }
+
+        let lines = self.build_lines(inner);
+        (lines.len(), inner.height as usize)
+    }
+
+    fn build_lines(&self, inner: Rect) -> Vec<Line<'static>> {
+        // Calculate dynamic bubble width: 90% of panel width (5% padding on each side)
+        // Minimum 40 chars, maximum based on available width
+        let available_width = inner.width.saturating_sub(4) as usize; // Account for "  " prefix and borders
+        let bubble_content_width = ((available_width as f32 * 0.9) as usize)
+            .max(40)
+            .min(available_width);
+
+        // Build lines from messages
+        let mut lines: Vec<Line> = Vec::new();
+
+        for (msg_idx, msg) in self.messages.iter().enumerate() {
+            let icon = self.role_icon(msg.role);
+            let label = self.role_label(msg.role).to_string();
+            let fg_color = self.role_color(msg.role);
+            let _bg_color = self.role_bg_color(msg.role);
+
+            // Check if this message is focused
+            let is_focused_msg = self.focused && msg_idx == self.focused_message_index;
+            let is_visual = self.focused && self.vim_mode == crate::ui_backend::VimMode::Visual;
+
+            // Handle question messages specially
+            if msg.role == MessageRole::Question {
+                if let Some(ref question) = msg.question {
+                    if question.answered {
+                        // Answered state: show "✓ Answered: <selections>"
+                        let answer_text = match question.question_type {
+                            crate::tui_new::widgets::question::QuestionType::MultipleChoice
+                            | crate::tui_new::widgets::question::QuestionType::SingleChoice => {
+                                let selections: Vec<String> = question
+                                    .selected
+                                    .iter()
+                                    .map(|&idx| question.options[idx].text.clone())
+                                    .collect();
+                                selections.join(", ")
+                            }
+                            crate::tui_new::widgets::question::QuestionType::FreeText => {
+                                question.free_text_answer.clone()
+                            }
+                        };
+
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
+                            Span::styled(
+                                format!("{}", msg.content),
+                                Style::default().fg(self.theme.text_primary),
+                            ),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled("✓ Answered: ", Style::default().fg(self.theme.green)),
+                            Span::styled(
+                                answer_text,
+                                Style::default()
+                                    .fg(self.theme.text_primary)
+                                    .bg(self.theme.agent_bubble_bg),
+                            ),
+                        ]));
+                    } else {
+                        // Unanswered: render question widget
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
+                            Span::styled(
+                                format!("{}", msg.content),
+                                Style::default().fg(self.theme.text_primary),
+                            ),
+                        ]));
+                        for (idx, opt) in question.options.iter().enumerate() {
+                            let checkbox = if question.selected.contains(&idx) {
+                                "●"
+                            } else {
+                                "○"
+                            };
+                            lines.push(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(
+                                    format!("{} ", checkbox),
+                                    Style::default().fg(self.theme.question_fg),
+                                ),
+                                Span::styled(
+                                    opt.text.clone(),
+                                    Style::default().fg(self.theme.text_primary),
+                                ),
+                            ]));
+                        }
+                    }
+                    lines.push(Line::from(""));
+                    continue;
+                }
+            }
+
+            let mut spans = vec![
+                Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
+                Span::styled(label.clone(), Style::default().fg(fg_color)),
+                Span::raw(" "),
+            ];
+
+            // Add timestamp if present
+            if !msg.timestamp.is_empty() {
+                spans.push(Span::styled(
+                    format!("{} ", msg.timestamp),
+                    Style::default().fg(self.theme.text_muted),
+                ));
+            }
+
+            // Add cursor indicator for focused message
+            if is_focused_msg {
+                let cursor_visible = get_message_cursor_visible();
+                let cursor = if cursor_visible {
+                    Span::styled("▮ ", Style::default().fg(self.theme.text_primary))
+                } else {
+                    Span::raw("  ")
+                };
+                spans.insert(0, cursor);
+            } else if self.focused {
+                spans.insert(0, Span::raw("  "));
+            }
+
+            // Standard message rendering (non-bubble)
+            if msg.role == MessageRole::System {
+                let mut system_spans = spans.clone();
+                system_spans.push(Span::styled(
+                    msg.content.clone(),
+                    Style::default().fg(self.theme.text_primary),
+                ));
+                lines.push(Line::from(system_spans));
+                lines.push(Line::from(""));
+                continue;
+            }
+
+            // Bubble rendering for user/assistant
+            if msg.role == MessageRole::User || msg.role == MessageRole::Agent {
+                let glow_color = if msg.role == MessageRole::User {
+                    self.theme.user_bubble
+                } else {
+                    self.theme.agent_bubble
+                };
+
+                let content = if msg.collapsed {
+                    "..."
+                } else {
+                    msg.content.as_str()
+                };
+
+                // Header line
+                let mut header_spans = spans.clone();
+                if msg.role == MessageRole::User {
+                    header_spans.push(Span::styled(
+                        self.agent_name.to_string(),
+                        Style::default().fg(self.theme.text_muted),
+                    ));
+                } else {
+                    header_spans.push(Span::styled(
+                        "Assistant",
+                        Style::default().fg(self.theme.text_muted),
+                    ));
+                }
+                lines.push(Line::from(header_spans));
+
+                // Top border
+                let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(top_border, Style::default().fg(glow_color)),
+                ]));
+
+                // Render streaming content as markdown (per chunk)
+                let markdown_lines =
+                    super::markdown::render_markdown(content, self.theme, bubble_content_width - 2);
+                for md_line in markdown_lines {
+                    let line_width = md_line.width();
+                    let padding = bubble_content_width.saturating_sub(2 + line_width);
+                    let mut line_spans = vec![
+                        Span::raw("  "),
+                        Span::styled("│", Style::default().fg(glow_color)),
+                        Span::raw(" "),
+                    ];
+                    line_spans.extend(md_line.spans);
+                    line_spans.push(Span::raw(" ".repeat(padding + 1)));
+                    line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
+                    lines.push(Line::from(line_spans));
+                }
+
+                // Bottom border
+                let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(bottom_border, Style::default().fg(glow_color)),
+                ]));
+                lines.push(Line::from(""));
+                continue;
+            }
+
+            // Non-bubble message types
+            let mut content_spans = spans.clone();
+
+            if is_visual && is_focused_msg {
+                content_spans.push(Span::styled(
+                    msg.content.clone(),
+                    Style::default()
+                        .fg(self.theme.text_primary)
+                        .bg(self.theme.bg_code),
+                ));
+            } else {
+                // Calculate prefix width for indentation
+                let mut prefix_width = 0;
+                if is_focused_msg {
+                    prefix_width += 2; // "▶ " or "  "
+                }
+                prefix_width += icon.chars().count() + 1; // "icon "
+                prefix_width += label.chars().count();
+                prefix_width += 1; // " "
+                if !msg.timestamp.is_empty() {
+                    prefix_width += msg.timestamp.chars().count() + 1; // "time "
+                }
+
+                let content_width = bubble_content_width.saturating_sub(prefix_width).max(20);
+                let wrapped_content = wrap_text(&msg.content, content_width);
+
+                for (i, line_content) in wrapped_content.into_iter().enumerate() {
+                    if i == 0 {
+                        let mut first_line_spans = content_spans.clone();
+                        first_line_spans.push(Span::styled(
+                            line_content,
+                            Style::default().fg(self.theme.text_primary),
+                        ));
+                        lines.push(Line::from(first_line_spans));
+                    } else {
+                        let indented_spans = vec![
+                            Span::raw(" ".repeat(prefix_width)),
+                            Span::styled(
+                                line_content,
+                                Style::default().fg(self.theme.text_primary),
+                            ),
+                        ];
+                        lines.push(Line::from(indented_spans));
+                    }
+                }
+                lines.push(Line::from(""));
+                continue;
+            }
+
+            lines.push(Line::from(content_spans));
+            lines.push(Line::from(""));
+        }
+
+        // Add streaming content if present
+        if let Some(ref content) = self.streaming_content {
+            if !content.is_empty() {
+                let icon = self.role_icon(MessageRole::Agent);
+                let mut header_spans = vec![
+                    Span::styled(
+                        format!("{} ", icon),
+                        Style::default().fg(self.theme.agent_bubble),
+                    ),
+                    Span::styled("Assistant", Style::default().fg(self.theme.text_muted)),
+                ];
+
+                if self.focused {
+                    let cursor_visible = get_message_cursor_visible();
+                    let cursor = if cursor_visible {
+                        Span::styled("▮ ", Style::default().fg(self.theme.text_primary))
+                    } else {
+                        Span::raw("  ")
+                    };
+                    header_spans.insert(0, cursor);
+                } else {
+                    header_spans.insert(0, Span::raw("  "));
+                }
+                lines.push(Line::from(header_spans));
+
+                let glow_color = self.theme.agent_bubble;
+                let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(top_border, Style::default().fg(glow_color)),
+                ]));
+
+                let markdown_lines =
+                    super::markdown::render_markdown(content, self.theme, bubble_content_width - 2);
+                for md_line in markdown_lines {
+                    let line_width = md_line.width();
+                    let padding = bubble_content_width.saturating_sub(2 + line_width);
+                    let mut line_spans = vec![
+                        Span::raw("  "),
+                        Span::styled("│", Style::default().fg(glow_color)),
+                        Span::raw(" "),
+                    ];
+                    line_spans.extend(md_line.spans);
+                    line_spans.push(Span::raw(" ".repeat(padding + 1)));
+                    line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
+                    lines.push(Line::from(line_spans));
+                }
+
+                let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(bottom_border, Style::default().fg(glow_color)),
+                ]));
+                lines.push(Line::from(""));
+            }
+        }
+
+        // Add streaming thinking if present and thinking mode enabled
+        if let Some(ref thinking) = self.streaming_thinking {
+            if !thinking.is_empty() {
+                let icon = self.role_icon(MessageRole::Thinking);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", icon),
+                        Style::default().fg(self.theme.thinking_fg),
+                    ),
+                    Span::styled("▼ Thinking ", Style::default().fg(self.theme.text_primary)),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    thinking.clone(),
+                    Style::default()
+                        .fg(self.theme.text_secondary)
+                        .bg(self.theme.thinking_bubble_bg),
+                )));
+                lines.push(Line::from(""));
+            }
+        }
+
+        lines
     }
 
     /// Get icon for message role
@@ -282,6 +691,13 @@ impl Widget for MessageArea<'_> {
             return;
         }
 
+        // Calculate dynamic bubble width: 90% of panel width (5% padding on each side)
+        // Minimum 40 chars, maximum based on available width
+        let available_width = inner.width.saturating_sub(4) as usize; // Account for "  " prefix and borders
+        let bubble_content_width = ((available_width as f32 * 0.9) as usize)
+            .max(40)
+            .min(available_width);
+
         // Build lines from messages
         let mut lines: Vec<Line> = Vec::new();
 
@@ -293,6 +709,7 @@ impl Widget for MessageArea<'_> {
 
             // Check if this message is focused
             let is_focused_msg = self.focused && msg_idx == self.focused_message_index;
+            let is_visual = self.focused && self.vim_mode == crate::ui_backend::VimMode::Visual;
 
             // Handle question messages specially
             if msg.role == MessageRole::Question {
@@ -354,7 +771,7 @@ impl Widget for MessageArea<'_> {
                                     Style::default().fg(fg_color),
                                 ),
                                 Span::styled(
-                                    &opt.text,
+                                    opt.text.clone(),
                                     Style::default().fg(self.theme.text_secondary),
                                 ),
                             ]));
@@ -364,7 +781,10 @@ impl Widget for MessageArea<'_> {
                     // Fallback if no question widget attached
                     lines.push(Line::from(vec![
                         Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
-                        Span::styled(&msg.content, Style::default().fg(self.theme.text_primary)),
+                        Span::styled(
+                            msg.content.clone(),
+                            Style::default().fg(self.theme.text_primary),
+                        ),
                     ]));
                 }
                 lines.push(Line::from(""));
@@ -375,24 +795,128 @@ impl Widget for MessageArea<'_> {
             let is_collapsible = matches!(msg.role, MessageRole::Thinking | MessageRole::Tool);
 
             if is_collapsible {
-                // Collapsible message with chevron indicator
-                let chevron = if msg.collapsed { "▶" } else { "▼" };
+                if msg.role == MessageRole::Tool {
+                    // Professional tool message rendering
+                    // Format: "status|tool_name|content" or legacy "tool_name: content"
+                    let parts: Vec<&str> = msg.content.splitn(3, '|').collect();
 
-                let header_line = Line::from(vec![
-                    Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
-                    Span::styled(
-                        format!("{} {} ", chevron, label),
-                        Style::default().fg(self.theme.text_primary),
-                    ),
-                ]);
-                lines.push(header_line);
+                    let (status_icon, tool_name, content) = if parts.len() == 3 {
+                        // New format: status|name|content
+                        (parts[0], parts[1], parts[2].to_string())
+                    } else if let Some(colon_idx) = msg.content.find(':') {
+                        // Legacy format: name: content
+                        (
+                            "🔧",
+                            &msg.content[..colon_idx],
+                            msg.content[colon_idx + 1..].trim().to_string(),
+                        )
+                    } else {
+                        ("🔧", "tool", msg.content.clone())
+                    };
 
-                // Show content only if not collapsed
-                if !msg.collapsed {
-                    lines.push(Line::from(Span::styled(
-                        &msg.content,
-                        Style::default().fg(self.theme.text_secondary).bg(bg_color),
-                    )));
+                    // Determine colors based on status with blinking for running tools
+                    let is_running = status_icon == "⋯";
+                    let tool_visible = get_tool_indicator_visible();
+                    let (status_color, status_display) = match status_icon {
+                        "⋯" => {
+                            // Running: blink between theme accent and muted color
+                            let color = if tool_visible {
+                                self.theme.yellow
+                            } else {
+                                self.theme.text_muted
+                            };
+                            let icon = if tool_visible { "●" } else { "○" };
+                            (color, icon)
+                        }
+                        "✓" => (self.theme.green, "✓"), // Success - green tick
+                        "✗" => (self.theme.red, "✗"),   // Failed - red cross
+                        _ => (self.theme.tool_fg, "●"), // Default
+                    };
+
+                    // Mark running tools as not collapsed so output shows during execution
+                    let effective_collapsed = if is_running { false } else { msg.collapsed };
+
+                    // Chevron for expand/collapse (shows navigation hint when focused)
+                    let chevron = if effective_collapsed { "▶" } else { "▼" };
+
+                    // Check if this tool message is focused
+                    let is_tool_focused = self.focused && msg_idx == self.focused_message_index;
+
+                    // Tool header: "● ▶ tool_name  description"
+                    let mut header_spans = vec![];
+
+                    // Add focus indicator for tool messages
+                    if is_tool_focused {
+                        let cursor_visible = get_message_cursor_visible();
+                        let cursor = if cursor_visible {
+                            Span::styled("▶ ", Style::default().fg(self.theme.cyan))
+                        } else {
+                            Span::styled("▷ ", Style::default().fg(self.theme.text_muted))
+                        };
+                        header_spans.push(cursor);
+                    } else if self.focused {
+                        header_spans.push(Span::raw("  "));
+                    }
+
+                    header_spans.extend([
+                        Span::styled(
+                            format!("{} ", status_display),
+                            Style::default().fg(status_color),
+                        ),
+                        Span::styled(
+                            format!("{} ", chevron),
+                            Style::default().fg(self.theme.text_muted),
+                        ),
+                        Span::styled(
+                            tool_name.to_string(),
+                            Style::default()
+                                .fg(self.theme.text_primary)
+                                .add_modifier(ratatui::style::Modifier::BOLD),
+                        ),
+                        Span::raw("  "),
+                        Span::styled(
+                            if content.len() > 50 && effective_collapsed {
+                                format!("{}...", &content[..47])
+                            } else if effective_collapsed {
+                                content.clone()
+                            } else {
+                                String::new()
+                            },
+                            Style::default().fg(self.theme.text_muted),
+                        ),
+                    ]);
+                    let header_line = Line::from(header_spans);
+                    lines.push(header_line);
+
+                    // Show content only if not collapsed
+                    if !effective_collapsed {
+                        // Add indented content with nice formatting
+                        let content_lines = wrap_text(&content, available_width.saturating_sub(4));
+                        for line in content_lines {
+                            lines.push(Line::from(vec![
+                                Span::raw("    "), // Indent
+                                Span::styled(line, Style::default().fg(self.theme.text_secondary)),
+                            ]));
+                        }
+                    }
+                } else {
+                    // Thinking messages - keep original collapsible behavior
+                    let chevron = if msg.collapsed { "▶" } else { "▼" };
+                    let header_line = Line::from(vec![
+                        Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
+                        Span::styled(
+                            format!("{} {} ", chevron, label),
+                            Style::default().fg(self.theme.text_primary),
+                        ),
+                    ]);
+                    lines.push(header_line);
+
+                    if !msg.collapsed {
+                        lines.push(Line::from(Span::styled(
+                            msg.content.clone(),
+                            Style::default().fg(self.theme.text_secondary).bg(bg_color),
+                        )));
+                    }
                 }
             } else {
                 // Regular message with role icon, label, and content
@@ -402,17 +926,28 @@ impl Widget for MessageArea<'_> {
                     let border_fg = self.role_border_color(msg.role);
                     let glow_color = dim_color(border_fg, 0.5);
 
-                    // Fixed bubble width for consistent appearance
-                    let bubble_content_width: usize = 56;
-
                     // Header line: icon with label (outside bubble)
                     let mut header_spans = vec![];
 
-                    // Add cursor indicator if this message is focused
+                    // Add blinking cursor indicator if this message is focused
                     if is_focused_msg {
-                        header_spans.push(Span::styled("> ", Style::default().fg(self.theme.cyan)));
+                        let cursor_visible = get_message_cursor_visible();
+                        if is_visual {
+                            header_spans.push(Span::styled(
+                                "▮ ",
+                                Style::default().fg(self.theme.bg_main).bg(self.theme.cyan),
+                            ));
+                        } else if cursor_visible {
+                            header_spans
+                                .push(Span::styled("▶ ", Style::default().fg(self.theme.cyan)));
+                        } else {
+                            header_spans.push(Span::styled(
+                                "▷ ",
+                                Style::default().fg(self.theme.text_muted),
+                            ));
+                        }
                     } else {
-                        header_spans.push(Span::raw(" "));
+                        header_spans.push(Span::raw("  "));
                     }
 
                     header_spans.push(Span::styled(
@@ -423,6 +958,13 @@ impl Widget for MessageArea<'_> {
                         label,
                         Style::default().fg(self.theme.text_secondary),
                     ));
+                    if !msg.timestamp.is_empty() {
+                        header_spans.push(Span::raw(" · "));
+                        header_spans.push(Span::styled(
+                            msg.timestamp.clone(),
+                            Style::default().fg(self.theme.text_muted),
+                        ));
+                    }
 
                     lines.push(Line::from(header_spans));
 
@@ -433,25 +975,48 @@ impl Widget for MessageArea<'_> {
                         Span::styled(top_border, Style::default().fg(glow_color)),
                     ]));
 
-                    // Wrap content into lines that fit the bubble
-                    let wrapped_lines = wrap_text(&msg.content, bubble_content_width - 2);
+                    // For Agent messages, use markdown rendering
+                    if msg.role == MessageRole::Agent {
+                        let markdown_lines = super::markdown::render_markdown(
+                            &msg.content,
+                            self.theme,
+                            bubble_content_width - 2,
+                        );
 
-                    // Content lines with side borders and full background
-                    for content_line in wrapped_lines {
-                        // Pad content to fill the bubble width exactly
-                        let char_count = content_line.chars().count();
-                        let padding = bubble_content_width - 2 - char_count;
-                        let padded = format!(" {}{} ", content_line, " ".repeat(padding));
+                        for md_line in markdown_lines {
+                            let line_width = md_line.width();
+                            let padding = bubble_content_width.saturating_sub(2 + line_width);
+                            let mut line_spans = vec![
+                                Span::raw("  "),
+                                Span::styled("│", Style::default().fg(glow_color)),
+                                Span::raw(" "),
+                            ];
+                            line_spans.extend(md_line.spans);
+                            line_spans.push(Span::raw(" ".repeat(padding + 1)));
+                            line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
+                            lines.push(Line::from(line_spans));
+                        }
+                    } else {
+                        // Wrap content into lines that fit the bubble (for User messages)
+                        let wrapped_lines = wrap_text(&msg.content, bubble_content_width - 2);
 
-                        lines.push(Line::from(vec![
-                            Span::raw("  "),
-                            Span::styled("│", Style::default().fg(glow_color)),
-                            Span::styled(
-                                padded,
-                                Style::default().fg(self.theme.text_primary).bg(bg),
-                            ),
-                            Span::styled("│", Style::default().fg(glow_color)),
-                        ]));
+                        // Content lines with side borders and full background
+                        for content_line in wrapped_lines {
+                            // Pad content to fill the bubble width exactly
+                            let char_count = content_line.chars().count();
+                            let padding = bubble_content_width - 2 - char_count;
+                            let padded = format!(" {}{} ", content_line, " ".repeat(padding));
+
+                            lines.push(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled("│", Style::default().fg(glow_color)),
+                                Span::styled(
+                                    padded,
+                                    Style::default().fg(self.theme.text_primary).bg(bg),
+                                ),
+                                Span::styled("│", Style::default().fg(glow_color)),
+                            ]));
+                        }
                     }
 
                     // Bottom border with rounded corners and glow
@@ -464,9 +1029,22 @@ impl Widget for MessageArea<'_> {
                     // System, Tool, Command messages: simple format
                     let mut spans = vec![];
 
-                    // Add cursor indicator if this message is focused
+                    // Add blinking cursor indicator if this message is focused
                     if is_focused_msg {
-                        spans.push(Span::styled("> ", Style::default().fg(self.theme.cyan)));
+                        let cursor_visible = get_message_cursor_visible();
+                        if is_visual {
+                            spans.push(Span::styled(
+                                "▮ ",
+                                Style::default().fg(self.theme.bg_main).bg(self.theme.cyan),
+                            ));
+                        } else if cursor_visible {
+                            spans.push(Span::styled("▶ ", Style::default().fg(self.theme.cyan)));
+                        } else {
+                            spans.push(Span::styled(
+                                "▷ ",
+                                Style::default().fg(self.theme.text_muted),
+                            ));
+                        }
                     }
 
                     spans.push(Span::styled(
@@ -478,14 +1056,47 @@ impl Widget for MessageArea<'_> {
                         Style::default().fg(self.theme.text_muted),
                     ));
                     spans.push(Span::raw(" "));
+                    if !msg.timestamp.is_empty() {
+                        spans.push(Span::styled(
+                            format!("{} ", msg.timestamp),
+                            Style::default().fg(self.theme.text_muted),
+                        ));
+                    }
 
-                    spans.push(Span::styled(
-                        &msg.content,
-                        Style::default().fg(self.theme.text_primary),
-                    ));
+                    // Calculate prefix width for indentation
+                    let mut prefix_width = 0;
+                    if is_focused_msg {
+                        prefix_width += 2; // "▶ " or "  "
+                    }
+                    prefix_width += icon.chars().count() + 1; // "icon "
+                    prefix_width += label.chars().count();
+                    prefix_width += 1; // " "
+                    if !msg.timestamp.is_empty() {
+                        prefix_width += msg.timestamp.chars().count() + 1; // "time "
+                    }
 
-                    let line = Line::from(spans);
-                    lines.push(line);
+                    let content_width = bubble_content_width.saturating_sub(prefix_width).max(20);
+                    let wrapped_content = wrap_text(&msg.content, content_width);
+
+                    for (i, line_content) in wrapped_content.into_iter().enumerate() {
+                        if i == 0 {
+                            let mut first_line_spans = spans.clone();
+                            first_line_spans.push(Span::styled(
+                                line_content,
+                                Style::default().fg(self.theme.text_primary),
+                            ));
+                            lines.push(Line::from(first_line_spans));
+                        } else {
+                            let indented_spans = vec![
+                                Span::raw(" ".repeat(prefix_width)),
+                                Span::styled(
+                                    line_content,
+                                    Style::default().fg(self.theme.text_primary),
+                                ),
+                            ];
+                            lines.push(Line::from(indented_spans));
+                        }
+                    }
                 }
             }
 
@@ -500,8 +1111,7 @@ impl Widget for MessageArea<'_> {
                 let label = self.role_label(MessageRole::Agent);
                 let border_fg = self.role_border_color(MessageRole::Agent);
                 let glow_color = dim_color(border_fg, 0.5);
-                let bg = self.role_bg_color(MessageRole::Agent);
-                let bubble_content_width: usize = 56;
+                let _bg = self.role_bg_color(MessageRole::Agent);
 
                 // Header line
                 let header_spans = vec![
@@ -518,19 +1128,21 @@ impl Widget for MessageArea<'_> {
                     Span::styled(top_border, Style::default().fg(glow_color)),
                 ]));
 
-                // Wrap streaming content
-                let wrapped_lines = wrap_text(content, bubble_content_width - 2);
-                for content_line in wrapped_lines {
-                    let char_count = content_line.chars().count();
-                    let padding = bubble_content_width - 2 - char_count;
-                    let padded = format!(" {}{} ", content_line, " ".repeat(padding));
-
-                    lines.push(Line::from(vec![
+                // Render streaming content as markdown (per chunk)
+                let markdown_lines =
+                    super::markdown::render_markdown(content, self.theme, bubble_content_width - 2);
+                for md_line in markdown_lines {
+                    let line_width = md_line.width();
+                    let padding = bubble_content_width.saturating_sub(2 + line_width);
+                    let mut line_spans = vec![
                         Span::raw("  "),
                         Span::styled("│", Style::default().fg(glow_color)),
-                        Span::styled(padded, Style::default().fg(self.theme.text_primary).bg(bg)),
-                        Span::styled("│", Style::default().fg(glow_color)),
-                    ]));
+                        Span::raw(" "),
+                    ];
+                    line_spans.extend(md_line.spans);
+                    line_spans.push(Span::raw(" ".repeat(padding + 1)));
+                    line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
+                    lines.push(Line::from(line_spans));
                 }
 
                 // Bottom border
@@ -567,8 +1179,10 @@ impl Widget for MessageArea<'_> {
         // Store total line count before filtering
         let total_lines = lines.len();
 
-        // Apply scroll offset (multiply by 2 since each message produces 2 lines: content + empty)
-        let line_offset = self.scroll_offset * 2;
+        let max_offset = total_lines.saturating_sub(inner.height as usize);
+
+        // Apply scroll offset (line-based)
+        let line_offset = self.scroll_offset.min(max_offset);
         let visible_lines: Vec<Line> = lines.into_iter().skip(line_offset).collect();
 
         let paragraph = Paragraph::new(visible_lines);
@@ -581,9 +1195,7 @@ impl Widget for MessageArea<'_> {
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
 
-            let mut scrollbar_state =
-                ScrollbarState::new(total_lines.saturating_sub(inner.height as usize))
-                    .position(line_offset);
+            let mut scrollbar_state = ScrollbarState::new(max_offset).position(line_offset);
 
             let scrollbar_area = Rect {
                 x: area.x + area.width.saturating_sub(1),
@@ -634,5 +1246,62 @@ mod tests {
             .collect();
 
         assert!(content.contains("Welcome"));
+    }
+
+    #[test]
+    fn test_agent_bubble_padding_fills_width() {
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+
+        let messages = vec![Message::agent("Hi")];
+
+        terminal
+            .draw(|f| {
+                let area = MessageArea::new(&messages, &theme);
+                f.render_widget(area, f.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 10,
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default())
+            .title(" Messages ");
+        let inner = block.inner(area);
+
+        let available_width = inner.width.saturating_sub(4) as usize;
+        let bubble_content_width = ((available_width as f32 * 0.9) as usize)
+            .max(40)
+            .min(available_width);
+
+        let expected_x = inner.x + 2 + 1 + bubble_content_width as u16;
+        let expected_y = inner.y + 2;
+
+        let cell = buffer.cell((expected_x, expected_y)).unwrap();
+        assert_eq!(cell.symbol(), "│");
+    }
+
+    #[test]
+    fn test_message_area_scroll_clamps_to_end() {
+        let backend = TestBackend::new(50, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+
+        let long_text = "This is a long line that should wrap across multiple lines.";
+        let messages = vec![Message::agent(long_text)];
+
+        terminal
+            .draw(|f| {
+                let area = MessageArea::new(&messages, &theme).scroll(usize::MAX);
+                f.render_widget(area, f.area());
+            })
+            .unwrap();
     }
 }

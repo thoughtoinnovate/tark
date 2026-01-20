@@ -191,7 +191,7 @@ pub struct ApprovalRequest {
 }
 
 /// A suggested pattern for approval
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuggestedPattern {
     /// The pattern string
     pub pattern: String,
@@ -392,55 +392,43 @@ impl AskUserTool {
         Self { interaction_tx }
     }
 
-    /// Format the user response in a human-readable Q&A format
+    /// Format the user response for tool output
     fn format_response(questionnaire: &Questionnaire, response: &UserResponse) -> String {
-        let mut output = String::new();
-        output.push_str("## User Responses\n\n");
-
+        let mut answers = response.answers.clone();
         for question in &questionnaire.questions {
-            // Question text
-            output.push_str(&format!("**Q: {}**\n", question.text));
-
-            // Answer
-            if let Some(answer) = response.answers.get(&question.id) {
+            if let Some(answer) = answers.get_mut(&question.id) {
                 match answer {
                     AnswerValue::Single(val) => {
-                        // For single-select, try to find the label
-                        let display_val = match &question.kind {
-                            QuestionType::SingleSelect { options, .. } => options
+                        if let QuestionType::SingleSelect { options, .. } = &question.kind {
+                            if let Some(label) = options
                                 .iter()
                                 .find(|o| &o.value == val)
-                                .map(|o| o.label.as_str())
-                                .unwrap_or(val),
-                            _ => val.as_str(),
-                        };
-                        output.push_str(&format!("A: {}\n", display_val));
+                                .map(|o| o.label.clone())
+                            {
+                                *val = label;
+                            }
+                        }
                     }
                     AnswerValue::Multi(vals) => {
-                        // For multi-select, find labels
-                        let display_vals: Vec<&str> = match &question.kind {
-                            QuestionType::MultiSelect { options, .. } => vals
+                        if let QuestionType::MultiSelect { options, .. } = &question.kind {
+                            let mapped: Vec<String> = vals
                                 .iter()
                                 .map(|v| {
                                     options
                                         .iter()
                                         .find(|o| &o.value == v)
-                                        .map(|o| o.label.as_str())
-                                        .unwrap_or(v.as_str())
+                                        .map(|o| o.label.clone())
+                                        .unwrap_or_else(|| v.clone())
                                 })
-                                .collect(),
-                            _ => vals.iter().map(|v| v.as_str()).collect(),
-                        };
-                        output.push_str(&format!("A: {}\n", display_vals.join(", ")));
+                                .collect();
+                            *vals = mapped;
+                        }
                     }
                 }
-            } else {
-                output.push_str("A: (no answer)\n");
             }
-            output.push('\n');
         }
 
-        output
+        serde_json::to_string_pretty(&answers).unwrap_or_else(|_| "{}".to_string())
     }
 }
 
@@ -451,9 +439,10 @@ impl Tool for AskUserTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user a structured set of questions via a popup dialog. Use this when you need \
-         specific configuration choices, confirmations, or free-form input from the user. \
-         Questions are displayed one at a time. The user can cancel to answer via chat instead."
+        "Ask the user structured questions via a popup dialog. \
+         PREFER single_select/multi_select over free_text - choices are faster for users! \
+         Use free_text ONLY when you cannot anticipate the answer (e.g., file paths, custom names). \
+         Choice questions include an 'Other' option so users can still provide custom input if needed."
     }
 
     fn parameters(&self) -> Value {
@@ -470,7 +459,7 @@ impl Tool for AskUserTool {
                 },
                 "questions": {
                     "type": "array",
-                    "description": "List of questions to ask",
+                    "description": "List of questions to ask. PREFER choice questions (single_select/multi_select) over free_text!",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -485,11 +474,11 @@ impl Tool for AskUserTool {
                             "type": {
                                 "type": "string",
                                 "enum": ["single_select", "multi_select", "free_text"],
-                                "description": "Type of input: single_select (radio), multi_select (checkboxes), or free_text"
+                                "description": "PREFER single_select or multi_select! Use free_text only for unpredictable input (paths, names). Choice questions have built-in 'Other' option."
                             },
                             "options": {
                                 "type": "array",
-                                "description": "Options for single_select and multi_select types",
+                                "description": "Options for single_select/multi_select. Include common choices; users can pick 'Other' for custom input.",
                                 "items": {
                                     "type": "object",
                                     "properties": {

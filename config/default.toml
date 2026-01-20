@@ -38,8 +38,8 @@ context_lines_before = 50
 context_lines_after = 20
 
 [agent]
-# Maximum tool call iterations per query
-max_iterations = 10
+# Maximum tool call iterations per query (increase for complex multi-step tasks)
+max_iterations = 50
 # Default working directory (. = current directory)
 working_directory = "."
 

@@ -57,6 +57,7 @@ export interface ThemePreset {
     msgCommand: string;
     msgThinking: string;
     msgQuestion: string;
+    msgApproval: string;
     
     // Modals
     modalBg: string;
@@ -134,6 +135,7 @@ export const catppuccinMocha: ThemePreset = {
     msgCommand: '#a6e3a1',
     msgThinking: '#9399b2',
     msgQuestion: '#89dceb',
+    msgApproval: '#f9e2af',
     
     modalBg: '#181825',
     modalBorder: '#313244',
@@ -209,6 +211,7 @@ export const catppuccinLatte: ThemePreset = {
     msgCommand: '#40a02b',
     msgThinking: '#8c8fa1',
     msgQuestion: '#04a5e5',
+    msgApproval: '#df8e1d',
     
     modalBg: '#dce0e8',
     modalBorder: '#ccd0da',
@@ -284,6 +287,7 @@ export const githubDark: ThemePreset = {
     msgCommand: '#3fb950',
     msgThinking: '#8b949e',
     msgQuestion: '#a371f7',
+    msgApproval: '#d29922',
     
     modalBg: '#161b22',
     modalBorder: '#30363d',
@@ -359,6 +363,7 @@ export const nord: ThemePreset = {
     msgCommand: '#a3be8c',
     msgThinking: '#4c566a',
     msgQuestion: '#b48ead',
+    msgApproval: '#ebcb8b',
     
     modalBg: '#272c36',
     modalBorder: '#3b4252',
@@ -434,6 +439,7 @@ export const oneDarkPro: ThemePreset = {
     msgCommand: '#98c379',
     msgThinking: '#5c6370',
     msgQuestion: '#c678dd',
+    msgApproval: '#e5c07b',
     
     modalBg: '#21252b',
     modalBorder: '#3e4451',
@@ -509,6 +515,7 @@ export const tokyoNight: ThemePreset = {
     msgCommand: '#9ece6a',
     msgThinking: '#565f89',
     msgQuestion: '#bb9af7',
+    msgApproval: '#e0af68',
     
     modalBg: '#16161e',
     modalBorder: '#292e42',
@@ -584,6 +591,7 @@ export const gruvboxDark: ThemePreset = {
     msgCommand: '#b8bb26',
     msgThinking: '#665c54',
     msgQuestion: '#d3869b',
+    msgApproval: '#fabd2f',
     
     modalBg: '#1d2021',
     modalBorder: '#3c3836',
@@ -681,6 +689,7 @@ export function applyTheme(theme: ThemePreset): void {
   root.style.setProperty('--msg-command', colors.msgCommand);
   root.style.setProperty('--msg-thinking', colors.msgThinking);
   root.style.setProperty('--msg-question', colors.msgQuestion);
+  root.style.setProperty('--msg-approval', colors.msgApproval);
   
   root.style.setProperty('--modal-bg', colors.modalBg);
   root.style.setProperty('--modal-border', colors.modalBorder);

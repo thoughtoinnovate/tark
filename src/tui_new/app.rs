@@ -3,32 +3,17 @@
 //! This is the core of the new TUI, built with TDD approach.
 //! Feature file: tests/visual/tui/features/01_terminal_layout.feature
 
+#![allow(clippy::collapsible_if)]
+
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 use std::path::PathBuf;
-use tokio::sync::mpsc;
 
 use super::config::AppConfig;
 use super::theme::{Theme, ThemePreset};
-use crate::tui::agent_bridge::{AgentBridge, AgentEvent};
 
-/// Agent operation mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgentMode {
-    #[default]
-    Build,
-    Plan,
-    Ask,
-}
-
-/// Build mode (only active in Build agent mode)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BuildMode {
-    Careful,
-    #[default]
-    Balanced,
-    Manual,
-}
+// Re-export types from ui_backend
+pub use crate::ui_backend::{AgentMode, BuildMode};
 
 /// Input mode for the TUI
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -42,37 +27,8 @@ pub enum InputMode {
     Command,
 }
 
-/// Currently focused UI component
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FocusedComponent {
-    #[default]
-    Input,
-    Messages,
-    Panel,
-    Modal,
-}
-
-impl FocusedComponent {
-    /// Cycle to next component
-    pub fn next(self) -> Self {
-        match self {
-            Self::Input => Self::Messages,
-            Self::Messages => Self::Panel,
-            Self::Panel => Self::Input,
-            Self::Modal => Self::Modal, // Modal keeps focus
-        }
-    }
-
-    /// Cycle to previous component
-    pub fn previous(self) -> Self {
-        match self {
-            Self::Input => Self::Panel,
-            Self::Messages => Self::Input,
-            Self::Panel => Self::Messages,
-            Self::Modal => Self::Modal,
-        }
-    }
-}
+// Re-export from ui_backend
+pub use crate::ui_backend::FocusedComponent;
 
 /// Application state for the new TUI
 #[derive(Debug)]
@@ -143,15 +99,8 @@ pub struct AppState {
     pub sidebar_expanded_panels: [bool; 4],
 }
 
-/// Types of modals that can be displayed
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModalType {
-    ProviderPicker,
-    ModelPicker,
-    FilePicker,
-    ThemePicker,
-    Help,
-}
+// Re-export from ui_backend
+pub use crate::ui_backend::ModalType;
 
 impl Default for AppState {
     fn default() -> Self {
@@ -658,10 +607,6 @@ pub struct TuiApp<B: Backend> {
     terminal: Terminal<B>,
     /// Application state
     pub state: AppState,
-    /// Agent bridge for LLM integration
-    agent_bridge: Option<AgentBridge>,
-    /// Receiver for agent events (streaming responses, tool calls, etc.)
-    agent_event_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
     /// Working directory for file operations
     working_dir: PathBuf,
     /// Current provider name
@@ -681,27 +626,13 @@ impl<B: Backend> TuiApp<B> {
 
     /// Create a new TUI application with specified working directory
     pub fn with_working_dir(terminal: Terminal<B>, working_dir: PathBuf) -> Self {
-        // Initialize AgentBridge for LLM communication
-        let (agent_bridge, llm_connected) =
-            match AgentBridge::new_with_interaction(working_dir.clone()) {
-                Ok((bridge, _interaction_rx)) => {
-                    // TODO: Store interaction_rx for future questionnaire support
-                    (Some(bridge), true)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to initialize AgentBridge: {}", e);
-                    (None, false)
-                }
-            };
-
         let mut state = AppState::new();
-        state.llm_connected = llm_connected;
+        // LLM connection will be managed by AppService
+        state.llm_connected = false;
 
         Self {
             terminal,
             state,
-            agent_bridge,
-            agent_event_rx: None,
             working_dir,
             current_provider: None,
             current_model: None,
@@ -828,9 +759,13 @@ impl<B: Backend> TuiApp<B> {
                     .focused(is_sidebar_focused)
                     .selected_panel(state.sidebar_selected_panel)
                     .session_info(SessionInfo {
+                        name: "Session".to_string(),
                         branch: "main".to_string(),
                         total_cost: 0.015,
                         model_count: 3,
+                        model_costs: vec![],
+                        total_tokens: 0,
+                        model_tokens: vec![],
                     })
                     .context_files(context_files.clone())
                     .tokens(1833, 1_000_000)
@@ -932,9 +867,27 @@ impl<B: Backend> TuiApp<B> {
                         let picker = ModelPickerModal::new(theme);
                         frame.render_widget(picker, area);
                     }
+                    ModalType::SessionPicker => {
+                        // Session picker handled in tui_new renderer
+                    }
                     ModalType::FilePicker => {
                         let picker = FilePickerModal::new(theme);
                         frame.render_widget(picker, area);
+                    }
+                    ModalType::Approval => {
+                        // Approval modal not implemented in old app.rs (using tui_new)
+                    }
+                    ModalType::TrustLevel => {
+                        // TrustLevel modal not implemented in old app.rs (using tui_new)
+                    }
+                    ModalType::Tools => {
+                        // Tools modal not implemented in old app.rs (using tui_new)
+                    }
+                    ModalType::Plugin => {
+                        // Plugin modal not implemented in old app.rs (using tui_new)
+                    }
+                    ModalType::DeviceFlow => {
+                        // DeviceFlow modal not implemented in old app.rs (using tui_new)
                     }
                 }
             }
@@ -1089,6 +1042,9 @@ impl<B: Backend> TuiApp<B> {
                                             // Select model and close
                                             self.state.close_modal();
                                         }
+                                        Some(ModalType::SessionPicker) => {
+                                            self.state.close_modal();
+                                        }
                                         Some(ModalType::FilePicker) => {
                                             // Select file and close
                                             self.state.close_modal();
@@ -1106,6 +1062,18 @@ impl<B: Backend> TuiApp<B> {
                                         }
                                         Some(ModalType::Help) => {
                                             // Close help
+                                            self.state.close_modal();
+                                        }
+                                        Some(ModalType::Approval) => {
+                                            // Approval handled via Y/N keys
+                                        }
+                                        Some(ModalType::TrustLevel) => {
+                                            // TrustLevel handled via Up/Down/Enter keys
+                                        }
+                                        Some(ModalType::Tools)
+                                        | Some(ModalType::Plugin)
+                                        | Some(ModalType::DeviceFlow) => {
+                                            // Close these modals
                                             self.state.close_modal();
                                         }
                                         None => {}

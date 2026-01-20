@@ -371,6 +371,33 @@ impl ModelsDbManager {
         // Normalize provider name
         let provider_key = Self::normalize_provider(provider);
 
+        if provider_key == "tark_sim" {
+            // Return synthetic model for simulation
+            return Ok(Some(ModelInfo {
+                id: "tark_llm".to_string(),
+                name: "Tark Simulation".to_string(),
+                family: Some("simulation".to_string()),
+                attachment: true,
+                reasoning: true,
+                tool_call: true,
+                temperature: true,
+                structured_output: Some(true),
+                knowledge: Some("2024-04".to_string()),
+                release_date: Some("2024-01-01".to_string()),
+                last_updated: None,
+                modalities: ModelModalities {
+                    input: vec!["text".to_string()],
+                    output: vec!["text".to_string()],
+                },
+                open_weights: true,
+                cost: ModelCost::default(),
+                limit: ModelLimits {
+                    context: 8192,
+                    output: 4096,
+                },
+            }));
+        }
+
         if let Some(provider_info) = db.providers.get(&provider_key) {
             // Try exact match first
             if let Some(model) = provider_info.models.get(model_id) {
@@ -396,19 +423,88 @@ impl ModelsDbManager {
     pub async fn get_provider(&self, provider: &str) -> Result<Option<ProviderInfo>> {
         let db = self.get_database().await?;
         let provider_key = Self::normalize_provider(provider);
+
+        if provider_key == "tark_sim" {
+            let mut models = HashMap::new();
+            models.insert(
+                "tark_llm".to_string(),
+                ModelInfo {
+                    id: "tark_llm".to_string(),
+                    name: "Tark Simulation".to_string(),
+                    family: Some("simulation".to_string()),
+                    attachment: true,
+                    reasoning: true,
+                    tool_call: true,
+                    temperature: true,
+                    structured_output: Some(true),
+                    knowledge: Some("2024-04".to_string()),
+                    release_date: Some("2024-01-01".to_string()),
+                    last_updated: None,
+                    modalities: ModelModalities {
+                        input: vec!["text".to_string()],
+                        output: vec!["text".to_string()],
+                    },
+                    open_weights: true,
+                    cost: ModelCost::default(),
+                    limit: ModelLimits {
+                        context: 8192,
+                        output: 4096,
+                    },
+                },
+            );
+
+            return Ok(Some(ProviderInfo {
+                id: "tark_sim".to_string(),
+                name: "Tark Simulation".to_string(),
+                env: vec![],
+                npm: None,
+                api: None,
+                doc: None,
+                models,
+            }));
+        }
+
         Ok(db.providers.get(&provider_key).cloned())
     }
 
     /// List all available providers
     pub async fn list_providers(&self) -> Result<Vec<String>> {
         let db = self.get_database().await?;
-        Ok(db.providers.keys().cloned().collect())
+        let mut providers: Vec<String> = db.providers.keys().cloned().collect();
+        providers.push("tark_sim".to_string());
+        Ok(providers)
     }
 
     /// List models for a provider
     pub async fn list_models(&self, provider: &str) -> Result<Vec<ModelInfo>> {
         let db = self.get_database().await?;
         let provider_key = Self::normalize_provider(provider);
+
+        if provider_key == "tark_sim" {
+            return Ok(vec![ModelInfo {
+                id: "tark_llm".to_string(),
+                name: "Tark Simulation".to_string(),
+                family: Some("simulation".to_string()),
+                attachment: true,
+                reasoning: true,
+                tool_call: true,
+                temperature: true,
+                structured_output: Some(true),
+                knowledge: Some("2024-04".to_string()),
+                release_date: Some("2024-01-01".to_string()),
+                last_updated: None,
+                modalities: ModelModalities {
+                    input: vec!["text".to_string()],
+                    output: vec!["text".to_string()],
+                },
+                open_weights: true,
+                cost: ModelCost::default(),
+                limit: ModelLimits {
+                    context: 8192,
+                    output: 4096,
+                },
+            }]);
+        }
 
         if let Some(provider_info) = db.providers.get(&provider_key) {
             Ok(provider_info.models.values().cloned().collect())
@@ -549,6 +645,7 @@ impl ModelsDbManager {
             "anthropic" | "claude" => return "anthropic".to_string(),
             "google" | "gemini" => return "google".to_string(),
             "ollama" | "local" => return "ollama".to_string(),
+            "tark_sim" => return "tark_sim".to_string(),
             "copilot" | "github" | "github-copilot" => return "github-copilot".to_string(),
             "openrouter" => return "openrouter".to_string(),
             "groq" => return "groq".to_string(),
@@ -621,7 +718,7 @@ impl ModelsDbManager {
                     (3.0, 15.0)
                 }
             }
-            "ollama" | "local" => (0.0, 0.0),
+            "ollama" | "local" | "tark_sim" => (0.0, 0.0),
             _ => (0.0, 0.0),
         };
 
@@ -656,6 +753,7 @@ impl ModelsDbManager {
             }
             "anthropic" | "claude" => 200_000,
             "ollama" | "local" => 32_000,
+            "tark_sim" => 8_192,
             _ => 128_000,
         }
     }
@@ -665,8 +763,12 @@ impl ModelsDbManager {
         if let Ok(Some(model)) = self.get_model(provider, model_id).await {
             return model.tool_call;
         }
-        // Assume true for major providers
-        !matches!(provider.to_lowercase().as_str(), "ollama" | "local")
+        // Assume true for major providers except ollama/local
+        let provider = provider.to_lowercase();
+        if provider == "tark_sim" {
+            return true;
+        }
+        !matches!(provider.as_str(), "ollama" | "local")
     }
 
     /// Check if a model supports reasoning/thinking mode
@@ -679,6 +781,7 @@ impl ModelsDbManager {
             || model_id.contains("o3")
             || model_id.contains("deepseek-r1")
             || model_id.contains("thinking")
+            || (provider == "tark_sim" && model_id == "tark_llm")
     }
 
     /// Check if a model supports vision
@@ -783,7 +886,8 @@ impl ModelsDbManager {
             || model_id.contains("thinking")
             || model_id.contains("sonnet-4")
             || model_id.contains("3-7-sonnet")
-            || model_id.contains("deepseek-r1");
+            || model_id.contains("deepseek-r1")
+            || (provider == "tark_sim" && model_id == "tark_llm");
 
         if !is_reasoning {
             return ModelThinkingDefaults::default();
@@ -807,6 +911,12 @@ impl ModelsDbManager {
                 suggested_budget: 8_192,
                 cost_per_1k: 0.0, // Included in output
                 param_type: ThinkingParamType::ThinkingBudget,
+            },
+            "tark_sim" => ModelThinkingDefaults {
+                supported: true,
+                suggested_budget: 2048,
+                cost_per_1k: 0.0,
+                param_type: ThinkingParamType::BudgetTokens,
             },
             _ => ModelThinkingDefaults::default(),
         }

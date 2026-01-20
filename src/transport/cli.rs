@@ -10,7 +10,8 @@ use crate::llm;
 use crate::storage::usage::{CleanupRequest, UsageTracker};
 use crate::storage::TarkStorage;
 use crate::tools::ToolRegistry;
-use crate::tui::{EditorBridge, EditorBridgeConfig, TuiApp, TuiConfig};
+// Using tui_new instead of old tui
+use crate::tui_new::app::TuiApp;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use std::io::{self, BufRead, Write};
@@ -29,72 +30,36 @@ use tabled::{settings::Style, Table, Tabled};
 /// * `socket_path` - Optional Unix socket path for Neovim integration
 pub async fn run_tui_chat(
     _initial_message: Option<String>,
-    working_dir: &str,
-    socket_path: Option<String>,
-    provider: Option<String>,
-    model: Option<String>,
-    debug: bool,
+    working_dir_str: &str,
+    _socket_path: Option<String>,
+    _provider: Option<String>,
+    _model: Option<String>,
+    _debug: bool,
 ) -> Result<()> {
-    let working_dir = PathBuf::from(working_dir).canonicalize()?;
+    let working_dir = PathBuf::from(working_dir_str).canonicalize()?;
 
-    // Load TUI configuration
-    let tui_config = TuiConfig::load().unwrap_or_default();
+    // Create the TUI application
+    use crossterm::{
+        execute,
+        terminal::{enable_raw_mode, EnterAlternateScreen},
+    };
+    use ratatui::{backend::CrosstermBackend, Terminal};
 
-    // Create the TUI application with provider/model overrides from CLI
-    // This ensures the correct provider is used when creating the AgentBridge
-    let mut app =
-        TuiApp::with_provider_override(tui_config, provider.clone(), model.clone(), debug)?;
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let terminal = Terminal::new(backend)?;
 
-    // Determine effective provider for logging
-    let effective_provider = provider.unwrap_or_else(|| {
-        let config = Config::load().unwrap_or_default();
-        config.llm.default_provider.clone()
-    });
-    tracing::info!("Using provider: {}", effective_provider);
+    let mut app = TuiApp::with_working_dir(terminal, working_dir.clone());
 
-    // Determine standalone mode
-    let is_standalone = socket_path.is_none();
-    app.state.editor_connected = !is_standalone;
-
-    // If socket path provided, attempt to connect to Neovim
-    if let Some(ref socket) = socket_path {
-        let bridge_config = EditorBridgeConfig {
-            socket_path: PathBuf::from(socket),
-            ..Default::default()
-        };
-        let bridge = EditorBridge::new(bridge_config);
-
-        // Try to connect (non-blocking, will fall back to standalone if fails)
-        match bridge.connect().await {
-            Ok(()) => {
-                tracing::info!("Connected to Neovim at {}", socket);
-                app.state.editor_connected = true;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to connect to Neovim: {}. Running in standalone mode.",
-                    e
-                );
-                app.state.editor_connected = false;
-            }
-        }
-    }
-
-    // Update status message based on mode
-    if app.state.editor_connected {
-        app.state.status_message = Some(format!(
-            "Connected to Neovim | Working dir: {}",
-            working_dir.display()
-        ));
-    } else {
-        app.state.status_message = Some(format!(
-            "Standalone mode | Working dir: {}",
-            working_dir.display()
-        ));
-    }
+    tracing::info!(
+        "Starting TUI in working directory: {}",
+        working_dir.display()
+    );
 
     // Run the TUI event loop
-    app.run().await?;
+    app.run()?;
 
     Ok(())
 }
@@ -763,43 +728,123 @@ pub async fn run_auth_logout(provider: &str) -> Result<()> {
 /// Run the NEW TUI (TDD implementation)
 ///
 /// This starts the new Terminal UI built with Test-Driven Development.
-/// Uses the tui_new module instead of the legacy tui module.
+/// Uses the tui_new module with the new ui_backend architecture.
 pub async fn run_tui_new(
     working_dir: &str,
-    _provider: Option<String>,
-    _model: Option<String>,
-    _debug: bool,
+    provider: Option<String>,
+    model: Option<String>,
+    debug: bool,
 ) -> Result<()> {
-    use crate::tui_new::TuiApp;
+    use crate::tui_new::{TuiController, TuiRenderer};
+    use crate::ui_backend::AppService;
     use crossterm::{
+        event::{DisableMouseCapture, EnableMouseCapture},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     };
     use ratatui::backend::CrosstermBackend;
     use ratatui::Terminal;
     use std::io::stdout;
+    use tokio::sync::mpsc;
 
     let working_dir = PathBuf::from(working_dir).canonicalize()?;
-    tracing::info!("Starting NEW TUI, cwd: {:?}", working_dir);
 
-    // Setup terminal
-    enable_raw_mode()?;
+    if debug {
+        // Initialize debug logger
+        let debug_config = crate::DebugLoggerConfig {
+            log_dir: working_dir.join(".tark").join("debug"),
+            max_file_size: 10 * 1024 * 1024, // 10MB
+            max_rotated_files: 3,
+        };
+
+        crate::init_debug_logger(debug_config).context("Failed to initialize debug logger")?;
+
+        tracing::info!(
+            "Starting NEW TUI with ui_backend, cwd: {:?}, DEBUG MODE ENABLED",
+            working_dir
+        );
+        tracing::info!(
+            "Debug logs will be written to: {}/.tark/debug/tark-debug.log",
+            working_dir.display()
+        );
+    } else {
+        tracing::info!("Starting NEW TUI with ui_backend, cwd: {:?}", working_dir);
+    }
+
+    // Check if we have a TTY before attempting terminal setup
+    if !crossterm::tty::IsTty::is_tty(&std::io::stdout()) {
+        anyhow::bail!(
+            "TUI requires a real terminal (TTY).\n\n\
+            You are running in a non-TTY environment.\n\n\
+            Solutions:\n\
+            1. Docker: Run with -it flags:   docker exec -it <container> bash\n\
+            2. SSH: Connect with -t flag:     ssh -t user@host\n\
+            3. Use tmux or screen:            tmux\n\
+            4. Use script command:            script -c './tark tui' /dev/null\n\
+            5. Use chat mode instead:         tark chat\n\n\
+            To check: Run 'tty' command (should NOT return 'not a tty')"
+        );
+    }
+
+    // Setup terminal with detailed error messages
+    enable_raw_mode()
+        .context("Failed to enable terminal raw mode. Check that you have a proper TTY.")?;
+    tracing::debug!("Raw mode enabled");
+
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("Failed to enter alternate screen. Terminal may not support this feature.")?;
+    tracing::debug!("Entered alternate screen with mouse capture enabled");
 
-    // Create and run the TUI app
-    let mut app = TuiApp::new(terminal);
+    let backend = CrosstermBackend::new(stdout);
+    let terminal = Terminal::new(backend)
+        .context("Failed to create terminal backend. Check terminal capabilities.")?;
+    tracing::debug!("Terminal backend created");
+
+    // Create event channel for AppService
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+
+    // Create AppService (business logic) with debug support and provider/model overrides
+    let mut service = AppService::new_with_options(
+        working_dir.clone(),
+        event_tx,
+        provider.clone(),
+        model.clone(),
+        debug,
+    )?;
+    let interaction_rx = service.take_interaction_receiver();
+
+    // Load and restore active session
+    service.load_active_session().await?;
+    tracing::info!("Loaded active session");
+
+    // Log provider and model if specified
+    if let Some(ref prov) = provider {
+        tracing::info!("Using provider: {}", prov);
+    }
+    if let Some(ref mdl) = model {
+        tracing::info!("Using model: {}", mdl);
+    }
+
+    // Create TuiRenderer
+    let renderer = TuiRenderer::new(terminal, working_dir.clone());
+
+    // Create TuiController (orchestrates service and renderer)
+    let mut controller = TuiController::new(service, renderer, event_rx, interaction_rx);
 
     // Run the main loop
-    let result = app.run();
+    let result = controller.run().await;
+
+    // Save session before exiting
+    if let Err(e) = controller.service().save_current_session().await {
+        tracing::warn!("Failed to save session on exit: {}", e);
+    }
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(std::io::stdout(), LeaveAlternateScreen)?;
+    execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
 
-    result.map_err(|e| anyhow::anyhow!("TUI error: {}", e))
+    result
 }
 
 /// Check authentication status for all providers

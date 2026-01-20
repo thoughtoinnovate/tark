@@ -356,10 +356,19 @@ impl TarkStorage {
         // Create plans subdirectory
         std::fs::create_dir_all(session_dir.join("plans"))?;
 
+        // Create conversations subdirectory
+        let conversations_dir = session_dir.join("conversations");
+        std::fs::create_dir_all(&conversations_dir)?;
+
         // Save session.json in the directory
         let path = session_dir.join("session.json");
         let content = serde_json::to_string_pretty(session)?;
         std::fs::write(&path, content)?;
+
+        // Save conversation messages in session conversations directory
+        let conversations_path = conversations_dir.join("conversation.json");
+        let messages_content = serde_json::to_string_pretty(&session.messages)?;
+        std::fs::write(&conversations_path, messages_content)?;
 
         // Update current session pointer
         std::fs::write(self.current_session_file(), &session.id)?;
@@ -373,7 +382,24 @@ impl TarkStorage {
         let dir_path = self.session_dir(id).join("session.json");
         if dir_path.exists() {
             let content = std::fs::read_to_string(&dir_path)?;
-            return serde_json::from_str(&content).context("Failed to parse session");
+            let mut session: ChatSession =
+                serde_json::from_str(&content).context("Failed to parse session")?;
+
+            let conversations_path = self
+                .session_dir(id)
+                .join("conversations")
+                .join("conversation.json");
+            if conversations_path.exists() {
+                if let Ok(conversations_content) = std::fs::read_to_string(&conversations_path) {
+                    if let Ok(messages) =
+                        serde_json::from_str::<Vec<SessionMessage>>(&conversations_content)
+                    {
+                        session.messages = messages;
+                    }
+                }
+            }
+
+            return Ok(session);
         }
 
         // Fall back to flat file (for backwards compatibility)
@@ -911,6 +937,35 @@ impl TarkStorage {
     }
 
     // ========== Plugins (merged: global + project) ==========
+
+    /// Load disabled plugins list from ~/.tark/plugins.json
+    pub fn load_disabled_plugins(&self) -> Result<Vec<String>> {
+        let path = self.global.root().join("plugins.json");
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+
+        let content = std::fs::read_to_string(&path)?;
+        let data: serde_json::Value = serde_json::from_str(&content)?;
+
+        Ok(data
+            .get("disabled")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Save disabled plugins list
+    pub fn save_disabled_plugins(&self, disabled: &[String]) -> Result<()> {
+        let path = self.global.root().join("plugins.json");
+        let data = serde_json::json!({ "disabled": disabled });
+        std::fs::write(&path, serde_json::to_string_pretty(&data)?)?;
+        Ok(())
+    }
 
     /// List all plugins (global + project)
     pub fn list_plugins(&self) -> Result<Vec<PluginInfo>> {
@@ -3126,6 +3181,29 @@ mod tests {
         // But tokens should only reflect current context
         assert_eq!(session.input_tokens, 75);
         assert_eq!(session.output_tokens, 150);
+    }
+
+    #[test]
+    fn test_session_conversations_persisted_in_session_dir() {
+        let temp = TempDir::new().unwrap();
+        let storage = TarkStorage::new(temp.path()).unwrap();
+
+        let mut session = ChatSession::new();
+        session.add_message("user", "Hello");
+        session.add_message("assistant", "Hi");
+
+        storage.save_session(&session).unwrap();
+
+        let conversations_path = storage
+            .session_dir(&session.id)
+            .join("conversations")
+            .join("conversation.json");
+        assert!(conversations_path.exists());
+
+        let loaded = storage.load_session(&session.id).unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[0].content, "Hello");
+        assert_eq!(loaded.messages[1].content, "Hi");
     }
 
     #[test]

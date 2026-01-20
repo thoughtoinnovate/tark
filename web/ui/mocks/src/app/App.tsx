@@ -63,6 +63,16 @@ function App() {
     { type: "system", content: `${defaultAppConfig.agentNameShort} Core v${defaultAppConfig.version} initialized` },
     { type: "system", content: "Connected to Engine. Ready for Build task." },
     
+    // APPROVAL MODAL - High visibility test
+    {
+      type: "approval",
+      content: "Command requires approval",
+      command: "rm -rf node_modules && npm install --force",
+      riskLevel: "high",
+      meta: "This command will delete the node_modules directory and reinstall dependencies with --force flag.",
+      detectedPattern: "rm -rf node_modules*"
+    },
+    
     { type: "input", content: "Help me refactor the authentication module and add JWT support" },
     
     /**

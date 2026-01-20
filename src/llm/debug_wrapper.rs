@@ -28,10 +28,8 @@ impl DebugProviderWrapper {
             .append(true)
             .open(log_path)?;
 
-        // Enable raw response logging to a separate file
-        // This captures the raw streaming payloads from LLM providers
-        let raw_log_path = log_path.with_file_name("llm_raw_response.log");
-        super::raw_log::set_raw_log_path(Some(raw_log_path));
+        // Note: Raw response logging is now handled by the unified debug logger
+        // via the CORRELATION_ID task-local and debug_log! macro
 
         Ok(Self {
             inner,
@@ -85,8 +83,8 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        // Set request_id in task-local context for raw logging
-        let result = crate::llm::raw_log::REQUEST_ID
+        // Set correlation_id in task-local context for raw logging
+        let result = crate::llm::raw_log::CORRELATION_ID
             .scope(request_id.clone(), self.inner.chat(messages, tools))
             .await;
         let duration = start.elapsed();
@@ -122,8 +120,8 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        // Set request_id in task-local context for raw logging
-        let result = crate::llm::raw_log::REQUEST_ID
+        // Set correlation_id in task-local context for raw logging
+        let result = crate::llm::raw_log::CORRELATION_ID
             .scope(
                 request_id.clone(),
                 self.inner.chat_with_thinking(messages, tools, settings),
@@ -162,8 +160,8 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        // Set request_id in task-local context for raw logging
-        let result = crate::llm::raw_log::REQUEST_ID
+        // Set correlation_id in task-local context for raw logging
+        let result = crate::llm::raw_log::CORRELATION_ID
             .scope(
                 request_id.clone(),
                 self.inner
@@ -205,8 +203,8 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        // Set request_id in task-local context for raw logging
-        let result = crate::llm::raw_log::REQUEST_ID
+        // Set correlation_id in task-local context for raw logging
+        let result = crate::llm::raw_log::CORRELATION_ID
             .scope(
                 request_id.clone(),
                 self.inner.chat_streaming_with_thinking(
@@ -255,8 +253,8 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        // Set request_id in task-local context for raw logging
-        let result = crate::llm::raw_log::REQUEST_ID
+        // Set correlation_id in task-local context for raw logging
+        let result = crate::llm::raw_log::CORRELATION_ID
             .scope(
                 request_id.clone(),
                 self.inner.complete_fim(prefix, suffix, language),
@@ -289,8 +287,8 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        // Set request_id in task-local context for raw logging
-        let result = crate::llm::raw_log::REQUEST_ID
+        // Set correlation_id in task-local context for raw logging
+        let result = crate::llm::raw_log::CORRELATION_ID
             .scope(request_id.clone(), self.inner.explain_code(code, context))
             .await;
         let duration = start.elapsed();
@@ -324,8 +322,8 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        // Set request_id in task-local context for raw logging
-        let result = crate::llm::raw_log::REQUEST_ID
+        // Set correlation_id in task-local context for raw logging
+        let result = crate::llm::raw_log::CORRELATION_ID
             .scope(
                 request_id.clone(),
                 self.inner.suggest_refactorings(code, context),
@@ -358,8 +356,8 @@ impl LlmProvider for DebugProviderWrapper {
         .await;
 
         let start = std::time::Instant::now();
-        // Set request_id in task-local context for raw logging
-        let result = crate::llm::raw_log::REQUEST_ID
+        // Set correlation_id in task-local context for raw logging
+        let result = crate::llm::raw_log::CORRELATION_ID
             .scope(request_id.clone(), self.inner.review_code(code, language))
             .await;
         let duration = start.elapsed();

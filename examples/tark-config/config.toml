@@ -1,34 +1,66 @@
-# Tark Configuration
-# Place in ~/.config/tark/config.toml for global, or .tark/config.toml for project
+# Tark Configuration Example
+# Save this to: ~/.config/tark/config.toml
 
-# LLM Provider settings
-provider = "openai"                    # "openai", "claude", or "ollama"
-model = "openai/gpt-4o"               # Full model ID (provider/model)
-default_mode = "build"                 # "plan", "build", or "review"
-verbose = false                        # Show thinking/tool calls by default
+[llm]
+# Default provider to use
+default_provider = "tark_sim"
 
-# Custom instructions added to every conversation
-custom_instructions = """
-When working on this project:
-- Follow the existing code style
-- Write tests for new features
-- Keep functions small and focused
-"""
+# Enabled providers to show in TUI provider picker
+# Empty list = show all providers from models.dev
+# Specify only the providers you want to use
+enabled_providers = ["tark_sim", "openai", "google", "claude"]
 
-# Files to ignore when exploring codebase
-ignore_patterns = [
-    "node_modules",
-    "target",
-    ".git",
-    "*.lock",
-    "dist",
-    "build",
-    "__pycache__",
-]
+[llm.tark_sim]
+model = "tark_llm"
+max_tokens = 8192
 
-# Auto-save conversations to .tark/conversations/
-auto_save_conversations = false
+[llm.openai]
+model = "gpt-4o"
+max_tokens = 16384
 
-# Maximum context tokens before suggesting /compact
-max_context_tokens = 100000
+[llm.claude]
+model = "claude-sonnet-4-20250514"
+max_tokens = 16384
 
+[llm.gemini]
+model = "gemini-2.0-flash-exp"
+max_tokens = 8192
+
+[llm.openrouter]
+model = "anthropic/claude-3.5-sonnet"
+max_tokens = 8192
+
+[llm.ollama]
+base_url = "http://localhost:11434"
+model = "codellama"
+
+[llm.copilot]
+model = "gpt-4o"
+max_tokens = 4096
+
+[server]
+port = 8765
+host = "127.0.0.1"
+
+[completion]
+cache_size = 100
+debounce_ms = 150
+context_lines_before = 50
+context_lines_after = 10
+
+[agent]
+# Maximum number of agent steps (tool calls) per message
+# Increase for complex multi-step tasks
+max_iterations = 50
+timeout_seconds = 300
+
+[tools]
+shell_enabled = true
+
+[thinking]
+# Default thinking level: "off", "brief", "normal", "extended"
+default = "off"
+# Allow user to override thinking level
+allow_override = true
+# Maximum thinking tokens (for extended thinking)
+max_tokens = 10000

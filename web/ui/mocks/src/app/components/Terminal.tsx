@@ -50,7 +50,13 @@ import {
   Palette,       // For theme picker
   Moon,          // For dark theme indicator
   ListTodo,      // For task queue indicator
-  Sun            // For light theme indicator
+  Sun,           // For light theme indicator
+  ShieldCheck,   // For approval modal icon
+  Play,          // For "run once" option
+  ShieldPlus,    // For "always allow" option
+  Asterisk,      // For "pattern match" option
+  Ban,           // For "skip" option
+  Clock          // For "run once" alternative icon
 } from 'lucide-react';
 import { themePresets, applyTheme, loadSavedTheme, type ThemePreset } from '../themes/presets';
 
@@ -72,10 +78,11 @@ import { themePresets, applyTheme, loadSavedTheme, type ThemePreset } from '../t
  *     Tool,
  *     Thinking,       // Agent's internal reasoning process
  *     Question,       // Agent asking user a question (various types)
+ *     Approval,       // Agent requesting approval for a command
  * }
  * ```
  */
-type LineType = 'system' | 'command' | 'output' | 'input' | 'tool' | 'thinking' | 'question';
+type LineType = 'system' | 'command' | 'output' | 'input' | 'tool' | 'thinking' | 'question' | 'approval';
 
 /**
  * @ratatui-enum: QuestionType
@@ -333,6 +340,11 @@ interface TerminalLine {
   placeholder?: string;
   answered?: boolean;
   answer?: string;
+  // Approval-specific fields
+  command?: string;         // The command being requested for approval
+  riskLevel?: 'low' | 'medium' | 'high';  // Risk level of the command
+  approvalResponse?: 'run_once' | 'always_allow' | 'pattern' | 'skip';  // User's decision
+  detectedPattern?: string; // Detected wildcard pattern for pattern matching
 }
 
 /**
@@ -2147,6 +2159,169 @@ export function Terminal({
               )}
 
               {/* =========================================================
+                  APPROVAL REQUEST
+                  =========================================================
+                  @ratatui-display: Inline approval request modal
+                  @ratatui-behavior: Agent requesting approval for risky command
+                  @ratatui-note: Similar styling to questions but approval-specific
+                  
+                  @ratatui-pattern:
+                  ```rust
+                  fn render_approval(&self, line: &TerminalLine) -> Vec<Line> {
+                      let risk_color = match line.risk_level {
+                          RiskLevel::High => Color::Rgb(251, 73, 52),    // Red
+                          RiskLevel::Medium => Color::Rgb(251, 191, 36), // Amber
+                          RiskLevel::Low => Color::Rgb(74, 222, 128),    // Green
+                      };
+                      
+                      vec![
+                          Line::from(vec![
+                              Span::styled("🛡️ ", Style::default().fg(risk_color)),
+                              Span::styled("Approval Required", Style::default()
+                                  .fg(risk_color)
+                                  .add_modifier(Modifier::BOLD)),
+                          ]),
+                          Line::from(format!("Command: {}", line.command)),
+                          // ... options ...
+                      ]
+                  }
+                  ```
+               */}
+              {line.type === 'approval' && (
+                <div className="flex gap-3 my-3">
+                  <div className="flex-shrink-0 w-6 h-6 rounded-lg bg-[var(--msg-approval)]/15 border border-[var(--msg-approval)]/30 flex items-center justify-center">
+                    <ShieldCheck className="w-3.5 h-3.5 text-[var(--msg-approval)]" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[11px] text-[var(--msg-approval)]/80 mb-1 font-medium">Approval Required</div>
+                    
+                    {/* Approval Content */}
+                    <div className="bg-[var(--msg-approval)]/5 border border-[var(--msg-approval)]/20 rounded-lg p-3 space-y-3">
+                      {/* Risk Level Badge */}
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          line.riskLevel === 'high' 
+                            ? 'bg-red-500/15 border border-red-500/30 text-red-400'
+                            : line.riskLevel === 'medium'
+                            ? 'bg-amber-500/15 border border-amber-500/30 text-amber-400'
+                            : 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+                        }`}>
+                          {line.riskLevel?.toUpperCase()} RISK
+                        </span>
+                      </div>
+
+                      {/* Command Display */}
+                      <div className="space-y-1.5">
+                        <div className="text-xs text-[var(--foreground)]/50 font-medium">Command:</div>
+                        <div className="bg-[var(--terminal-bg)] border border-[var(--msg-approval)]/30 rounded px-3 py-2">
+                          <code className="text-sm text-[var(--msg-approval)] font-mono">{line.command}</code>
+                        </div>
+                      </div>
+
+                      {/* Description */}
+                      {line.meta && (
+                        <p className="text-xs text-[var(--foreground)]/60">{line.meta}</p>
+                      )}
+
+                      {/* Not Answered Yet - Show Options */}
+                      {!line.answered && !answeredQuestions[index] && (
+                        <div className="space-y-2">
+                          <div className="text-xs text-[var(--foreground)]/70 font-medium mb-2">Choose an action:</div>
+                          
+                          {/* Run Once */}
+                          <button
+                            onClick={() => {
+                              setAnsweredQuestions(prev => ({
+                                ...prev,
+                                [index]: { answer: 'Run once', selectedLabels: [] }
+                              }));
+                            }}
+                            className="w-full flex items-center gap-3 px-3 py-2.5 rounded border bg-[var(--terminal-bg)]/50 border-[var(--terminal-border)] text-[var(--foreground)]/80 hover:bg-[var(--msg-approval)]/10 hover:border-[var(--msg-approval)]/30 transition-all text-left group"
+                          >
+                            <Play className="w-4 h-4 text-[var(--msg-approval)] flex-shrink-0" />
+                            <div className="flex-1">
+                              <div className="text-sm font-medium text-[var(--foreground)]">Run Once</div>
+                              <div className="text-xs text-[var(--foreground)]/50 mt-0.5">Execute this command one time only</div>
+                            </div>
+                          </button>
+
+                          {/* Always Allow */}
+                          <button
+                            onClick={() => {
+                              setAnsweredQuestions(prev => ({
+                                ...prev,
+                                [index]: { answer: 'Always allow this exact command', selectedLabels: [] }
+                              }));
+                            }}
+                            className="w-full flex items-center gap-3 px-3 py-2.5 rounded border bg-[var(--terminal-bg)]/50 border-[var(--terminal-border)] text-[var(--foreground)]/80 hover:bg-emerald-500/10 hover:border-emerald-500/30 transition-all text-left group"
+                          >
+                            <ShieldPlus className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                            <div className="flex-1">
+                              <div className="text-sm font-medium text-[var(--foreground)]">Always Allow</div>
+                              <div className="text-xs text-[var(--foreground)]/50 mt-0.5">Add exact command to approval list</div>
+                            </div>
+                          </button>
+
+                          {/* Pattern Match */}
+                          <button
+                            onClick={() => {
+                              const pattern = line.detectedPattern || 'rm -rf * && npm install *';
+                              setAnsweredQuestions(prev => ({
+                                ...prev,
+                                [index]: { answer: `Allow pattern: ${pattern}`, selectedLabels: [] }
+                              }));
+                            }}
+                            className="w-full flex items-center gap-3 px-3 py-2.5 rounded border bg-[var(--terminal-bg)]/50 border-[var(--terminal-border)] text-[var(--foreground)]/80 hover:bg-blue-500/10 hover:border-blue-500/30 transition-all text-left group"
+                          >
+                            <Asterisk className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                            <div className="flex-1">
+                              <div className="text-sm font-medium text-[var(--foreground)]">Pattern Match</div>
+                              <div className="text-xs text-[var(--foreground)]/50 mt-0.5">
+                                Allow similar commands using wildcards
+                                {line.detectedPattern && (
+                                  <div className="mt-1 font-mono text-blue-400">Pattern: {line.detectedPattern}</div>
+                                )}
+                              </div>
+                            </div>
+                          </button>
+
+                          {/* Skip */}
+                          <button
+                            onClick={() => {
+                              setAnsweredQuestions(prev => ({
+                                ...prev,
+                                [index]: { answer: 'Skipped execution', selectedLabels: [] }
+                              }));
+                            }}
+                            className="w-full flex items-center gap-3 px-3 py-2.5 rounded border bg-[var(--terminal-bg)]/50 border-[var(--terminal-border)] text-[var(--foreground)]/80 hover:bg-red-500/10 hover:border-red-500/30 transition-all text-left group"
+                          >
+                            <Ban className="w-4 h-4 text-red-400 flex-shrink-0" />
+                            <div className="flex-1">
+                              <div className="text-sm font-medium text-[var(--foreground)]">Skip</div>
+                              <div className="text-xs text-[var(--foreground)]/50 mt-0.5">Don't run this command</div>
+                            </div>
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Answered State */}
+                      {answeredQuestions[index] && (
+                        <div className="flex items-start gap-2 px-3 py-2 bg-[var(--llm-connected)]/10 border border-[var(--llm-connected)]/20 rounded">
+                          <Check className="w-4 h-4 text-[var(--llm-connected)] mt-0.5 flex-shrink-0" />
+                          <div className="flex-1">
+                            <span className="text-sm text-[var(--llm-connected)] font-medium">Decision Made</span>
+                            <div className="text-sm text-[var(--foreground)] mt-1">
+                              {answeredQuestions[index].answer}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* =========================================================
                   COMMAND MESSAGE TYPE
                   =========================================================
                   @ratatui-style:
@@ -3532,6 +3707,15 @@ export default function AgentTerminalPreview() {
   const [lines, setLines] = useState<TerminalLine[]>([
     { type: 'system', content: `${defaultAppConfig.agentNameShort} Core v${defaultAppConfig.version} initialized` },
     { type: 'system', content: 'Connected to Engine. Ready for Build task.' },
+    
+    // Demo Approval Request - MOVED TO TOP FOR VISIBILITY
+    {
+      type: 'approval' as const,
+      content: 'Command requires approval',
+      command: 'rm -rf node_modules && npm install --force',
+      riskLevel: 'high' as const,
+      meta: 'This command will delete the node_modules directory and reinstall dependencies with --force flag.'
+    } as TerminalLine,
     
     // User Request
     { type: 'input', content: 'Create a simple Express server with a health check endpoint and install dotenv.' },

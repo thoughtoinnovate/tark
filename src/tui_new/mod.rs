@@ -12,13 +12,14 @@
 // These will be used as we implement more features
 #![allow(dead_code)]
 
-mod app;
-mod config;
+pub mod app;
+pub mod config;
 mod controller;
 mod events;
 pub mod git_info;
 pub mod modals;
 mod renderer;
+pub mod session_prefs;
 mod theme;
 mod utils;
 pub mod widgets;
@@ -42,3 +43,7 @@ pub use theme::{Theme, ThemePreset};
 pub use widgets::{
     Header, InputWidget, Message, MessageArea, MessageRole, StatusBar, TerminalFrame,
 };
+
+// Re-export session preferences
+#[allow(unused_imports)]
+pub use session_prefs::{PreferencesManager, TuiPreferences};

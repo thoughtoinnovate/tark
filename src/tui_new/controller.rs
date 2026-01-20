@@ -7,7 +7,15 @@ use anyhow::Result;
 use ratatui::backend::Backend;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use uuid::Uuid;
 
+use crate::llm::models_db;
+use crate::tools::questionnaire::{
+    AnswerValue, ApprovalChoice, ApprovalResponse, InteractionRequest, UserResponse,
+};
+use crate::ui_backend::approval::ApprovalCardState;
+use crate::ui_backend::questionnaire::QuestionnaireState;
 use crate::ui_backend::UiRenderer;
 use crate::ui_backend::{AppEvent, AppService, Command, SharedState};
 
@@ -28,8 +36,19 @@ pub struct TuiController<B: Backend> {
     renderer: TuiRenderer<B>,
     /// Event receiver for async AppEvents
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
+    /// Interaction receiver for ask_user/approval
+    interaction_rx: Option<crate::tools::InteractionReceiver>,
+    /// Pending questionnaire responder
+    questionnaire_responder:
+        std::sync::Arc<tokio::sync::Mutex<Option<oneshot::Sender<UserResponse>>>>,
+    /// Pending approval responder
+    approval_responder:
+        std::sync::Arc<tokio::sync::Mutex<Option<oneshot::Sender<ApprovalResponse>>>>,
     /// Modal manager for delegating modal-specific commands
     modal_manager: ModalManager,
+    /// Pending questionnaire data (for multi-question support)
+    pending_questionnaire:
+        std::sync::Arc<tokio::sync::Mutex<Option<crate::tools::questionnaire::Questionnaire>>>,
 }
 
 impl<B: Backend> TuiController<B> {
@@ -38,12 +57,17 @@ impl<B: Backend> TuiController<B> {
         service: AppService,
         renderer: TuiRenderer<B>,
         event_rx: mpsc::UnboundedReceiver<AppEvent>,
+        interaction_rx: Option<crate::tools::InteractionReceiver>,
     ) -> Self {
         Self {
             service,
             renderer,
             event_rx,
+            interaction_rx,
+            questionnaire_responder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            approval_responder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             modal_manager: ModalManager::new(),
+            pending_questionnaire: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -53,6 +77,7 @@ impl<B: Backend> TuiController<B> {
         self.service.refresh_sidebar_data().await;
 
         let state = self.service.state().clone();
+        self.spawn_interaction_task(state.clone());
 
         loop {
             // 1. Render current state
@@ -78,8 +103,435 @@ impl<B: Backend> TuiController<B> {
         Ok(())
     }
 
+    fn spawn_interaction_task(&mut self, state: SharedState) {
+        let Some(mut interaction_rx) = self.interaction_rx.take() else {
+            return;
+        };
+
+        let questionnaire_responder = self.questionnaire_responder.clone();
+        let approval_responder = self.approval_responder.clone();
+        let pending_questionnaire = self.pending_questionnaire.clone();
+
+        tokio::spawn(async move {
+            while let Some(request) = interaction_rx.recv().await {
+                match request {
+                    InteractionRequest::Questionnaire { data, responder } => {
+                        let Some(question) = data.questions.first() else {
+                            let _ = responder.send(UserResponse::cancelled());
+                            continue;
+                        };
+
+                        let total_questions = data.questions.len();
+                        let title = data.title.clone();
+
+                        let (question_type, options) = match &question.kind {
+                            crate::tools::questionnaire::QuestionType::SingleSelect {
+                                options,
+                                ..
+                            } => (
+                                crate::ui_backend::questionnaire::QuestionType::SingleChoice,
+                                options
+                                    .iter()
+                                    .map(|opt| crate::ui_backend::questionnaire::QuestionOption {
+                                        text: opt.label.clone(),
+                                        value: opt.value.clone(),
+                                    })
+                                    .collect(),
+                            ),
+                            crate::tools::questionnaire::QuestionType::MultiSelect {
+                                options,
+                                ..
+                            } => (
+                                crate::ui_backend::questionnaire::QuestionType::MultipleChoice,
+                                options
+                                    .iter()
+                                    .map(|opt| crate::ui_backend::questionnaire::QuestionOption {
+                                        text: opt.label.clone(),
+                                        value: opt.value.clone(),
+                                    })
+                                    .collect(),
+                            ),
+                            crate::tools::questionnaire::QuestionType::FreeText { .. } => (
+                                crate::ui_backend::questionnaire::QuestionType::FreeText,
+                                vec![],
+                            ),
+                        };
+
+                        // Create state for first question with multi-question info
+                        let question_state = QuestionnaireState::new_multi(
+                            title,
+                            question.id.clone(),
+                            question.text.clone(),
+                            question_type,
+                            options,
+                            0,               // current index
+                            total_questions, // total
+                        );
+                        state.set_active_questionnaire(Some(question_state));
+
+                        // Store full questionnaire for multi-question navigation
+                        let mut pending_guard = pending_questionnaire.lock().await;
+                        *pending_guard = Some(data);
+
+                        let mut guard = questionnaire_responder.lock().await;
+                        *guard = Some(responder);
+                    }
+                    InteractionRequest::Approval { request, responder } => {
+                        let risk_level = match request.risk_level {
+                            crate::tools::risk::RiskLevel::ReadOnly => {
+                                crate::ui_backend::approval::RiskLevel::Safe
+                            }
+                            crate::tools::risk::RiskLevel::Write => {
+                                crate::ui_backend::approval::RiskLevel::Write
+                            }
+                            crate::tools::risk::RiskLevel::Risky => {
+                                crate::ui_backend::approval::RiskLevel::Risky
+                            }
+                            crate::tools::risk::RiskLevel::Dangerous => {
+                                crate::ui_backend::approval::RiskLevel::Dangerous
+                            }
+                        };
+
+                        let suggested_patterns: Vec<
+                            crate::ui_backend::approval::ApprovalPatternOption,
+                        > = request
+                            .suggested_patterns
+                            .into_iter()
+                            .map(
+                                |pattern| crate::ui_backend::approval::ApprovalPatternOption {
+                                    pattern: pattern.pattern,
+                                    match_type: pattern.match_type,
+                                    description: pattern.description,
+                                },
+                            )
+                            .collect();
+                        let mut approval_state = ApprovalCardState::new(
+                            request.tool.clone(),
+                            risk_level,
+                            format!("Approval required for {}", request.tool),
+                            request.command.clone(),
+                            Vec::new(),
+                            suggested_patterns,
+                        );
+                        if let Some(idx) = approval_state
+                            .suggested_patterns
+                            .iter()
+                            .position(|p| matches!(p.match_type, crate::tools::MatchType::Exact))
+                        {
+                            approval_state.selected_pattern = idx;
+                        }
+                        state.set_pending_approval(Some(approval_state));
+                        state.set_active_modal(Some(crate::ui_backend::ModalType::Approval));
+                        state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+
+                        let mut guard = approval_responder.lock().await;
+                        *guard = Some(responder);
+                    }
+                }
+            }
+        });
+    }
+
+    async fn send_approval_response(&self, choice: ApprovalChoice) {
+        let mut guard = self.approval_responder.lock().await;
+        let Some(responder) = guard.take() else {
+            return;
+        };
+        let response = match choice {
+            ApprovalChoice::ApproveOnce => ApprovalResponse::approve_once(),
+            ApprovalChoice::ApproveSession => {
+                if let Some(pattern) = self.selected_approval_pattern().await {
+                    ApprovalResponse::approve_session(pattern)
+                } else {
+                    ApprovalResponse::approve_once()
+                }
+            }
+            ApprovalChoice::ApproveAlways => {
+                if let Some(pattern) = self.selected_approval_pattern().await {
+                    ApprovalResponse::approve_always(pattern)
+                } else {
+                    ApprovalResponse::approve_once()
+                }
+            }
+            ApprovalChoice::Deny => ApprovalResponse::deny(),
+            ApprovalChoice::DenyAlways => {
+                if let Some(pattern) = self.selected_approval_pattern().await {
+                    ApprovalResponse::deny_always(pattern)
+                } else {
+                    ApprovalResponse::deny()
+                }
+            }
+        };
+        let _ = responder.send(response);
+    }
+
+    async fn selected_approval_pattern(&self) -> Option<crate::tools::ApprovalPattern> {
+        let approval = self.service.state().pending_approval()?;
+        let option = approval.suggested_patterns.get(approval.selected_pattern)?;
+        Some(crate::tools::ApprovalPattern::new(
+            approval.operation,
+            option.pattern.clone(),
+            option.match_type,
+        ))
+    }
+
+    async fn send_questionnaire_response(&self, state: &SharedState) {
+        let Some(questionnaire) = state.active_questionnaire() else {
+            return;
+        };
+
+        // Build the answer for current question
+        let (answer, display_answer) = self.build_answer(&questionnaire);
+
+        // Collect the answered question
+        let answered = crate::ui_backend::questionnaire::AnsweredQuestion {
+            question_id: questionnaire.question_id.clone(),
+            question_text: questionnaire.question.clone(),
+            answer_display: display_answer.clone(),
+            answer_value: match &answer {
+                AnswerValue::Single(v) => serde_json::json!(v),
+                AnswerValue::Multi(v) => serde_json::json!(v),
+            },
+        };
+
+        // Get current state for multi-question tracking
+        let current_index = questionnaire.current_question_index;
+        let total_questions = questionnaire.total_questions;
+        let title = questionnaire.title.clone();
+        let mut collected = questionnaire.collected_answers.clone();
+        collected.push(answered.clone());
+
+        // Check if there are more questions
+        let pending_guard = self.pending_questionnaire.lock().await;
+        let has_more = if let Some(ref pending) = *pending_guard {
+            current_index + 1 < pending.questions.len()
+        } else {
+            false
+        };
+
+        if has_more {
+            // More questions - advance to next question
+            let pending = pending_guard.as_ref().unwrap();
+            let next_index = current_index + 1;
+            let next_question = &pending.questions[next_index];
+
+            let (question_type, options) = match &next_question.kind {
+                crate::tools::questionnaire::QuestionType::SingleSelect { options, .. } => (
+                    crate::ui_backend::questionnaire::QuestionType::SingleChoice,
+                    options
+                        .iter()
+                        .map(|opt| crate::ui_backend::questionnaire::QuestionOption {
+                            text: opt.label.clone(),
+                            value: opt.value.clone(),
+                        })
+                        .collect(),
+                ),
+                crate::tools::questionnaire::QuestionType::MultiSelect { options, .. } => (
+                    crate::ui_backend::questionnaire::QuestionType::MultipleChoice,
+                    options
+                        .iter()
+                        .map(|opt| crate::ui_backend::questionnaire::QuestionOption {
+                            text: opt.label.clone(),
+                            value: opt.value.clone(),
+                        })
+                        .collect(),
+                ),
+                crate::tools::questionnaire::QuestionType::FreeText { .. } => (
+                    crate::ui_backend::questionnaire::QuestionType::FreeText,
+                    vec![],
+                ),
+            };
+
+            // Create state for next question, preserving collected answers
+            let mut next_state = QuestionnaireState::new_multi(
+                title,
+                next_question.id.clone(),
+                next_question.text.clone(),
+                question_type,
+                options,
+                next_index,
+                total_questions,
+            );
+            next_state.collected_answers = collected;
+            state.set_active_questionnaire(Some(next_state));
+
+            // Don't release the lock - we still have more questions
+            drop(pending_guard);
+        } else {
+            // Last question - show summary and send all answers
+            drop(pending_guard);
+
+            // Build visual feedback showing all answers
+            let mut summary_lines = vec![format!(
+                "📝 **{}**",
+                if title.is_empty() {
+                    "Questionnaire"
+                } else {
+                    &title
+                }
+            )];
+            for ans in &collected {
+                summary_lines.push(format!(
+                    "**Q:** {}\n**A:** {}",
+                    ans.question_text, ans.answer_display
+                ));
+            }
+            let summary = summary_lines.join("\n\n");
+
+            state.add_message(crate::ui_backend::Message {
+                role: crate::ui_backend::MessageRole::User,
+                content: summary,
+                timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                collapsed: false,
+                thinking: None,
+                tool_calls: Vec::new(),
+                segments: Vec::new(),
+            });
+
+            // Build response with all answers
+            let mut all_answers = std::collections::HashMap::new();
+            for ans in &collected {
+                let answer_val = match ans.answer_value.clone() {
+                    serde_json::Value::Array(arr) => {
+                        let values: Vec<String> = arr
+                            .into_iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect();
+                        AnswerValue::Multi(values)
+                    }
+                    serde_json::Value::String(s) => AnswerValue::Single(s),
+                    other => AnswerValue::Single(other.to_string()),
+                };
+                all_answers.insert(ans.question_id.clone(), answer_val);
+            }
+            let response = UserResponse::with_answers(all_answers);
+
+            // Clear the questionnaire state and pending data
+            state.set_active_questionnaire(None);
+            let mut pending_guard = self.pending_questionnaire.lock().await;
+            *pending_guard = None;
+
+            // Send response back to tool
+            let mut guard = self.questionnaire_responder.lock().await;
+            if let Some(responder) = guard.take() {
+                let _ = responder.send(response);
+            }
+        }
+    }
+
+    /// Build answer value and display text from current questionnaire state
+    fn build_answer(&self, questionnaire: &QuestionnaireState) -> (AnswerValue, String) {
+        match questionnaire.question_type {
+            crate::ui_backend::questionnaire::QuestionType::SingleChoice => {
+                if questionnaire.other_selected && !questionnaire.other_text.trim().is_empty() {
+                    let custom = questionnaire.other_text.trim().to_string();
+                    (
+                        AnswerValue::Single(format!("other:{}", custom)),
+                        format!("Other: {}", custom),
+                    )
+                } else {
+                    let (value, label) = questionnaire
+                        .selected
+                        .first()
+                        .and_then(|idx| {
+                            questionnaire
+                                .options
+                                .get(*idx)
+                                .map(|opt| (opt.value.clone(), opt.text.clone()))
+                        })
+                        .unwrap_or_default();
+                    (AnswerValue::Single(value), label)
+                }
+            }
+            crate::ui_backend::questionnaire::QuestionType::MultipleChoice => {
+                let mut values: Vec<String> = Vec::new();
+                let mut labels: Vec<String> = Vec::new();
+
+                for idx in &questionnaire.selected {
+                    if let Some(opt) = questionnaire.options.get(*idx) {
+                        values.push(opt.value.clone());
+                        labels.push(opt.text.clone());
+                    }
+                }
+
+                if questionnaire.other_selected && !questionnaire.other_text.trim().is_empty() {
+                    let custom = questionnaire.other_text.trim().to_string();
+                    values.push(format!("other:{}", custom));
+                    labels.push(format!("Other: {}", custom));
+                }
+
+                (AnswerValue::Multi(values), labels.join(", "))
+            }
+            crate::ui_backend::questionnaire::QuestionType::FreeText => {
+                let text = questionnaire.free_text_answer.clone();
+                (AnswerValue::Single(text.clone()), text)
+            }
+        }
+    }
+
     /// Handle a user command
     async fn handle_command(&mut self, command: Command) -> Result<()> {
+        // Log TUI command with correlation_id if available
+        if let Some(correlation_id) = self.service.state().current_correlation_id() {
+            if let Some(logger) = crate::debug_logger() {
+                let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                    correlation_id,
+                    crate::LogCategory::Tui,
+                    "command_processing",
+                )
+                .with_data(serde_json::json!({
+                    "command": format!("{:?}", command)
+                }));
+                logger.log(entry);
+            }
+        }
+
+        if let Command::QuestionSubmit = command {
+            self.send_questionnaire_response(self.service.state()).await;
+        }
+        match command {
+            Command::ApproveOperation => {
+                self.send_approval_response(ApprovalChoice::ApproveOnce)
+                    .await;
+            }
+            Command::ApproveSession => {
+                self.send_approval_response(ApprovalChoice::ApproveSession)
+                    .await;
+            }
+            Command::ApproveAlways => {
+                self.send_approval_response(ApprovalChoice::ApproveAlways)
+                    .await;
+            }
+            Command::DenyOperation => {
+                self.send_approval_response(ApprovalChoice::Deny).await;
+            }
+            Command::DenyAlways => {
+                self.send_approval_response(ApprovalChoice::DenyAlways)
+                    .await;
+            }
+            Command::CloseModal => {
+                if self.service.state().active_modal()
+                    == Some(crate::ui_backend::ModalType::Approval)
+                {
+                    self.send_approval_response(ApprovalChoice::Deny).await;
+
+                    // Add a message showing the user skipped the approval
+                    self.service
+                        .state()
+                        .add_message(crate::ui_backend::Message {
+                            role: crate::ui_backend::MessageRole::System,
+                            content: "ℹ️ Operation skipped by user".to_string(),
+                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            collapsed: false,
+                            thinking: None,
+                            tool_calls: Vec::new(),
+                            segments: Vec::new(),
+                        });
+                }
+            }
+            _ => {}
+        }
+
         // Handle Quit with interruption if processing
         if let Command::Quit = command {
             // If LLM is processing, interrupt first
@@ -133,7 +585,18 @@ impl<B: Backend> TuiController<B> {
                             // Load models for this provider and open model picker
                             let models = self.service.get_models(&provider_id).await;
                             state.set_available_models(models);
-                            state.set_model_picker_selected(0);
+
+                            // Initialize selection to current model if applicable
+                            let current_model = state.current_model();
+                            let models = state.available_models();
+                            let mut selected = 0;
+                            if let Some(current) = current_model {
+                                if let Some(idx) = models.iter().position(|m| m.id == current) {
+                                    selected = idx;
+                                }
+                            }
+                            state.set_model_picker_selected(selected);
+
                             state.set_model_picker_filter(String::new());
                         }
                     }
@@ -146,7 +609,7 @@ impl<B: Backend> TuiController<B> {
             }
         }
 
-        let state = self.service.state();
+        let state = self.service.state().clone();
 
         // Special handling for modal toggle commands
         match &command {
@@ -170,6 +633,53 @@ impl<B: Backend> TuiController<B> {
                 }
                 state.set_active_modal(None);
                 state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
+                return Ok(());
+            }
+            Command::DeleteSessionSelected => {
+                if state.active_modal() == Some(crate::ui_backend::ModalType::SessionPicker) {
+                    let all_sessions = state.available_sessions();
+                    let filter = state.session_picker_filter();
+                    let filtered_sessions: Vec<_> = if filter.is_empty() {
+                        all_sessions
+                    } else {
+                        let filter_lower = filter.to_lowercase();
+                        all_sessions
+                            .into_iter()
+                            .filter(|s| {
+                                s.name.to_lowercase().contains(&filter_lower)
+                                    || s.id.to_lowercase().contains(&filter_lower)
+                            })
+                            .collect()
+                    };
+
+                    let selected = state.session_picker_selected();
+                    if let Some(session_meta) = filtered_sessions.get(selected) {
+                        if let Err(err) = self.service.delete_session(&session_meta.id).await {
+                            state.set_error_notification(Some(
+                                crate::ui_backend::ErrorNotification {
+                                    message: format!("Failed to delete session: {}", err),
+                                    level: crate::ui_backend::ErrorLevel::Error,
+                                    timestamp: chrono::Local::now(),
+                                },
+                            ));
+                            return Ok(());
+                        }
+
+                        if let Ok(mut sessions) = self.service.list_sessions() {
+                            let current_id = state.session().map(|s| s.session_id);
+                            for session in &mut sessions {
+                                session.is_current = current_id
+                                    .as_deref()
+                                    .map(|id| id == session.id)
+                                    .unwrap_or(false);
+                            }
+                            state.set_available_sessions(sessions);
+                        }
+
+                        let new_selected = selected.saturating_sub(1);
+                        state.set_session_picker_selected(new_selected);
+                    }
+                }
                 return Ok(());
             }
             Command::ConfirmModal => {
@@ -203,8 +713,27 @@ impl<B: Backend> TuiController<B> {
                             // Load models for this provider first
                             let models = self.service.get_models(&provider_id).await;
 
-                            // Auto-select first model as default
-                            let default_model_id = models.first().map(|m| m.id.clone());
+                            if let Some(logger) = crate::debug_logger() {
+                                let correlation_id = state
+                                    .current_correlation_id()
+                                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                                let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                    correlation_id,
+                                    crate::LogCategory::Tui,
+                                    "provider_picker_confirm",
+                                )
+                                .with_data(serde_json::json!({
+                                    "filter": filter,
+                                    "selected_index": selected,
+                                    "provider_id": provider_id.clone(),
+                                    "provider_name": provider_info.name,
+                                    "active_modal": "ProviderPicker"
+                                }));
+                                logger.log(entry);
+                            }
+
+                            // Auto-select first model as default if available
+                            let default_model = models.first().cloned();
 
                             // Set the provider
                             self.service
@@ -212,16 +741,27 @@ impl<B: Backend> TuiController<B> {
                                 .await?;
 
                             // Set default model if available
-                            if let Some(model_id) = default_model_id {
+                            if let Some(ref model_info) = default_model {
                                 self.service
-                                    .handle_command(Command::SelectModel(model_id))
+                                    .handle_command(Command::SelectModel(model_info.id.clone()))
                                     .await?;
                             }
 
                             // Update state with models and open model picker for user to confirm/change
                             let state = self.service.state();
                             state.set_available_models(models);
-                            state.set_model_picker_selected(0);
+
+                            // Initialize selection to current model if it exists in the list
+                            let current_model = state.current_model();
+                            let models = state.available_models();
+                            let mut selected = 0;
+                            if let Some(current) = current_model {
+                                if let Some(idx) = models.iter().position(|m| m.id == current) {
+                                    selected = idx;
+                                }
+                            }
+                            state.set_model_picker_selected(selected);
+
                             state.set_model_picker_filter(String::new());
                             state.set_active_modal(Some(crate::ui_backend::ModalType::ModelPicker));
                         }
@@ -246,12 +786,29 @@ impl<B: Backend> TuiController<B> {
                         if let Some(model_info) = filtered_models.get(selected) {
                             let model_id = model_info.id.clone();
                             let model_name = model_info.name.clone();
+
+                            if let Some(logger) = crate::debug_logger() {
+                                let correlation_id = state
+                                    .current_correlation_id()
+                                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                                let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                    correlation_id,
+                                    crate::LogCategory::Tui,
+                                    "model_picker_confirm",
+                                )
+                                .with_data(serde_json::json!({
+                                    "filter": filter,
+                                    "selected_index": selected,
+                                    "model_id": model_id.clone(),
+                                    "model_name": model_name.clone(),
+                                    "active_modal": "ModelPicker"
+                                }));
+                                logger.log(entry);
+                            }
+
                             self.service
                                 .handle_command(Command::SelectModel(model_id))
                                 .await?;
-                            // Set the display name in state for status bar
-                            let state = self.service.state();
-                            state.set_model(Some(model_name));
                         }
                         let state = self.service.state();
                         state.set_active_modal(None);
@@ -328,6 +885,34 @@ impl<B: Backend> TuiController<B> {
                         let selected = state.model_picker_selected();
                         if selected > 0 && selected <= filtered.len() {
                             state.set_model_picker_selected(selected - 1);
+                        }
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::SessionPicker) => {
+                        let all_sessions = state.available_sessions();
+                        let filter = state.session_picker_filter();
+                        let filtered_sessions: Vec<_> = if filter.is_empty() {
+                            all_sessions
+                        } else {
+                            let filter_lower = filter.to_lowercase();
+                            all_sessions
+                                .into_iter()
+                                .filter(|s| {
+                                    s.name.to_lowercase().contains(&filter_lower)
+                                        || s.id.to_lowercase().contains(&filter_lower)
+                                })
+                                .collect()
+                        };
+
+                        let selected = state.session_picker_selected();
+                        if let Some(session_meta) = filtered_sessions.get(selected) {
+                            // Use Command::SwitchSession to properly switch sessions
+                            // This triggers the async handler that loads all session data
+                            self.service
+                                .handle_command(Command::SwitchSession(session_meta.id.clone()))
+                                .await?;
+                            state.set_active_modal(None);
+                            state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
                         }
                         return Ok(());
                     }
@@ -487,13 +1072,36 @@ impl<B: Backend> TuiController<B> {
                 // Load providers and initialize picker state
                 let providers = self.service.get_providers().await;
                 state.set_available_providers(providers);
-                state.set_provider_picker_selected(0);
+
+                // Initialize selection to current provider
+                let current_provider = state.current_provider();
+                let providers = state.available_providers();
+                let mut selected = 0;
+                if let Some(current) = current_provider {
+                    if let Some(idx) = providers.iter().position(|p| p.id == current) {
+                        selected = idx;
+                    }
+                }
+                state.set_provider_picker_selected(selected);
+
                 state.set_provider_picker_filter(String::new());
                 state.set_active_modal(Some(crate::ui_backend::ModalType::ProviderPicker));
                 state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
                 return Ok(());
             }
             Command::OpenModelPicker => {
+                // Initialize selection to current model
+                let current_model = state.current_model();
+                let models = state.available_models();
+                let mut selected = 0;
+                if let Some(current) = current_model {
+                    if let Some(idx) = models.iter().position(|m| m.id == current) {
+                        selected = idx;
+                    }
+                }
+                state.set_model_picker_selected(selected);
+                state.set_model_picker_filter(String::new());
+
                 state.set_active_modal(Some(crate::ui_backend::ModalType::ModelPicker));
                 state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
                 return Ok(());
@@ -524,20 +1132,28 @@ impl<B: Backend> TuiController<B> {
             }
             Command::ScrollUp => {
                 // Scroll up in messages area
+                let total_lines = state.messages_total_lines();
+                let viewport_height = state.messages_viewport_height();
+                let max_offset = total_lines.saturating_sub(viewport_height);
                 let current_offset = state.messages_scroll_offset();
-                if current_offset > 0 {
-                    state.set_messages_scroll_offset(current_offset - 1);
+                let normalized = if current_offset == usize::MAX {
+                    max_offset
+                } else {
+                    current_offset
+                };
+                if normalized > 0 {
+                    state.set_messages_scroll_offset(normalized.saturating_sub(1));
                 }
                 return Ok(());
             }
             Command::ScrollDown => {
                 // Scroll down in messages area
                 let current_offset = state.messages_scroll_offset();
-                let message_count = state.messages().len();
-                // Allow scrolling but limit to reasonable bounds
-                if current_offset < message_count.saturating_sub(1) {
-                    state.set_messages_scroll_offset(current_offset + 1);
-                }
+                let total_lines = state.messages_total_lines();
+                let viewport_height = state.messages_viewport_height();
+                let max_offset = total_lines.saturating_sub(viewport_height);
+                let next = current_offset.saturating_add(1).min(max_offset);
+                state.set_messages_scroll_offset(next);
                 return Ok(());
             }
             Command::ToggleSidebarPanel(panel_idx) => {
@@ -546,24 +1162,22 @@ impl<B: Backend> TuiController<B> {
                     let mut panels = state.sidebar_expanded_panels();
                     panels[*panel_idx] = !panels[*panel_idx];
                     state.set_sidebar_expanded_panels(panels);
+                    state.set_sidebar_selected_panel(*panel_idx);
                 }
                 return Ok(());
             }
             Command::SidebarUp => {
-                // Navigate up in sidebar
-                let current_panel = state.sidebar_selected_panel();
-                if current_panel > 0 {
-                    state.set_sidebar_selected_panel(current_panel - 1);
+                let panel = state.sidebar_selected_panel();
+                let current = state.sidebar_panel_scroll(panel);
+                if current > 0 {
+                    state.set_sidebar_panel_scroll(panel, current - 1);
                 }
                 return Ok(());
             }
             Command::SidebarDown => {
-                // Navigate down in sidebar
-                let current_panel = state.sidebar_selected_panel();
-                if current_panel < 3 {
-                    // 4 panels total (0-3)
-                    state.set_sidebar_selected_panel(current_panel + 1);
-                }
+                let panel = state.sidebar_selected_panel();
+                let current = state.sidebar_panel_scroll(panel);
+                state.set_sidebar_panel_scroll(panel, current + 1);
                 return Ok(());
             }
             Command::SidebarSelect => {
@@ -572,6 +1186,35 @@ impl<B: Backend> TuiController<B> {
                 let mut panels = state.sidebar_expanded_panels();
                 panels[panel_idx] = !panels[panel_idx];
                 state.set_sidebar_expanded_panels(panels);
+                return Ok(());
+            }
+            Command::QuestionCancel => {
+                // Cancel questionnaire and send "skipped" response to LLM
+                if state.active_questionnaire().is_some() {
+                    // Clear UI state
+                    state.set_active_questionnaire(None);
+
+                    // Clear pending questionnaire data
+                    let mut pending_guard = self.pending_questionnaire.lock().await;
+                    *pending_guard = None;
+
+                    // Send cancelled response back to the tool
+                    let mut guard = self.questionnaire_responder.lock().await;
+                    if let Some(responder) = guard.take() {
+                        let _ = responder.send(UserResponse::cancelled());
+                    }
+
+                    // Add a message showing the user skipped
+                    state.add_message(crate::ui_backend::Message {
+                        role: crate::ui_backend::MessageRole::System,
+                        content: "ℹ️ Question skipped by user".to_string(),
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        collapsed: false,
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                        segments: Vec::new(),
+                    });
+                }
                 return Ok(());
             }
             _ => {}
@@ -584,30 +1227,83 @@ impl<B: Backend> TuiController<B> {
     }
 
     /// Poll for async events (non-blocking)
+    /// Processes events in batches, but stops after ToolStarted to ensure
+    /// loading states are visible before completion events arrive.
     async fn poll_events(&mut self, state: &SharedState) -> Result<()> {
+        let mut events_processed = 0;
+        const MAX_EVENTS_PER_CYCLE: usize = 20; // Batch text chunks, but limit overall
+
         while let Ok(event) = self.event_rx.try_recv() {
+            events_processed += 1;
+
+            // Track if this is a ToolStarted event (we'll render after it)
+            let is_tool_started = matches!(&event, AppEvent::ToolStarted { .. });
             // Update state based on event type
             match &event {
                 AppEvent::LlmTextChunk(chunk) => {
                     state.append_streaming_content(chunk);
+                    state.scroll_to_bottom();
                 }
                 AppEvent::LlmThinkingChunk(chunk) => {
                     state.append_streaming_thinking(chunk);
+                    state.scroll_to_bottom();
                 }
-                AppEvent::LlmCompleted { text, .. } => {
+                AppEvent::LlmCompleted {
+                    text,
+                    input_tokens,
+                    output_tokens,
+                } => {
                     // Add assistant message with final text
                     use crate::ui_backend::{Message, MessageRole};
+                    let thinking_content = state.streaming_thinking();
                     let msg = Message {
                         role: MessageRole::Assistant,
                         content: text.clone(),
-                        thinking: None,
+                        thinking: thinking_content.clone(),
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        tool_calls: Vec::new(),
+                        segments: Vec::new(),
                     };
-                    state.add_message(msg);
+                    state.add_message(msg.clone());
+                    self.service.record_session_message(&msg).await;
+                    state.scroll_to_bottom();
+
+                    if let Some(thinking) = thinking_content {
+                        if !thinking.is_empty() {
+                            let thinking_msg = Message {
+                                role: MessageRole::Thinking,
+                                content: thinking,
+                                thinking: None,
+                                collapsed: true,
+                                timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                tool_calls: Vec::new(),
+                                segments: Vec::new(),
+                            };
+                            state.add_message(thinking_msg.clone());
+                            self.service.record_session_message(&thinking_msg).await;
+                            state.scroll_to_bottom();
+                        }
+                    }
 
                     // Clear streaming state
                     state.clear_streaming();
+
+                    // Update session cost (models.dev pricing)
+                    if let (Some(provider), Some(model_id)) =
+                        (state.current_provider(), state.current_model())
+                    {
+                        let cost = models_db()
+                            .calculate_cost(
+                                &provider,
+                                &model_id,
+                                *input_tokens as u32,
+                                *output_tokens as u32,
+                            )
+                            .await;
+                        state.add_session_cost(&model_id, cost);
+                        state.add_session_tokens(&model_id, *input_tokens + *output_tokens);
+                    }
 
                     // Refresh sidebar data (updates costs and tokens)
                     self.service.refresh_sidebar_data().await;
@@ -628,27 +1324,151 @@ impl<B: Backend> TuiController<B> {
                         thinking: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        tool_calls: Vec::new(),
+                        segments: Vec::new(),
                     };
-                    state.add_message(msg);
+                    state.add_message(msg.clone());
+                    self.service.record_session_message(&msg).await;
+                    state.scroll_to_bottom();
 
                     // Clear streaming state
                     state.clear_streaming();
                 }
-                AppEvent::ToolStarted { name, .. } => {
-                    // Add tool invocation message
+                AppEvent::ToolStarted { name, args } => {
+                    use crate::ui_backend::ActiveToolInfo;
                     use crate::ui_backend::{Message, MessageRole};
+
+                    // Collapse all previous tool messages before adding the new one
+                    state.collapse_all_tools_except_last();
+
+                    // Track active tool for loading indicator
+                    let tool_info = ActiveToolInfo::new(name.clone(), args.clone());
+                    let description = tool_info.description.clone();
+                    state.add_active_tool(tool_info);
+
+                    // Create a professional tool invocation message
+                    // Format: "⋯|tool_name|description"
+                    // Running tools will be rendered expanded by message_area
                     let msg = Message {
-                        role: MessageRole::System,
-                        content: format!("🔧 Executing tool: {}", name),
+                        role: MessageRole::Tool,
+                        content: format!("⋯|{}|{}", name, description),
                         thinking: None,
-                        collapsed: false,
+                        tool_calls: Vec::new(),
+                        segments: Vec::new(),
+                        collapsed: false, // Running tools are expanded (renderer also forces this)
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
-                    state.add_message(msg);
+                    state.add_message(msg.clone());
+                    self.service.record_session_message(&msg).await;
+                    state.scroll_to_bottom();
                 }
-                AppEvent::ToolCompleted { ref name, .. } => {
+                AppEvent::ToolCompleted { ref name, result } => {
+                    if name == "ask_user" {
+                        continue;
+                    }
+
+                    // Complete the active tool tracking
+                    state.complete_active_tool(name, result.clone(), true);
+                    state.cleanup_completed_tools();
+
+                    // Format the result nicely
+                    // Format: "✓|tool_name|result"
+                    let result_preview = if result.len() > 500 {
+                        format!("{}...", &result[..497])
+                    } else {
+                        result.clone()
+                    };
+
+                    // Update the existing tool message in-place (animation effect)
+                    // Keep the completed tool expanded initially, collapse all others
+                    let new_content = format!("✓|{}|{}", name, result_preview);
+                    state.update_tool_message(name, new_content, true); // Collapse completed tool
+                    state.collapse_all_tools_except_last(); // Make sure only most recent is visible
+                    state.scroll_to_bottom();
+
                     if name == "write_file" || name == "delete_file" || name == "shell" {
                         self.service.refresh_sidebar_data().await;
+                    }
+                }
+                AppEvent::ToolFailed { ref name, error } => {
+                    // Complete the active tool as failed
+                    state.complete_active_tool(name, error.clone(), false);
+                    state.cleanup_completed_tools();
+
+                    // Update the existing tool message in-place (animation effect)
+                    // Format: "✗|tool_name|error"
+                    let new_content = format!("✗|{}|{}", name, error);
+                    state.update_tool_message(name, new_content, true); // Collapse failed tool
+                    state.collapse_all_tools_except_last(); // Make sure only most recent is visible
+                    state.scroll_to_bottom();
+                }
+                AppEvent::SessionSwitched { session_id } => {
+                    // Load full session state from the switched session
+                    use crate::ui_backend::SessionService;
+                    if let Ok(session) = self.service.storage().load_session(session_id) {
+                        // Restore UI messages
+                        let ui_messages = SessionService::session_messages_to_ui(&session);
+                        state.clear_messages();
+                        for msg in ui_messages {
+                            state.add_message(msg);
+                        }
+                        state.scroll_to_bottom();
+
+                        // Restore provider and model
+                        if !session.provider.is_empty() {
+                            state.set_provider(Some(session.provider.clone()));
+                        }
+                        if !session.model.is_empty() {
+                            state.set_model(Some(session.model.clone()));
+                        }
+
+                        // Load available models for the provider
+                        if !session.provider.is_empty() {
+                            let models = self.service.get_models(&session.provider).await;
+                            state.set_available_models(models);
+                        }
+
+                        // Update session info in state
+                        let session_name = if session.name.is_empty() {
+                            format!("Session {}", session.created_at.format("%Y-%m-%d %H:%M"))
+                        } else {
+                            session.name.clone()
+                        };
+                        let branch = crate::tui_new::git_info::get_current_branch(
+                            self.service.working_dir(),
+                        );
+                        state.set_session(Some(crate::ui_backend::SessionInfo {
+                            session_id: session.id.clone(),
+                            branch,
+                            total_cost: session.total_cost,
+                            model_count: 1,
+                            created_at: session.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        }));
+
+                        // Restore agent mode from session
+                        if !session.mode.is_empty() {
+                            let mode = session
+                                .mode
+                                .parse::<crate::core::types::AgentMode>()
+                                .unwrap_or_default();
+                            state.set_agent_mode(mode);
+                        }
+
+                        // Update LLM provider for conversation
+                        if !session.provider.is_empty() {
+                            if let Err(e) = self
+                                .service
+                                .set_provider_internal(&session.provider, Some(&session.model))
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to update LLM provider on session switch: {}",
+                                    e
+                                );
+                            }
+                        }
+
+                        tracing::info!("Session switched: {} ({})", session_name, session.id);
                     }
                 }
                 _ => {}
@@ -656,6 +1476,17 @@ impl<B: Backend> TuiController<B> {
 
             // Let renderer handle the event (for triggering refresh)
             self.renderer.handle_event(&event, state)?;
+
+            // Stop after ToolStarted to ensure loading state is rendered
+            // before ToolCompleted arrives and updates the message
+            if is_tool_started {
+                break;
+            }
+
+            // Also stop if we've processed too many events (prevent UI freeze)
+            if events_processed >= MAX_EVENTS_PER_CYCLE {
+                break;
+            }
         }
         Ok(())
     }
@@ -680,7 +1511,7 @@ impl<B: Backend> TuiController<B> {
 
     /// Handle slash commands (e.g., /theme, /help, /model)
     async fn handle_slash_command(&mut self, text: &str) -> Result<()> {
-        let state = self.service.state();
+        let state = self.service.state().clone();
 
         match text.trim() {
             "/help" | "/?" => {
@@ -691,7 +1522,18 @@ impl<B: Backend> TuiController<B> {
                 // Load providers and initialize picker state
                 let providers = self.service.get_providers().await;
                 state.set_available_providers(providers);
-                state.set_provider_picker_selected(0);
+
+                // Initialize selection to current provider
+                let current_provider = state.current_provider();
+                let providers = state.available_providers();
+                let mut selected = 0;
+                if let Some(current) = current_provider {
+                    if let Some(idx) = providers.iter().position(|p| p.id == current) {
+                        selected = idx;
+                    }
+                }
+                state.set_provider_picker_selected(selected);
+
                 state.set_provider_picker_filter(String::new());
                 state.set_active_modal(Some(crate::ui_backend::ModalType::ProviderPicker));
                 state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
@@ -736,6 +1578,8 @@ impl<B: Backend> TuiController<B> {
                                     info.type_icon, info.filename, info.size_display
                                 ),
                                 thinking: None,
+                                tool_calls: Vec::new(),
+                                segments: Vec::new(),
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -747,6 +1591,8 @@ impl<B: Backend> TuiController<B> {
                                 role: MessageRole::System,
                                 content: format!("Failed to attach file: {}", e),
                                 thinking: None,
+                                tool_calls: Vec::new(),
+                                segments: Vec::new(),
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -771,6 +1617,8 @@ impl<B: Backend> TuiController<B> {
                     role: MessageRole::System,
                     content: "Cleared all attachments.".to_string(),
                     thinking: None,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -792,6 +1640,8 @@ impl<B: Backend> TuiController<B> {
                     role: MessageRole::System,
                     content: "Chat cleared.".to_string(),
                     thinking: None,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -815,6 +1665,8 @@ impl<B: Backend> TuiController<B> {
                             .to_string()
                     },
                     thinking: None,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -829,6 +1681,8 @@ impl<B: Backend> TuiController<B> {
                     role: MessageRole::System,
                     content: "Context compaction triggered. Auto-compaction will manage context window usage.".to_string(),
                     thinking: None,
+                        tool_calls: Vec::new(),
+                        segments: Vec::new(),
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -846,6 +1700,8 @@ impl<B: Backend> TuiController<B> {
                         role: MessageRole::System,
                         content: "No tools available for current agent mode.".to_string(),
                         thinking: None,
+                        tool_calls: Vec::new(),
+                        segments: Vec::new(),
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -866,27 +1722,21 @@ impl<B: Backend> TuiController<B> {
                 return Ok(());
             }
             "/sessions" => {
-                // List all sessions
                 match self.service.list_sessions() {
-                    Ok(sessions) => {
-                        let mut content = String::from("Available sessions:\n");
-                        for (idx, session) in sessions.iter().enumerate() {
-                            content.push_str(&format!(
-                                "  {}. {} ({})\n",
-                                idx + 1,
-                                session.id,
-                                session.created_at
-                            ));
+                    Ok(mut sessions) => {
+                        let current_id = state.session().map(|s| s.session_id);
+                        for session in &mut sessions {
+                            session.is_current = current_id
+                                .as_deref()
+                                .map(|id| id == session.id)
+                                .unwrap_or(false);
                         }
-                        use crate::ui_backend::{Message, MessageRole};
-                        let msg = Message {
-                            role: MessageRole::System,
-                            content,
-                            thinking: None,
-                            collapsed: false,
-                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                        };
-                        state.add_message(msg);
+                        let selected = sessions.iter().position(|s| s.is_current).unwrap_or(0);
+                        state.set_available_sessions(sessions);
+                        state.set_session_picker_selected(selected);
+                        state.set_session_picker_filter(String::new());
+                        state.set_active_modal(Some(crate::ui_backend::ModalType::SessionPicker));
+                        state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
                     }
                     Err(e) => {
                         use crate::ui_backend::{Message, MessageRole};
@@ -894,12 +1744,19 @@ impl<B: Backend> TuiController<B> {
                             role: MessageRole::System,
                             content: format!("Failed to list sessions: {}", e),
                             thinking: None,
+                            tool_calls: Vec::new(),
+                            segments: Vec::new(),
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
                         state.add_message(msg);
                     }
                 }
+                state.clear_input();
+                return Ok(());
+            }
+            "/new" => {
+                self.service.handle_command(Command::NewSession).await?;
                 state.clear_input();
                 return Ok(());
             }
@@ -921,6 +1778,8 @@ impl<B: Backend> TuiController<B> {
                                 role: MessageRole::System,
                                 content: format!("Switched to session: {}", session_id),
                                 thinking: None,
+                                tool_calls: Vec::new(),
+                                segments: Vec::new(),
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -932,6 +1791,8 @@ impl<B: Backend> TuiController<B> {
                                 role: MessageRole::System,
                                 content: format!("Failed to switch session: {}", e),
                                 thinking: None,
+                                tool_calls: Vec::new(),
+                                segments: Vec::new(),
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -960,6 +1821,8 @@ impl<B: Backend> TuiController<B> {
                             role: MessageRole::System,
                             content: format!("Session exported to: {}", path),
                             thinking: None,
+                            tool_calls: Vec::new(),
+                            segments: Vec::new(),
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -971,6 +1834,8 @@ impl<B: Backend> TuiController<B> {
                             role: MessageRole::System,
                             content: format!("Failed to export session: {}", e),
                             thinking: None,
+                            tool_calls: Vec::new(),
+                            segments: Vec::new(),
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -1001,6 +1866,8 @@ impl<B: Backend> TuiController<B> {
                                     session.session_id, session.created_at
                                 ),
                                 thinking: None,
+                                tool_calls: Vec::new(),
+                                segments: Vec::new(),
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -1012,6 +1879,8 @@ impl<B: Backend> TuiController<B> {
                                 role: MessageRole::System,
                                 content: format!("Failed to import session: {}", e),
                                 thinking: None,
+                                tool_calls: Vec::new(),
+                                segments: Vec::new(),
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -1032,6 +1901,8 @@ impl<B: Backend> TuiController<B> {
                         text
                     ),
                     thinking: None,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };

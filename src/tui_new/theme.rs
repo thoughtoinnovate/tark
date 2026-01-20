@@ -24,18 +24,8 @@
 
 use ratatui::style::Color;
 
-/// Available theme presets
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ThemePreset {
-    #[default]
-    CatppuccinMocha,
-    Nord,
-    GithubDark,
-    Dracula,
-    OneDark,
-    GruvboxDark,
-    TokyoNight,
-}
+// Re-export ThemePreset from ui_backend
+pub use crate::ui_backend::ThemePreset;
 
 /// Theme colors for the TUI
 #[derive(Debug, Clone)]
@@ -71,6 +61,11 @@ pub struct Theme {
     pub thinking_fg: Color,
     pub question_fg: Color,
     pub command_fg: Color,
+
+    // Bubble background colors (derived from theme colors)
+    pub user_bubble_bg: Color,
+    pub agent_bubble_bg: Color,
+    pub thinking_bubble_bg: Color,
 }
 
 impl Default for Theme {
@@ -109,6 +104,11 @@ impl Theme {
             thinking_fg: Color::Rgb(249, 226, 175),
             question_fg: Color::Rgb(137, 220, 235),
             command_fg: Color::Rgb(166, 227, 161),
+
+            // Bubble backgrounds - blue-tinted for user, green-tinted for agent
+            user_bubble_bg: Color::Rgb(35, 40, 60),
+            agent_bubble_bg: Color::Rgb(35, 50, 45),
+            thinking_bubble_bg: Color::Rgb(42, 43, 55),
         }
     }
 
@@ -141,6 +141,11 @@ impl Theme {
             thinking_fg: Color::Rgb(235, 203, 139),
             question_fg: Color::Rgb(136, 192, 208),
             command_fg: Color::Rgb(163, 190, 140),
+
+            // Nord bubble backgrounds - frost blue for user, aurora green for agent
+            user_bubble_bg: Color::Rgb(46, 55, 70),
+            agent_bubble_bg: Color::Rgb(50, 60, 55),
+            thinking_bubble_bg: Color::Rgb(55, 62, 75),
         }
     }
 
@@ -173,6 +178,11 @@ impl Theme {
             thinking_fg: Color::Rgb(241, 250, 140),
             question_fg: Color::Rgb(139, 233, 253),
             command_fg: Color::Rgb(80, 250, 123),
+
+            // Dracula bubble backgrounds - purple-tinted for user, green-tinted for agent
+            user_bubble_bg: Color::Rgb(55, 45, 70),
+            agent_bubble_bg: Color::Rgb(40, 55, 45),
+            thinking_bubble_bg: Color::Rgb(55, 55, 65),
         }
     }
 
@@ -205,6 +215,11 @@ impl Theme {
             thinking_fg: Color::Rgb(201, 137, 16),
             question_fg: Color::Rgb(125, 196, 228),
             command_fg: Color::Rgb(87, 171, 90),
+
+            // GitHub bubble backgrounds - blue-tinted for user, green-tinted for agent
+            user_bubble_bg: Color::Rgb(20, 30, 45),
+            agent_bubble_bg: Color::Rgb(20, 35, 28),
+            thinking_bubble_bg: Color::Rgb(30, 35, 45),
         }
     }
 
@@ -237,6 +252,11 @@ impl Theme {
             thinking_fg: Color::Rgb(229, 192, 123),
             question_fg: Color::Rgb(86, 182, 194),
             command_fg: Color::Rgb(152, 195, 121),
+
+            // One Dark bubble backgrounds - blue-tinted for user, green-tinted for agent
+            user_bubble_bg: Color::Rgb(40, 50, 65),
+            agent_bubble_bg: Color::Rgb(45, 55, 48),
+            thinking_bubble_bg: Color::Rgb(50, 55, 62),
         }
     }
 
@@ -269,6 +289,11 @@ impl Theme {
             thinking_fg: Color::Rgb(250, 189, 47),
             question_fg: Color::Rgb(131, 165, 152),
             command_fg: Color::Rgb(184, 187, 38),
+
+            // Gruvbox bubble backgrounds - aqua-tinted for user, olive-tinted for agent
+            user_bubble_bg: Color::Rgb(50, 55, 55),
+            agent_bubble_bg: Color::Rgb(55, 55, 40),
+            thinking_bubble_bg: Color::Rgb(55, 50, 45),
         }
     }
 
@@ -301,6 +326,11 @@ impl Theme {
             thinking_fg: Color::Rgb(224, 175, 104),
             question_fg: Color::Rgb(125, 207, 255),
             command_fg: Color::Rgb(158, 206, 106),
+
+            // Tokyo Night bubble backgrounds - blue-tinted for user, green-tinted for agent
+            user_bubble_bg: Color::Rgb(30, 35, 55),
+            agent_bubble_bg: Color::Rgb(32, 45, 38),
+            thinking_bubble_bg: Color::Rgb(38, 40, 52),
         }
     }
 
@@ -308,56 +338,17 @@ impl Theme {
     pub fn from_preset(preset: ThemePreset) -> Self {
         match preset {
             ThemePreset::CatppuccinMocha => Self::catppuccin_mocha(),
+            ThemePreset::CatppuccinMacchiato => Self::catppuccin_mocha(), // TODO: implement proper theme
+            ThemePreset::CatppuccinFrappe => Self::catppuccin_mocha(), // TODO: implement proper theme
+            ThemePreset::CatppuccinLatte => Self::catppuccin_mocha(), // TODO: implement proper theme
             ThemePreset::Nord => Self::nord(),
-            ThemePreset::GithubDark => Self::github_dark(),
             ThemePreset::Dracula => Self::dracula(),
             ThemePreset::OneDark => Self::one_dark(),
             ThemePreset::GruvboxDark => Self::gruvbox_dark(),
+            ThemePreset::GruvboxLight => Self::gruvbox_dark(), // TODO: implement proper theme
+            ThemePreset::SolarizedDark => Self::nord(),        // TODO: implement proper theme
+            ThemePreset::SolarizedLight => Self::nord(),       // TODO: implement proper theme
             ThemePreset::TokyoNight => Self::tokyo_night(),
-        }
-    }
-}
-
-impl ThemePreset {
-    /// Get display name for theme preset
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            ThemePreset::CatppuccinMocha => "Catppuccin Mocha",
-            ThemePreset::Nord => "Nord",
-            ThemePreset::GithubDark => "GitHub Dark",
-            ThemePreset::Dracula => "Dracula",
-            ThemePreset::OneDark => "One Dark",
-            ThemePreset::GruvboxDark => "Gruvbox Dark",
-            ThemePreset::TokyoNight => "Tokyo Night",
-        }
-    }
-
-    /// Get all available presets
-    pub fn all() -> Vec<ThemePreset> {
-        vec![
-            ThemePreset::CatppuccinMocha,
-            ThemePreset::Nord,
-            ThemePreset::Dracula,
-            ThemePreset::GithubDark,
-            ThemePreset::OneDark,
-            ThemePreset::GruvboxDark,
-            ThemePreset::TokyoNight,
-        ]
-    }
-
-    /// Parse theme preset from string (for config/CLI)
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "catppuccin" | "catppuccin-mocha" | "catppuccin_mocha" => {
-                Some(ThemePreset::CatppuccinMocha)
-            }
-            "nord" => Some(ThemePreset::Nord),
-            "github" | "github-dark" | "github_dark" => Some(ThemePreset::GithubDark),
-            "dracula" => Some(ThemePreset::Dracula),
-            "onedark" | "one-dark" | "one_dark" => Some(ThemePreset::OneDark),
-            "gruvbox" | "gruvbox-dark" | "gruvbox_dark" => Some(ThemePreset::GruvboxDark),
-            "tokyonight" | "tokyo-night" | "tokyo_night" => Some(ThemePreset::TokyoNight),
-            _ => None,
         }
     }
 }
@@ -406,6 +397,11 @@ impl Theme {
             thinking_fg: type_hl.fg.unwrap_or(Color::Rgb(249, 226, 175)),
             question_fg: special.fg.unwrap_or(Color::Rgb(137, 220, 235)),
             command_fg: constant.fg.unwrap_or(Color::Rgb(166, 227, 161)),
+
+            // Default bubble backgrounds based on the loaded theme
+            user_bubble_bg: Color::Rgb(35, 40, 60),
+            agent_bubble_bg: Color::Rgb(35, 50, 45),
+            thinking_bubble_bg: Color::Rgb(42, 43, 55),
         }
     }
 }

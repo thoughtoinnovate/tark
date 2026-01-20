@@ -29,18 +29,45 @@ pub struct LlmConfig {
     pub copilot: CopilotConfig,
     pub gemini: GeminiConfig,
     pub openrouter: OpenRouterConfig,
+    pub tark_sim: TarkSimConfig,
+    /// List of enabled providers to show in TUI (empty = show all)
+    #[serde(default)]
+    pub enabled_providers: Vec<String>,
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            default_provider: "openai".to_string(),
+            default_provider: "tark_sim".to_string(),
             claude: ClaudeConfig::default(),
             openai: OpenAiConfig::default(),
             ollama: OllamaConfig::default(),
             copilot: CopilotConfig::default(),
             gemini: GeminiConfig::default(),
             openrouter: OpenRouterConfig::default(),
+            tark_sim: TarkSimConfig::default(),
+            // Default to only OpenAI and Gemini for now
+            enabled_providers: vec![
+                "openai".to_string(),
+                "google".to_string(),
+                "tark_sim".to_string(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TarkSimConfig {
+    pub model: String,
+    pub max_tokens: usize,
+}
+
+impl Default for TarkSimConfig {
+    fn default() -> Self {
+        Self {
+            model: "tark_llm".to_string(),
+            max_tokens: 8192,
         }
     }
 }
@@ -204,7 +231,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 25,
+            max_iterations: 50, // Increased from 25 for complex multi-step tasks
             working_directory: ".".to_string(),
         }
     }

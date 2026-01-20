@@ -242,6 +242,10 @@ impl Tool for WriteFileTool {
         })
     }
 
+    fn risk_level(&self) -> super::RiskLevel {
+        super::RiskLevel::Write
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolResult> {
         #[derive(Deserialize)]
         struct Params {
@@ -358,6 +362,10 @@ impl Tool for PatchFileTool {
         })
     }
 
+    fn risk_level(&self) -> super::RiskLevel {
+        super::RiskLevel::Write
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolResult> {
         #[derive(Deserialize)]
         struct Params {
@@ -444,6 +452,10 @@ impl Tool for DeleteFileTool {
             },
             "required": ["path"]
         })
+    }
+
+    fn risk_level(&self) -> super::RiskLevel {
+        super::RiskLevel::Dangerous
     }
 
     async fn execute(&self, params: Value) -> Result<ToolResult> {

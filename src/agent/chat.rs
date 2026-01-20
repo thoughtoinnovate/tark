@@ -323,14 +323,24 @@ When to use ask_user (ALWAYS):
 - ANY yes/no question
 - ANY "which do you prefer" question
 
+⚠️ PREFER CHOICE QUESTIONS OVER FREE TEXT:
+- single_select: User picks ONE option (has built-in "Other" for custom input)
+- multi_select: User picks MULTIPLE options (has built-in "Other" for custom input)
+- free_text: ONLY use when you truly cannot anticipate answers (file paths, custom names)
+
+Why choices are better:
+1. Faster for users (just click)
+2. Users can still type custom answer via "Other" option
+3. Helps users understand what options exist
+
 Example - User says "help with plan to improve UX":
 ❌ WRONG: Typing "What type of application are we focusing on?" in chat
+❌ WRONG: Using free_text for questions with predictable answers
 ✅ RIGHT: Call ask_user tool with:
   title: "UX Improvement Planning"
   questions: [
-    {id: "app_type", type: "single_select", text: "What type of application?", options: ["Web app", "Mobile app", "Desktop app", "CLI tool"]},
-    {id: "focus_areas", type: "multi_select", text: "Which areas to focus on?", options: ["Navigation", "Performance", "Accessibility", "Visual design", "User flows"]},
-    {id: "feedback", type: "free_text", text: "Any specific user feedback or issues?"}
+    {id: "app_type", type: "single_select", text: "What type of application?", options: [{value: "web", label: "Web app"}, {value: "mobile", label: "Mobile app"}, {value: "desktop", label: "Desktop app"}, {value: "cli", label: "CLI tool"}]},
+    {id: "focus_areas", type: "multi_select", text: "Which areas to focus on?", options: [{value: "nav", label: "Navigation"}, {value: "perf", label: "Performance"}, {value: "a11y", label: "Accessibility"}]}
   ]
 
 🔄 TOOL EFFICIENCY - AVOID LOOPS:
@@ -401,10 +411,15 @@ When to use ask_user (ALWAYS):
 - Getting preferences or choices
 - ANY question expecting a response
 
+⚠️ PREFER CHOICE QUESTIONS (single_select/multi_select) OVER free_text!
+Choice questions have a built-in "Other" option for custom input.
+Only use free_text for truly unpredictable answers (paths, names).
+
 Example:
 ❌ WRONG: "What specific areas would you like me to explain?"
-✅ RIGHT: Call ask_user with questions like:
-  {type: "multi_select", text: "Which areas should I explain?", options: ["Architecture", "Data flow", "APIs", "Testing"]}
+❌ WRONG: Using free_text when you could offer choices
+✅ RIGHT: Call ask_user with single_select/multi_select:
+  {type: "multi_select", text: "Which areas should I explain?", options: [{value: "arch", label: "Architecture"}, {value: "flow", label: "Data flow"}, {value: "api", label: "APIs"}, {value: "test", label: "Testing"}]}
 
 🔄 TOOL EFFICIENCY - AVOID LOOPS:
 - NEVER call the same tool with identical arguments twice in a row
@@ -529,14 +544,19 @@ When to use ask_user (ALWAYS):
 - ANY yes/no question
 - ANY "which do you prefer" question
 
-Question types: single_select (pick one), multi_select (pick many), free_text (type answer)
+⚠️ PREFER CHOICE QUESTIONS OVER FREE TEXT:
+- single_select: User picks ONE option (has "Other" for custom input)
+- multi_select: User picks MANY options (has "Other" for custom input)
+- free_text: ONLY for truly unpredictable input (file paths, custom names)
+
 User can press Esc to cancel and answer via chat instead.
 
 Example - User says "add authentication":
 ❌ WRONG: "What authentication method would you prefer? JWT, sessions, or OAuth?"
-✅ RIGHT: Call ask_user with:
+❌ WRONG: Using free_text for questions with obvious choices
+✅ RIGHT: Call ask_user with single_select:
   title: "Authentication Setup"
-  questions: [{id: "method", type: "single_select", text: "Which authentication method?", options: ["JWT tokens", "Session-based", "OAuth2", "API keys"]}]
+  questions: [{id: "method", type: "single_select", text: "Which authentication method?", options: [{value: "jwt", label: "JWT tokens"}, {value: "session", label: "Session-based"}, {value: "oauth", label: "OAuth2"}, {value: "api_key", label: "API keys"}]}]
 
 ❌ NEVER DO THIS:
 - Say "I couldn't find X" without trying multiple search patterns
@@ -545,6 +565,7 @@ Example - User says "add authentication":
 - Say you "can't create diagrams" - YOU CAN with Mermaid/PlantUML!
 - Run dangerous shell commands (they will be blocked anyway)
 - Ask questions in chat text - USE ask_user tool instead!
+- Use free_text when you could provide choices - users prefer clicking over typing!
 
 🔄 TOOL EFFICIENCY - AVOID LOOPS:
 - NEVER call the same tool with identical arguments twice in a row
@@ -851,6 +872,11 @@ impl ChatAgent {
     /// Update just the LLM provider while preserving conversation history
     pub fn update_provider(&mut self, llm: Arc<dyn LlmProvider>) {
         self.llm = llm;
+    }
+
+    /// Update approval storage path (per session)
+    pub async fn set_approval_storage_path(&mut self, storage_path: std::path::PathBuf) {
+        self.tools.set_approval_storage_path(storage_path).await;
     }
 
     /// Set the trust level for risky tool operations
@@ -2334,6 +2360,9 @@ impl ChatAgent {
                             .unwrap_or_else(|_| "{}".to_string());
                         on_tool_call(call.name.clone(), args_preview);
 
+                        // Yield to allow the UI to render the "tool started" state
+                        tokio::task::yield_now().await;
+
                         tracing::info!(
                             "Executing tool: {} with args: {} (mode: {:?})",
                             call.name,
@@ -2494,6 +2523,9 @@ impl ChatAgent {
                             .unwrap_or_else(|_| "{}".to_string());
                         on_tool_call(call.name.clone(), args_preview);
 
+                        // Yield to allow the UI to render the "tool started" state
+                        tokio::task::yield_now().await;
+
                         let result =
                             match self.tools.execute(&call.name, call.arguments.clone()).await {
                                 Ok(r) => r,
@@ -2595,5 +2627,77 @@ impl ChatAgent {
             context_usage_percent,
             usage: Some(accumulated_usage),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatAgent;
+    use crate::llm::{LlmProvider, LlmResponse, Message, ToolDefinition};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct TestProvider {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl LlmProvider for TestProvider {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: Option<&[ToolDefinition]>,
+        ) -> anyhow::Result<LlmResponse> {
+            Ok(LlmResponse::Text {
+                text: self.name.to_string(),
+                usage: None,
+            })
+        }
+
+        async fn complete_fim(
+            &self,
+            _prefix: &str,
+            _suffix: &str,
+            _language: &str,
+        ) -> anyhow::Result<crate::llm::CompletionResult> {
+            unimplemented!("test provider")
+        }
+
+        async fn explain_code(&self, _code: &str, _context: &str) -> anyhow::Result<String> {
+            unimplemented!("test provider")
+        }
+
+        async fn suggest_refactorings(
+            &self,
+            _code: &str,
+            _context: &str,
+        ) -> anyhow::Result<Vec<crate::llm::RefactoringSuggestion>> {
+            unimplemented!("test provider")
+        }
+
+        async fn review_code(
+            &self,
+            _code: &str,
+            _language: &str,
+        ) -> anyhow::Result<Vec<crate::llm::CodeIssue>> {
+            unimplemented!("test provider")
+        }
+    }
+
+    #[test]
+    fn update_provider_replaces_llm() {
+        let provider_a = Arc::new(TestProvider { name: "provider_a" });
+        let provider_b = Arc::new(TestProvider { name: "provider_b" });
+        let tools = crate::tools::ToolRegistry::new(std::path::PathBuf::from("."));
+
+        let mut agent = ChatAgent::new(provider_a, tools);
+        assert_eq!(agent.llm.name(), "provider_a");
+
+        agent.update_provider(provider_b);
+        assert_eq!(agent.llm.name(), "provider_b");
     }
 }

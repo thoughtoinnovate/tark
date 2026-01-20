@@ -244,6 +244,10 @@ impl ToolOrchestrator {
             let args_preview = serde_json::to_string(&call.arguments).unwrap_or_default();
             on_tool_call(call.name.clone(), args_preview);
 
+            // Yield to allow the UI to render the "tool started" state before execution
+            // This ensures loading indicators are visible even for fast tools
+            tokio::task::yield_now().await;
+
             let result = match self.tools.execute(&call.name, call.arguments.clone()).await {
                 Ok(r) => r,
                 Err(e) => {

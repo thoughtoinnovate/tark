@@ -36,6 +36,13 @@ tark/
 ├── src/                    # Rust backend (tark server)
 │   ├── main.rs             # CLI entry point
 │   ├── lib.rs              # Library exports
+│   ├── ui_backend/         # BFF layer (Backend-for-Frontend)
+│   │   ├── traits.rs       # UiRenderer trait
+│   │   ├── events.rs       # AppEvent enum
+│   │   ├── service.rs      # AppService business logic
+│   │   ├── state.rs        # SharedState (thread-safe)
+│   │   ├── commands.rs     # Command enum
+│   │   └── types.rs        # Shared data structures
 │   ├── agent/              # Chat agent with tool execution
 │   ├── completion/         # FIM (fill-in-middle) completions
 │   ├── config/             # Configuration management
@@ -206,6 +213,10 @@ For TUI features, you MUST:
 
 | File | Purpose | When to Modify |
 |------|---------|----------------|
+| `src/ui_backend/service.rs` | BFF business logic | Adding UI-agnostic features |
+| `src/ui_backend/commands.rs` | User action abstraction | Adding new commands |
+| `src/ui_backend/events.rs` | Async event streaming | Adding new event types |
+| `src/ui_backend/state.rs` | Thread-safe shared state | Adding state fields |
 | `src/agent/chat.rs` | Chat agent logic | Adding agent features |
 | `src/tools/mod.rs` | Tool registry & mode composition | Adding/modifying tools |
 | `src/tools/risk.rs` | Risk levels & trust levels | Changing risk categories |

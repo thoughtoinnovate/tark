@@ -76,4 +76,77 @@ pub enum AppEvent {
 
     /// Status message changed
     StatusChanged(String),
+
+    // ========== Error Notification Events ==========
+    /// An error occurred that should be shown to the user
+    ErrorOccurred {
+        message: String,
+        level: crate::ui_backend::state::ErrorLevel,
+    },
+
+    /// Error notification was cleared
+    ErrorCleared,
+
+    // ========== Attachment Events ==========
+    /// An attachment was added
+    AttachmentAdded { path: String, size: String },
+
+    /// An attachment was removed
+    AttachmentRemoved { path: String },
+
+    /// All attachments were cleared
+    AttachmentsCleared,
+
+    // ========== Questionnaire Events ==========
+    /// A questionnaire (ask_user) was requested by the agent
+    QuestionnaireRequested {
+        question: String,
+        question_type: crate::ui_backend::questionnaire::QuestionType,
+        options: Vec<crate::ui_backend::questionnaire::QuestionOption>,
+    },
+
+    /// The questionnaire was answered
+    QuestionnaireAnswered { answer: serde_json::Value },
+
+    // ========== Approval Events ==========
+    /// Approval requested for a risky operation
+    ApprovalRequested {
+        operation: String,
+        risk_level: crate::ui_backend::approval::RiskLevel,
+        description: String,
+        command: String,
+        affected_paths: Vec<String>,
+    },
+
+    /// Operation was approved
+    OperationApproved,
+
+    /// Operation was rejected
+    OperationRejected,
+
+    // ========== Session Events ==========
+    /// A new session was created
+    SessionCreated { session_id: String },
+
+    /// Session was switched
+    SessionSwitched { session_id: String },
+
+    /// Session was loaded successfully
+    SessionLoaded {
+        session_id: String,
+        message_count: usize,
+    },
+
+    /// Session was exported
+    SessionExported { path: String },
+
+    // ========== Rate Limiting Events ==========
+    /// Rate limit was hit
+    RateLimitHit {
+        retry_after_seconds: u64,
+        message: String,
+    },
+
+    /// Rate limit expired, retrying pending message
+    RateLimitExpired,
 }

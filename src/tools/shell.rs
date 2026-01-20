@@ -146,6 +146,10 @@ impl Tool for ShellTool {
         })
     }
 
+    fn risk_level(&self) -> super::RiskLevel {
+        super::RiskLevel::Risky
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolResult> {
         #[derive(Deserialize)]
         struct Params {

@@ -2,23 +2,29 @@
 //!
 //! Built with TDD approach following feature files in tests/visual/tui/features/
 
+pub mod command_autocomplete;
 mod header;
 mod input;
+pub mod markdown;
 mod message_area;
 mod modal;
-mod question;
+pub mod question;
 mod sidebar;
 mod status_bar;
 mod terminal_frame;
 
+pub use command_autocomplete::{AutocompleteState, CommandAutocomplete, SlashCommand};
 pub use header::Header;
+#[allow(unused_imports)]
+pub use input::AttachmentBadge;
 pub use input::InputWidget;
 pub use message_area::{Message, MessageArea, MessageRole};
 pub use modal::{
-    FilePickerModal, HelpModal, ModelPickerModal, ProviderPickerModal, ThemePickerModal,
+    FilePickerModal, HelpModal, ModelPickerModal, ProviderPickerModal, SessionPickerModal,
+    ThemePickerModal,
 };
 #[allow(unused_imports)]
-pub use question::{QuestionOption, QuestionType, QuestionWidget};
+pub use question::{QuestionOption, QuestionType, QuestionWidget, ThemedQuestion};
 #[allow(unused_imports)]
 pub use sidebar::{GitChange, GitStatus, SessionInfo, Sidebar, SidebarPanel, Task, TaskStatus};
 pub use status_bar::StatusBar;

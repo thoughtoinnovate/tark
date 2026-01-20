@@ -80,6 +80,7 @@ pub enum VimMode {
 pub enum ModalType {
     ProviderPicker,
     ModelPicker,
+    SessionPicker,
     FilePicker,
     ThemePicker,
     Help,
@@ -107,6 +108,8 @@ pub struct ConversationState {
     pub messages: Vec<Message>,
     pub focused_message: usize,
     pub messages_scroll_offset: usize,
+    pub messages_total_lines: usize,
+    pub messages_viewport_height: usize,
     pub streaming_content: Option<String>,
     pub streaming_thinking: Option<String>,
 }
@@ -118,6 +121,7 @@ pub struct CatalogState {
     pub current_model: Option<String>,
     pub available_providers: Vec<ProviderInfo>,
     pub available_models: Vec<ModelInfo>,
+    pub available_sessions: Vec<crate::storage::SessionMeta>,
     pub device_flow_session: Option<DeviceFlowSession>,
 }
 
@@ -138,6 +142,8 @@ pub struct UiState {
     pub provider_picker_filter: String,
     pub model_picker_selected: usize,
     pub model_picker_filter: String,
+    pub session_picker_selected: usize,
+    pub session_picker_filter: String,
 
     // Sidebar state
     pub sidebar_selected_panel: usize,
@@ -160,6 +166,8 @@ impl Default for UiState {
             provider_picker_filter: String::new(),
             model_picker_selected: 0,
             model_picker_filter: String::new(),
+            session_picker_selected: 0,
+            session_picker_filter: String::new(),
             sidebar_selected_panel: 0,
             sidebar_selected_item: None,
             sidebar_expanded_panels: [false; 4],
@@ -194,11 +202,20 @@ struct StateInner {
     pub llm_connected: bool,
     pub llm_processing: bool,
     pub device_flow_session: Option<DeviceFlowSession>,
+    pub current_correlation_id: Option<String>,
+    /// Correlation ID of the currently processing message (for race condition prevention)
+    pub processing_correlation_id: Option<String>,
 
     // ========== Messages ==========
     pub messages: Vec<Message>,
     pub focused_message: usize,
     pub messages_scroll_offset: usize,
+    pub messages_total_lines: usize,
+    pub messages_viewport_height: usize,
+
+    // ========== Active Tools ==========
+    /// Currently executing tools (for loading indicators)
+    pub active_tools: Vec<crate::ui_backend::types::ActiveToolInfo>,
 
     // ========== Streaming State (BFF owns this, renderer reads only) ==========
     pub streaming_content: Option<String>,
@@ -210,6 +227,12 @@ struct StateInner {
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
     pub saved_input: String,
+    /// Visual selection start (byte offset) for input
+    pub input_selection_start: Option<usize>,
+    /// Visual selection end (byte offset) for input
+    pub input_selection_end: Option<usize>,
+    /// Pending vim operator (e.g., 'd' for delete)
+    pub pending_operator: Option<char>,
 
     // ========== UI State ==========
     pub sidebar_visible: bool,
@@ -229,6 +252,8 @@ struct StateInner {
     pub provider_picker_filter: String,
     pub model_picker_selected: usize,
     pub model_picker_filter: String,
+    pub session_picker_selected: usize,
+    pub session_picker_filter: String,
 
     // ========== File Picker State ==========
     pub file_picker_files: Vec<String>,
@@ -243,6 +268,7 @@ struct StateInner {
     pub sidebar_selected_item: Option<usize>,
     pub sidebar_expanded_panels: [bool; 4],
     pub sidebar_scroll_offset: usize,
+    pub sidebar_panel_scrolls: [usize; 4],
 
     // ========== Context ==========
     pub context_files: Vec<ContextFile>,
@@ -261,6 +287,7 @@ struct StateInner {
     // ========== Available Options ==========
     pub available_providers: Vec<ProviderInfo>,
     pub available_models: Vec<ModelInfo>,
+    pub available_sessions: Vec<crate::storage::SessionMeta>,
 
     // ========== Error Notification ==========
     pub error_notification: Option<ErrorNotification>,
@@ -281,6 +308,17 @@ struct StateInner {
 
     // ========== Message Queue ==========
     pub message_queue: Vec<String>,
+
+    // ========== Command Autocomplete ==========
+    pub autocomplete_active: bool,
+    pub autocomplete_filter: String,
+    pub autocomplete_selected: usize,
+
+    // ========== Session Cost Tracking ==========
+    pub session_cost_total: f64,
+    pub session_cost_by_model: Vec<(String, f64)>,
+    pub session_tokens_total: usize,
+    pub session_tokens_by_model: Vec<(String, usize)>,
 }
 
 impl Default for SharedState {
@@ -302,12 +340,17 @@ impl SharedState {
                 trust_level_selected: 1, // Default to Balanced (index 1)
                 current_provider: None,
                 current_model: None,
+                current_correlation_id: None,
+                processing_correlation_id: None,
                 llm_connected: false,
                 llm_processing: false,
                 device_flow_session: None,
                 messages: Vec::new(),
                 focused_message: 0,
                 messages_scroll_offset: 0,
+                messages_total_lines: 0,
+                messages_viewport_height: 0,
+                active_tools: Vec::new(),
                 streaming_content: None,
                 streaming_thinking: None,
                 input_text: String::new(),
@@ -315,6 +358,9 @@ impl SharedState {
                 input_history: Vec::new(),
                 history_index: None,
                 saved_input: String::new(),
+                input_selection_start: None,
+                input_selection_end: None,
+                pending_operator: None,
                 sidebar_visible: true,
                 theme: ThemePreset::CatppuccinMocha,
                 status_message: None,
@@ -328,6 +374,8 @@ impl SharedState {
                 provider_picker_filter: String::new(),
                 model_picker_selected: 0,
                 model_picker_filter: String::new(),
+                session_picker_selected: 0,
+                session_picker_filter: String::new(),
                 file_picker_files: Vec::new(),
                 file_picker_filter: String::new(),
                 file_picker_selected: 0,
@@ -336,6 +384,7 @@ impl SharedState {
                 sidebar_selected_item: None,
                 sidebar_expanded_panels: [true, true, true, true],
                 sidebar_scroll_offset: 0,
+                sidebar_panel_scrolls: [0, 0, 0, 0],
                 context_files: Vec::new(),
                 tokens_used: 0,
                 tokens_total: 1_000_000,
@@ -344,6 +393,7 @@ impl SharedState {
                 git_changes: Vec::new(),
                 available_providers: Vec::new(),
                 available_models: Vec::new(),
+                available_sessions: Vec::new(),
                 error_notification: None,
                 attachments: Vec::new(),
                 attachment_dropdown_visible: false,
@@ -352,6 +402,13 @@ impl SharedState {
                 rate_limit_retry_at: None,
                 rate_limit_pending_message: None,
                 message_queue: Vec::new(),
+                autocomplete_active: false,
+                autocomplete_filter: String::new(),
+                autocomplete_selected: 0,
+                session_cost_total: 0.0,
+                session_cost_by_model: Vec::new(),
+                session_tokens_total: 0,
+                session_tokens_by_model: Vec::new(),
             })),
         }
     }
@@ -420,6 +477,20 @@ impl SharedState {
         self.read_inner().device_flow_session.clone()
     }
 
+    pub fn current_correlation_id(&self) -> Option<String> {
+        self.read_inner().current_correlation_id.clone()
+    }
+
+    pub fn generate_new_correlation_id(&self) -> String {
+        let correlation_id = uuid::Uuid::new_v4().to_string();
+        self.write_inner().current_correlation_id = Some(correlation_id.clone());
+        correlation_id
+    }
+
+    pub fn set_correlation_id(&self, id: Option<String>) {
+        self.write_inner().current_correlation_id = id;
+    }
+
     pub fn set_device_flow_session(&self, session: Option<DeviceFlowSession>) {
         self.write_inner().device_flow_session = session;
     }
@@ -435,6 +506,8 @@ impl SharedState {
             messages: inner.messages.clone(),
             focused_message: inner.focused_message,
             messages_scroll_offset: inner.messages_scroll_offset,
+            messages_total_lines: inner.messages_total_lines,
+            messages_viewport_height: inner.messages_viewport_height,
             streaming_content: inner.streaming_content.clone(),
             streaming_thinking: inner.streaming_thinking.clone(),
         }
@@ -448,6 +521,7 @@ impl SharedState {
             current_model: inner.current_model.clone(),
             available_providers: inner.available_providers.clone(),
             available_models: inner.available_models.clone(),
+            available_sessions: inner.available_sessions.clone(),
             device_flow_session: inner.device_flow_session.clone(),
         }
     }
@@ -468,6 +542,8 @@ impl SharedState {
             provider_picker_filter: inner.provider_picker_filter.clone(),
             model_picker_selected: inner.model_picker_selected,
             model_picker_filter: inner.model_picker_filter.clone(),
+            session_picker_selected: inner.session_picker_selected,
+            session_picker_filter: inner.session_picker_filter.clone(),
             sidebar_selected_panel: inner.sidebar_selected_panel,
             sidebar_selected_item: inner.sidebar_selected_item,
             sidebar_expanded_panels: inner.sidebar_expanded_panels,
@@ -498,6 +574,14 @@ impl SharedState {
 
     pub fn messages_scroll_offset(&self) -> usize {
         self.read_inner().messages_scroll_offset
+    }
+
+    pub fn messages_total_lines(&self) -> usize {
+        self.read_inner().messages_total_lines
+    }
+
+    pub fn messages_viewport_height(&self) -> usize {
+        self.read_inner().messages_viewport_height
     }
 
     pub fn focused_message(&self) -> usize {
@@ -568,6 +652,18 @@ impl SharedState {
         self.read_inner().sidebar_scroll_offset
     }
 
+    pub fn sidebar_panel_scrolls(&self) -> [usize; 4] {
+        self.read_inner().sidebar_panel_scrolls
+    }
+
+    pub fn sidebar_panel_scroll(&self, panel: usize) -> usize {
+        self.read_inner()
+            .sidebar_panel_scrolls
+            .get(panel)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn theme_before_preview(&self) -> Option<ThemePreset> {
         self.read_inner().theme_before_preview
     }
@@ -586,6 +682,14 @@ impl SharedState {
 
     pub fn model_picker_filter(&self) -> String {
         self.read_inner().model_picker_filter.clone()
+    }
+
+    pub fn session_picker_selected(&self) -> usize {
+        self.read_inner().session_picker_selected
+    }
+
+    pub fn session_picker_filter(&self) -> String {
+        self.read_inner().session_picker_filter.clone()
     }
 
     pub fn file_picker_files(&self) -> Vec<String> {
@@ -702,6 +806,14 @@ impl SharedState {
         self.write_inner().llm_processing = processing;
     }
 
+    pub fn processing_correlation_id(&self) -> Option<String> {
+        self.read_inner().processing_correlation_id.clone()
+    }
+
+    pub fn set_processing_correlation_id(&self, id: Option<String>) {
+        self.write_inner().processing_correlation_id = id;
+    }
+
     pub fn set_provider(&self, provider: Option<String>) {
         self.write_inner().current_provider = provider;
     }
@@ -716,6 +828,195 @@ impl SharedState {
 
     pub fn set_input_cursor(&self, cursor: usize) {
         self.write_inner().input_cursor = cursor;
+    }
+
+    /// Get current input selection range (start, end)
+    pub fn input_selection(&self) -> Option<(usize, usize)> {
+        let inner = self.read_inner();
+        match (inner.input_selection_start, inner.input_selection_end) {
+            (Some(start), Some(end)) => Some((start.min(end), start.max(end))),
+            _ => None,
+        }
+    }
+
+    /// Set input selection range
+    pub fn set_input_selection(&self, start: usize, end: usize) {
+        let mut inner = self.write_inner();
+        inner.input_selection_start = Some(start);
+        inner.input_selection_end = Some(end);
+    }
+
+    /// Clear input selection
+    pub fn clear_input_selection(&self) {
+        let mut inner = self.write_inner();
+        inner.input_selection_start = None;
+        inner.input_selection_end = None;
+    }
+
+    /// Set pending operator (vim)
+    pub fn set_pending_operator(&self, op: Option<char>) {
+        self.write_inner().pending_operator = op;
+    }
+
+    /// Get pending operator
+    pub fn pending_operator(&self) -> Option<char> {
+        self.read_inner().pending_operator
+    }
+
+    // ========== Vim Navigation Methods ==========
+
+    /// Move cursor right by one character
+    pub fn move_cursor_right(&self) {
+        let mut inner = self.write_inner();
+        if inner.input_cursor < inner.input_text.len() {
+            // Move by one character
+            let text = &inner.input_text;
+            if let Some(c) = text[inner.input_cursor..].chars().next() {
+                inner.input_cursor += c.len_utf8();
+            }
+        }
+    }
+
+    /// Move cursor left by one character
+    pub fn move_cursor_left(&self) {
+        let mut inner = self.write_inner();
+        if inner.input_cursor > 0 {
+            // Move by one character backward
+            let text = &inner.input_text[..inner.input_cursor];
+            if let Some(c) = text.chars().next_back() {
+                inner.input_cursor -= c.len_utf8();
+            }
+        }
+    }
+
+    /// Move cursor to end of current line
+    pub fn move_cursor_to_line_end(&self) {
+        let mut inner = self.write_inner();
+        let text = &inner.input_text;
+        // Find next newline or end of text
+        if let Some(pos) = text[inner.input_cursor..].find('\n') {
+            inner.input_cursor += pos;
+        } else {
+            inner.input_cursor = text.len();
+        }
+    }
+
+    /// Move cursor to start of current line
+    pub fn move_cursor_to_line_start(&self) {
+        let mut inner = self.write_inner();
+        let text = &inner.input_text;
+        // Find previous newline or start of text
+        if let Some(pos) = text[..inner.input_cursor].rfind('\n') {
+            inner.input_cursor = pos + 1;
+        } else {
+            inner.input_cursor = 0;
+        }
+    }
+
+    /// Move cursor forward by one word
+    pub fn move_cursor_word_forward(&self) {
+        let mut inner = self.write_inner();
+        let text = &inner.input_text;
+        let pos = inner.input_cursor;
+
+        // Skip current word characters
+        let rest = &text[pos..];
+        let skip_word = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
+
+        // Skip whitespace after word
+        let after_word = &text[pos + skip_word..];
+        let skip_space = after_word
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(after_word.len());
+
+        inner.input_cursor = (pos + skip_word + skip_space).min(text.len());
+    }
+
+    /// Move cursor backward by one word
+    pub fn move_cursor_word_backward(&self) {
+        let mut inner = self.write_inner();
+        let text = &inner.input_text;
+        let pos = inner.input_cursor;
+
+        if pos == 0 {
+            return;
+        }
+
+        // Skip whitespace before cursor
+        let before = &text[..pos];
+        let trimmed = before.trim_end();
+        let trimmed_len = trimmed.len();
+
+        if trimmed_len == 0 {
+            inner.input_cursor = 0;
+            return;
+        }
+
+        // Find start of previous word
+        let word_start = trimmed
+            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+
+        inner.input_cursor = word_start;
+    }
+
+    /// Move cursor up one line
+    pub fn move_cursor_up(&self) {
+        let mut inner = self.write_inner();
+        let text = &inner.input_text;
+        let pos = inner.input_cursor;
+
+        // Find start of current line
+        let line_start = text[..pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let col = pos - line_start;
+
+        // Find previous line
+        if line_start > 0 {
+            let prev_line_end = line_start - 1; // Position of \n
+            let prev_line_start = text[..prev_line_end]
+                .rfind('\n')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let prev_line_len = prev_line_end - prev_line_start;
+
+            // Move to same column or end of previous line
+            inner.input_cursor = prev_line_start + col.min(prev_line_len);
+        }
+    }
+
+    /// Insert a newline at cursor position
+    pub fn insert_newline(&self) {
+        let mut inner = self.write_inner();
+        let pos = inner.input_cursor;
+        inner.input_text.insert(pos, '\n');
+        inner.input_cursor = pos + 1;
+    }
+
+    /// Delete character after cursor
+    pub fn delete_char_after(&self) {
+        let mut inner = self.write_inner();
+        let pos = inner.input_cursor;
+        if pos < inner.input_text.len() {
+            if let Some(c) = inner.input_text[pos..].chars().next() {
+                inner.input_text.drain(pos..pos + c.len_utf8());
+            }
+        }
+    }
+
+    /// Delete character before cursor
+    pub fn delete_char_before(&self) {
+        let mut inner = self.write_inner();
+        if inner.input_cursor > 0 {
+            let pos = inner.input_cursor;
+            if let Some(c) = inner.input_text[..pos].chars().next_back() {
+                let char_len = c.len_utf8();
+                inner.input_text.drain(pos - char_len..pos);
+                inner.input_cursor -= char_len;
+            }
+        }
     }
 
     pub fn set_sidebar_visible(&self, visible: bool) {
@@ -734,12 +1035,140 @@ impl SharedState {
         self.write_inner().messages.push(message);
     }
 
+    /// Update the last tool message for a given tool name (for in-place animation)
+    /// Returns true if a message was updated, false if no matching message found
+    pub fn update_tool_message(
+        &self,
+        tool_name: &str,
+        new_content: String,
+        collapsed: bool,
+    ) -> bool {
+        let mut inner = self.write_inner();
+        // Find the last Tool message that matches this tool name
+        // Tool message format: "status|name|content"
+        for msg in inner.messages.iter_mut().rev() {
+            if msg.role == crate::ui_backend::MessageRole::Tool {
+                // Check if this message is for the same tool
+                let parts: Vec<&str> = msg.content.splitn(3, '|').collect();
+                if parts.len() >= 2 && parts[1] == tool_name {
+                    // Update this message in place
+                    msg.content = new_content;
+                    msg.collapsed = collapsed;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Collapse all tool messages except the most recent one
+    /// This provides a clean view where only the current/active tool is expanded
+    pub fn collapse_all_tools_except_last(&self) {
+        let mut inner = self.write_inner();
+        let messages = &mut inner.messages;
+
+        // Find the index of the last tool message
+        let last_tool_idx = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, msg)| msg.role == crate::ui_backend::MessageRole::Tool)
+            .map(|(idx, _)| idx);
+
+        // Collapse all tool messages except the last one
+        for (idx, msg) in messages.iter_mut().enumerate() {
+            if msg.role == crate::ui_backend::MessageRole::Tool {
+                msg.collapsed = Some(idx) != last_tool_idx;
+            }
+        }
+    }
+
+    /// Toggle collapse state of a specific message by index
+    /// Returns true if the message was found and toggled
+    pub fn toggle_message_collapse(&self, index: usize) -> bool {
+        let mut inner = self.write_inner();
+        if let Some(msg) = inner.messages.get_mut(index) {
+            msg.collapsed = !msg.collapsed;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if the focused message is a tool message
+    pub fn is_focused_message_tool(&self) -> bool {
+        let inner = self.read_inner();
+        if let Some(msg) = inner.messages.get(inner.focused_message) {
+            msg.role == crate::ui_backend::MessageRole::Tool
+        } else {
+            false
+        }
+    }
+
+    pub fn set_messages(&self, messages: Vec<Message>) {
+        self.write_inner().messages = messages;
+    }
+
     pub fn clear_messages(&self) {
         self.write_inner().messages.clear();
     }
 
+    // ========== Active Tools ==========
+
+    /// Get active tools
+    pub fn active_tools(&self) -> Vec<crate::ui_backend::types::ActiveToolInfo> {
+        self.read_inner().active_tools.clone()
+    }
+
+    /// Add a new active tool (tool started)
+    pub fn add_active_tool(&self, tool: crate::ui_backend::types::ActiveToolInfo) {
+        self.write_inner().active_tools.push(tool);
+    }
+
+    /// Complete an active tool by name (tool finished)
+    pub fn complete_active_tool(&self, name: &str, result: String, success: bool) {
+        let mut inner = self.write_inner();
+        if let Some(tool) = inner.active_tools.iter_mut().find(|t| t.name == name) {
+            tool.complete(result, success);
+        }
+    }
+
+    /// Remove completed tools from active list
+    pub fn cleanup_completed_tools(&self) {
+        let mut inner = self.write_inner();
+        inner
+            .active_tools
+            .retain(|t| matches!(t.status, crate::ui_backend::types::ToolStatus::Running));
+    }
+
+    /// Clear all active tools
+    pub fn clear_active_tools(&self) {
+        self.write_inner().active_tools.clear();
+    }
+
     pub fn set_messages_scroll_offset(&self, offset: usize) {
         self.write_inner().messages_scroll_offset = offset;
+    }
+
+    pub fn set_messages_metrics(&self, total_lines: usize, viewport_height: usize) {
+        let mut inner = self.write_inner();
+        inner.messages_total_lines = total_lines;
+        inner.messages_viewport_height = viewport_height;
+    }
+
+    /// Set focused message index
+    pub fn set_focused_message(&self, index: usize) {
+        let mut inner = self.write_inner();
+        inner.focused_message = index;
+    }
+
+    /// Scroll to bottom (most recent message)
+    pub fn scroll_to_bottom(&self) {
+        let count = self.message_count();
+        if count > 0 {
+            self.set_messages_scroll_offset(usize::MAX);
+            self.set_focused_message(count.saturating_sub(1));
+        }
     }
 
     pub fn add_context_file(&self, file: ContextFile) {
@@ -772,6 +1201,9 @@ impl SharedState {
         inner.input_cursor = 0;
         inner.history_index = None;
         inner.saved_input.clear();
+        inner.input_selection_start = None;
+        inner.input_selection_end = None;
+        inner.pending_operator = None;
     }
 
     pub fn input_history(&self) -> Vec<String> {
@@ -864,6 +1296,12 @@ impl SharedState {
         self.write_inner().sidebar_scroll_offset = offset;
     }
 
+    pub fn set_sidebar_panel_scroll(&self, panel: usize, offset: usize) {
+        if panel < 4 {
+            self.write_inner().sidebar_panel_scrolls[panel] = offset;
+        }
+    }
+
     pub fn set_provider_picker_selected(&self, selected: usize) {
         self.write_inner().provider_picker_selected = selected;
     }
@@ -878,6 +1316,22 @@ impl SharedState {
 
     pub fn set_model_picker_filter(&self, filter: String) {
         self.write_inner().model_picker_filter = filter;
+    }
+
+    pub fn set_session_picker_selected(&self, selected: usize) {
+        self.write_inner().session_picker_selected = selected;
+    }
+
+    pub fn set_session_picker_filter(&self, filter: String) {
+        self.write_inner().session_picker_filter = filter;
+    }
+
+    pub fn set_available_sessions(&self, sessions: Vec<crate::storage::SessionMeta>) {
+        self.write_inner().available_sessions = sessions;
+    }
+
+    pub fn available_sessions(&self) -> Vec<crate::storage::SessionMeta> {
+        self.read_inner().available_sessions.clone()
     }
 
     pub fn set_file_picker_files(&self, files: Vec<String>) {
@@ -957,8 +1411,72 @@ impl SharedState {
         }
     }
 
+    /// Cancel/skip the questionnaire without answering
+    pub fn cancel_questionnaire(&self) {
+        // Clear the questionnaire - user can answer via chat instead
+        self.write_inner().active_questionnaire = None;
+    }
+
+    pub fn questionnaire_focus_prev(&self) {
+        if let Some(ref mut q) = self.write_inner().active_questionnaire {
+            q.focus_prev();
+        }
+    }
+
+    pub fn questionnaire_focus_next(&self) {
+        if let Some(ref mut q) = self.write_inner().active_questionnaire {
+            q.focus_next();
+        }
+    }
+
+    pub fn questionnaire_toggle_focused(&self) {
+        if let Some(ref mut q) = self.write_inner().active_questionnaire {
+            q.toggle_focused();
+        }
+    }
+
+    pub fn questionnaire_insert_char(&self, ch: char) {
+        if let Some(ref mut q) = self.write_inner().active_questionnaire {
+            q.insert_char(ch);
+        }
+    }
+
+    pub fn questionnaire_backspace(&self) {
+        if let Some(ref mut q) = self.write_inner().active_questionnaire {
+            q.backspace();
+        }
+    }
+
     pub fn set_pending_approval(&self, approval: Option<ApprovalCardState>) {
         self.write_inner().pending_approval = approval;
+    }
+
+    pub fn approval_select_prev(&self) {
+        if let Some(ref mut approval) = self.write_inner().pending_approval {
+            // Navigate actions (always available)
+            approval.select_prev_action();
+        }
+    }
+
+    pub fn approval_select_next(&self) {
+        if let Some(ref mut approval) = self.write_inner().pending_approval {
+            // Navigate actions (always available)
+            approval.select_next_action();
+        }
+    }
+
+    /// Navigate to previous pattern (for pattern selection)
+    pub fn approval_select_prev_pattern(&self) {
+        if let Some(ref mut approval) = self.write_inner().pending_approval {
+            approval.select_prev_pattern();
+        }
+    }
+
+    /// Navigate to next pattern (for pattern selection)
+    pub fn approval_select_next_pattern(&self) {
+        if let Some(ref mut approval) = self.write_inner().pending_approval {
+            approval.select_next_pattern();
+        }
     }
 
     pub fn approve_operation(&self) {
@@ -1046,6 +1564,128 @@ impl SharedState {
 
     pub fn queued_message_count(&self) -> usize {
         self.read_inner().message_queue.len()
+    }
+
+    /// Clear all queued messages (used on cancel/abort)
+    pub fn clear_message_queue(&self) -> usize {
+        let mut inner = self.write_inner();
+        let count = inner.message_queue.len();
+        inner.message_queue.clear();
+        count
+    }
+
+    // ========== Command Autocomplete ==========
+
+    /// Check if autocomplete is active
+    pub fn autocomplete_active(&self) -> bool {
+        self.read_inner().autocomplete_active
+    }
+
+    /// Get autocomplete filter
+    pub fn autocomplete_filter(&self) -> String {
+        self.read_inner().autocomplete_filter.clone()
+    }
+
+    /// Get autocomplete selected index
+    pub fn autocomplete_selected(&self) -> usize {
+        self.read_inner().autocomplete_selected
+    }
+
+    /// Activate autocomplete with initial filter
+    pub fn activate_autocomplete(&self, filter: &str) {
+        let mut inner = self.write_inner();
+        inner.autocomplete_active = true;
+        inner.autocomplete_filter = filter.to_string();
+        inner.autocomplete_selected = 0;
+    }
+
+    /// Deactivate autocomplete
+    pub fn deactivate_autocomplete(&self) {
+        let mut inner = self.write_inner();
+        inner.autocomplete_active = false;
+        inner.autocomplete_filter.clear();
+        inner.autocomplete_selected = 0;
+    }
+
+    /// Update autocomplete filter
+    pub fn update_autocomplete_filter(&self, filter: &str) {
+        self.write_inner().autocomplete_filter = filter.to_string();
+    }
+
+    /// Set autocomplete selected index
+    pub fn set_autocomplete_selected(&self, index: usize) {
+        self.write_inner().autocomplete_selected = index;
+    }
+
+    /// Move autocomplete selection up
+    pub fn autocomplete_move_up(&self) {
+        let mut inner = self.write_inner();
+        if inner.autocomplete_selected > 0 {
+            inner.autocomplete_selected -= 1;
+        }
+    }
+
+    /// Move autocomplete selection down (bounded by max_items)
+    pub fn autocomplete_move_down(&self, max_items: usize) {
+        let mut inner = self.write_inner();
+        if inner.autocomplete_selected + 1 < max_items {
+            inner.autocomplete_selected += 1;
+        }
+    }
+
+    // ========== Session Cost Tracking ==========
+
+    /// Get total session cost
+    pub fn session_cost_total(&self) -> f64 {
+        self.read_inner().session_cost_total
+    }
+
+    /// Get per-model cost breakdown
+    pub fn session_cost_by_model(&self) -> Vec<(String, f64)> {
+        self.read_inner().session_cost_by_model.clone()
+    }
+
+    pub fn session_tokens_total(&self) -> usize {
+        self.read_inner().session_tokens_total
+    }
+
+    pub fn session_tokens_by_model(&self) -> Vec<(String, usize)> {
+        self.read_inner().session_tokens_by_model.clone()
+    }
+
+    /// Add cost for a model and update totals
+    pub fn add_session_cost(&self, model_name: &str, cost: f64) {
+        let mut inner = self.write_inner();
+        inner.session_cost_total += cost;
+
+        if let Some(entry) = inner
+            .session_cost_by_model
+            .iter_mut()
+            .find(|(name, _)| name == model_name)
+        {
+            entry.1 += cost;
+        } else {
+            inner
+                .session_cost_by_model
+                .push((model_name.to_string(), cost));
+        }
+    }
+
+    pub fn add_session_tokens(&self, model_name: &str, tokens: usize) {
+        let mut inner = self.write_inner();
+        inner.session_tokens_total += tokens;
+
+        if let Some(entry) = inner
+            .session_tokens_by_model
+            .iter_mut()
+            .find(|(name, _)| name == model_name)
+        {
+            entry.1 += tokens;
+        } else {
+            inner
+                .session_tokens_by_model
+                .push((model_name.to_string(), tokens));
+        }
     }
 }
 

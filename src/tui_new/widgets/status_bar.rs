@@ -3,6 +3,8 @@
 //! Displays agent mode, model, thinking toggle, queue, and help button
 //! Feature: 02_status_bar.feature
 
+#![allow(clippy::vec_init_then_push)]
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -30,6 +32,8 @@ pub struct StatusBar<'a> {
     queue_count: usize,
     /// Whether agent is processing
     is_processing: bool,
+    /// Whether LLM is connected (green dot) or disconnected (red dot)
+    llm_connected: bool,
     /// Theme for styling
     theme: &'a Theme,
 }
@@ -45,6 +49,7 @@ impl<'a> StatusBar<'a> {
             thinking_enabled: true,
             queue_count: 0,
             is_processing: false,
+            llm_connected: false,
             theme,
         }
     }
@@ -88,6 +93,12 @@ impl<'a> StatusBar<'a> {
     /// Set processing state
     pub fn processing(mut self, is_processing: bool) -> Self {
         self.is_processing = is_processing;
+        self
+    }
+
+    /// Set LLM connection state
+    pub fn connected(mut self, connected: bool) -> Self {
+        self.llm_connected = connected;
         self
     }
 
@@ -160,14 +171,31 @@ impl Widget for StatusBar<'_> {
             ));
         }
 
-        // 4. Indicators section (brain + queue)
+        // 4. Indicators section (thinking brain with border styling + queue)
         spans.push(Span::raw("  "));
-        let thinking_color = if self.thinking_enabled {
-            self.theme.yellow
+        if self.thinking_enabled {
+            // Thinking enabled: brain with golden/yellow border styling
+            spans.push(Span::styled("[", Style::default().fg(self.theme.yellow)));
+            spans.push(Span::styled(
+                "🧠",
+                Style::default().fg(self.theme.text_primary),
+            ));
+            spans.push(Span::styled("]", Style::default().fg(self.theme.yellow)));
         } else {
-            self.theme.text_muted
-        };
-        spans.push(Span::styled("🧠", Style::default().fg(thinking_color)));
+            // Thinking disabled: brain with muted border matching theme background
+            spans.push(Span::styled(
+                "[",
+                Style::default().fg(self.theme.text_muted),
+            ));
+            spans.push(Span::styled(
+                "🧠",
+                Style::default().fg(self.theme.text_muted),
+            ));
+            spans.push(Span::styled(
+                "]",
+                Style::default().fg(self.theme.text_muted),
+            ));
+        }
 
         if self.queue_count > 0 {
             spans.push(Span::raw("  "));
@@ -193,7 +221,7 @@ impl Widget for StatusBar<'_> {
 
         // Calculate right section width for alignment
         let model_provider_text = format!(
-            "• {} {}  ⊙",
+            "● {} {}  ?",
             self.model_name,
             self.provider_name.to_uppercase()
         );
@@ -206,10 +234,16 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::raw(" ".repeat(padding)));
         }
 
-        // 6. Model/Provider (right-aligned)
+        // 6. Model/Provider (right-aligned) with connection indicator
+        // Connection dot: green if connected, red if not
+        let connection_dot_color = if self.llm_connected {
+            self.theme.green
+        } else {
+            self.theme.red
+        };
         spans.push(Span::styled(
-            "• ",
-            Style::default().fg(self.theme.text_muted),
+            "● ",
+            Style::default().fg(connection_dot_color),
         ));
         spans.push(Span::styled(
             self.model_name,
@@ -221,10 +255,10 @@ impl Widget for StatusBar<'_> {
             Style::default().fg(self.theme.text_muted),
         ));
 
-        // 7. Help button
+        // 7. Help button (Ctrl+? to open)
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
-            "⊙",
+            "[?]",
             Style::default().fg(self.theme.text_muted),
         ));
 

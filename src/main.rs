@@ -5,6 +5,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod agent;
 mod completion;
 mod config;
+mod core;
+mod debug_logger;
 mod diagnostics;
 mod llm;
 mod lsp;
@@ -13,8 +15,37 @@ mod services;
 mod storage;
 mod tools;
 mod transport;
-mod tui;
+// Old TUI removed - using tui_new architecture
 mod tui_new;
+mod ui_backend;
+
+// Re-export debug logging utilities for use within the binary
+use debug_logger::{DebugLogEntry, DebugLogger, DebugLoggerConfig, LogCategory};
+use std::sync::OnceLock;
+
+/// Global debug logger instance
+static TARK_DEBUG_LOGGER: OnceLock<DebugLogger> = OnceLock::new();
+
+/// Initialize the global debug logger
+pub fn init_debug_logger(config: DebugLoggerConfig) -> anyhow::Result<()> {
+    let logger = DebugLogger::new(config)?;
+    TARK_DEBUG_LOGGER
+        .set(logger)
+        .map_err(|_| anyhow::anyhow!("Debug logger already initialized"))?;
+    Ok(())
+}
+
+/// Get the global debug logger (if initialized)
+pub fn debug_logger() -> Option<&'static DebugLogger> {
+    TARK_DEBUG_LOGGER.get()
+}
+
+/// Log a debug entry to the global logger (if enabled)
+pub fn debug_log(entry: DebugLogEntry) {
+    if let Some(logger) = debug_logger() {
+        logger.log(entry);
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "tark")]
