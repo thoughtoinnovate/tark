@@ -65,9 +65,9 @@ impl RiskLevel {
 /// - `Manual`: Prompt for everything including reads
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TrustLevel {
-    /// Auto-run reads & writes, prompt for risky/dangerous only (default)
+    /// Auto-run reads & writes, prompt for risky/dangerous only
     Balanced,
-    /// Auto-run reads only, prompt for writes and above
+    /// Auto-run reads only, prompt for writes and above (default)
     #[default]
     Careful,
     /// Prompt for everything including reads

@@ -16,7 +16,7 @@ use tark_cli::tools::{MatchType, RiskLevel, TrustLevel};
 #[test]
 fn test_trust_level_default() {
     let level = TrustLevel::default();
-    assert_eq!(level, TrustLevel::Balanced);
+    assert_eq!(level, TrustLevel::Careful);
 }
 
 #[test]
