@@ -84,6 +84,9 @@ pub enum Command {
     /// Exit from inside sidebar panel back to panel header
     SidebarExit,
 
+    /// Refresh sidebar data (e.g., after task reorder)
+    RefreshSidebar,
+
     /// Set Vim editing mode
     SetVimMode(super::VimMode),
 

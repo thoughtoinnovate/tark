@@ -24,7 +24,6 @@ The Tark TUI includes a powerful theme system with live preview, search, and sup
 ### Open Theme Picker
 ```
 /theme          # Type in chat input
-Ctrl+T Ctrl+H   # Keyboard shortcut (if configured)
 ```
 
 ### Navigate & Preview
@@ -39,8 +38,8 @@ Escape          # Cancel and restore original theme
 ```
 1. Type: /theme
 2. See list of all themes with current theme marked (✓)
-3. Type "dr" to filter → Shows "Dracula"
-4. Press Down → Instantly see Dracula theme applied
+3. Type "no" to filter → Shows "Nord"
+4. Press Down → Instantly see Nord theme applied
 5. Press Down again → See GitHub Dark
 6. Press Enter → Confirm GitHub Dark as your theme
    OR Press Escape → Go back to your original theme
@@ -52,7 +51,6 @@ Escape          # Cancel and restore original theme
 |-------|-------------|----------|
 | **Catppuccin Mocha** | Pastel dark theme (default) | Modern, soft colors |
 | **Nord** | Arctic-inspired blue/cyan | Cool, minimal aesthetic |
-| **Dracula** | Purple and pink dark | High contrast, vibrant |
 | **GitHub Dark** | GitHub's official dark | Professional, clean |
 | **One Dark** | Atom editor classic | Popular, balanced |
 | **Gruvbox Dark** | Retro groove colors | Warm, vintage feel |
@@ -162,7 +160,7 @@ The following Neovim highlight groups map to TUI theme colors:
 use tark::tui_new::theme::{Theme, ThemePreset};
 
 // Load a preset
-let theme = Theme::from_preset(ThemePreset::Dracula);
+let theme = Theme::from_preset(ThemePreset::Nord);
 
 // Parse from string (CLI/config)
 if let Some(preset) = ThemePreset::from_str("nord") {
@@ -178,7 +176,7 @@ let theme = Theme::from_nvim_highlights(&highlights);
 
 ```lua
 -- Set theme
-vim.fn['tark#set_theme']('dracula')
+vim.fn['tark#set_theme']('nord')
 
 -- Get current theme
 local theme = vim.fn['tark#get_theme']()
@@ -243,11 +241,11 @@ bg_main = "Normal.bg"
 | Key | Action |
 |-----|--------|
 | `/theme` | Open theme picker |
-| `Type` | Filter themes |
+| `a-z` | Filter themes by name |
 | `↑/↓` | Navigate & live preview |
-| `Enter` | Apply theme |
-| `Escape` | Cancel preview |
-| `Ctrl+T T` | Cycle to next theme (global) |
+| `Enter` | Apply theme permanently |
+| `Escape` | Cancel and restore original |
+| `Backspace` | Delete filter character |
 
 ## Examples
 
@@ -255,17 +253,17 @@ bg_main = "Normal.bg"
 
 ```
 /theme      # Open picker
-dr          # Type "dr" to filter to Dracula
-Down        # Preview Dracula
-Enter       # Apply Dracula
+no          # Type "no" to filter to Nord
+Down        # Preview Nord
+Enter       # Apply Nord
 ```
 
 ### Example 2: Browse All Themes
 
 ```
 /theme      # Open picker
-Down Down   # Preview Nord, then Dracula
-Down Down   # Preview GitHub Dark, then One Dark
+Down Down   # Preview Nord, then GitHub Dark
+Down Down   # Preview One Dark, then Gruvbox Dark
 Escape      # Cancel, restore original theme
 ```
 
@@ -317,6 +315,7 @@ The theme will persist in `~/.config/tark/themes/tokyonight.toml`.
 
 ## See Also
 
+- [Theme Quick Start](THEME_QUICKSTART.md) - Quick guide to theme switching
+- [TUI Setup Guide](TUI_SETUP.md) - TUI configuration
 - `examples/tark-config/themes/custom.toml` - Custom theme template
-- `src/tui_new/theme.rs` - Theme implementation
-- `README.md` - General configuration guide
+- `src/tui_new/theme.rs` - Theme implementation (6 presets)

@@ -332,6 +332,10 @@ struct StateInner {
     pub editing_task_content: String,
     /// Index of task pending deletion (for confirmation dialog)
     pub pending_delete_task_index: Option<usize>,
+    /// Index of task being dragged for reordering (None = not dragging)
+    pub dragging_task_index: Option<usize>,
+    /// Target position for the dragged task
+    pub drag_target_index: Option<usize>,
 
     // ========== Command Autocomplete ==========
     pub autocomplete_active: bool,
@@ -434,6 +438,8 @@ impl SharedState {
                 editing_task_index: None,
                 editing_task_content: String::new(),
                 pending_delete_task_index: None,
+                dragging_task_index: None,
+                drag_target_index: None,
                 autocomplete_active: false,
                 autocomplete_filter: String::new(),
                 autocomplete_selected: 0,
@@ -1773,6 +1779,59 @@ impl SharedState {
         self.read_inner().editing_task_index.is_some()
     }
 
+    // ========== Task Drag-to-Reorder ==========
+
+    /// Start dragging a task for reordering
+    pub fn start_task_drag(&self, index: usize) {
+        let mut inner = self.write_inner();
+        inner.dragging_task_index = Some(index);
+        inner.drag_target_index = Some(index);
+    }
+
+    /// Update the drag target position
+    pub fn update_drag_target(&self, target_index: usize) {
+        self.write_inner().drag_target_index = Some(target_index);
+    }
+
+    /// Get the index of the task being dragged
+    pub fn dragging_task_index(&self) -> Option<usize> {
+        self.read_inner().dragging_task_index
+    }
+
+    /// Get the current drag target position
+    pub fn drag_target_index(&self) -> Option<usize> {
+        self.read_inner().drag_target_index
+    }
+
+    /// Complete the drag operation and reorder the task
+    pub fn complete_task_drag(&self) -> bool {
+        let mut inner = self.write_inner();
+        if let (Some(from), Some(to)) = (inner.dragging_task_index, inner.drag_target_index) {
+            inner.dragging_task_index = None;
+            inner.drag_target_index = None;
+            if from != to && from < inner.message_queue.len() && to < inner.message_queue.len() {
+                let item = inner.message_queue.remove(from);
+                inner.message_queue.insert(to, item);
+                return true;
+            }
+        }
+        inner.dragging_task_index = None;
+        inner.drag_target_index = None;
+        false
+    }
+
+    /// Cancel the drag operation
+    pub fn cancel_task_drag(&self) {
+        let mut inner = self.write_inner();
+        inner.dragging_task_index = None;
+        inner.drag_target_index = None;
+    }
+
+    /// Check if currently dragging a task
+    pub fn is_dragging_task(&self) -> bool {
+        self.read_inner().dragging_task_index.is_some()
+    }
+
     // ========== Command Autocomplete ==========
 
     /// Check if autocomplete is active
@@ -2386,5 +2445,87 @@ mod tests {
 
         // Nothing should be deleted
         assert_eq!(state.queued_message_count(), 2);
+    }
+
+    #[test]
+    fn test_task_drag_reorder() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("task_a".to_string());
+        state.queue_message("task_b".to_string());
+        state.queue_message("task_c".to_string());
+        state.queue_message("task_d".to_string());
+
+        // Initially not dragging
+        assert!(!state.is_dragging_task());
+        assert!(state.dragging_task_index().is_none());
+        assert!(state.drag_target_index().is_none());
+
+        // Start drag on task at index 1 (task_b)
+        state.start_task_drag(1);
+        assert!(state.is_dragging_task());
+        assert_eq!(state.dragging_task_index(), Some(1));
+        assert_eq!(state.drag_target_index(), Some(1)); // Initial target is same as source
+
+        // Update drag target to index 3
+        state.update_drag_target(3);
+        assert_eq!(state.drag_target_index(), Some(3));
+
+        // Complete the drag
+        assert!(state.complete_task_drag());
+        assert!(!state.is_dragging_task());
+
+        // Verify task_b moved from index 1 to index 3
+        let messages = state.queued_messages();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0], "task_a");
+        assert_eq!(messages[1], "task_c");
+        assert_eq!(messages[2], "task_d");
+        assert_eq!(messages[3], "task_b");
+    }
+
+    #[test]
+    fn test_task_drag_cancel() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("task_1".to_string());
+        state.queue_message("task_2".to_string());
+
+        // Start drag
+        state.start_task_drag(0);
+        state.update_drag_target(1);
+        assert!(state.is_dragging_task());
+
+        // Cancel drag
+        state.cancel_task_drag();
+        assert!(!state.is_dragging_task());
+
+        // Queue should be unchanged
+        let messages = state.queued_messages();
+        assert_eq!(messages[0], "task_1");
+        assert_eq!(messages[1], "task_2");
+    }
+
+    #[test]
+    fn test_task_drag_no_movement() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("task_1".to_string());
+        state.queue_message("task_2".to_string());
+
+        // Start drag and complete without changing target
+        state.start_task_drag(0);
+        assert_eq!(state.drag_target_index(), Some(0)); // Target equals source
+
+        // Complete should return false (no actual movement)
+        assert!(!state.complete_task_drag());
+
+        // Queue should be unchanged
+        let messages = state.queued_messages();
+        assert_eq!(messages[0], "task_1");
+        assert_eq!(messages[1], "task_2");
     }
 }

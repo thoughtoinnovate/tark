@@ -31,66 +31,107 @@ This document helps AI coding agents understand the tark codebase and make effec
 
 ## Architecture
 
+The TUI uses a **Backend-for-Frontend (BFF)** pattern separating UI rendering from business logic.
+
 ```
 tark/
-├── src/                    # Rust backend (tark server)
-│   ├── main.rs             # CLI entry point
-│   ├── lib.rs              # Library exports
-│   ├── ui_backend/         # BFF layer (Backend-for-Frontend)
-│   │   ├── traits.rs       # UiRenderer trait
-│   │   ├── events.rs       # AppEvent enum
-│   │   ├── service.rs      # AppService business logic
-│   │   ├── state.rs        # SharedState (thread-safe)
-│   │   ├── commands.rs     # Command enum
-│   │   └── types.rs        # Shared data structures
-│   ├── agent/              # Chat agent with tool execution
-│   ├── completion/         # FIM (fill-in-middle) completions
-│   ├── config/             # Configuration management
-│   ├── diagnostics/        # Code analysis
-│   ├── llm/                # LLM providers + model DB
-│   │   ├── claude.rs       # Anthropic Claude
-│   │   ├── openai.rs       # OpenAI GPT
-│   │   ├── gemini.rs       # Google Gemini
-│   │   ├── copilot.rs      # GitHub Copilot
-│   │   ├── openrouter.rs   # OpenRouter
-│   │   ├── ollama.rs       # Local Ollama
-│   │   ├── models_db.rs    # models.dev integration
-│   │   └── types.rs        # Shared LLM types
-│   ├── lsp/                # LSP server implementation
-│   ├── storage/            # Persistent storage (.tark/)
-│   │   └── usage.rs        # Usage tracking with SQLite
-│   ├── tools/              # Agent tools with risk-based categorization
-│   │   ├── mod.rs          # Tool registry with mode-based composition
-│   │   ├── risk.rs         # RiskLevel and TrustLevel enums
-│   │   ├── approval.rs     # ApprovalGate with pattern matching
-│   │   ├── readonly/       # Read-only tools (grep, file_preview, safe_shell)
-│   │   ├── write/          # Write tools (reserved for future)
-│   │   ├── risky/          # Shell tools (reserved for future)
-│   │   └── dangerous/      # Destructive tools (reserved for future)
-│   ├── tui/                # Terminal UI
-│   │   └── widgets/        # TUI components
-│   │       ├── approval_card.rs           # Approval request popup
-│   │       └── approval_mode_selector.rs  # Trust level selector (Shift+A, Build mode only)
-│   └── transport/          # HTTP server and CLI
-│       └── dashboard.rs    # Usage dashboard HTML
-├── lua/                    # Neovim plugin (Lua)
+├── src/                         # Rust backend (tark server)
+│   ├── main.rs                  # CLI entry point
+│   ├── lib.rs                   # Library exports
+│   │
+│   ├── core/                    # Shared core modules
+│   │   ├── attachments.rs       # File attachment handling
+│   │   ├── context_tracker.rs   # Context window management
+│   │   ├── conversation_manager.rs # Conversation state
+│   │   ├── session_manager.rs   # Session persistence
+│   │   ├── tokenizer.rs         # Token counting
+│   │   └── types.rs             # AgentMode, BuildMode, ThinkLevel
+│   │
+│   ├── ui_backend/              # BFF layer (Backend-for-Frontend)
+│   │   ├── traits.rs            # UiRenderer trait
+│   │   ├── events.rs            # AppEvent enum
+│   │   ├── service.rs           # AppService orchestrator
+│   │   ├── state.rs             # SharedState (Arc<RwLock<>>)
+│   │   ├── commands.rs          # Command enum (100+ variants)
+│   │   ├── types.rs             # UI data structures
+│   │   ├── approval.rs          # ApprovalCardState
+│   │   └── questionnaire.rs     # QuestionnaireState
+│   │
+│   ├── tui_new/                 # New TUI implementation (ratatui)
+│   │   ├── controller.rs        # Event loop coordinator
+│   │   ├── renderer.rs          # UiRenderer implementation
+│   │   ├── theme.rs             # Theme system (6 presets)
+│   │   ├── modals/              # Modal widgets
+│   │   │   ├── approval_modal.rs
+│   │   │   ├── trust_modal.rs
+│   │   │   ├── session_picker.rs
+│   │   │   ├── task_edit_modal.rs
+│   │   │   └── ...
+│   │   └── widgets/             # UI components
+│   │       ├── header.rs        # Title bar
+│   │       ├── message_area.rs  # Chat messages
+│   │       ├── input.rs         # Input field
+│   │       ├── sidebar.rs       # Session/Context/Tasks/Git
+│   │       ├── status_bar.rs    # Mode/Provider/Model
+│   │       └── modal.rs         # Picker modals
+│   │
+│   ├── agent/                   # Chat agent with tool execution
+│   ├── completion/              # FIM (fill-in-middle) completions
+│   ├── config/                  # Configuration management
+│   ├── diagnostics/             # Code analysis
+│   ├── llm/                     # LLM providers + model DB
+│   │   ├── claude.rs            # Anthropic Claude
+│   │   ├── openai.rs            # OpenAI GPT
+│   │   ├── gemini.rs            # Google Gemini
+│   │   ├── copilot.rs           # GitHub Copilot
+│   │   ├── openrouter.rs        # OpenRouter
+│   │   ├── ollama.rs            # Local Ollama (with tool calling)
+│   │   ├── tark_sim.rs          # Built-in test provider
+│   │   ├── models_db.rs         # models.dev integration
+│   │   └── types.rs             # Shared LLM types
+│   ├── lsp/                     # LSP server implementation
+│   ├── storage/                 # Persistent storage (.tark/)
+│   │   └── usage.rs             # Usage tracking with SQLite
+│   ├── tools/                   # Agent tools with risk-based categorization
+│   │   ├── mod.rs               # Tool registry with mode-based composition
+│   │   ├── risk.rs              # RiskLevel and TrustLevel enums
+│   │   ├── approval.rs          # ApprovalGate with pattern matching
+│   │   ├── questionnaire.rs     # User interaction requests
+│   │   ├── readonly/            # Read-only tools (grep, file_preview, safe_shell)
+│   │   ├── write/               # Write tools
+│   │   ├── risky/               # Shell tools
+│   │   └── dangerous/           # Destructive tools
+│   └── transport/               # HTTP server and CLI
+│       ├── cli.rs               # CLI commands
+│       └── dashboard.rs         # Usage dashboard HTML
+│
+├── lua/                         # Neovim plugin (Lua)
 │   └── tark/
-│       ├── init.lua        # Plugin entry point & setup
-│       ├── binary.lua      # Binary find/download/version
-│       ├── tui.lua         # TUI integration (socket RPC)
-│       ├── ghost.lua       # Ghost text completions
-│       ├── lsp.lua         # LSP integration helpers
-│       ├── statusline.lua  # Statusline helpers
-│       └── health.lua      # :checkhealth integration
-├── plugin/
-│   └── tark.lua            # Command registration
-├── .github/workflows/      # CI/CD
-│   ├── ci.yml              # Tests, build, lint
-│   ├── release.yml         # Multi-platform releases
-│   └── docker.yml          # Docker image builds
-├── Dockerfile              # Minimal scratch image (~15MB)
-├── Dockerfile.alpine       # Alpine image with shell (~30MB)
-└── install.sh              # Binary installer with checksum verification
+│       ├── init.lua             # Plugin entry point & setup
+│       ├── binary.lua           # Binary find/download/version
+│       ├── tui.lua              # TUI integration (socket RPC)
+│       ├── ghost.lua            # Ghost text completions
+│       ├── lsp.lua              # LSP integration helpers
+│       ├── statusline.lua       # Statusline helpers
+│       └── health.lua           # :checkhealth integration
+│
+├── tests/                       # Test suite
+│   ├── cucumber_tui_new.rs      # BDD integration tests
+│   ├── tui_snapshot_tests.rs    # Visual snapshot tests
+│   ├── tui_widget_tests.rs      # Widget unit tests
+│   └── visual/                  # Visual E2E tests
+│       └── tui/features/        # Gherkin feature files
+│
+├── docs/                        # Documentation
+│   ├── BFF_ARCHITECTURE.md      # BFF design details
+│   ├── TUI_SETUP.md             # Setup guide
+│   ├── THEMES.md                # Theme system
+│   └── TUI_MODAL_DESIGN_GUIDE.md # Modal design patterns
+│
+├── .github/workflows/           # CI/CD
+├── Dockerfile                   # Minimal scratch image (~15MB)
+├── Dockerfile.alpine            # Alpine image with shell (~30MB)
+└── install.sh                   # Binary installer with checksum verification
 ```
 
 ## Do's ✅
@@ -139,32 +180,37 @@ tark/
 
 ### TUI Testing (CRITICAL)
 
-**⚠️ Cucumber/BDD step definitions can CHEAT by directly manipulating state instead of testing real code paths.**
+The TUI has a multi-level testing strategy. See `tests/TUI_TESTING_README.md` for details.
+
+**Test Levels:**
+
+| Level | Tool | Purpose | Command |
+|-------|------|---------|---------|
+| Unit | `#[test]` | Widget functions | `cargo test --test tui_widget_tests` |
+| Snapshot | `insta` | Visual regression | `cargo test --test tui_snapshot_tests` |
+| Integration | Cucumber | Component interactions | `cargo test --test cucumber_tui_new` |
+| E2E | Cucumber + PTY | Real binary | `cargo test --test cucumber_e2e --release` |
+
+**⚠️ Cucumber step definitions can CHEAT by directly manipulating state instead of testing real code paths.**
 
 For TUI features, you MUST:
 
-1. **Write real behavior tests in `tests/tui_real_behavior.rs`**
-   ```rust
-   // ✅ GOOD - Tests actual code path
-   #[test]
-   fn test_slash_help_opens_help_modal() {
-       let mut app = create_test_app();
-       app.state_mut().insert_str("/help");
-       app.state_mut().submit_input();  // Calls REAL method
-       assert_eq!(app.state().active_modal, Some(ModalType::Help));
-   }
-   ```
+1. **Write unit tests for widget logic in `tests/tui_widget_tests.rs`**
 
-2. **Don't trust cucumber tests alone** - They may pass while real app is broken
+2. **Use snapshot tests for visual changes in `tests/tui_snapshot_tests.rs`**
+   ```bash
+   cargo test --test tui_snapshot_tests
+   cargo insta review  # Review snapshot changes
+   ```
 
 3. **Manual smoke test after EVERY TUI change**:
    ```bash
    cargo build --release
    ./target/release/tark tui
-   # Verify: /help, /model, /theme, ?, Escape, Enter all work
+   # Verify: /help, /model, /theme, Ctrl+?, Escape, Enter all work
    ```
 
-4. **If manual test fails, fix `src/tui_new/app.rs`** - Not the test step definitions
+4. **If manual test fails, fix `src/tui_new/controller.rs` or `renderer.rs`** - Not the test step definitions
 
 ### Versioning
 
@@ -211,26 +257,62 @@ For TUI features, you MUST:
 
 ## Key Files to Understand
 
+### BFF Layer (Backend-for-Frontend)
+
 | File | Purpose | When to Modify |
 |------|---------|----------------|
-| `src/ui_backend/service.rs` | BFF business logic | Adding UI-agnostic features |
-| `src/ui_backend/commands.rs` | User action abstraction | Adding new commands |
-| `src/ui_backend/events.rs` | Async event streaming | Adding new event types |
-| `src/ui_backend/state.rs` | Thread-safe shared state | Adding state fields |
+| `src/ui_backend/service.rs` | AppService orchestrator | Adding UI-agnostic features |
+| `src/ui_backend/commands.rs` | Command enum (100+ variants) | Adding new user actions |
+| `src/ui_backend/events.rs` | AppEvent enum | Adding new async events |
+| `src/ui_backend/state.rs` | SharedState (Arc<RwLock>) | Adding state fields |
+| `src/ui_backend/types.rs` | UI data structures | Adding new UI types |
+| `src/core/types.rs` | AgentMode, BuildMode, ThinkLevel | Changing core types |
+
+### TUI Layer (Presentation)
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
+| `src/tui_new/controller.rs` | Event loop coordinator | Changing event handling |
+| `src/tui_new/renderer.rs` | Key-to-command mapping, rendering | Adding keybindings |
+| `src/tui_new/theme.rs` | Theme presets and colors | Adding themes |
+| `src/tui_new/widgets/*.rs` | UI widgets | Modifying widgets |
+| `src/tui_new/modals/*.rs` | Modal dialogs | Adding modals |
+
+### Agent & Tools
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
 | `src/agent/chat.rs` | Chat agent logic | Adding agent features |
 | `src/tools/mod.rs` | Tool registry & mode composition | Adding/modifying tools |
-| `src/tools/risk.rs` | Risk levels & trust levels | Changing risk categories |
-| `src/tools/approval.rs` | Approval gate & pattern matching | Changing approval flow |
-| `src/tools/readonly/` | Safe read-only tools | Adding read-only tools |
+| `src/tools/risk.rs` | RiskLevel and TrustLevel enums | Changing risk categories |
+| `src/tools/approval.rs` | ApprovalGate with pattern matching | Changing approval flow |
+| `src/tools/questionnaire.rs` | User interaction requests | Adding question types |
+
+### LLM Providers
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
 | `src/llm/types.rs` | LLM message types | Changing API contracts |
-| `src/completion/engine.rs` | FIM completion logic | Changing completion behavior |
-| `src/storage/usage.rs` | Usage tracking & SQLite | Adding usage analytics |
-| `src/transport/dashboard.rs` | Usage dashboard HTML | Modifying dashboard UI |
-| `src/tui/widgets/approval_card.rs` | Approval popup UI | Changing approval UX |
+| `src/llm/ollama.rs` | Ollama provider (with tool calling) | Ollama features |
+| `src/llm/tark_sim.rs` | Built-in test provider | Testing/demo |
+| `src/llm/models_db.rs` | models.dev integration | Model metadata |
+
+### Neovim Plugin
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
 | `lua/tark/init.lua` | Plugin entry & config | Adding config options |
 | `lua/tark/tui.lua` | TUI integration | Socket RPC handlers |
 | `lua/tark/binary.lua` | Binary management | Download/version logic |
 | `plugin/tark.lua` | Command registration | Adding new commands |
+
+### Infrastructure
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
+| `src/completion/engine.rs` | FIM completion logic | Changing completion behavior |
+| `src/storage/usage.rs` | Usage tracking & SQLite | Adding usage analytics |
+| `src/transport/dashboard.rs` | Usage dashboard HTML | Modifying dashboard UI |
 | `.github/workflows/release.yml` | Release automation | Adding platforms |
 
 ## Common Tasks
@@ -249,6 +331,31 @@ For TUI features, you MUST:
 3. Export in `src/llm/mod.rs`
 4. Add config in `src/config/mod.rs`
 5. Add to provider selection in chat
+
+### Adding a New TUI Modal
+
+1. Add modal type to `ModalType` enum in `src/ui_backend/state.rs`
+2. Create modal widget in `src/tui_new/modals/` (follow `docs/TUI_MODAL_DESIGN_GUIDE.md`)
+3. Add rendering in `src/tui_new/renderer.rs` render method
+4. Add keyboard handling in `renderer.rs` `key_to_command()` function
+5. Add any needed state fields to `SharedState`
+6. Add command handling in `src/tui_new/controller.rs`
+7. Update `docs/TUI_MODAL_DESIGN_GUIDE.md` with new modal
+
+### Adding a New Command
+
+1. Add variant to `Command` enum in `src/ui_backend/commands.rs`
+2. Handle command in `src/ui_backend/service.rs` `handle_command()`
+3. If TUI-specific, add keybinding in `src/tui_new/renderer.rs`
+4. Update `README.md` keyboard shortcuts table
+
+### Adding a New Theme
+
+1. Add variant to `ThemePreset` enum in `src/tui_new/theme.rs`
+2. Implement `Theme::your_theme()` method with colors
+3. Update `from_preset()` match statement
+4. Update `display_name()` and `all()` methods
+5. Update `docs/THEMES.md`
 
 ### Adding a Config Option
 

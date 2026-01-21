@@ -8,8 +8,8 @@ When you navigate through themes with Up/Down arrows, you see **instant preview*
 ```
 /theme      # Open theme picker
 ↓           # Preview "Nord" - entire UI changes to Nord colors
-↓           # Preview "Dracula" - UI changes to Dracula colors
-Enter       # Keep Dracula
+↓           # Preview "GitHub Dark" - UI changes to GitHub Dark colors
+Enter       # Keep GitHub Dark
 ```
 
 or
@@ -74,13 +74,12 @@ Enter       # Apply
 "o" → Shows One Dark, Tokyo Night (both have "o")
 ```
 
-## All 7 Built-in Themes
+## All 6 Built-in Themes
 
 | Theme | Preview | Use Case |
 |-------|---------|----------|
 | **Catppuccin Mocha** | Soft pastels on dark navy | Default, easy on eyes |
 | **Nord** | Cool blues and cyans | Arctic, minimal |
-| **Dracula** | Purple, pink, vibrant | High contrast |
 | **GitHub Dark** | Professional grays | Clean, corporate |
 | **One Dark** | Balanced colors | Popular, familiar |
 | **Gruvbox Dark** | Warm retro colors | Vintage feel |
@@ -88,17 +87,17 @@ Enter       # Apply
 
 ## Quick Examples
 
-### Example 1: Try Dracula
+### Example 1: Try Nord
 ```
 /theme          # Open
-dracula         # Type "dracula"
+nord            # Type "nord"
 Enter           # Instantly applied!
 ```
 
 ### Example 2: Browse All Themes
 ```
 /theme          # Open
-↓↓↓↓↓↓         # Press Down 6 times, see all 7 themes
+↓↓↓↓↓          # Press Down 5 times, see all 6 themes
 Escape          # Don't like any? Back to original
 ```
 
@@ -198,7 +197,7 @@ Try this to see live preview in action:
 
 ```bash
 # Start TUI
-cargo run --features test-sim -- tui
+./target/release/tark tui
 
 # In TUI:
 /theme          # Open theme picker
@@ -206,7 +205,6 @@ cargo run --features test-sim -- tui
 
 # Now press Down repeatedly and watch:
 ↓               # → Nord appears (blues and cyans)
-↓               # → Dracula appears (purples and pinks)
 ↓               # → GitHub Dark appears (professional grays)
 ↓               # → One Dark appears (balanced colors)
 ↓               # → Gruvbox Dark appears (warm retros)

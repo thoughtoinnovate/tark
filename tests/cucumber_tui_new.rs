@@ -772,7 +772,6 @@ async fn press_key(w: &mut TuiWorld, key: String) {
                     ThemePreset::CatppuccinMocha,
                     ThemePreset::Nord,
                     ThemePreset::TokyoNight,
-                    ThemePreset::Dracula,
                     ThemePreset::OneDark,
                     ThemePreset::GruvboxDark,
                     ThemePreset::SolarizedDark,
@@ -2407,10 +2406,9 @@ async fn item_highlighted(w: &mut TuiWorld, item: String) {
             "catppuccin mocha" => 0,
             "nord" => 1,
             "github dark" => 2,
-            "dracula" => 3,
-            "one dark" => 4,
-            "gruvbox dark" => 5,
-            "tokyo night" => 6,
+            "one dark" => 3,
+            "gruvbox dark" => 4,
+            "tokyo night" => 5,
             _ => 0,
         };
         w.app.state_mut().dropdown_index = idx;
@@ -2994,7 +2992,6 @@ async fn current_theme_is(w: &mut TuiWorld, theme: String) {
         "gruvbox dark" | "gruvbox-dark" => ThemePreset::GruvboxDark,
         "one dark" | "one-dark" => ThemePreset::OneDark,
         "solarized dark" | "solarized-dark" => ThemePreset::SolarizedDark,
-        "dracula" => ThemePreset::Dracula,
         _ => ThemePreset::CatppuccinMocha,
     };
     w.app.state_mut().set_theme(preset);
@@ -3017,7 +3014,6 @@ async fn apply_theme(w: &mut TuiWorld, theme: String) {
         "catppuccin mocha" => ThemePreset::CatppuccinMocha,
         "nord" => ThemePreset::Nord,
         "one dark" => ThemePreset::OneDark,
-        "dracula" => ThemePreset::Dracula,
         _ => ThemePreset::CatppuccinMocha,
     };
     w.app.state_mut().set_theme(preset);

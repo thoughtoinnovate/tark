@@ -1048,6 +1048,60 @@ impl<B: Backend> TuiRenderer<B> {
             (KeyCode::Left, KeyModifiers::CONTROL) => Some(Command::CursorWordBackward),
             (KeyCode::Right, KeyModifiers::CONTROL) => Some(Command::CursorWordForward),
 
+            // Task queue management: Shift+Up to move task up (same as Shift+K)
+            (KeyCode::Up, KeyModifiers::SHIFT) => {
+                // Panel focused + Tasks panel + queued item selected -> move task up
+                if state.focused_component() == FocusedComponent::Panel
+                    && state.sidebar_selected_panel() == 2
+                {
+                    if let Some(item_idx) = state.sidebar_selected_item() {
+                        let tasks = state.tasks();
+                        let active_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Active)
+                            .count();
+                        let completed_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Completed)
+                            .count();
+                        if item_idx >= active_count + completed_count {
+                            let queue_idx = item_idx - active_count - completed_count;
+                            if queue_idx > 0 {
+                                return Some(Command::MoveTaskUp(queue_idx));
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            // Task queue management: Shift+Down to move task down (same as Shift+J)
+            (KeyCode::Down, KeyModifiers::SHIFT) => {
+                // Panel focused + Tasks panel + queued item selected -> move task down
+                if state.focused_component() == FocusedComponent::Panel
+                    && state.sidebar_selected_panel() == 2
+                {
+                    if let Some(item_idx) = state.sidebar_selected_item() {
+                        let tasks = state.tasks();
+                        let active_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Active)
+                            .count();
+                        let completed_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Completed)
+                            .count();
+                        let queued_count = state.queued_message_count();
+                        if item_idx >= active_count + completed_count {
+                            let queue_idx = item_idx - active_count - completed_count;
+                            if queue_idx < queued_count.saturating_sub(1) {
+                                return Some(Command::MoveTaskDown(queue_idx));
+                            }
+                        }
+                    }
+                }
+                None
+            }
+
             // Arrow key navigation (context-dependent)
             (KeyCode::Up, _) => {
                 if state.active_questionnaire().is_some() {
@@ -1187,13 +1241,54 @@ impl<B: Backend> TuiRenderer<B> {
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 tracing::debug!("Left click event detected");
+                // Check if clicking a queued task in the Tasks panel (for drag-to-reorder)
+                let target = self.hit_test(mouse.column, mouse.row, state);
+                if target == ClickTarget::Sidebar {
+                    if let Some((task_idx, is_queued)) =
+                        self.get_clicked_task_index(mouse.row, state)
+                    {
+                        if is_queued {
+                            // Start drag operation for queued tasks
+                            let tasks = state.tasks();
+                            let active_count = tasks
+                                .iter()
+                                .filter(|t| t.status == StateTaskStatus::Active)
+                                .count();
+                            let completed_count = tasks
+                                .iter()
+                                .filter(|t| t.status == StateTaskStatus::Completed)
+                                .count();
+                            let queue_idx = task_idx - active_count - completed_count;
+                            state.start_task_drag(queue_idx);
+                            tracing::debug!("Started task drag for queue index {}", queue_idx);
+                            // Also select the item in the sidebar
+                            state.set_sidebar_selected_panel(2); // Tasks panel
+                            state.set_sidebar_selected_item(Some(task_idx));
+                            return Some(Command::FocusPanel);
+                        }
+                    }
+                }
                 // Handle clicks - delegate to hit testing
                 self.handle_mouse_click(mouse.column, mouse.row, state)
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 tracing::debug!("Mouse drag event detected at row={}", mouse.row);
-                // Handle scrollbar dragging for messages area
+                // Handle scrollbar dragging for messages area or task drag-to-reorder
                 self.handle_scrollbar_drag(mouse.column, mouse.row, state)
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                tracing::debug!("Mouse up event detected");
+                // Complete task drag operation if active
+                if state.is_dragging_task() {
+                    let moved = state.complete_task_drag();
+                    if moved {
+                        tracing::debug!("Task drag completed, task moved");
+                        return Some(Command::RefreshSidebar);
+                    } else {
+                        tracing::debug!("Task drag cancelled (no movement)");
+                    }
+                }
+                None
             }
             _ => {
                 tracing::debug!("Unhandled mouse event: {:?}", mouse.kind);
@@ -1345,9 +1440,32 @@ impl<B: Backend> TuiRenderer<B> {
         None
     }
 
-    /// Handle scrollbar dragging
+    /// Handle scrollbar dragging or task drag-to-reorder
     fn handle_scrollbar_drag(&self, col: u16, row: u16, state: &SharedState) -> Option<Command> {
         let size = self.terminal.size().unwrap_or_default();
+
+        // First, check if we're dragging a task for reorder
+        if state.is_dragging_task() {
+            // Update drag target based on mouse position in sidebar
+            if let Some((task_idx, _is_queued)) = self.get_clicked_task_index(row, state) {
+                // Only allow dropping onto queued tasks (excluding the first/active one)
+                let tasks = state.tasks();
+                let active_count = tasks
+                    .iter()
+                    .filter(|t| t.status == StateTaskStatus::Active)
+                    .count();
+                let completed_count = tasks
+                    .iter()
+                    .filter(|t| t.status == StateTaskStatus::Completed)
+                    .count();
+
+                if task_idx >= active_count + completed_count {
+                    let queue_idx = task_idx - active_count - completed_count;
+                    state.update_drag_target(queue_idx);
+                }
+            }
+            return None; // State updated, no command needed
+        }
 
         // Check if dragging in the messages area scrollbar region
         // The scrollbar is at the right edge of the messages panel
@@ -1387,6 +1505,53 @@ impl<B: Backend> TuiRenderer<B> {
             }
 
             return None; // State is already updated, no command needed
+        }
+
+        None
+    }
+
+    /// Get the task index clicked within the Tasks panel
+    /// Returns (task_list_index, is_queued_task)
+    fn get_clicked_task_index(&self, row: u16, state: &SharedState) -> Option<(usize, bool)> {
+        let size = self.terminal.size().unwrap_or_default();
+        let _sidebar_height = size.height.saturating_sub(2);
+
+        // Calculate Tasks panel start position (same logic as get_clicked_sidebar_panel)
+        let inner_y = 1u16;
+        let header_h = 2u16;
+        let panels = state.sidebar_expanded_panels();
+
+        let session_h = if panels[0] { 5u16 } else { 1u16 };
+        let context_h = if panels[1] { 6u16 } else { 1u16 };
+
+        // Tasks panel header starts at this position
+        let tasks_start = inner_y + header_h + session_h + context_h;
+        let tasks_header_h = 1u16; // "Tasks" header line
+
+        // If click is on or before the header, not a task item
+        if row <= tasks_start || !panels[2] {
+            return None;
+        }
+
+        // Calculate which task item was clicked
+        // Each task takes 2 lines: name line + status/label line
+        let item_row = row.saturating_sub(tasks_start + tasks_header_h);
+        let task_idx = (item_row / 2) as usize; // 2 lines per task
+
+        let tasks = state.tasks();
+        if task_idx < tasks.len() {
+            // Determine if this is a queued task
+            let active_count = tasks
+                .iter()
+                .filter(|t| t.status == StateTaskStatus::Active)
+                .count();
+            let completed_count = tasks
+                .iter()
+                .filter(|t| t.status == StateTaskStatus::Completed)
+                .count();
+
+            let is_queued = task_idx >= active_count + completed_count;
+            return Some((task_idx, is_queued));
         }
 
         None
@@ -1735,6 +1900,10 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 
                 sidebar.expanded_panels = state.sidebar_expanded_panels();
                 sidebar.selected_item = state.sidebar_selected_item();
+
+                // Set drag state for visual feedback
+                sidebar =
+                    sidebar.drag_state(state.dragging_task_index(), state.drag_target_index());
 
                 frame.render_widget(sidebar, sidebar_rect);
             }

@@ -211,6 +211,21 @@ let modal_height = area.height.min(20); // Max 20 rows
    - ✅ Keyboard shortcuts formatting
    - ✅ Section organization
 
+4. **SessionSwitchConfirmModal** (`src/tui_new/modals/session_switch_confirm.rs`)
+   - ✅ Warning-style modal (yellow border)
+   - ✅ Clear yes/no options
+   - ✅ Explains consequences
+
+5. **TaskEditModal** (`src/tui_new/modals/task_edit_modal.rs`)
+   - ✅ Text editing within modal
+   - ✅ Save/Cancel actions
+   - ✅ Shows task context
+
+6. **TrustModal** (`src/tui_new/modals/trust_modal.rs`)
+   - ✅ Three-option selector
+   - ✅ Clear descriptions for each level
+   - ✅ Current selection highlight
+
 ## Checklist for New Modals
 
 Before creating a new modal, ensure:
@@ -267,6 +282,27 @@ Span::styled("Y", Style::default().fg(self.theme.green)),
 Span::styled(" Approve", Style::default().fg(self.theme.text_muted)),
 ```
 
+## Available Modal Types
+
+The following modal types are defined in `src/ui_backend/state.rs`:
+
+| Modal Type | Purpose | File Location |
+|------------|---------|---------------|
+| `ProviderPicker` | Select LLM provider | `widgets/modal.rs` |
+| `ModelPicker` | Select model for provider | `widgets/modal.rs` |
+| `SessionPicker` | Switch between sessions | `modals/session_picker.rs` |
+| `FilePicker` | Add files to context | `widgets/modal.rs` |
+| `ThemePicker` | Select UI theme | `widgets/modal.rs` |
+| `Help` | Show keyboard shortcuts | `widgets/modal.rs` |
+| `Approval` | Approve risky operations | `modals/approval_modal.rs` |
+| `TrustLevel` | Set trust/approval level | `modals/trust_modal.rs` |
+| `Tools` | View available tools | `modals/tools_modal.rs` |
+| `Plugin` | Manage plugins | `modals/plugin_modal.rs` |
+| `DeviceFlow` | OAuth device flow auth | `modals/device_flow_modal.rs` |
+| `SessionSwitchConfirm` | Confirm session switch | `modals/session_switch_confirm.rs` |
+| `TaskEdit` | Edit queued task | `modals/task_edit_modal.rs` |
+| `TaskDeleteConfirm` | Confirm task deletion | `modals/task_edit_modal.rs` |
+
 ## Theme Support
 
 All modals automatically support theme switching via the `Theme` struct. When users change themes:
@@ -277,15 +313,10 @@ All modals automatically support theme switching via the `Theme` struct. When us
 
 Available theme presets:
 - Catppuccin Mocha (default)
-- Catppuccin Macchiato
-- Catppuccin Frappe
-- Catppuccin Latte
-- Tokyo Night
-- Dracula
 - Nord
+- GitHub Dark
+- One Dark
 - Gruvbox Dark
-- Gruvbox Light
-- Solarized Dark
-- Solarized Light
+- Tokyo Night
 
 All themes are defined in `src/tui_new/theme.rs`.

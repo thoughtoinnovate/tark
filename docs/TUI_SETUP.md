@@ -301,9 +301,76 @@ enabled_providers = []  # Empty = show all
 
 ---
 
+## New Features
+
+### Theme System
+
+Switch themes with `/theme` command for live preview:
+
+```bash
+/theme         # Opens theme picker
+↑/↓            # Preview themes in real-time
+Enter          # Apply selected theme
+Escape         # Cancel and restore original
+```
+
+Available themes: Catppuccin Mocha, Nord, GitHub Dark, One Dark, Gruvbox Dark, Tokyo Night
+
+See [THEMES.md](THEMES.md) for custom themes.
+
+### Task Queue Management
+
+When you send multiple messages while the agent is working, they're queued.
+
+**Managing queued tasks (Sidebar → Tasks panel):**
+- `e` - Edit a queued task
+- `D` - Delete a queued task
+- `J/K` - Reorder tasks
+
+### Session Management
+
+```bash
+/sessions        # List all sessions
+/session <id>    # Switch to session
+/new             # Create new session
+/export [path]   # Export session to JSON
+/import <path>   # Import session from JSON
+```
+
+### Trust Levels (Build Mode)
+
+Control how risky operations are approved with `Ctrl+Shift+B` or `/trust`:
+
+| Level | Behavior |
+|-------|----------|
+| Manual | Approve everything |
+| Balanced | Auto-approve reads, prompt for writes (default) |
+| Careful | Auto-approve most, prompt only for dangerous |
+
+---
+
+## Keyboard Quick Reference
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+C` | Cancel LLM / Quit |
+| `Ctrl+B` | Toggle sidebar |
+| `Ctrl+T` | Toggle thinking blocks |
+| `Shift+Tab` | Cycle agent mode |
+| `Ctrl+M` | Cycle build mode |
+| `Ctrl+?` | Help modal |
+| `Tab` | Cycle focus |
+| `j/k` | Vim navigation |
+| `Esc` | Close modal |
+
+See [README.md](../README.md) for full keyboard reference.
+
+---
+
 ## Getting Help
 
 1. Check logs: `cat tark-debug.log` (if --debug was used)
 2. Run diagnostics: `./test_tui_init.sh`
 3. Test with chat mode: `./tark chat` (works without TTY)
 4. Check authentication: `./tark auth status`
+5. See [BFF_ARCHITECTURE.md](BFF_ARCHITECTURE.md) for architecture details
