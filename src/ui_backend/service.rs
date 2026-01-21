@@ -826,6 +826,7 @@ impl AppService {
                     self.state.add_message(queue_msg.clone());
                     self.state.scroll_to_bottom();
                     self.event_tx.send(AppEvent::MessageAdded(queue_msg)).ok();
+                    self.update_tasks(); // Update sidebar tasks with new queued item
                     return Ok(());
                 }
 
@@ -876,6 +877,7 @@ impl AppService {
                 // Send to LLM via ConversationService
                 if let Some(ref conv_svc) = self.conversation_svc {
                     self.state.set_llm_processing(true);
+                    self.update_tasks(); // Update sidebar tasks
 
                     let conv_svc = conv_svc.clone();
                     let text = text.clone();
@@ -1795,6 +1797,57 @@ impl AppService {
 
         let git_changes = crate::tui_new::git_info::get_git_changes(&self.working_dir);
         self.state.set_git_changes(git_changes);
+
+        // Update tasks from current state
+        self.update_tasks();
+    }
+
+    /// Update tasks in sidebar from current processing state and message queue
+    fn update_tasks(&self) {
+        use crate::ui_backend::types::{TaskInfo, TaskStatus};
+
+        let mut tasks = Vec::new();
+
+        // If LLM is processing, find the last user message as the active task
+        if self.state.llm_processing() {
+            let messages = self.state.messages();
+            // Find the last user message (that's what's being processed)
+            if let Some(last_user_msg) = messages.iter().rev().find(|m| m.role == MessageRole::User)
+            {
+                // Truncate long messages for display
+                let task_name = if last_user_msg.content.len() > 50 {
+                    format!("{}...", &last_user_msg.content[..47])
+                } else {
+                    last_user_msg.content.clone()
+                };
+
+                tasks.push(TaskInfo {
+                    id: format!("active_{}", tasks.len()),
+                    name: task_name,
+                    status: TaskStatus::Active,
+                    created_at: last_user_msg.timestamp.clone(),
+                });
+            }
+        }
+
+        // Add queued messages as queued tasks
+        let queued_messages = self.state.queued_messages();
+        for (idx, msg) in queued_messages.iter().enumerate() {
+            let task_name = if msg.len() > 50 {
+                format!("{}...", &msg[..47])
+            } else {
+                msg.clone()
+            };
+
+            tasks.push(TaskInfo {
+                id: format!("queued_{}", idx),
+                name: task_name,
+                status: TaskStatus::Queued,
+                created_at: chrono::Local::now().format("%H:%M:%S").to_string(),
+            });
+        }
+
+        self.state.set_tasks(tasks);
     }
 
     /// Get git changes for the working directory

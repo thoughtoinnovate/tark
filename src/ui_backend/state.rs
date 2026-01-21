@@ -1574,6 +1574,11 @@ impl SharedState {
         self.read_inner().message_queue.len()
     }
 
+    /// Get a copy of all queued messages (for display in sidebar)
+    pub fn queued_messages(&self) -> Vec<String> {
+        self.read_inner().message_queue.clone()
+    }
+
     /// Clear all queued messages (used on cancel/abort)
     pub fn clear_message_queue(&self) -> usize {
         let mut inner = self.write_inner();
