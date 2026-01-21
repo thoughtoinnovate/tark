@@ -88,6 +88,8 @@ pub struct Sidebar<'a> {
     pub tasks: Vec<Task>,
     /// Git changes
     pub git_changes: Vec<GitChange>,
+    /// Current git branch
+    pub git_branch: String,
     /// Theme
     pub theme: &'a Theme,
     /// Current theme name for display
@@ -112,7 +114,6 @@ pub struct Sidebar<'a> {
 #[derive(Debug, Default)]
 pub struct SessionInfo {
     pub name: String,
-    pub branch: String,
     pub total_cost: f64,
     pub model_count: usize,
     pub model_costs: Vec<(String, f64)>,
@@ -132,6 +133,7 @@ impl<'a> Sidebar<'a> {
             tokens_total: 1_000_000,
             tasks: Vec::new(),
             git_changes: Vec::new(),
+            git_branch: String::new(),
             theme,
             current_theme_name: "Catppuccin Mocha".to_string(),
             expanded_panels: [true, true, true, true], // All expanded by default
@@ -215,7 +217,7 @@ impl<'a> Sidebar<'a> {
         }
 
         let max_items = match self.selected_panel {
-            0 => self.session_info.branch.len(), // Simplified
+            0 => 3 + self.session_info.model_costs.len(), // name line + cost line + tokens line + per-model lines
             1 => self.context_files.len(),
             2 => self.tasks.len(),
             3 => self.git_changes.len(),
@@ -278,6 +280,11 @@ impl<'a> Sidebar<'a> {
 
     pub fn git_changes(mut self, changes: Vec<GitChange>) -> Self {
         self.git_changes = changes;
+        self
+    }
+
+    pub fn git_branch(mut self, branch: String) -> Self {
+        self.git_branch = branch;
         self
     }
 
@@ -438,17 +445,20 @@ impl Widget for Sidebar<'_> {
         );
 
         if session_expanded {
-            Self::push_line(
-                &mut session_lines,
-                &mut all_lines,
-                Line::from(vec![
-                    Span::raw("  ⎇ "),
-                    Span::styled(
-                        &self.session_info.branch,
-                        Style::default().fg(self.theme.blue),
-                    ),
-                ]),
-            );
+            // Show session name
+            if !self.session_info.name.is_empty() {
+                Self::push_line(
+                    &mut session_lines,
+                    &mut all_lines,
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            &self.session_info.name,
+                            Style::default().fg(self.theme.text_secondary),
+                        ),
+                    ]),
+                );
+            }
             Self::push_line(
                 &mut session_lines,
                 &mut all_lines,
@@ -829,19 +839,18 @@ impl Widget for Sidebar<'_> {
         );
 
         if git_expanded {
-            // Branch name display
-            Self::push_line(
-                &mut git_lines,
-                &mut all_lines,
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled("⎇ ", Style::default().fg(self.theme.purple)),
-                    Span::styled(
-                        &self.session_info.branch,
-                        Style::default().fg(self.theme.blue),
-                    ),
-                ]),
-            );
+            // Show current branch
+            if !self.git_branch.is_empty() {
+                Self::push_line(
+                    &mut git_lines,
+                    &mut all_lines,
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("⎇ ", Style::default().fg(self.theme.purple)),
+                        Span::styled(&self.git_branch, Style::default().fg(self.theme.blue)),
+                    ]),
+                );
+            }
 
             // Summary: modified | added | deleted
             Self::push_line(

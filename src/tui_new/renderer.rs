@@ -15,7 +15,9 @@ use crate::ui_backend::{
     AppEvent, Command, FocusedComponent, MessageRole as UiMessageRole, ModalType, SharedState,
 };
 
-use super::modals::{ApprovalModal, DeviceFlowModal, PluginModal, ToolsModal, TrustModal};
+use super::modals::{
+    ApprovalModal, DeviceFlowModal, PluginModal, SessionSwitchConfirmModal, ToolsModal, TrustModal,
+};
 use super::theme::Theme;
 use super::widgets::{
     FilePickerModal, GitChange, GitStatus, Header, HelpModal, InputWidget, MessageArea,
@@ -147,6 +149,10 @@ impl<B: Backend> TuiRenderer<B> {
                     state.approval_select_next();
                     return None;
                 }
+                // SessionSwitchConfirm modal navigation
+                if state.active_modal() == Some(ModalType::SessionSwitchConfirm) {
+                    return Some(Command::ModalDown);
+                }
                 match (state.focused_component(), state.vim_mode()) {
                     (FocusedComponent::Messages, VimMode::Normal) => Some(Command::ScrollDown),
                     (FocusedComponent::Panel, VimMode::Normal) => Some(Command::SidebarDown),
@@ -164,6 +170,10 @@ impl<B: Backend> TuiRenderer<B> {
                 if state.active_modal() == Some(ModalType::Approval) {
                     state.approval_select_prev();
                     return None;
+                }
+                // SessionSwitchConfirm modal navigation
+                if state.active_modal() == Some(ModalType::SessionSwitchConfirm) {
+                    return Some(Command::ModalUp);
                 }
                 match (state.focused_component(), state.vim_mode()) {
                     (FocusedComponent::Messages, VimMode::Normal) => Some(Command::ScrollUp),
@@ -629,7 +639,8 @@ impl<B: Backend> TuiRenderer<B> {
                         Some(ModalType::ThemePicker)
                         | Some(ModalType::ProviderPicker)
                         | Some(ModalType::ModelPicker)
-                        | Some(ModalType::SessionPicker) => Some(Command::ModalUp),
+                        | Some(ModalType::SessionPicker)
+                        | Some(ModalType::SessionSwitchConfirm) => Some(Command::ModalUp),
                         _ if matches!(state.focused_component(), FocusedComponent::Panel) => {
                             Some(Command::SidebarUp)
                         }
@@ -672,7 +683,8 @@ impl<B: Backend> TuiRenderer<B> {
                         Some(ModalType::ThemePicker)
                         | Some(ModalType::ProviderPicker)
                         | Some(ModalType::ModelPicker)
-                        | Some(ModalType::SessionPicker) => Some(Command::ModalDown),
+                        | Some(ModalType::SessionPicker)
+                        | Some(ModalType::SessionSwitchConfirm) => Some(Command::ModalDown),
                         _ if matches!(state.focused_component(), FocusedComponent::Panel) => {
                             Some(Command::SidebarDown)
                         }
@@ -1152,19 +1164,6 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 let is_sidebar_focused = focused_component == FocusedComponent::Panel;
                 let current_theme_name = theme_preset.display_name().to_string();
 
-                // Derive session name from first user message (first few words)
-                let session_name = messages
-                    .iter()
-                    .find(|m| matches!(m.role, UiMessageRole::User))
-                    .map(|m| {
-                        m.content
-                            .split_whitespace()
-                            .take(4)
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                    .unwrap_or_default();
-
                 let session_costs = state.session_cost_by_model();
                 let session_total_cost = state.session_cost_total();
                 let session_tokens = state.session_tokens_by_model();
@@ -1174,22 +1173,35 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 let session_info = state
                     .session()
                     .map(|s| SessionInfo {
-                        name: session_name.clone(),
-                        branch: s.branch,
+                        name: s.session_name.clone(),
                         total_cost: session_total_cost.max(s.total_cost),
                         model_count: session_costs.len().max(s.model_count),
                         model_costs: session_costs.clone(),
                         total_tokens: session_total_tokens,
                         model_tokens: session_tokens.clone(),
                     })
-                    .unwrap_or_else(|| SessionInfo {
-                        name: session_name.clone(),
-                        branch: crate::tui_new::git_info::get_current_branch(&self.working_dir),
-                        total_cost: session_total_cost,
-                        model_count: session_costs.len(),
-                        model_costs: session_costs.clone(),
-                        total_tokens: session_total_tokens,
-                        model_tokens: session_tokens.clone(),
+                    .unwrap_or_else(|| {
+                        // Derive session name from first user message as fallback
+                        let session_name = messages
+                            .iter()
+                            .find(|m| matches!(m.role, UiMessageRole::User))
+                            .map(|m| {
+                                m.content
+                                    .split_whitespace()
+                                    .take(4)
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            })
+                            .unwrap_or_else(|| "New Session".to_string());
+
+                        SessionInfo {
+                            name: session_name,
+                            total_cost: session_total_cost,
+                            model_count: session_costs.len(),
+                            model_costs: session_costs.clone(),
+                            total_tokens: session_total_tokens,
+                            model_tokens: session_tokens.clone(),
+                        }
                     });
 
                 // Get real tasks from state
@@ -1248,7 +1260,10 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     )
                     .tokens(state.tokens_used(), state.tokens_total())
                     .tasks(tasks_widget)
-                    .git_changes(git_changes_widget);
+                    .git_changes(git_changes_widget)
+                    .git_branch(crate::tui_new::git_info::get_current_branch(
+                        &self.working_dir,
+                    ));
 
                 sidebar.expanded_panels = state.sidebar_expanded_panels();
                 sidebar.selected_item = state.sidebar_selected_item();
@@ -1369,6 +1384,11 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                             let modal = DeviceFlowModal::new(theme, &session);
                             frame.render_widget(modal, area);
                         }
+                    }
+                    ModalType::SessionSwitchConfirm => {
+                        let selected = state.session_switch_confirm_selected();
+                        let modal = SessionSwitchConfirmModal::new(theme).selected(selected);
+                        frame.render_widget(modal, area);
                     }
                 }
             }

@@ -41,11 +41,16 @@ impl SessionService {
     pub async fn get_current(&self) -> SessionInfo {
         let mgr = self.session_mgr.read().await;
         let stats = mgr.stats();
+        let session = mgr.current();
 
         SessionInfo {
             session_id: stats.session_id,
-            branch: "main".to_string(), // TODO: Get from git
-            total_cost: 0.0,            // TODO: Get from usage tracker
+            session_name: if session.name.is_empty() {
+                format!("Session {}", session.created_at.format("%Y-%m-%d %H:%M"))
+            } else {
+                session.name.clone()
+            },
+            total_cost: 0.0, // TODO: Get from usage tracker
             model_count: 1,
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         }
@@ -69,7 +74,7 @@ impl SessionService {
 
         Ok(SessionInfo {
             session_id,
-            branch: "main".to_string(),
+            session_name: "New Session".to_string(),
             total_cost: 0.0,
             model_count: 1,
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -93,9 +98,15 @@ impl SessionService {
         // Restore conversation from session
         self.conversation_svc.restore_from_session(&session).await;
 
+        let session_name = if session.name.is_empty() {
+            format!("Session {}", session.created_at.format("%Y-%m-%d %H:%M"))
+        } else {
+            session.name.clone()
+        };
+
         Ok(SessionInfo {
             session_id: session.id,
-            branch: "main".to_string(),
+            session_name,
             total_cost: session.total_cost,
             model_count: 1,
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -195,9 +206,15 @@ impl SessionService {
         // Restore conversation from imported session
         self.conversation_svc.restore_from_session(&session).await;
 
+        let session_name = if session.name.is_empty() {
+            format!("Session {}", session.created_at.format("%Y-%m-%d %H:%M"))
+        } else {
+            session.name.clone()
+        };
+
         Ok(SessionInfo {
             session_id: session.id,
-            branch: "main".to_string(),
+            session_name,
             total_cost: 0.0,
             model_count: 1,
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -208,6 +225,25 @@ impl SessionService {
     pub async fn update_metadata(&self, provider: String, model: String, mode: AgentMode) {
         let mut mgr = self.session_mgr.write().await;
         mgr.update_metadata(provider, model, mode);
+    }
+
+    /// Update session usage stats (cost and tokens) and save
+    pub async fn update_usage(
+        &self,
+        cost: f64,
+        input_tokens: usize,
+        output_tokens: usize,
+    ) -> Result<(), StorageError> {
+        let mut mgr = self.session_mgr.write().await;
+        let session = mgr.current_mut();
+        session.total_cost += cost;
+        session.input_tokens += input_tokens;
+        session.output_tokens += output_tokens;
+        drop(mgr); // Release lock before saving
+
+        // Save to persist the changes
+        let mgr = self.session_mgr.read().await;
+        mgr.save().map_err(|e| StorageError::Other(e.into()))
     }
 
     /// Get session statistics

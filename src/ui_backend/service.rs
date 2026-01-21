@@ -903,9 +903,25 @@ impl AppService {
                     }
 
                     // Spawn task for async message sending
-                    // Store correlation_id for this request to prevent race conditions
+                    // Store correlation_id and session_id for this request to prevent race conditions
                     let this_correlation_id = correlation_id.clone();
                     state.set_processing_correlation_id(Some(this_correlation_id.clone()));
+                    // Track which session this request belongs to
+                    let this_session_id = state.session().map(|s| s.session_id.clone());
+                    state.set_processing_session_id(this_session_id.clone());
+
+                    if let Some(logger) = crate::debug_logger() {
+                        let entry = crate::DebugLogEntry::new(
+                            correlation_id.clone(),
+                            crate::LogCategory::Service,
+                            "processing_session_set",
+                        )
+                        .with_data(serde_json::json!({
+                            "processing_session_id": this_session_id,
+                            "correlation_id": this_correlation_id
+                        }));
+                        logger.log(entry);
+                    }
 
                     tokio::spawn(async move {
                         if let Err(e) = conv_svc
@@ -957,6 +973,7 @@ impl AppService {
                         {
                             state.set_llm_processing(false);
                             state.set_processing_correlation_id(None);
+                            state.set_processing_session_id(None);
                         }
 
                         // Notify controller if there are queued messages to process
@@ -1149,6 +1166,7 @@ impl AppService {
                     }
                     self.state.set_llm_processing(false);
                     self.state.set_processing_correlation_id(None);
+                    self.state.set_processing_session_id(None);
 
                     // Add a visible message in the chat
                     self.state.add_message(crate::ui_backend::Message {
@@ -1260,6 +1278,7 @@ impl AppService {
                     }
                     self.state.set_llm_processing(false);
                     self.state.set_processing_correlation_id(None);
+                    self.state.set_processing_session_id(None);
 
                     // Clear queued messages - user explicitly cancelled
                     let discarded_count = self.state.clear_message_queue();
@@ -1313,9 +1332,20 @@ impl AppService {
                     tokio::spawn(async move {
                         match session_svc.create_new().await {
                             Ok(info) => {
-                                // Clear UI messages for new session
+                                // Clear UI state for new session
                                 state.clear_messages();
                                 state.clear_input();
+                                state.clear_context_files(); // Context files are session-specific
+                                                             // Reset cost/token tracking for new session
+                                state.set_session_cost_total(0.0);
+                                state.set_session_tokens_total(0);
+                                state.set_session_cost_by_model(Vec::new());
+                                state.set_session_tokens_by_model(Vec::new());
+                                let _ = state.clear_message_queue();
+
+                                // Set session info in state (critical for session tracking during mid-request switches)
+                                state.set_session(Some(info.clone()));
+
                                 let _ = event_tx.send(AppEvent::StatusChanged(format!(
                                     "New session: {}",
                                     info.session_id
@@ -1338,10 +1368,15 @@ impl AppService {
                                 let _ = session_svc
                                     .update_metadata(
                                         default_provider.clone(),
-                                        default_model,
+                                        default_model.clone(),
                                         crate::core::types::AgentMode::Build,
                                     )
                                     .await;
+
+                                // Save session to persist provider/model metadata
+                                if let Err(e) = session_svc.save_current().await {
+                                    tracing::warn!("Failed to save new session: {}", e);
+                                }
 
                                 if let Some(ref conv_svc) = conv_svc {
                                     if !default_provider.is_empty() {
@@ -1524,6 +1559,23 @@ impl AppService {
     pub fn import_session(&self, _path: &std::path::Path) -> Result<super::types::SessionInfo> {
         // TODO: Implement session import through SessionService
         Err(anyhow::anyhow!("Import not yet implemented"))
+    }
+
+    /// Set the trust level for tool execution
+    pub async fn set_trust_level(&self, level: crate::tools::TrustLevel) {
+        self.state.set_trust_level(level);
+
+        let build_mode = match level {
+            crate::tools::TrustLevel::Manual => BuildMode::Manual,
+            crate::tools::TrustLevel::Balanced => BuildMode::Balanced,
+            crate::tools::TrustLevel::Careful => BuildMode::Careful,
+        };
+        self.state.set_build_mode(build_mode);
+
+        self.tools.set_trust_level(level).await;
+        if let Some(ref conv_svc) = self.conversation_svc {
+            let _ = conv_svc.set_trust_level(level).await;
+        }
     }
 
     /// Set the active provider
@@ -1800,6 +1852,32 @@ impl AppService {
 
         // Update tasks from current state
         self.update_tasks();
+    }
+
+    /// Silently interrupt agent processing without adding a visible message
+    /// Used when switching sessions to prevent responses from bleeding into new session
+    pub async fn silent_interrupt(&self) {
+        if self.state.llm_processing() {
+            if let Some(ref conv_svc) = self.conversation_svc {
+                conv_svc.interrupt_and_reset().await;
+            }
+            self.state.set_llm_processing(false);
+            self.state.set_processing_correlation_id(None);
+            self.state.set_processing_session_id(None);
+            // No visible message added - this is intentional for session switching
+        }
+    }
+
+    /// Update session usage stats (cost and tokens) and persist to disk
+    pub async fn update_session_usage(&self, cost: f64, input_tokens: usize, output_tokens: usize) {
+        if let Some(ref session_svc) = self.session_svc {
+            if let Err(e) = session_svc
+                .update_usage(cost, input_tokens, output_tokens)
+                .await
+            {
+                tracing::warn!("Failed to update session usage: {}", e);
+            }
+        }
     }
 
     /// Update tasks in sidebar from current processing state and message queue

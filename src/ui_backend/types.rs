@@ -194,7 +194,7 @@ pub struct ModelInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session_id: String,
-    pub branch: String,
+    pub session_name: String,
     pub total_cost: f64,
     pub model_count: usize,
     pub created_at: String,

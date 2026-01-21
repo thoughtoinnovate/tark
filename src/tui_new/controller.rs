@@ -631,6 +631,11 @@ impl<B: Backend> TuiController<B> {
                     }
                     state.set_theme_before_preview(None);
                 }
+                // Clear pending session switch if canceling confirmation dialog
+                if state.active_modal() == Some(crate::ui_backend::ModalType::SessionSwitchConfirm)
+                {
+                    state.set_pending_session_switch(None);
+                }
                 state.set_active_modal(None);
                 state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
                 return Ok(());
@@ -815,6 +820,105 @@ impl<B: Backend> TuiController<B> {
                         state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
                         return Ok(());
                     }
+                    Some(crate::ui_backend::ModalType::SessionPicker) => {
+                        // Switch to selected session
+                        let all_sessions = state.available_sessions();
+                        let filter = state.session_picker_filter();
+                        let filtered_sessions: Vec<_> = if filter.is_empty() {
+                            all_sessions
+                        } else {
+                            let filter_lower = filter.to_lowercase();
+                            all_sessions
+                                .into_iter()
+                                .filter(|s| {
+                                    s.name.to_lowercase().contains(&filter_lower)
+                                        || s.id.to_lowercase().contains(&filter_lower)
+                                })
+                                .collect()
+                        };
+
+                        let selected = state.session_picker_selected();
+                        if let Some(session_meta) = filtered_sessions.get(selected) {
+                            if let Some(logger) = crate::debug_logger() {
+                                let correlation_id = state
+                                    .current_correlation_id()
+                                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                                let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                    correlation_id,
+                                    crate::LogCategory::Tui,
+                                    "session_picker_confirm",
+                                )
+                                .with_data(serde_json::json!({
+                                    "filter": filter,
+                                    "selected_index": selected,
+                                    "session_id": session_meta.id.clone(),
+                                    "session_name": session_meta.name.clone(),
+                                    "active_modal": "SessionPicker"
+                                }));
+                                logger.log(entry);
+                            }
+
+                            // If agent is currently processing, show confirmation dialog
+                            // instead of immediately switching
+                            if state.llm_processing() {
+                                tracing::info!(
+                                    "Agent processing - showing session switch confirmation for {}",
+                                    session_meta.id
+                                );
+                                // Store the pending session ID and show confirmation dialog
+                                state.set_pending_session_switch(Some(session_meta.id.clone()));
+                                state.set_session_switch_confirm_selected(0); // Default to "Wait"
+                                state.set_active_modal(Some(
+                                    crate::ui_backend::ModalType::SessionSwitchConfirm,
+                                ));
+                                return Ok(());
+                            }
+
+                            // No agent processing - switch directly
+                            self.service
+                                .handle_command(Command::SwitchSession(session_meta.id.clone()))
+                                .await?;
+                        }
+                        state.set_active_modal(None);
+                        state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::SessionSwitchConfirm) => {
+                        // Handle confirmation dialog for session switch
+                        let selected = state.session_switch_confirm_selected();
+                        let pending_session = state.pending_session_switch();
+
+                        if selected == 0 {
+                            // "Wait" selected - just close the dialog and let agent finish
+                            tracing::info!("User chose to wait for agent to finish");
+                            state.set_pending_session_switch(None);
+                            state.set_active_modal(None);
+                            state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
+                        } else if let Some(session_id) = pending_session {
+                            // "Abort & Switch" selected - abort agent and switch
+                            tracing::info!(
+                                "User chose to abort agent and switch to session {}",
+                                session_id
+                            );
+                            // Silently abort the agent
+                            self.service.silent_interrupt().await;
+                            state.clear_streaming();
+                            state.set_llm_processing(false);
+                            state.set_processing_correlation_id(None);
+                            state.set_processing_session_id(None);
+
+                            // Clear pending state
+                            state.set_pending_session_switch(None);
+
+                            // Switch to the new session
+                            self.service
+                                .handle_command(Command::SwitchSession(session_id))
+                                .await?;
+                            state.set_active_modal(None);
+                            state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
+                        }
+                        return Ok(());
+                    }
                     _ => {
                         state.set_active_modal(None);
                         state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
@@ -889,30 +993,18 @@ impl<B: Backend> TuiController<B> {
                         return Ok(());
                     }
                     Some(crate::ui_backend::ModalType::SessionPicker) => {
-                        let all_sessions = state.available_sessions();
-                        let filter = state.session_picker_filter();
-                        let filtered_sessions: Vec<_> = if filter.is_empty() {
-                            all_sessions
-                        } else {
-                            let filter_lower = filter.to_lowercase();
-                            all_sessions
-                                .into_iter()
-                                .filter(|s| {
-                                    s.name.to_lowercase().contains(&filter_lower)
-                                        || s.id.to_lowercase().contains(&filter_lower)
-                                })
-                                .collect()
-                        };
-
+                        // Navigate up in session list
                         let selected = state.session_picker_selected();
-                        if let Some(session_meta) = filtered_sessions.get(selected) {
-                            // Use Command::SwitchSession to properly switch sessions
-                            // This triggers the async handler that loads all session data
-                            self.service
-                                .handle_command(Command::SwitchSession(session_meta.id.clone()))
-                                .await?;
-                            state.set_active_modal(None);
-                            state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
+                        if selected > 0 {
+                            state.set_session_picker_selected(selected - 1);
+                        }
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::SessionSwitchConfirm) => {
+                        // Navigate between options (0 = Wait, 1 = Abort & Switch)
+                        let selected = state.session_switch_confirm_selected();
+                        if selected == 1 {
+                            state.set_session_switch_confirm_selected(0);
                         }
                         return Ok(());
                     }
@@ -981,6 +1073,37 @@ impl<B: Backend> TuiController<B> {
                         let selected = state.model_picker_selected();
                         if selected + 1 < filtered.len() {
                             state.set_model_picker_selected(selected + 1);
+                        }
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::SessionPicker) => {
+                        // Navigate down in session list
+                        let all_sessions = state.available_sessions();
+                        let filter = state.session_picker_filter();
+                        let filtered_sessions: Vec<_> = if filter.is_empty() {
+                            all_sessions
+                        } else {
+                            let filter_lower = filter.to_lowercase();
+                            all_sessions
+                                .into_iter()
+                                .filter(|s| {
+                                    s.name.to_lowercase().contains(&filter_lower)
+                                        || s.id.to_lowercase().contains(&filter_lower)
+                                })
+                                .collect()
+                        };
+
+                        let selected = state.session_picker_selected();
+                        if selected + 1 < filtered_sessions.len() {
+                            state.set_session_picker_selected(selected + 1);
+                        }
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::SessionSwitchConfirm) => {
+                        // Navigate between options (0 = Wait, 1 = Abort & Switch)
+                        let selected = state.session_switch_confirm_selected();
+                        if selected == 0 {
+                            state.set_session_switch_confirm_selected(1);
                         }
                         return Ok(());
                     }
@@ -1238,6 +1361,59 @@ impl<B: Backend> TuiController<B> {
 
             // Track if this is a ToolStarted event (we'll render after it)
             let is_tool_started = matches!(&event, AppEvent::ToolStarted { .. });
+
+            // Check if session has changed during LLM processing
+            // If so, discard LLM events from the old session
+            let is_llm_event = matches!(
+                &event,
+                AppEvent::LlmTextChunk(_)
+                    | AppEvent::LlmThinkingChunk(_)
+                    | AppEvent::LlmCompleted { .. }
+                    | AppEvent::ToolStarted { .. }
+                    | AppEvent::ToolCompleted { .. }
+                    | AppEvent::ToolFailed { .. }
+            );
+
+            if is_llm_event {
+                let current_session_id = state.session().map(|s| s.session_id.clone());
+                let processing_session_id = state.processing_session_id();
+
+                // If we have a processing session and it doesn't match the current session,
+                // discard this event - it's from a different session
+                if let Some(ref proc_session) = processing_session_id {
+                    if current_session_id.as_ref() != Some(proc_session) {
+                        if let Some(logger) = crate::debug_logger() {
+                            let entry = crate::DebugLogEntry::new(
+                                state
+                                    .current_correlation_id()
+                                    .unwrap_or_else(|| "unknown".to_string()),
+                                crate::LogCategory::Tui,
+                                "llm_event_discarded_session_mismatch",
+                            )
+                            .with_data(serde_json::json!({
+                                "processing_session_id": proc_session,
+                                "current_session_id": current_session_id,
+                                "event_type": format!("{:?}", std::mem::discriminant(&event))
+                            }));
+                            logger.log(entry);
+                        }
+                        tracing::warn!(
+                            "Discarding LLM event from session {} (current session: {:?})",
+                            proc_session,
+                            current_session_id
+                        );
+                        // Still need to check for completion to clean up state
+                        if matches!(&event, AppEvent::LlmCompleted { .. }) {
+                            state.set_llm_processing(false);
+                            state.set_processing_correlation_id(None);
+                            state.set_processing_session_id(None);
+                            state.clear_streaming();
+                        }
+                        continue; // Skip this event
+                    }
+                }
+            }
+
             // Update state based on event type
             match &event {
                 AppEvent::LlmTextChunk(chunk) => {
@@ -1303,6 +1479,11 @@ impl<B: Backend> TuiController<B> {
                             .await;
                         state.add_session_cost(&model_id, cost);
                         state.add_session_tokens(&model_id, *input_tokens + *output_tokens);
+
+                        // Persist usage to session file so it survives session switches
+                        self.service
+                            .update_session_usage(cost, *input_tokens, *output_tokens)
+                            .await;
                     }
 
                     // Refresh sidebar data (updates costs and tokens)
@@ -1407,70 +1588,131 @@ impl<B: Backend> TuiController<B> {
                 AppEvent::SessionSwitched { session_id } => {
                     // Load full session state from the switched session
                     use crate::ui_backend::SessionService;
-                    if let Ok(session) = self.service.storage().load_session(session_id) {
-                        // Restore UI messages
-                        let ui_messages = SessionService::session_messages_to_ui(&session);
-                        state.clear_messages();
-                        for msg in ui_messages {
-                            state.add_message(msg);
-                        }
-                        state.scroll_to_bottom();
-
-                        // Restore provider and model
-                        if !session.provider.is_empty() {
-                            state.set_provider(Some(session.provider.clone()));
-                        }
-                        if !session.model.is_empty() {
-                            state.set_model(Some(session.model.clone()));
-                        }
-
-                        // Load available models for the provider
-                        if !session.provider.is_empty() {
-                            let models = self.service.get_models(&session.provider).await;
-                            state.set_available_models(models);
-                        }
-
-                        // Update session info in state
-                        let session_name = if session.name.is_empty() {
-                            format!("Session {}", session.created_at.format("%Y-%m-%d %H:%M"))
-                        } else {
-                            session.name.clone()
-                        };
-                        let branch = crate::tui_new::git_info::get_current_branch(
-                            self.service.working_dir(),
-                        );
-                        state.set_session(Some(crate::ui_backend::SessionInfo {
-                            session_id: session.id.clone(),
-                            branch,
-                            total_cost: session.total_cost,
-                            model_count: 1,
-                            created_at: session.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                        }));
-
-                        // Restore agent mode from session
-                        if !session.mode.is_empty() {
-                            let mode = session
-                                .mode
-                                .parse::<crate::core::types::AgentMode>()
-                                .unwrap_or_default();
-                            state.set_agent_mode(mode);
-                        }
-
-                        // Update LLM provider for conversation
-                        if !session.provider.is_empty() {
-                            if let Err(e) = self
-                                .service
-                                .set_provider_internal(&session.provider, Some(&session.model))
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to update LLM provider on session switch: {}",
-                                    e
-                                );
+                    tracing::info!("SessionSwitched event received for session: {}", session_id);
+                    match self.service.storage().load_session(session_id) {
+                        Ok(session) => {
+                            tracing::info!(
+                                "Session loaded successfully: {} ({})",
+                                session.name,
+                                session.id
+                            );
+                            // Restore UI messages
+                            let ui_messages = SessionService::session_messages_to_ui(&session);
+                            state.clear_messages();
+                            for msg in ui_messages {
+                                state.add_message(msg);
                             }
-                        }
+                            state.scroll_to_bottom();
 
-                        tracing::info!("Session switched: {} ({})", session_name, session.id);
+                            // Clear session-specific runtime state
+                            let _ = state.clear_message_queue();
+                            // Clear per-model cost/token breakdowns (runtime-only, not persisted)
+                            state.set_session_cost_by_model(Vec::new());
+                            state.set_session_tokens_by_model(Vec::new());
+                            // Clear context files (session-specific, should not persist across sessions)
+                            state.clear_context_files();
+                            // Note: Tasks are NOT cleared - they are workspace-level, not session-specific
+
+                            // Restore provider and model selection
+                            if !session.provider.is_empty() {
+                                state.set_provider(Some(session.provider.clone()));
+                            }
+                            if !session.model.is_empty() {
+                                state.set_model(Some(session.model.clone()));
+                            }
+
+                            // Load available models for the provider
+                            if !session.provider.is_empty() {
+                                let models = self.service.get_models(&session.provider).await;
+                                state.set_available_models(models);
+                            }
+
+                            // Load available providers to ensure dropdown state
+                            let providers = self.service.get_providers().await;
+                            state.set_available_providers(providers);
+
+                            // Update session info in state
+                            let session_name = if session.name.is_empty() {
+                                format!("Session {}", session.created_at.format("%Y-%m-%d %H:%M"))
+                            } else {
+                                session.name.clone()
+                            };
+                            state.set_session(Some(crate::ui_backend::SessionInfo {
+                                session_id: session.id.clone(),
+                                session_name: session_name.clone(),
+                                total_cost: session.total_cost,
+                                model_count: 1,
+                                created_at: session
+                                    .created_at
+                                    .format("%Y-%m-%d %H:%M:%S")
+                                    .to_string(),
+                            }));
+
+                            // Restore token/cost tracking from session
+                            state.set_session_cost_total(session.total_cost);
+                            state.set_session_tokens_total(
+                                session.input_tokens + session.output_tokens,
+                            );
+
+                            // Restore trust level and build mode from approval_mode
+                            let trust_level = match session.approval_mode.as_str() {
+                                "zero_trust" => crate::tools::TrustLevel::Manual,
+                                "only_reads" => crate::tools::TrustLevel::Careful,
+                                _ => crate::tools::TrustLevel::Balanced, // "ask_risky" default
+                            };
+                            self.service.set_trust_level(trust_level).await;
+
+                            // Restore agent mode from session
+                            if !session.mode.is_empty() {
+                                let mode = session
+                                    .mode
+                                    .parse::<crate::core::types::AgentMode>()
+                                    .unwrap_or_default();
+                                state.set_agent_mode(mode);
+                            }
+
+                            // Update LLM provider for conversation
+                            if !session.provider.is_empty() {
+                                if let Err(e) = self
+                                    .service
+                                    .set_provider_internal(&session.provider, Some(&session.model))
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to update LLM provider on session switch: {}",
+                                        e
+                                    );
+                                }
+                            } else {
+                                // Session has no provider set - use default from config
+                                let config = crate::config::Config::load().unwrap_or_default();
+                                let default_provider = config.llm.default_provider.clone();
+                                let default_model = config.llm.tark_sim.model.clone();
+                                if !default_provider.is_empty() {
+                                    if let Err(e) = self
+                                        .service
+                                        .set_provider_internal(
+                                            &default_provider,
+                                            Some(&default_model),
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to set default provider on session switch: {}",
+                                            e
+                                        );
+                                    }
+                                    // Update state to reflect default provider
+                                    state.set_provider(Some(default_provider));
+                                    state.set_model(Some(default_model));
+                                }
+                            }
+
+                            tracing::info!("Session switched: {} ({})", session_name, session.id);
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to load session {}: {}", session_id, e);
+                        }
                     }
                 }
                 _ => {}

@@ -73,17 +73,9 @@ impl StorageFacade {
             .save_session(&session)
             .map_err(StorageError::Other)?;
 
-        // Get current git branch
-        let working_dir = self
-            .project
-            .project_root()
-            .parent()
-            .unwrap_or(self.project.project_root());
-        let branch = crate::tui_new::git_info::get_current_branch(working_dir);
-
         Ok(SessionInfo {
             session_id: session.id.clone(),
-            branch,
+            session_name: "New Session".to_string(),
             total_cost: 0.0,
             model_count: 0,
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -145,9 +137,15 @@ impl StorageFacade {
 
         self.project.save_session(&session)?;
 
+        let session_name = if session.name.is_empty() {
+            format!("Imported {}", session.created_at.format("%Y-%m-%d %H:%M"))
+        } else {
+            session.name.clone()
+        };
+
         Ok(SessionInfo {
             session_id: session.id.clone(),
-            branch: "main".to_string(),
+            session_name,
             total_cost: 0.0,
             model_count: 0,
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),

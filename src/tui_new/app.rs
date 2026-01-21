@@ -286,7 +286,7 @@ impl AppState {
         }
 
         let max_items = match self.sidebar_selected_panel {
-            0 => 3, // Session: branch + cost info
+            0 => 2, // Session: cost info + tokens
             1 => self.context_files.len(),
             2 => 8, // Tasks (from mock data)
             3 => 5, // Git changes (from mock data)
@@ -761,7 +761,6 @@ impl<B: Backend> TuiApp<B> {
                     .selected_panel(state.sidebar_selected_panel)
                     .session_info(SessionInfo {
                         name: "Session".to_string(),
-                        branch: "main".to_string(),
                         total_cost: 0.015,
                         model_count: 3,
                         model_costs: vec![],
@@ -809,38 +808,40 @@ impl<B: Backend> TuiApp<B> {
                 sidebar.expanded_panels = state.sidebar_expanded_panels;
                 sidebar.selected_item = state.sidebar_selected_item;
 
-                let sidebar = sidebar.git_changes(vec![
-                    GitChange {
-                        file: "src/components/Sidebar.tsx".to_string(),
-                        status: GitStatus::Modified,
-                        additions: 45,
-                        deletions: 12,
-                    },
-                    GitChange {
-                        file: "src/utils/helpers.ts".to_string(),
-                        status: GitStatus::Added,
-                        additions: 0,
-                        deletions: 0,
-                    },
-                    GitChange {
-                        file: "public/legacy-logo.svg".to_string(),
-                        status: GitStatus::Deleted,
-                        additions: 0,
-                        deletions: 0,
-                    },
-                    GitChange {
-                        file: "src/styles/globals.css".to_string(),
-                        status: GitStatus::Modified,
-                        additions: 10,
-                        deletions: 5,
-                    },
-                    GitChange {
-                        file: "README.md".to_string(),
-                        status: GitStatus::Modified,
-                        additions: 2,
-                        deletions: 1,
-                    },
-                ]);
+                let sidebar = sidebar
+                    .git_changes(vec![
+                        GitChange {
+                            file: "src/components/Sidebar.tsx".to_string(),
+                            status: GitStatus::Modified,
+                            additions: 45,
+                            deletions: 12,
+                        },
+                        GitChange {
+                            file: "src/utils/helpers.ts".to_string(),
+                            status: GitStatus::Added,
+                            additions: 0,
+                            deletions: 0,
+                        },
+                        GitChange {
+                            file: "public/legacy-logo.svg".to_string(),
+                            status: GitStatus::Deleted,
+                            additions: 0,
+                            deletions: 0,
+                        },
+                        GitChange {
+                            file: "src/styles/globals.css".to_string(),
+                            status: GitStatus::Modified,
+                            additions: 10,
+                            deletions: 5,
+                        },
+                        GitChange {
+                            file: "README.md".to_string(),
+                            status: GitStatus::Modified,
+                            additions: 2,
+                            deletions: 1,
+                        },
+                    ])
+                    .git_branch("main".to_string());
                 frame.render_widget(sidebar, sidebar_rect);
             }
 
@@ -889,6 +890,9 @@ impl<B: Backend> TuiApp<B> {
                     }
                     ModalType::DeviceFlow => {
                         // DeviceFlow modal not implemented in old app.rs (using tui_new)
+                    }
+                    ModalType::SessionSwitchConfirm => {
+                        // SessionSwitchConfirm modal handled in tui_new renderer
                     }
                 }
             }
@@ -1076,6 +1080,9 @@ impl<B: Backend> TuiApp<B> {
                                         | Some(ModalType::DeviceFlow) => {
                                             // Close these modals
                                             self.state.close_modal();
+                                        }
+                                        Some(ModalType::SessionSwitchConfirm) => {
+                                            // SessionSwitchConfirm handled in controller
                                         }
                                         None => {}
                                     }

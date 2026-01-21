@@ -224,3 +224,167 @@ mod error_tests {
         let _ = storage.delete_session(&session_id);
     }
 }
+
+mod session_switch_confirmation_tests {
+    use super::*;
+    use tark_cli::ui_backend::ModalType;
+
+    #[tokio::test]
+    async fn test_session_switch_confirm_state_initialization() {
+        let state = SharedState::new();
+
+        // Initial state should have no pending session switch
+        assert!(state.pending_session_switch().is_none());
+        assert_eq!(state.session_switch_confirm_selected(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_set_pending_session_switch() {
+        let state = SharedState::new();
+
+        // Set a pending session switch
+        state.set_pending_session_switch(Some("session_123".to_string()));
+        assert_eq!(
+            state.pending_session_switch(),
+            Some("session_123".to_string())
+        );
+
+        // Clear it
+        state.set_pending_session_switch(None);
+        assert!(state.pending_session_switch().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_switch_confirm_selection() {
+        let state = SharedState::new();
+
+        // Default selection should be 0 (Wait)
+        assert_eq!(state.session_switch_confirm_selected(), 0);
+
+        // Change to 1 (Abort & Switch)
+        state.set_session_switch_confirm_selected(1);
+        assert_eq!(state.session_switch_confirm_selected(), 1);
+
+        // Reset to 0
+        state.set_session_switch_confirm_selected(0);
+        assert_eq!(state.session_switch_confirm_selected(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_session_switch_confirm_modal_type() {
+        let state = SharedState::new();
+
+        // Open SessionSwitchConfirm modal
+        state.set_active_modal(Some(ModalType::SessionSwitchConfirm));
+        assert_eq!(state.active_modal(), Some(ModalType::SessionSwitchConfirm));
+
+        // Close it
+        state.set_active_modal(None);
+        assert!(state.active_modal().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_switch_when_llm_processing() {
+        let state = SharedState::new();
+
+        // Simulate LLM processing
+        state.set_llm_processing(true);
+        assert!(state.llm_processing());
+
+        // When user tries to switch sessions, we should show confirmation
+        // Set pending session and open modal
+        state.set_pending_session_switch(Some("target_session".to_string()));
+        state.set_active_modal(Some(ModalType::SessionSwitchConfirm));
+
+        // Verify state
+        assert_eq!(
+            state.pending_session_switch(),
+            Some("target_session".to_string())
+        );
+        assert_eq!(state.active_modal(), Some(ModalType::SessionSwitchConfirm));
+        assert!(state.llm_processing());
+    }
+
+    #[tokio::test]
+    async fn test_session_switch_confirm_cancel_clears_state() {
+        let state = SharedState::new();
+
+        // Set up confirmation state
+        state.set_pending_session_switch(Some("session_to_switch".to_string()));
+        state.set_session_switch_confirm_selected(1);
+        state.set_active_modal(Some(ModalType::SessionSwitchConfirm));
+
+        // Simulate cancel (Escape)
+        state.set_pending_session_switch(None);
+        state.set_active_modal(None);
+
+        // State should be cleared
+        assert!(state.pending_session_switch().is_none());
+        assert!(state.active_modal().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_processing_session_id_tracking() {
+        let state = SharedState::new();
+
+        // Initially no processing session
+        assert!(state.processing_session_id().is_none());
+
+        // Set processing session ID (simulating SendMessage)
+        state.set_processing_session_id(Some("session_abc".to_string()));
+        assert_eq!(
+            state.processing_session_id(),
+            Some("session_abc".to_string())
+        );
+
+        // Clear on completion
+        state.set_processing_session_id(None);
+        assert!(state.processing_session_id().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_switch_workflow_wait_option() {
+        let state = SharedState::new();
+
+        // Setup: LLM is processing, user wants to switch
+        state.set_llm_processing(true);
+        state.set_pending_session_switch(Some("new_session".to_string()));
+        state.set_active_modal(Some(ModalType::SessionSwitchConfirm));
+        state.set_session_switch_confirm_selected(0); // Wait option
+
+        // User confirms "Wait" - just close dialog
+        state.set_pending_session_switch(None);
+        state.set_active_modal(None);
+
+        // LLM should still be processing (we're waiting)
+        assert!(state.llm_processing());
+        assert!(state.pending_session_switch().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_switch_workflow_abort_option() {
+        let state = SharedState::new();
+
+        // Setup: LLM is processing, user wants to switch
+        state.set_llm_processing(true);
+        state.set_processing_session_id(Some("old_session".to_string()));
+        state.set_pending_session_switch(Some("new_session".to_string()));
+        state.set_active_modal(Some(ModalType::SessionSwitchConfirm));
+        state.set_session_switch_confirm_selected(1); // Abort & Switch option
+
+        // User confirms "Abort & Switch" - abort agent and switch
+        // Simulate the abort
+        state.set_llm_processing(false);
+        state.set_processing_session_id(None);
+        state.clear_streaming();
+
+        // Clear pending state
+        state.set_pending_session_switch(None);
+        state.set_active_modal(None);
+
+        // LLM should be stopped
+        assert!(!state.llm_processing());
+        assert!(state.processing_session_id().is_none());
+        assert!(state.pending_session_switch().is_none());
+    }
+}

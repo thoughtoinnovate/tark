@@ -89,6 +89,8 @@ pub enum ModalType {
     Tools,
     Plugin,
     DeviceFlow,
+    /// Confirmation dialog when switching sessions while agent is processing
+    SessionSwitchConfirm,
 }
 
 /// Active OAuth device flow session
@@ -205,6 +207,8 @@ struct StateInner {
     pub current_correlation_id: Option<String>,
     /// Correlation ID of the currently processing message (for race condition prevention)
     pub processing_correlation_id: Option<String>,
+    /// Session ID that initiated the current processing request (for session switch protection)
+    pub processing_session_id: Option<String>,
 
     // ========== Messages ==========
     pub messages: Vec<Message>,
@@ -254,6 +258,10 @@ struct StateInner {
     pub model_picker_filter: String,
     pub session_picker_selected: usize,
     pub session_picker_filter: String,
+    /// Pending session ID when awaiting user confirmation to switch (agent is processing)
+    pub pending_session_switch: Option<String>,
+    /// Selected option in session switch confirm dialog (0 = Wait, 1 = Abort & Switch)
+    pub session_switch_confirm_selected: usize,
 
     // ========== File Picker State ==========
     pub file_picker_files: Vec<String>,
@@ -342,6 +350,7 @@ impl SharedState {
                 current_model: None,
                 current_correlation_id: None,
                 processing_correlation_id: None,
+                processing_session_id: None,
                 llm_connected: false,
                 llm_processing: false,
                 device_flow_session: None,
@@ -376,6 +385,8 @@ impl SharedState {
                 model_picker_filter: String::new(),
                 session_picker_selected: 0,
                 session_picker_filter: String::new(),
+                pending_session_switch: None,
+                session_switch_confirm_selected: 0,
                 file_picker_files: Vec::new(),
                 file_picker_filter: String::new(),
                 file_picker_selected: 0,
@@ -692,6 +703,14 @@ impl SharedState {
         self.read_inner().session_picker_filter.clone()
     }
 
+    pub fn pending_session_switch(&self) -> Option<String> {
+        self.read_inner().pending_session_switch.clone()
+    }
+
+    pub fn session_switch_confirm_selected(&self) -> usize {
+        self.read_inner().session_switch_confirm_selected
+    }
+
     pub fn file_picker_files(&self) -> Vec<String> {
         self.read_inner().file_picker_files.clone()
     }
@@ -812,6 +831,14 @@ impl SharedState {
 
     pub fn set_processing_correlation_id(&self, id: Option<String>) {
         self.write_inner().processing_correlation_id = id;
+    }
+
+    pub fn processing_session_id(&self) -> Option<String> {
+        self.read_inner().processing_session_id.clone()
+    }
+
+    pub fn set_processing_session_id(&self, id: Option<String>) {
+        self.write_inner().processing_session_id = id;
     }
 
     pub fn set_provider(&self, provider: Option<String>) {
@@ -1334,6 +1361,14 @@ impl SharedState {
         self.write_inner().session_picker_filter = filter;
     }
 
+    pub fn set_pending_session_switch(&self, session_id: Option<String>) {
+        self.write_inner().pending_session_switch = session_id;
+    }
+
+    pub fn set_session_switch_confirm_selected(&self, selected: usize) {
+        self.write_inner().session_switch_confirm_selected = selected;
+    }
+
     pub fn set_available_sessions(&self, sessions: Vec<crate::storage::SessionMeta>) {
         self.write_inner().available_sessions = sessions;
     }
@@ -1664,6 +1699,26 @@ impl SharedState {
 
     pub fn session_tokens_by_model(&self) -> Vec<(String, usize)> {
         self.read_inner().session_tokens_by_model.clone()
+    }
+
+    /// Set total session cost (used when loading session)
+    pub fn set_session_cost_total(&self, cost: f64) {
+        self.write_inner().session_cost_total = cost;
+    }
+
+    /// Set total session tokens (used when loading session)
+    pub fn set_session_tokens_total(&self, tokens: usize) {
+        self.write_inner().session_tokens_total = tokens;
+    }
+
+    /// Set per-model cost breakdown (used when loading session)
+    pub fn set_session_cost_by_model(&self, costs: Vec<(String, f64)>) {
+        self.write_inner().session_cost_by_model = costs;
+    }
+
+    /// Set per-model tokens breakdown (used when loading session)
+    pub fn set_session_tokens_by_model(&self, tokens: Vec<(String, usize)>) {
+        self.write_inner().session_tokens_by_model = tokens;
     }
 
     /// Add cost for a model and update totals

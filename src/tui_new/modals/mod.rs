@@ -10,6 +10,7 @@ pub mod model_picker;
 pub mod plugin_modal;
 pub mod provider_picker;
 pub mod session_picker;
+pub mod session_switch_confirm;
 pub mod theme_picker;
 pub mod tools_modal;
 pub mod trust_modal;
@@ -21,6 +22,7 @@ pub use model_picker::ModelPickerHandler;
 pub use plugin_modal::PluginModal;
 pub use provider_picker::ProviderPickerHandler;
 pub use session_picker::SessionPickerHandler;
+pub use session_switch_confirm::SessionSwitchConfirmModal;
 pub use theme_picker::ThemePickerHandler;
 pub use tools_modal::ToolsModal;
 pub use trust_modal::TrustModal;
@@ -63,6 +65,7 @@ impl ModalManager {
             | Some(ModalType::Tools)
             | Some(ModalType::Plugin)
             | Some(ModalType::DeviceFlow)
+            | Some(ModalType::SessionSwitchConfirm)
             | None => {
                 // These modals are handled directly in controller/renderer
                 Ok(ModalResult::NotHandled)
