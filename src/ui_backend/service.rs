@@ -767,12 +767,53 @@ impl AppService {
                 }
 
                 // If already processing, queue the message
-                if self.state.llm_processing() {
+                let is_processing = self.state.llm_processing();
+
+                // Log the processing state check
+                if let Some(logger) = crate::debug_logger() {
+                    let correlation_id = self
+                        .state
+                        .current_correlation_id()
+                        .unwrap_or_else(|| "none".to_string());
+                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                        correlation_id,
+                        crate::LogCategory::Service,
+                        "send_message_check",
+                    )
+                    .with_data(serde_json::json!({
+                        "llm_processing": is_processing,
+                        "text": text,
+                        "will_queue": is_processing
+                    }));
+                    logger.log(entry);
+                }
+
+                if is_processing {
                     self.state.queue_message(text.clone());
                     self.state.clear_input();
 
                     // Add queued indicator message
                     let queue_count = self.state.queued_message_count();
+                    tracing::info!("Message queued: '{}', queue_count={}", text, queue_count);
+
+                    // Log to debug logger as well
+                    if let Some(logger) = crate::debug_logger() {
+                        let correlation_id = self
+                            .state
+                            .current_correlation_id()
+                            .unwrap_or_else(|| "none".to_string());
+                        let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                            correlation_id,
+                            crate::LogCategory::Service,
+                            "message_queued",
+                        )
+                        .with_data(serde_json::json!({
+                            "text": text,
+                            "queue_count": queue_count
+                        }));
+                        logger.log(entry);
+                    }
+
                     let queue_msg = Message {
                         role: MessageRole::System,
                         content: format!("⏳ Message queued ({} in queue)", queue_count),
@@ -916,15 +957,13 @@ impl AppService {
                             state.set_processing_correlation_id(None);
                         }
 
-                        // Process next queued message if any
-                        if let Some(_next_msg) = state.pop_queued_message() {
-                            // Remove the "Message queued" notification since we're processing it now
-                            state.remove_system_messages_containing("Message queued");
+                        // Notify controller if there are queued messages to process
+                        // Note: The controller handles actually popping and sending queued messages
+                        // via the LlmComplete event handler - we just notify here
+                        if state.queued_message_count() > 0 {
                             let _ = event_tx.send(AppEvent::TaskQueueUpdated {
                                 count: state.queued_message_count(),
                             });
-                            // Trigger sending the queued message
-                            // Note: This will be handled by the controller polling for events
                         }
                     });
                 } else {

@@ -1840,4 +1840,167 @@ mod tests {
         state.set_thinking_enabled(false);
         assert!(!state.thinking_enabled());
     }
+
+    #[test]
+    fn test_message_queue_fifo_order() {
+        let state = SharedState::new();
+
+        // Queue should be empty initially
+        assert_eq!(state.queued_message_count(), 0);
+        assert!(state.pop_queued_message().is_none());
+
+        // Queue messages in order
+        state.queue_message("first".to_string());
+        state.queue_message("second".to_string());
+        state.queue_message("third".to_string());
+
+        // Verify count
+        assert_eq!(state.queued_message_count(), 3);
+
+        // Pop should return in FIFO order
+        assert_eq!(state.pop_queued_message(), Some("first".to_string()));
+        assert_eq!(state.queued_message_count(), 2);
+
+        assert_eq!(state.pop_queued_message(), Some("second".to_string()));
+        assert_eq!(state.queued_message_count(), 1);
+
+        assert_eq!(state.pop_queued_message(), Some("third".to_string()));
+        assert_eq!(state.queued_message_count(), 0);
+
+        // Queue is now empty
+        assert!(state.pop_queued_message().is_none());
+    }
+
+    #[test]
+    fn test_message_queue_clear() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("msg1".to_string());
+        state.queue_message("msg2".to_string());
+        state.queue_message("msg3".to_string());
+        assert_eq!(state.queued_message_count(), 3);
+
+        // Clear should return count and empty the queue
+        let cleared = state.clear_message_queue();
+        assert_eq!(cleared, 3);
+        assert_eq!(state.queued_message_count(), 0);
+        assert!(state.pop_queued_message().is_none());
+    }
+
+    #[test]
+    fn test_llm_processing_state() {
+        let state = SharedState::new();
+
+        // Default is not processing
+        assert!(!state.llm_processing());
+
+        // Set processing
+        state.set_llm_processing(true);
+        assert!(state.llm_processing());
+
+        // Clear processing
+        state.set_llm_processing(false);
+        assert!(!state.llm_processing());
+    }
+
+    #[test]
+    fn test_message_queue_with_llm_processing() {
+        // This test verifies the scenario where messages should be queued
+        // when LLM is processing
+        let state = SharedState::new();
+
+        // Simulate LLM starting to process
+        state.set_llm_processing(true);
+        assert!(state.llm_processing());
+
+        // Queue messages while processing (simulating user typing fast)
+        state.queue_message("queued_1".to_string());
+        state.queue_message("queued_2".to_string());
+        state.queue_message("queued_3".to_string());
+        assert_eq!(state.queued_message_count(), 3);
+
+        // Simulate LLM completing
+        state.set_llm_processing(false);
+
+        // Process queued messages in order (simulating controller behavior)
+        // IMPORTANT: Only ONE pop per LLM completion cycle
+        let next = state.pop_queued_message();
+        assert_eq!(next, Some("queued_1".to_string()));
+        assert_eq!(state.queued_message_count(), 2);
+
+        // Simulate sending queued_1 and completing
+        state.set_llm_processing(true);
+        // ... LLM processes queued_1 ...
+        state.set_llm_processing(false);
+
+        // Pop next message
+        let next = state.pop_queued_message();
+        assert_eq!(next, Some("queued_2".to_string()));
+        assert_eq!(state.queued_message_count(), 1);
+
+        // Continue until empty
+        state.set_llm_processing(true);
+        state.set_llm_processing(false);
+        let next = state.pop_queued_message();
+        assert_eq!(next, Some("queued_3".to_string()));
+        assert_eq!(state.queued_message_count(), 0);
+
+        // Queue is empty
+        assert!(state.pop_queued_message().is_none());
+    }
+
+    #[test]
+    fn test_remove_system_messages_containing() {
+        let state = SharedState::new();
+
+        // Add various messages
+        state.add_message(Message {
+            role: MessageRole::User,
+            content: "Hello".to_string(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            segments: Vec::new(),
+            collapsed: false,
+            timestamp: "12:00:00".to_string(),
+        });
+        state.add_message(Message {
+            role: MessageRole::System,
+            content: "⏳ Message queued (1 in queue)".to_string(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            segments: Vec::new(),
+            collapsed: false,
+            timestamp: "12:00:01".to_string(),
+        });
+        state.add_message(Message {
+            role: MessageRole::System,
+            content: "⏳ Message queued (2 in queue)".to_string(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            segments: Vec::new(),
+            collapsed: false,
+            timestamp: "12:00:02".to_string(),
+        });
+        state.add_message(Message {
+            role: MessageRole::Assistant,
+            content: "Response".to_string(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            segments: Vec::new(),
+            collapsed: false,
+            timestamp: "12:00:03".to_string(),
+        });
+
+        assert_eq!(state.messages().len(), 4);
+
+        // Remove system messages containing "Message queued"
+        state.remove_system_messages_containing("Message queued");
+
+        // Should only have user and assistant messages left
+        let messages = state.messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+    }
 }
