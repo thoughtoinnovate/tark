@@ -128,6 +128,10 @@ pub struct Sidebar<'a> {
     pub scroll_offset: usize,
     /// Per-panel scroll offsets
     pub panel_scrolls: [usize; 4],
+    /// Index of task being dragged for reordering (within queued tasks)
+    pub dragging_task_index: Option<usize>,
+    /// Target position for the dragged task
+    pub drag_target_index: Option<usize>,
 }
 
 /// Session information
@@ -165,6 +169,8 @@ impl<'a> Sidebar<'a> {
             vim_mode: crate::ui_backend::VimMode::Insert,
             scroll_offset: 0,
             panel_scrolls: [0, 0, 0, 0],
+            dragging_task_index: None,
+            drag_target_index: None,
         }
     }
 
@@ -211,6 +217,13 @@ impl<'a> Sidebar<'a> {
 
     pub fn panel_scrolls(mut self, scrolls: [usize; 4]) -> Self {
         self.panel_scrolls = scrolls;
+        self
+    }
+
+    /// Set drag state for task reordering
+    pub fn drag_state(mut self, dragging: Option<usize>, target: Option<usize>) -> Self {
+        self.dragging_task_index = dragging;
+        self.drag_target_index = target;
         self
     }
 
@@ -465,7 +478,7 @@ impl Widget for Sidebar<'_> {
             Style::default()
                 .fg(self.theme.cyan)
                 .add_modifier(Modifier::BOLD)
-                .bg(Color::Rgb(45, 60, 83))
+                .bg(self.theme.selection_bg)
         } else {
             Style::default()
                 .fg(self.theme.text_primary)
@@ -561,7 +574,7 @@ impl Widget for Sidebar<'_> {
             Style::default()
                 .fg(self.theme.cyan)
                 .add_modifier(Modifier::BOLD)
-                .bg(Color::Rgb(45, 60, 83))
+                .bg(self.theme.selection_bg)
         } else {
             Style::default()
                 .fg(self.theme.text_primary)
@@ -694,7 +707,7 @@ impl Widget for Sidebar<'_> {
                 let item_style = if item_selected {
                     Style::default()
                         .fg(self.theme.cyan)
-                        .bg(Color::Rgb(45, 60, 83))
+                        .bg(self.theme.selection_bg)
                 } else {
                     Style::default().fg(self.theme.text_secondary)
                 };
@@ -748,7 +761,7 @@ impl Widget for Sidebar<'_> {
             Style::default()
                 .fg(tasks_header_color)
                 .add_modifier(Modifier::BOLD)
-                .bg(Color::Rgb(45, 60, 83))
+                .bg(self.theme.selection_bg)
         } else {
             Style::default()
                 .fg(tasks_header_color)
@@ -793,7 +806,7 @@ impl Widget for Sidebar<'_> {
                 let item_style = if item_selected {
                     Style::default()
                         .fg(self.theme.cyan)
-                        .bg(Color::Rgb(45, 60, 83))
+                        .bg(self.theme.selection_bg)
                 } else {
                     // Active tasks get highlight color
                     Style::default().fg(self.theme.green)
@@ -841,7 +854,7 @@ impl Widget for Sidebar<'_> {
                 let item_style = if item_selected {
                     Style::default()
                         .fg(self.theme.cyan)
-                        .bg(Color::Rgb(45, 60, 83))
+                        .bg(self.theme.selection_bg)
                 } else {
                     Style::default().fg(self.theme.text_muted)
                 };
@@ -872,38 +885,78 @@ impl Widget for Sidebar<'_> {
                     )]),
                 );
 
-                for task in queued_tasks.iter() {
+                let is_dragging = self.dragging_task_index.is_some();
+
+                for (queue_idx, task) in queued_tasks.iter().enumerate() {
                     let item_selected = self.focused
                         && self.selected_panel == 2
                         && self.selected_item == Some(task_idx);
-                    let item_style = if item_selected {
+
+                    // Check if this item is being dragged
+                    let is_dragged_item = self.dragging_task_index == Some(queue_idx);
+                    // Check if this is the drop target
+                    let is_drop_target = is_dragging
+                        && self.drag_target_index == Some(queue_idx)
+                        && self.dragging_task_index != Some(queue_idx);
+
+                    let item_style = if is_dragged_item {
+                        // Dragged item: dimmed with italic
+                        Style::default()
+                            .fg(self.theme.text_muted)
+                            .add_modifier(Modifier::ITALIC)
+                    } else if is_drop_target {
+                        // Drop target: highlighted with underline
+                        Style::default()
+                            .fg(self.theme.yellow)
+                            .add_modifier(Modifier::UNDERLINED)
+                    } else if item_selected {
                         Style::default()
                             .fg(self.theme.cyan)
-                            .bg(Color::Rgb(45, 60, 83))
+                            .bg(self.theme.selection_bg)
                     } else {
                         Style::default().fg(self.theme.text_secondary)
                     };
 
                     // Queued tasks show:
+                    // - Drag indicator (↕) when item is being dragged
+                    // - Drop indicator (→) when this is the drop target
                     // - Selection indicator (▸) when selected
                     // - Gray empty circle (○)
                     // - Task name
-                    // - Action icons (≡ x) only on selected row
-                    let prefix = if item_selected { " ▸" } else { "  " };
+                    // - Action icons (≡ x) only on selected row (not while dragging)
+                    let prefix = if is_dragged_item {
+                        " ↕"
+                    } else if is_drop_target {
+                        " →"
+                    } else if item_selected {
+                        " ▸"
+                    } else {
+                        "  "
+                    };
 
-                    // When selected, need extra space for action icons (≡ x = 4 chars)
-                    let icon_space = if item_selected { 5 } else { 0 };
+                    // When selected (and not dragging), need extra space for action icons (≡ x = 4 chars)
+                    let icon_space = if item_selected && !is_dragging { 5 } else { 0 };
                     let truncated_name =
                         Self::truncate_text(&task.name, content_width, 4 + icon_space);
 
+                    let prefix_style = if is_dragged_item {
+                        Style::default().fg(self.theme.yellow)
+                    } else if is_drop_target {
+                        Style::default()
+                            .fg(self.theme.green)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.theme.cyan)
+                    };
+
                     let mut spans = vec![
-                        Span::styled(prefix, Style::default().fg(self.theme.cyan)),
+                        Span::styled(prefix, prefix_style),
                         Span::styled("○ ", Style::default().fg(self.theme.text_muted)),
                         Span::styled(truncated_name, item_style),
                     ];
 
-                    // Add action icons only on selected row
-                    if item_selected {
+                    // Add action icons only on selected row (not while dragging)
+                    if item_selected && !is_dragging {
                         spans.push(Span::styled(
                             " ≡",
                             Style::default().fg(self.theme.text_muted),
@@ -943,7 +996,7 @@ impl Widget for Sidebar<'_> {
             Style::default()
                 .fg(self.theme.cyan)
                 .add_modifier(Modifier::BOLD)
-                .bg(Color::Rgb(45, 60, 83))
+                .bg(self.theme.selection_bg)
         } else {
             Style::default()
                 .fg(self.theme.text_primary)
@@ -1017,7 +1070,7 @@ impl Widget for Sidebar<'_> {
                 let item_style = if item_selected {
                     Style::default()
                         .fg(self.theme.cyan)
-                        .bg(Color::Rgb(45, 60, 83))
+                        .bg(self.theme.selection_bg)
                 } else {
                     Style::default().fg(self.theme.text_primary)
                 };
@@ -1061,7 +1114,7 @@ impl Widget for Sidebar<'_> {
         let footer_style = if footer_selected {
             Style::default()
                 .fg(self.theme.cyan)
-                .bg(Color::Rgb(45, 60, 83))
+                .bg(self.theme.selection_bg)
         } else {
             Style::default().fg(self.theme.cyan)
         };

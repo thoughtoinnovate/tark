@@ -66,6 +66,9 @@ pub struct Theme {
     pub user_bubble_bg: Color,
     pub agent_bubble_bg: Color,
     pub thinking_bubble_bg: Color,
+
+    // Selection colors for modals and interactive elements
+    pub selection_bg: Color,
 }
 
 impl Default for Theme {
@@ -109,6 +112,9 @@ impl Theme {
             user_bubble_bg: Color::Rgb(35, 40, 60),
             agent_bubble_bg: Color::Rgb(35, 50, 45),
             thinking_bubble_bg: Color::Rgb(42, 43, 55),
+
+            // Selection highlight for modals
+            selection_bg: Color::Rgb(45, 50, 70),
         }
     }
 
@@ -146,43 +152,9 @@ impl Theme {
             user_bubble_bg: Color::Rgb(46, 55, 70),
             agent_bubble_bg: Color::Rgb(50, 60, 55),
             thinking_bubble_bg: Color::Rgb(55, 62, 75),
-        }
-    }
 
-    /// Dracula theme
-    pub fn dracula() -> Self {
-        Self {
-            bg_main: Color::Rgb(40, 42, 54), // background
-            bg_dark: Color::Rgb(33, 34, 44), // darker variant
-            bg_sidebar: Color::Rgb(40, 42, 54),
-            bg_code: Color::Rgb(68, 71, 90), // current line
-
-            border: Color::Rgb(68, 71, 90),
-            border_focused: Color::Rgb(189, 147, 249), // purple
-
-            text_primary: Color::Rgb(248, 248, 242), // foreground
-            text_secondary: Color::Rgb(241, 250, 140), // yellow
-            text_muted: Color::Rgb(98, 114, 164),    // comment
-
-            cyan: Color::Rgb(139, 233, 253),   // cyan
-            blue: Color::Rgb(189, 147, 249),   // purple
-            green: Color::Rgb(80, 250, 123),   // green
-            yellow: Color::Rgb(241, 250, 140), // yellow
-            red: Color::Rgb(255, 85, 85),      // red
-            purple: Color::Rgb(189, 147, 249), // purple
-
-            system_fg: Color::Rgb(139, 233, 253),
-            user_bubble: Color::Rgb(189, 147, 249),
-            agent_bubble: Color::Rgb(80, 250, 123),
-            tool_fg: Color::Rgb(98, 114, 164),
-            thinking_fg: Color::Rgb(241, 250, 140),
-            question_fg: Color::Rgb(139, 233, 253),
-            command_fg: Color::Rgb(80, 250, 123),
-
-            // Dracula bubble backgrounds - purple-tinted for user, green-tinted for agent
-            user_bubble_bg: Color::Rgb(55, 45, 70),
-            agent_bubble_bg: Color::Rgb(40, 55, 45),
-            thinking_bubble_bg: Color::Rgb(55, 55, 65),
+            // Selection highlight for modals - frost blue tint
+            selection_bg: Color::Rgb(50, 60, 80),
         }
     }
 
@@ -220,6 +192,9 @@ impl Theme {
             user_bubble_bg: Color::Rgb(20, 30, 45),
             agent_bubble_bg: Color::Rgb(20, 35, 28),
             thinking_bubble_bg: Color::Rgb(30, 35, 45),
+
+            // Selection highlight for modals
+            selection_bg: Color::Rgb(30, 45, 65),
         }
     }
 
@@ -257,6 +232,9 @@ impl Theme {
             user_bubble_bg: Color::Rgb(40, 50, 65),
             agent_bubble_bg: Color::Rgb(45, 55, 48),
             thinking_bubble_bg: Color::Rgb(50, 55, 62),
+
+            // Selection highlight for modals
+            selection_bg: Color::Rgb(45, 55, 75),
         }
     }
 
@@ -294,6 +272,9 @@ impl Theme {
             user_bubble_bg: Color::Rgb(50, 55, 55),
             agent_bubble_bg: Color::Rgb(55, 55, 40),
             thinking_bubble_bg: Color::Rgb(55, 50, 45),
+
+            // Selection highlight for modals - earthy tone
+            selection_bg: Color::Rgb(60, 55, 50),
         }
     }
 
@@ -331,6 +312,9 @@ impl Theme {
             user_bubble_bg: Color::Rgb(30, 35, 55),
             agent_bubble_bg: Color::Rgb(32, 45, 38),
             thinking_bubble_bg: Color::Rgb(38, 40, 52),
+
+            // Selection highlight for modals - midnight blue
+            selection_bg: Color::Rgb(40, 45, 70),
         }
     }
 
@@ -342,7 +326,6 @@ impl Theme {
             ThemePreset::CatppuccinFrappe => Self::catppuccin_mocha(), // TODO: implement proper theme
             ThemePreset::CatppuccinLatte => Self::catppuccin_mocha(), // TODO: implement proper theme
             ThemePreset::Nord => Self::nord(),
-            ThemePreset::Dracula => Self::dracula(),
             ThemePreset::OneDark => Self::one_dark(),
             ThemePreset::GruvboxDark => Self::gruvbox_dark(),
             ThemePreset::GruvboxLight => Self::gruvbox_dark(), // TODO: implement proper theme
@@ -402,6 +385,9 @@ impl Theme {
             user_bubble_bg: Color::Rgb(35, 40, 60),
             agent_bubble_bg: Color::Rgb(35, 50, 45),
             thinking_bubble_bg: Color::Rgb(42, 43, 55),
+
+            // Selection highlight for modals
+            selection_bg: Color::Rgb(45, 50, 70),
         }
     }
 }

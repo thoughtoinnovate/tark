@@ -126,7 +126,7 @@ impl Widget for TrustModal<'_> {
                 Style::default()
                     .fg(self.theme.cyan)
                     .add_modifier(Modifier::BOLD)
-                    .bg(ratatui::style::Color::Rgb(45, 60, 83))
+                    .bg(self.theme.selection_bg)
             } else if is_current {
                 Style::default()
                     .fg(self.theme.green)

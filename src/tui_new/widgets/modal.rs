@@ -6,7 +6,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Widget},
@@ -265,7 +265,7 @@ impl Widget for ProviderPickerModal<'_> {
                 Style::default()
                     .fg(self.theme.cyan)
                     .add_modifier(Modifier::BOLD)
-                    .bg(Color::Rgb(45, 60, 83))
+                    .bg(self.theme.selection_bg)
             } else {
                 Style::default().fg(self.theme.text_primary)
             };
@@ -552,7 +552,7 @@ impl Widget for ModelPickerModal<'_> {
                 Style::default()
                     .fg(self.theme.cyan)
                     .add_modifier(Modifier::BOLD)
-                    .bg(Color::Rgb(45, 60, 83))
+                    .bg(self.theme.selection_bg)
             } else {
                 Style::default().fg(self.theme.text_primary)
             };
@@ -717,7 +717,7 @@ impl Widget for SessionPickerModal<'_> {
                 Style::default()
                     .fg(self.theme.cyan)
                     .add_modifier(Modifier::BOLD)
-                    .bg(Color::Rgb(45, 60, 83))
+                    .bg(self.theme.selection_bg)
             } else {
                 Style::default().fg(self.theme.text_primary)
             };
@@ -875,7 +875,7 @@ impl Widget for FilePickerModal<'_> {
                     Style::default()
                         .fg(self.theme.cyan)
                         .add_modifier(Modifier::BOLD)
-                        .bg(Color::Rgb(45, 60, 83))
+                        .bg(self.theme.selection_bg)
                 } else {
                     Style::default().fg(self.theme.text_primary)
                 };

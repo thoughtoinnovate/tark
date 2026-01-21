@@ -532,6 +532,7 @@ impl<B: Backend> TuiController<B> {
 
         if let Command::QuestionSubmit = command {
             self.send_questionnaire_response(self.service.state()).await;
+            return Ok(()); // Prevent falling through to service.handle_command() - fixes race condition
         }
         match command {
             Command::ApproveOperation => {
@@ -1583,6 +1584,11 @@ impl<B: Backend> TuiController<B> {
                 }
                 return Ok(());
             }
+            Command::RefreshSidebar => {
+                // Refresh sidebar data (e.g., after drag-to-reorder)
+                self.service.refresh_sidebar_data().await;
+                return Ok(());
+            }
             Command::UpdateTaskEditContent(content) => {
                 // Update editing content
                 state.set_editing_task_content(content.clone());
@@ -1890,11 +1896,20 @@ impl<B: Backend> TuiController<B> {
                                         .await
                                     {
                                         tracing::error!("Failed to apply mode switch: {}", e);
+                                        state.set_status_message(Some(format!(
+                                            "Failed to switch mode: {}",
+                                            e
+                                        )));
                                     } else {
                                         tracing::info!(
                                             "Mode switched to {:?} via switch_mode tool",
                                             mode
                                         );
+                                        // Provide visual feedback to user
+                                        state.set_status_message(Some(format!(
+                                            "Switched to {} mode",
+                                            mode.display_name()
+                                        )));
                                     }
                                 }
                             }
