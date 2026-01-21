@@ -1310,6 +1310,8 @@ impl<B: Backend> TuiController<B> {
 
                     // Process next queued message if any
                     if let Some(next_msg) = state.pop_queued_message() {
+                        // Remove the "Message queued" notification since we're processing it now
+                        state.remove_system_messages_containing("Message queued");
                         self.service
                             .handle_command(Command::SendMessage(next_msg))
                             .await?;

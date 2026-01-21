@@ -918,6 +918,8 @@ impl AppService {
 
                         // Process next queued message if any
                         if let Some(_next_msg) = state.pop_queued_message() {
+                            // Remove the "Message queued" notification since we're processing it now
+                            state.remove_system_messages_containing("Message queued");
                             let _ = event_tx.send(AppEvent::TaskQueueUpdated {
                                 count: state.queued_message_count(),
                             });

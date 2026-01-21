@@ -8,8 +8,8 @@ use super::approval::ApprovalCardState;
 use super::commands::{AgentMode, BuildMode};
 use super::questionnaire::QuestionnaireState;
 use super::types::{
-    AttachmentInfo, ContextFile, GitChangeInfo, Message, ModelInfo, ProviderInfo, SessionInfo,
-    TaskInfo, ThemePreset,
+    AttachmentInfo, ContextFile, GitChangeInfo, Message, MessageRole, ModelInfo, ProviderInfo,
+    SessionInfo, TaskInfo, ThemePreset,
 };
 use crate::tools::TrustLevel;
 
@@ -1111,6 +1111,14 @@ impl SharedState {
 
     pub fn clear_messages(&self) {
         self.write_inner().messages.clear();
+    }
+
+    /// Remove system messages containing specific text (used for transient notifications)
+    pub fn remove_system_messages_containing(&self, text: &str) {
+        let mut inner = self.write_inner();
+        inner
+            .messages
+            .retain(|msg| !(msg.role == MessageRole::System && msg.content.contains(text)));
     }
 
     // ========== Active Tools ==========
