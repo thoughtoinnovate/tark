@@ -322,6 +322,30 @@ impl<'a> Sidebar<'a> {
         target.push(line.clone());
         all.push(line);
     }
+
+    /// Truncate text to fit within available width, adding "..." if truncated
+    /// Leaves 2% padding on the right edge
+    fn truncate_text(text: &str, available_width: u16, prefix_len: usize) -> String {
+        // Calculate max text width: available - prefix - 2% right padding (min 1 char)
+        let right_padding = (available_width as usize * 2 / 100).max(1);
+        let max_width = (available_width as usize)
+            .saturating_sub(prefix_len)
+            .saturating_sub(right_padding);
+
+        if max_width < 4 {
+            // Not enough space for meaningful text
+            return String::new();
+        }
+
+        if text.chars().count() <= max_width {
+            text.to_string()
+        } else {
+            // Truncate and add "..."
+            let truncate_at = max_width.saturating_sub(3);
+            let truncated: String = text.chars().take(truncate_at).collect();
+            format!("{}...", truncated)
+        }
+    }
 }
 
 impl Widget for Sidebar<'_> {
@@ -356,6 +380,9 @@ impl Widget for Sidebar<'_> {
         let mut context_lines: Vec<Line> = vec![];
         let mut tasks_lines: Vec<Line> = vec![];
         let mut git_lines: Vec<Line> = vec![];
+
+        // Available width for content (used for truncation)
+        let content_width = inner.width;
         let mut footer_lines: Vec<Line> = vec![];
 
         // VIM mode indicator
@@ -657,6 +684,8 @@ impl Widget for Sidebar<'_> {
                 };
 
                 // Use animated spinner indicator ⟳ for active tasks
+                // Truncate task name to fit within available width (prefix "  ⟳ " = 4 chars)
+                let truncated_name = Self::truncate_text(&task.name, content_width, 4);
                 Self::push_line(
                     &mut tasks_lines,
                     &mut all_lines,
@@ -667,7 +696,7 @@ impl Widget for Sidebar<'_> {
                                 .fg(self.theme.green)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(&task.name, item_style),
+                        Span::styled(truncated_name, item_style),
                     ]),
                 );
                 task_idx += 1;
@@ -692,12 +721,14 @@ impl Widget for Sidebar<'_> {
                     Style::default().fg(self.theme.text_muted)
                 };
 
+                // Truncate task name to fit within available width (prefix "  ✓ " = 4 chars)
+                let truncated_name = Self::truncate_text(&task.name, content_width, 4);
                 Self::push_line(
                     &mut tasks_lines,
                     &mut all_lines,
                     Line::from(vec![
                         Span::styled("  ✓ ", Style::default().fg(self.theme.green)),
-                        Span::styled(&task.name, item_style),
+                        Span::styled(truncated_name, item_style),
                     ]),
                 );
                 task_idx += 1;
@@ -729,12 +760,14 @@ impl Widget for Sidebar<'_> {
                     };
 
                     // Queued tasks show unchecked circle icon ○
+                    // Truncate task name to fit within available width (prefix "  ○ " = 4 chars)
+                    let truncated_name = Self::truncate_text(&task.name, content_width, 4);
                     Self::push_line(
                         &mut tasks_lines,
                         &mut all_lines,
                         Line::from(vec![
                             Span::styled("  ○ ", Style::default().fg(self.theme.text_muted)),
-                            Span::styled(&task.name, item_style),
+                            Span::styled(truncated_name, item_style),
                         ]),
                     );
                     task_idx += 1;
