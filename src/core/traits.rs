@@ -14,7 +14,7 @@ use anyhow::Result;
 /// - Gemini uses a different tokenizer
 /// - Local models vary
 ///
-/// This trait allows the ContextManager to be provider-agnostic.
+/// This trait allows context tracking to be provider-agnostic.
 pub trait Tokenizer: Send + Sync {
     /// Count tokens in a text string
     fn count_tokens(&self, text: &str) -> usize;

@@ -324,6 +324,24 @@ impl ThemePreset {
         }
     }
 
+    /// Get icon for this theme preset
+    pub fn icon(&self) -> &'static str {
+        match self {
+            ThemePreset::CatppuccinMocha => "🐱",
+            ThemePreset::CatppuccinMacchiato => "🐱",
+            ThemePreset::CatppuccinFrappe => "🐱",
+            ThemePreset::CatppuccinLatte => "🐱",
+            ThemePreset::Dracula => "🧛",
+            ThemePreset::Nord => "❄️",
+            ThemePreset::TokyoNight => "🌃",
+            ThemePreset::GruvboxDark => "🌰",
+            ThemePreset::GruvboxLight => "🌰",
+            ThemePreset::SolarizedDark => "☀️",
+            ThemePreset::SolarizedLight => "☀️",
+            ThemePreset::OneDark => "🌑",
+        }
+    }
+
     pub fn all() -> Vec<Self> {
         vec![
             ThemePreset::CatppuccinMocha,

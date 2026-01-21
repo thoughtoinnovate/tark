@@ -75,8 +75,14 @@ pub enum Command {
     /// Navigate down in sidebar
     SidebarDown,
 
-    /// Select item in sidebar
+    /// Select item in sidebar (toggle expand/collapse or action on item)
     SidebarSelect,
+
+    /// Enter into sidebar panel (select first item if expanded)
+    SidebarEnter,
+
+    /// Exit from inside sidebar panel back to panel header
+    SidebarExit,
 
     /// Set Vim editing mode
     SetVimMode(super::VimMode),
@@ -302,6 +308,34 @@ pub enum Command {
 
     /// Deactivate autocomplete
     AutocompleteCancel,
+
+    // ========== Task Queue Management ==========
+    /// Open edit modal for a queued task at index
+    EditQueuedTask(usize),
+
+    /// Request deletion of queued task (shows confirmation)
+    DeleteQueuedTask(usize),
+
+    /// Confirm deletion of the pending task
+    ConfirmDeleteTask,
+
+    /// Cancel task deletion
+    CancelDeleteTask,
+
+    /// Move queued task up in the queue
+    MoveTaskUp(usize),
+
+    /// Move queued task down in the queue
+    MoveTaskDown(usize),
+
+    /// Update task edit content (while editing)
+    UpdateTaskEditContent(String),
+
+    /// Confirm task edit
+    ConfirmTaskEdit,
+
+    /// Cancel task edit
+    CancelTaskEdit,
 }
 
 /// Convert keyboard events to commands

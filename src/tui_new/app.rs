@@ -667,6 +667,7 @@ impl<B: Backend> TuiApp<B> {
             ModelPickerModal, ProviderPickerModal, SessionInfo, Sidebar, StatusBar, Task,
             TaskStatus, TerminalFrame, ThemePickerModal,
         };
+        use crate::core::context_tracker::ContextBreakdown;
         use ratatui::layout::{Constraint, Direction, Layout};
 
         let state = &self.state;
@@ -754,9 +755,19 @@ impl<B: Backend> TuiApp<B> {
                 let is_sidebar_focused = state.focused_component == FocusedComponent::Panel;
                 let current_theme_name = state.theme_preset.display_name().to_string();
 
+                // Demo context breakdown
+                let demo_breakdown = ContextBreakdown::new(
+                    1500,    // system_prompt
+                    12000,   // conversation_history
+                    800,     // tool_schemas
+                    500,     // attachments
+                    128_000, // max_tokens
+                );
+
                 let mut sidebar = Sidebar::new(theme)
                     .visible(true)
                     .theme_name(current_theme_name)
+                    .theme_preset(state.theme_preset)
                     .focused(is_sidebar_focused)
                     .selected_panel(state.sidebar_selected_panel)
                     .session_info(SessionInfo {
@@ -768,7 +779,7 @@ impl<B: Backend> TuiApp<B> {
                         model_tokens: vec![],
                     })
                     .context_files(context_files.clone())
-                    .tokens(1833, 1_000_000)
+                    .context_breakdown(demo_breakdown)
                     .tasks(vec![
                         Task {
                             name: "Understanding the codebase architecture".to_string(),
@@ -893,6 +904,12 @@ impl<B: Backend> TuiApp<B> {
                     }
                     ModalType::SessionSwitchConfirm => {
                         // SessionSwitchConfirm modal handled in tui_new renderer
+                    }
+                    ModalType::TaskEdit => {
+                        // TaskEdit modal handled in tui_new renderer
+                    }
+                    ModalType::TaskDeleteConfirm => {
+                        // TaskDeleteConfirm modal handled in tui_new renderer
                     }
                 }
             }
@@ -1083,6 +1100,12 @@ impl<B: Backend> TuiApp<B> {
                                         }
                                         Some(ModalType::SessionSwitchConfirm) => {
                                             // SessionSwitchConfirm handled in controller
+                                        }
+                                        Some(ModalType::TaskEdit) => {
+                                            // TaskEdit handled in controller
+                                        }
+                                        Some(ModalType::TaskDeleteConfirm) => {
+                                            // TaskDeleteConfirm handled in controller
                                         }
                                         None => {}
                                     }

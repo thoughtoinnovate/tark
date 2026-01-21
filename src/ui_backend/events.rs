@@ -149,4 +149,13 @@ pub enum AppEvent {
 
     /// Rate limit expired, retrying pending message
     RateLimitExpired,
+
+    // ========== Context Management Events ==========
+    /// Context was auto-compacted to free up space
+    ContextCompacted {
+        old_tokens: usize,
+        new_tokens: usize,
+        messages_removed: usize,
+        summary: Option<String>,
+    },
 }

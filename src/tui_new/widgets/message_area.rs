@@ -830,7 +830,8 @@ impl Widget for MessageArea<'_> {
                         }
                         "✓" => (self.theme.green, "✓"), // Success - green tick
                         "✗" => (self.theme.red, "✗"),   // Failed - red cross
-                        _ => (self.theme.tool_fg, "●"), // Default
+                        "?" => (self.theme.yellow, "?"), // Interrupted - yellow question mark (session was closed while running)
+                        _ => (self.theme.tool_fg, "●"),  // Default
                     };
 
                     // Mark running tools as not collapsed so output shows during execution

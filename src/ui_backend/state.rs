@@ -11,6 +11,7 @@ use super::types::{
     AttachmentInfo, ContextFile, GitChangeInfo, Message, MessageRole, ModelInfo, ProviderInfo,
     SessionInfo, TaskInfo, ThemePreset,
 };
+use crate::core::context_tracker::ContextBreakdown;
 use crate::tools::TrustLevel;
 
 /// Error notification level
@@ -91,6 +92,10 @@ pub enum ModalType {
     DeviceFlow,
     /// Confirmation dialog when switching sessions while agent is processing
     SessionSwitchConfirm,
+    /// Modal for editing a queued task
+    TaskEdit,
+    /// Confirmation dialog for deleting a queued task
+    TaskDeleteConfirm,
 }
 
 /// Active OAuth device flow session
@@ -271,6 +276,9 @@ struct StateInner {
     // ========== Tools Modal State ==========
     pub tools_selected: usize,
 
+    // ========== Plugin Modal State ==========
+    pub plugin_selected: usize,
+
     // ========== Sidebar State ==========
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
@@ -282,6 +290,8 @@ struct StateInner {
     pub context_files: Vec<ContextFile>,
     pub tokens_used: usize,
     pub tokens_total: usize,
+    /// Detailed breakdown of context token usage by source
+    pub context_breakdown: ContextBreakdown,
 
     // ========== Session ==========
     pub session: Option<SessionInfo>,
@@ -316,6 +326,12 @@ struct StateInner {
 
     // ========== Message Queue ==========
     pub message_queue: Vec<String>,
+    /// Index of task currently being edited (None = not editing)
+    pub editing_task_index: Option<usize>,
+    /// Content buffer for task being edited
+    pub editing_task_content: String,
+    /// Index of task pending deletion (for confirmation dialog)
+    pub pending_delete_task_index: Option<usize>,
 
     // ========== Command Autocomplete ==========
     pub autocomplete_active: bool,
@@ -391,6 +407,7 @@ impl SharedState {
                 file_picker_filter: String::new(),
                 file_picker_selected: 0,
                 tools_selected: 0,
+                plugin_selected: 0,
                 sidebar_selected_panel: 0,
                 sidebar_selected_item: None,
                 sidebar_expanded_panels: [true, true, true, true],
@@ -399,6 +416,7 @@ impl SharedState {
                 context_files: Vec::new(),
                 tokens_used: 0,
                 tokens_total: 1_000_000,
+                context_breakdown: ContextBreakdown::default(),
                 session: None,
                 tasks: Vec::new(),
                 git_changes: Vec::new(),
@@ -413,6 +431,9 @@ impl SharedState {
                 rate_limit_retry_at: None,
                 rate_limit_pending_message: None,
                 message_queue: Vec::new(),
+                editing_task_index: None,
+                editing_task_content: String::new(),
+                pending_delete_task_index: None,
                 autocomplete_active: false,
                 autocomplete_filter: String::new(),
                 autocomplete_selected: 0,
@@ -725,6 +746,10 @@ impl SharedState {
 
     pub fn tools_selected(&self) -> usize {
         self.read_inner().tools_selected
+    }
+
+    pub fn plugin_selected(&self) -> usize {
+        self.read_inner().plugin_selected
     }
 
     pub fn error_notification(&self) -> Option<ErrorNotification> {
@@ -1393,6 +1418,10 @@ impl SharedState {
         self.write_inner().tools_selected = selected;
     }
 
+    pub fn set_plugin_selected(&self, selected: usize) {
+        self.write_inner().plugin_selected = selected;
+    }
+
     pub fn set_session(&self, session: Option<SessionInfo>) {
         self.write_inner().session = session;
     }
@@ -1409,6 +1438,19 @@ impl SharedState {
         let mut inner = self.write_inner();
         inner.tokens_used = used;
         inner.tokens_total = total;
+    }
+
+    /// Get the detailed context breakdown
+    pub fn context_breakdown(&self) -> ContextBreakdown {
+        self.read_inner().context_breakdown.clone()
+    }
+
+    /// Set the context breakdown (also updates tokens_used and tokens_total)
+    pub fn set_context_breakdown(&self, breakdown: ContextBreakdown) {
+        let mut inner = self.write_inner();
+        inner.tokens_used = breakdown.total;
+        inner.tokens_total = breakdown.max_tokens;
+        inner.context_breakdown = breakdown;
     }
 
     pub fn set_error_notification(&self, notification: Option<ErrorNotification>) {
@@ -1620,6 +1662,115 @@ impl SharedState {
         let count = inner.message_queue.len();
         inner.message_queue.clear();
         count
+    }
+
+    /// Edit a queued message at the given index
+    pub fn edit_queued_message(&self, index: usize, new_content: String) -> bool {
+        let mut inner = self.write_inner();
+        if index < inner.message_queue.len() {
+            inner.message_queue[index] = new_content;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Delete a queued message at the given index
+    pub fn delete_queued_message(&self, index: usize) -> Option<String> {
+        let mut inner = self.write_inner();
+        if index < inner.message_queue.len() {
+            Some(inner.message_queue.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Move a queued message from one index to another (reorder)
+    pub fn move_queued_message(&self, from: usize, to: usize) -> bool {
+        let mut inner = self.write_inner();
+        let len = inner.message_queue.len();
+        if from >= len || to >= len || from == to {
+            return false;
+        }
+        let item = inner.message_queue.remove(from);
+        inner.message_queue.insert(to, item);
+        true
+    }
+
+    /// Start editing a task at the given index
+    pub fn start_task_edit(&self, index: usize) -> bool {
+        let mut inner = self.write_inner();
+        if index < inner.message_queue.len() {
+            inner.editing_task_content = inner.message_queue[index].clone();
+            inner.editing_task_index = Some(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the index of the task being edited
+    pub fn editing_task_index(&self) -> Option<usize> {
+        self.read_inner().editing_task_index
+    }
+
+    /// Get the content of the task being edited
+    pub fn editing_task_content(&self) -> String {
+        self.read_inner().editing_task_content.clone()
+    }
+
+    /// Update the editing task content
+    pub fn set_editing_task_content(&self, content: String) {
+        self.write_inner().editing_task_content = content;
+    }
+
+    /// Confirm the edit and apply changes to the queue
+    pub fn confirm_task_edit(&self) -> bool {
+        let mut inner = self.write_inner();
+        if let Some(index) = inner.editing_task_index {
+            if index < inner.message_queue.len() && !inner.editing_task_content.trim().is_empty() {
+                inner.message_queue[index] = inner.editing_task_content.clone();
+                inner.editing_task_index = None;
+                inner.editing_task_content.clear();
+                return true;
+            }
+        }
+        inner.editing_task_index = None;
+        inner.editing_task_content.clear();
+        false
+    }
+
+    /// Cancel the current task edit
+    pub fn cancel_task_edit(&self) {
+        let mut inner = self.write_inner();
+        inner.editing_task_index = None;
+        inner.editing_task_content.clear();
+    }
+
+    /// Set the task pending deletion (for confirmation dialog)
+    pub fn set_pending_delete_task(&self, index: Option<usize>) {
+        self.write_inner().pending_delete_task_index = index;
+    }
+
+    /// Get the task pending deletion
+    pub fn pending_delete_task_index(&self) -> Option<usize> {
+        self.read_inner().pending_delete_task_index
+    }
+
+    /// Confirm deletion of the pending task
+    pub fn confirm_task_delete(&self) -> Option<String> {
+        let mut inner = self.write_inner();
+        if let Some(index) = inner.pending_delete_task_index.take() {
+            if index < inner.message_queue.len() {
+                return Some(inner.message_queue.remove(index));
+            }
+        }
+        None
+    }
+
+    /// Check if currently editing a task
+    pub fn is_editing_task(&self) -> bool {
+        self.read_inner().editing_task_index.is_some()
     }
 
     // ========== Command Autocomplete ==========
@@ -2062,5 +2213,178 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, MessageRole::User);
         assert_eq!(messages[1].role, MessageRole::Assistant);
+    }
+
+    #[test]
+    fn test_edit_queued_message() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("original_1".to_string());
+        state.queue_message("original_2".to_string());
+        state.queue_message("original_3".to_string());
+
+        // Edit message at index 1
+        assert!(state.edit_queued_message(1, "edited_2".to_string()));
+
+        // Verify the edit
+        let messages = state.queued_messages();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0], "original_1");
+        assert_eq!(messages[1], "edited_2");
+        assert_eq!(messages[2], "original_3");
+
+        // Edit at invalid index should fail
+        assert!(!state.edit_queued_message(10, "should_fail".to_string()));
+    }
+
+    #[test]
+    fn test_delete_queued_message() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("msg_1".to_string());
+        state.queue_message("msg_2".to_string());
+        state.queue_message("msg_3".to_string());
+        assert_eq!(state.queued_message_count(), 3);
+
+        // Delete message at index 1
+        let deleted = state.delete_queued_message(1);
+        assert_eq!(deleted, Some("msg_2".to_string()));
+        assert_eq!(state.queued_message_count(), 2);
+
+        // Remaining messages should be msg_1 and msg_3
+        let messages = state.queued_messages();
+        assert_eq!(messages[0], "msg_1");
+        assert_eq!(messages[1], "msg_3");
+
+        // Delete at invalid index should return None
+        let result = state.delete_queued_message(10);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_move_queued_message() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("a".to_string());
+        state.queue_message("b".to_string());
+        state.queue_message("c".to_string());
+        state.queue_message("d".to_string());
+
+        // Move message from index 0 to index 2
+        assert!(state.move_queued_message(0, 2));
+        let messages = state.queued_messages();
+        assert_eq!(messages, vec!["b", "c", "a", "d"]);
+
+        // Move message from index 3 to index 1
+        assert!(state.move_queued_message(3, 1));
+        let messages = state.queued_messages();
+        assert_eq!(messages, vec!["b", "d", "c", "a"]);
+
+        // Move to same position should fail (no-op)
+        assert!(!state.move_queued_message(1, 1));
+
+        // Move from invalid index should fail
+        assert!(!state.move_queued_message(10, 0));
+
+        // Move to invalid index should fail
+        assert!(!state.move_queued_message(0, 10));
+    }
+
+    #[test]
+    fn test_task_edit_workflow() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("task_1".to_string());
+        state.queue_message("task_2".to_string());
+        state.queue_message("task_3".to_string());
+
+        // Initially not editing
+        assert!(!state.is_editing_task());
+        assert!(state.editing_task_index().is_none());
+
+        // Start editing task at index 1
+        assert!(state.start_task_edit(1));
+        assert!(state.is_editing_task());
+        assert_eq!(state.editing_task_index(), Some(1));
+        assert_eq!(state.editing_task_content(), "task_2");
+
+        // Modify the content
+        state.set_editing_task_content("task_2_modified".to_string());
+        assert_eq!(state.editing_task_content(), "task_2_modified");
+
+        // Confirm the edit
+        assert!(state.confirm_task_edit());
+        assert!(!state.is_editing_task());
+
+        // Verify the queue was updated
+        let messages = state.queued_messages();
+        assert_eq!(messages[1], "task_2_modified");
+    }
+
+    #[test]
+    fn test_task_edit_cancel() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("task_1".to_string());
+        state.queue_message("task_2".to_string());
+
+        // Start editing task at index 0
+        assert!(state.start_task_edit(0));
+        state.set_editing_task_content("modified_but_cancelled".to_string());
+
+        // Cancel the edit
+        state.cancel_task_edit();
+        assert!(!state.is_editing_task());
+        assert!(state.editing_task_index().is_none());
+
+        // Queue should be unchanged
+        let messages = state.queued_messages();
+        assert_eq!(messages[0], "task_1");
+    }
+
+    #[test]
+    fn test_task_delete_workflow() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("task_1".to_string());
+        state.queue_message("task_2".to_string());
+        state.queue_message("task_3".to_string());
+
+        // Set pending delete
+        state.set_pending_delete_task(Some(1));
+        assert_eq!(state.pending_delete_task_index(), Some(1));
+
+        // Confirm delete
+        let deleted = state.confirm_task_delete();
+        assert_eq!(deleted, Some("task_2".to_string()));
+        assert!(state.pending_delete_task_index().is_none());
+
+        // Verify queue
+        let messages = state.queued_messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0], "task_1");
+        assert_eq!(messages[1], "task_3");
+    }
+
+    #[test]
+    fn test_task_delete_cancel() {
+        let state = SharedState::new();
+
+        // Queue some messages
+        state.queue_message("task_1".to_string());
+        state.queue_message("task_2".to_string());
+
+        // Set pending delete then cancel
+        state.set_pending_delete_task(Some(0));
+        state.set_pending_delete_task(None);
+
+        // Nothing should be deleted
+        assert_eq!(state.queued_message_count(), 2);
     }
 }

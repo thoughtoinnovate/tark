@@ -124,10 +124,10 @@ impl<B: Backend> TuiController<B> {
                         let total_questions = data.questions.len();
                         let title = data.title.clone();
 
-                        let (question_type, options) = match &question.kind {
+                        let (question_type, options, default_value) = match &question.kind {
                             crate::tools::questionnaire::QuestionType::SingleSelect {
                                 options,
-                                ..
+                                default,
                             } => (
                                 crate::ui_backend::questionnaire::QuestionType::SingleChoice,
                                 options
@@ -136,7 +136,8 @@ impl<B: Backend> TuiController<B> {
                                         text: opt.label.clone(),
                                         value: opt.value.clone(),
                                     })
-                                    .collect(),
+                                    .collect::<Vec<_>>(),
+                                default.clone(),
                             ),
                             crate::tools::questionnaire::QuestionType::MultiSelect {
                                 options,
@@ -150,23 +151,45 @@ impl<B: Backend> TuiController<B> {
                                         value: opt.value.clone(),
                                     })
                                     .collect(),
+                                None,
                             ),
                             crate::tools::questionnaire::QuestionType::FreeText { .. } => (
                                 crate::ui_backend::questionnaire::QuestionType::FreeText,
                                 vec![],
+                                None,
                             ),
                         };
 
                         // Create state for first question with multi-question info
-                        let question_state = QuestionnaireState::new_multi(
+                        let mut question_state = QuestionnaireState::new_multi(
                             title,
                             question.id.clone(),
                             question.text.clone(),
                             question_type,
-                            options,
+                            options.clone(),
                             0,               // current index
                             total_questions, // total
                         );
+
+                        // Pre-select default option for single choice questions
+                        if question_type
+                            == crate::ui_backend::questionnaire::QuestionType::SingleChoice
+                        {
+                            let mut selected_idx = None;
+                            // Try to find the default value in options
+                            if let Some(ref default_val) = default_value {
+                                selected_idx = options.iter().position(|o| &o.value == default_val);
+                            }
+                            // Fallback to first option if no default matched
+                            if selected_idx.is_none() && !options.is_empty() {
+                                selected_idx = Some(0);
+                            }
+                            if let Some(idx) = selected_idx {
+                                question_state.selected = vec![idx];
+                                question_state.focused_index = idx;
+                            }
+                        }
+
                         state.set_active_questionnaire(Some(question_state));
 
                         // Store full questionnaire for multi-question navigation
@@ -315,8 +338,8 @@ impl<B: Backend> TuiController<B> {
             let next_index = current_index + 1;
             let next_question = &pending.questions[next_index];
 
-            let (question_type, options) = match &next_question.kind {
-                crate::tools::questionnaire::QuestionType::SingleSelect { options, .. } => (
+            let (question_type, options, default_value) = match &next_question.kind {
+                crate::tools::questionnaire::QuestionType::SingleSelect { options, default } => (
                     crate::ui_backend::questionnaire::QuestionType::SingleChoice,
                     options
                         .iter()
@@ -324,7 +347,8 @@ impl<B: Backend> TuiController<B> {
                             text: opt.label.clone(),
                             value: opt.value.clone(),
                         })
-                        .collect(),
+                        .collect::<Vec<_>>(),
+                    default.clone(),
                 ),
                 crate::tools::questionnaire::QuestionType::MultiSelect { options, .. } => (
                     crate::ui_backend::questionnaire::QuestionType::MultipleChoice,
@@ -335,10 +359,12 @@ impl<B: Backend> TuiController<B> {
                             value: opt.value.clone(),
                         })
                         .collect(),
+                    None,
                 ),
                 crate::tools::questionnaire::QuestionType::FreeText { .. } => (
                     crate::ui_backend::questionnaire::QuestionType::FreeText,
                     vec![],
+                    None,
                 ),
             };
 
@@ -348,11 +374,29 @@ impl<B: Backend> TuiController<B> {
                 next_question.id.clone(),
                 next_question.text.clone(),
                 question_type,
-                options,
+                options.clone(),
                 next_index,
                 total_questions,
             );
             next_state.collected_answers = collected;
+
+            // Pre-select default option for single choice questions
+            if question_type == crate::ui_backend::questionnaire::QuestionType::SingleChoice {
+                let mut selected_idx = None;
+                // Try to find the default value in options
+                if let Some(ref default_val) = default_value {
+                    selected_idx = options.iter().position(|o| &o.value == default_val);
+                }
+                // Fallback to first option if no default matched
+                if selected_idx.is_none() && !options.is_empty() {
+                    selected_idx = Some(0);
+                }
+                if let Some(idx) = selected_idx {
+                    next_state.selected = vec![idx];
+                    next_state.focused_index = idx;
+                }
+            }
+
             state.set_active_questionnaire(Some(next_state));
 
             // Don't release the lock - we still have more questions
@@ -1008,6 +1052,30 @@ impl<B: Backend> TuiController<B> {
                         }
                         return Ok(());
                     }
+                    Some(crate::ui_backend::ModalType::TrustLevel) => {
+                        // Navigate up in trust level selector (3 options: Manual, Balanced, Careful)
+                        let selected = state.trust_level_selected();
+                        if selected > 0 {
+                            state.set_trust_level_selected(selected - 1);
+                        }
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::Tools) => {
+                        // Navigate up in tools list
+                        let selected = state.tools_selected();
+                        if selected > 0 {
+                            state.set_tools_selected(selected - 1);
+                        }
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::Plugin) => {
+                        // Navigate up in plugin list
+                        let selected = state.plugin_selected();
+                        if selected > 0 {
+                            state.set_plugin_selected(selected - 1);
+                        }
+                        return Ok(());
+                    }
                     _ => {}
                 }
             }
@@ -1107,6 +1175,29 @@ impl<B: Backend> TuiController<B> {
                         }
                         return Ok(());
                     }
+                    Some(crate::ui_backend::ModalType::TrustLevel) => {
+                        // Navigate down in trust level selector (3 options: Manual, Balanced, Careful)
+                        let selected = state.trust_level_selected();
+                        if selected < 2 {
+                            // 0, 1, 2 for 3 options
+                            state.set_trust_level_selected(selected + 1);
+                        }
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::Tools) => {
+                        // Navigate down in tools list
+                        let selected = state.tools_selected();
+                        // Note: The max limit will be checked by the tools list itself
+                        state.set_tools_selected(selected + 1);
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::Plugin) => {
+                        // Navigate down in plugin list
+                        let selected = state.plugin_selected();
+                        // Note: The max limit will be checked by the plugin list itself
+                        state.set_plugin_selected(selected + 1);
+                        return Ok(());
+                    }
                     _ => {}
                 }
             }
@@ -1157,20 +1248,16 @@ impl<B: Backend> TuiController<B> {
                 }
             }
             Command::FocusNext => {
+                use crate::ui_backend::{FocusedComponent, VimMode};
                 let current = state.focused_component();
-                let next = match current {
-                    crate::ui_backend::FocusedComponent::Input => {
-                        crate::ui_backend::FocusedComponent::Messages
-                    }
-                    crate::ui_backend::FocusedComponent::Messages => {
-                        crate::ui_backend::FocusedComponent::Panel
-                    }
-                    crate::ui_backend::FocusedComponent::Panel => {
-                        crate::ui_backend::FocusedComponent::Input
-                    }
-                    crate::ui_backend::FocusedComponent::Modal => current,
+                let (next, vim_mode) = match current {
+                    FocusedComponent::Input => (FocusedComponent::Messages, VimMode::Normal),
+                    FocusedComponent::Messages => (FocusedComponent::Panel, VimMode::Normal),
+                    FocusedComponent::Panel => (FocusedComponent::Input, VimMode::Insert),
+                    FocusedComponent::Modal => (current, state.vim_mode()),
                 };
                 state.set_focused_component(next);
+                state.set_vim_mode(vim_mode);
                 return Ok(());
             }
             Command::FocusInput => {
@@ -1290,25 +1377,120 @@ impl<B: Backend> TuiController<B> {
                 return Ok(());
             }
             Command::SidebarUp => {
-                let panel = state.sidebar_selected_panel();
-                let current = state.sidebar_panel_scroll(panel);
-                if current > 0 {
-                    state.set_sidebar_panel_scroll(panel, current - 1);
+                let selected_item = state.sidebar_selected_item();
+                let panel_idx = state.sidebar_selected_panel();
+
+                if selected_item.is_some() {
+                    // Inside a panel - navigate items up
+                    if let Some(item) = selected_item {
+                        if item > 0 {
+                            state.set_sidebar_selected_item(Some(item - 1));
+                        } else {
+                            // At first item, go back to panel header
+                            state.set_sidebar_selected_item(None);
+                        }
+                    }
+                } else {
+                    // At panel level - navigate to previous panel
+                    let new_panel = if panel_idx == 0 { 4 } else { panel_idx - 1 };
+                    state.set_sidebar_selected_panel(new_panel);
                 }
                 return Ok(());
             }
             Command::SidebarDown => {
-                let panel = state.sidebar_selected_panel();
-                let current = state.sidebar_panel_scroll(panel);
-                state.set_sidebar_panel_scroll(panel, current + 1);
+                let selected_item = state.sidebar_selected_item();
+                let panel_idx = state.sidebar_selected_panel();
+
+                if selected_item.is_some() {
+                    // Inside a panel - navigate items down
+                    // Get max items for current panel
+                    let max_items = match panel_idx {
+                        0 => 3, // Session: name, cost, tokens
+                        1 => state.context_files().len(),
+                        2 => state.tasks().len(),
+                        3 => state.git_changes().len(),
+                        _ => 0,
+                    };
+                    if let Some(item) = selected_item {
+                        if item + 1 < max_items {
+                            state.set_sidebar_selected_item(Some(item + 1));
+                        }
+                    }
+                } else {
+                    // At panel level - navigate to next panel
+                    let new_panel = (panel_idx + 1) % 5;
+                    state.set_sidebar_selected_panel(new_panel);
+                }
                 return Ok(());
             }
             Command::SidebarSelect => {
-                // Toggle the currently selected panel
                 let panel_idx = state.sidebar_selected_panel();
-                let mut panels = state.sidebar_expanded_panels();
-                panels[panel_idx] = !panels[panel_idx];
-                state.set_sidebar_expanded_panels(panels);
+                let selected_item = state.sidebar_selected_item();
+
+                if panel_idx == 4 {
+                    // Theme panel - open theme picker
+                    state.set_theme_before_preview(Some(state.theme()));
+                    state.set_active_modal(Some(crate::ui_backend::ModalType::ThemePicker));
+                    state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+
+                    // Initialize selection to current theme
+                    let all_themes = crate::ui_backend::ThemePreset::all();
+                    let current_theme = state.theme();
+                    if let Some(idx) = all_themes.iter().position(|&t| t == current_theme) {
+                        state.set_theme_picker_selected(idx);
+                    }
+                    state.set_theme_picker_filter(String::new());
+                } else if selected_item.is_none() {
+                    // At panel header - toggle expansion
+                    let mut panels = state.sidebar_expanded_panels();
+                    panels[panel_idx] = !panels[panel_idx];
+                    state.set_sidebar_expanded_panels(panels);
+                }
+                // If inside a panel with an item selected, Enter could trigger an action
+                // (e.g., open file, show task details) - for now, no action
+                return Ok(());
+            }
+            Command::SidebarEnter => {
+                let panel_idx = state.sidebar_selected_panel();
+                let panels = state.sidebar_expanded_panels();
+
+                // Theme panel (4) opens theme picker instead of entering
+                if panel_idx == 4 {
+                    state.set_theme_before_preview(Some(state.theme()));
+                    state.set_active_modal(Some(crate::ui_backend::ModalType::ThemePicker));
+                    state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+
+                    let all_themes = crate::ui_backend::ThemePreset::all();
+                    let current_theme = state.theme();
+                    if let Some(idx) = all_themes.iter().position(|&t| t == current_theme) {
+                        state.set_theme_picker_selected(idx);
+                    }
+                    state.set_theme_picker_filter(String::new());
+                } else if panel_idx < 4 && panels[panel_idx] {
+                    // Panel is expanded - enter and select first item
+                    let max_items = match panel_idx {
+                        0 => 3, // Session: name, cost, tokens
+                        1 => state.context_files().len(),
+                        2 => state.tasks().len(),
+                        3 => state.git_changes().len(),
+                        _ => 0,
+                    };
+                    if max_items > 0 {
+                        state.set_sidebar_selected_item(Some(0));
+                    }
+                } else if panel_idx < 4 {
+                    // Panel is collapsed - expand it first
+                    let mut panels = state.sidebar_expanded_panels();
+                    panels[panel_idx] = true;
+                    state.set_sidebar_expanded_panels(panels);
+                }
+                return Ok(());
+            }
+            Command::SidebarExit => {
+                // Exit from inside a panel back to panel header
+                if state.sidebar_selected_item().is_some() {
+                    state.set_sidebar_selected_item(None);
+                }
                 return Ok(());
             }
             Command::QuestionCancel => {
@@ -1340,6 +1522,118 @@ impl<B: Backend> TuiController<B> {
                 }
                 return Ok(());
             }
+
+            // ========== Task Queue Management ==========
+            Command::EditQueuedTask(index) => {
+                // Start editing the task - open edit modal
+                if state.start_task_edit(*index) {
+                    state.set_active_modal(Some(crate::ui_backend::ModalType::TaskEdit));
+                    state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+                }
+                return Ok(());
+            }
+            Command::DeleteQueuedTask(index) => {
+                // Set pending delete and open confirm modal
+                state.set_pending_delete_task(Some(*index));
+                state.set_active_modal(Some(crate::ui_backend::ModalType::TaskDeleteConfirm));
+                state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+                return Ok(());
+            }
+            Command::ConfirmDeleteTask => {
+                // Confirm deletion of pending task
+                if let Some(_deleted) = state.confirm_task_delete() {
+                    // Task deleted - update sidebar tasks display
+                    self.service.refresh_sidebar_data().await;
+                }
+                state.set_active_modal(None);
+                state.set_focused_component(crate::ui_backend::FocusedComponent::Panel);
+                return Ok(());
+            }
+            Command::CancelDeleteTask => {
+                // Cancel task deletion
+                state.set_pending_delete_task(None);
+                state.set_active_modal(None);
+                state.set_focused_component(crate::ui_backend::FocusedComponent::Panel);
+                return Ok(());
+            }
+            Command::MoveTaskUp(index) => {
+                // Move task up in queue (swap with previous)
+                let idx = *index;
+                if idx > 0 && state.move_queued_message(idx, idx - 1) {
+                    // Update selection to follow the moved task
+                    if let Some(item_idx) = state.sidebar_selected_item() {
+                        state.set_sidebar_selected_item(Some(item_idx.saturating_sub(1)));
+                    }
+                    // Refresh sidebar
+                    self.service.refresh_sidebar_data().await;
+                }
+                return Ok(());
+            }
+            Command::MoveTaskDown(index) => {
+                // Move task down in queue (swap with next)
+                let idx = *index;
+                let queue_len = state.queued_message_count();
+                if idx < queue_len.saturating_sub(1) && state.move_queued_message(idx, idx + 1) {
+                    // Update selection to follow the moved task
+                    if let Some(item_idx) = state.sidebar_selected_item() {
+                        state.set_sidebar_selected_item(Some(item_idx + 1));
+                    }
+                    // Refresh sidebar
+                    self.service.refresh_sidebar_data().await;
+                }
+                return Ok(());
+            }
+            Command::UpdateTaskEditContent(content) => {
+                // Update editing content
+                state.set_editing_task_content(content.clone());
+                return Ok(());
+            }
+            Command::ConfirmTaskEdit => {
+                // Check if we were editing task 0 (next to be processed)
+                let was_editing_task_0 = state.editing_task_index() == Some(0);
+
+                // Confirm the edit
+                if state.confirm_task_edit() {
+                    // Edit saved - refresh sidebar
+                    self.service.refresh_sidebar_data().await;
+                }
+                state.set_active_modal(None);
+                state.set_focused_component(crate::ui_backend::FocusedComponent::Panel);
+
+                // If we were editing task 0 and LLM is not processing,
+                // resume queue processing
+                if was_editing_task_0 && !state.llm_processing() {
+                    if let Some(next_msg) = state.pop_queued_message() {
+                        state.remove_system_messages_containing("Message queued");
+                        self.service
+                            .handle_command(Command::SendMessage(next_msg))
+                            .await?;
+                    }
+                }
+                return Ok(());
+            }
+            Command::CancelTaskEdit => {
+                // Check if we were editing task 0 (next to be processed)
+                let was_editing_task_0 = state.editing_task_index() == Some(0);
+
+                // Cancel the edit
+                state.cancel_task_edit();
+                state.set_active_modal(None);
+                state.set_focused_component(crate::ui_backend::FocusedComponent::Panel);
+
+                // If we were editing task 0 and LLM is not processing,
+                // resume queue processing
+                if was_editing_task_0 && !state.llm_processing() {
+                    if let Some(next_msg) = state.pop_queued_message() {
+                        state.remove_system_messages_containing("Message queued");
+                        self.service
+                            .handle_command(Command::SendMessage(next_msg))
+                            .await?;
+                    }
+                }
+                return Ok(());
+            }
+
             _ => {}
         }
 
@@ -1490,13 +1784,19 @@ impl<B: Backend> TuiController<B> {
                     self.service.refresh_sidebar_data().await;
 
                     // Process next queued message if any
-                    if let Some(next_msg) = state.pop_queued_message() {
-                        // Remove the "Message queued" notification since we're processing it now
-                        state.remove_system_messages_containing("Message queued");
-                        self.service
-                            .handle_command(Command::SendMessage(next_msg))
-                            .await?;
+                    // BUT pause if we're currently editing the next task (index 0)
+                    let is_editing_next_task = state.editing_task_index() == Some(0);
+                    if !is_editing_next_task {
+                        if let Some(next_msg) = state.pop_queued_message() {
+                            // Remove the "Message queued" notification since we're processing it now
+                            state.remove_system_messages_containing("Message queued");
+                            self.service
+                                .handle_command(Command::SendMessage(next_msg))
+                                .await?;
+                        }
                     }
+                    // If editing the next task, queue processing is paused
+                    // It will resume when the user confirms/cancels the edit
                 }
                 AppEvent::LlmError(error) => {
                     // Add error message
@@ -1546,10 +1846,6 @@ impl<B: Backend> TuiController<B> {
                     state.scroll_to_bottom();
                 }
                 AppEvent::ToolCompleted { ref name, result } => {
-                    if name == "ask_user" {
-                        continue;
-                    }
-
                     // Complete the active tool tracking
                     state.complete_active_tool(name, result.clone(), true);
                     state.cleanup_completed_tools();
@@ -1565,9 +1861,45 @@ impl<B: Backend> TuiController<B> {
                     // Update the existing tool message in-place (animation effect)
                     // Keep the completed tool expanded initially, collapse all others
                     let new_content = format!("✓|{}|{}", name, result_preview);
-                    state.update_tool_message(name, new_content, true); // Collapse completed tool
+                    state.update_tool_message(name, new_content.clone(), true); // Collapse completed tool
                     state.collapse_all_tools_except_last(); // Make sure only most recent is visible
                     state.scroll_to_bottom();
+
+                    // Persist the updated tool status to session storage
+                    self.service
+                        .update_session_tool_message(name, new_content)
+                        .await;
+
+                    // Handle mode switch confirmation
+                    if name == "switch_mode" && result.contains("MODE_SWITCH_CONFIRMED:") {
+                        if let Some(json_start) = result.find("MODE_SWITCH_CONFIRMED:") {
+                            let json_str = &result[json_start + "MODE_SWITCH_CONFIRMED:".len()..];
+                            let json_end = json_str.find('\n').unwrap_or(json_str.len());
+                            let json_payload = &json_str[..json_end];
+
+                            if let Ok(payload) =
+                                serde_json::from_str::<serde_json::Value>(json_payload)
+                            {
+                                if let Some(target_mode) =
+                                    payload.get("target_mode").and_then(|v| v.as_str())
+                                {
+                                    let mode: crate::core::types::AgentMode = target_mode.into();
+                                    if let Err(e) = self
+                                        .service
+                                        .handle_command(Command::SetAgentMode(mode))
+                                        .await
+                                    {
+                                        tracing::error!("Failed to apply mode switch: {}", e);
+                                    } else {
+                                        tracing::info!(
+                                            "Mode switched to {:?} via switch_mode tool",
+                                            mode
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     if name == "write_file" || name == "delete_file" || name == "shell" {
                         self.service.refresh_sidebar_data().await;
@@ -1581,9 +1913,57 @@ impl<B: Backend> TuiController<B> {
                     // Update the existing tool message in-place (animation effect)
                     // Format: "✗|tool_name|error"
                     let new_content = format!("✗|{}|{}", name, error);
-                    state.update_tool_message(name, new_content, true); // Collapse failed tool
+                    state.update_tool_message(name, new_content.clone(), true); // Collapse failed tool
                     state.collapse_all_tools_except_last(); // Make sure only most recent is visible
                     state.scroll_to_bottom();
+
+                    // Persist the updated tool status to session storage
+                    self.service
+                        .update_session_tool_message(name, new_content)
+                        .await;
+                }
+                AppEvent::ContextCompacted {
+                    old_tokens,
+                    new_tokens,
+                    messages_removed,
+                    ref summary,
+                } => {
+                    // Show auto-compaction message in UI
+                    use crate::ui_backend::{Message, MessageRole};
+
+                    let saved_tokens = old_tokens.saturating_sub(*new_tokens);
+                    let saved_pct = if *old_tokens > 0 {
+                        (saved_tokens as f64 / *old_tokens as f64 * 100.0) as usize
+                    } else {
+                        0
+                    };
+
+                    let summary_text = summary
+                        .as_ref()
+                        .map(|s| format!("\n\n📝 Summary: {}", s))
+                        .unwrap_or_default();
+
+                    let msg = Message {
+                        role: MessageRole::System,
+                        content: format!(
+                            "📦 Auto-compacted: {}k → {}k tokens (saved {}%, {} messages){}",
+                            old_tokens / 1000,
+                            new_tokens / 1000,
+                            saved_pct,
+                            messages_removed,
+                            summary_text
+                        ),
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                        segments: Vec::new(),
+                        collapsed: false,
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    };
+                    state.add_message(msg);
+                    state.scroll_to_bottom();
+
+                    // Refresh sidebar to show updated context usage
+                    self.service.refresh_sidebar_data().await;
                 }
                 AppEvent::SessionSwitched { session_id } => {
                     // Load full session state from the switched session
@@ -1919,19 +2299,48 @@ impl<B: Backend> TuiController<B> {
                 return Ok(());
             }
             "/compact" => {
-                // Trigger context compaction
+                // Force context compaction
                 use crate::ui_backend::{Message, MessageRole};
-                let msg = Message {
-                    role: MessageRole::System,
-                    content: "Context compaction triggered. Auto-compaction will manage context window usage.".to_string(),
-                    thinking: None,
-                        tool_calls: Vec::new(),
-                        segments: Vec::new(),
-                    collapsed: false,
-                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                };
-                state.add_message(msg);
                 state.clear_input();
+
+                match self.service.compact_context().await {
+                    Ok(result) => {
+                        let msg = Message {
+                            role: MessageRole::System,
+                            content: format!(
+                                "📦 Context compacted: {} → {} tokens ({} messages removed){}",
+                                result.old_tokens,
+                                result.new_tokens,
+                                result.messages_removed,
+                                result
+                                    .summary
+                                    .as_ref()
+                                    .map(|s| format!("\n\nSummary: {}", s))
+                                    .unwrap_or_default()
+                            ),
+                            thinking: None,
+                            tool_calls: Vec::new(),
+                            segments: Vec::new(),
+                            collapsed: false,
+                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        };
+                        state.add_message(msg);
+                        // Refresh sidebar to show updated context usage
+                        self.service.refresh_sidebar_data().await;
+                    }
+                    Err(e) => {
+                        let msg = Message {
+                            role: MessageRole::System,
+                            content: format!("⚠️ Compaction failed: {}", e),
+                            thinking: None,
+                            tool_calls: Vec::new(),
+                            segments: Vec::new(),
+                            collapsed: false,
+                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        };
+                        state.add_message(msg);
+                    }
+                }
                 return Ok(());
             }
             "/tools" => {

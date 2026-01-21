@@ -181,6 +181,35 @@ impl SessionService {
             .map_err(|e| StorageError::Other(e.into()))
     }
 
+    /// Update the last tool message for a given tool name with new content
+    ///
+    /// This is used to persist the final tool status (✓ or ✗) when a tool completes,
+    /// replacing the initial "running" (⋯) status that was saved when the tool started.
+    pub async fn update_last_tool_message(
+        &self,
+        tool_name: &str,
+        new_content: String,
+    ) -> Result<(), StorageError> {
+        let mut mgr = self.session_mgr.write().await;
+        let session = mgr.current_mut();
+
+        // Find the last tool message that matches this tool name
+        // Tool message format: "status|name|content"
+        for msg in session.messages.iter_mut().rev() {
+            if msg.role == "tool" {
+                let parts: Vec<&str> = msg.content.splitn(3, '|').collect();
+                if parts.len() >= 2 && parts[1] == tool_name {
+                    // Update this message in place
+                    msg.content = new_content;
+                    break;
+                }
+            }
+        }
+
+        mgr.auto_save_if_needed()
+            .map_err(|e| StorageError::Other(e.into()))
+    }
+
     /// Export current session to a file
     pub async fn export(&self, path: &Path) -> Result<(), StorageError> {
         let mgr = self.session_mgr.read().await;
@@ -259,6 +288,9 @@ impl SessionService {
     }
 
     /// Convert session messages to UI messages including tool calls and thinking
+    ///
+    /// This also sanitizes tool messages: any "⋯" (running) status is converted to "?" (interrupted)
+    /// since tools cannot actually be running after a session restart.
     pub fn session_messages_to_ui(session: &crate::storage::ChatSession) -> Vec<Message> {
         session
             .messages
@@ -276,10 +308,19 @@ impl SessionService {
                     _ => MessageRole::System,
                 };
 
+                // Sanitize tool message content: convert "running" status to "interrupted"
+                // since tools can't actually be running after restart
+                let content = if role == MessageRole::Tool && msg.content.starts_with("⋯|") {
+                    // Replace "⋯|" with "?|" to indicate interrupted/unknown status
+                    format!("?{}", &msg.content[3..]) // "⋯" is 3 bytes in UTF-8
+                } else {
+                    msg.content.clone()
+                };
+
                 if msg.segments.is_empty() {
                     messages.push(Message {
                         role,
-                        content: msg.content.clone(),
+                        content,
                         thinking: msg.thinking_content.clone(),
                         collapsed: false,
                         timestamp: timestamp.clone(),

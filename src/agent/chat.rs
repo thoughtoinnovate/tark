@@ -936,6 +936,69 @@ impl ChatAgent {
         self.context.is_near_limit()
     }
 
+    /// Get system prompt token count
+    ///
+    /// Returns the estimated tokens used by the system prompt message.
+    pub fn system_prompt_tokens(&self) -> usize {
+        use crate::llm::Role;
+        self.context
+            .messages()
+            .iter()
+            .find(|m| m.role == Role::System)
+            .map(|m| match &m.content {
+                crate::llm::MessageContent::Text(t) => ConversationContext::estimate_tokens(t),
+                crate::llm::MessageContent::Parts(parts) => parts
+                    .iter()
+                    .map(|p| match p {
+                        crate::llm::ContentPart::Text { text } => {
+                            ConversationContext::estimate_tokens(text)
+                        }
+                        _ => 0,
+                    })
+                    .sum(),
+            })
+            .unwrap_or(0)
+    }
+
+    /// Get estimated token count for tool schemas
+    ///
+    /// Estimates approximately 100 tokens per tool definition based on
+    /// average tool schema size (name, description, parameters).
+    pub fn tool_schema_tokens(&self) -> usize {
+        // Average tool definition is approximately 100 tokens
+        // (name ~5, description ~30, parameters ~65)
+        self.tools.definitions().len() * 100
+    }
+
+    /// Get conversation history token count (excludes system prompt)
+    ///
+    /// Returns estimated tokens for all user/assistant/tool messages.
+    pub fn conversation_history_tokens(&self) -> usize {
+        use crate::llm::Role;
+        self.context
+            .messages()
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .map(|m| match &m.content {
+                crate::llm::MessageContent::Text(t) => ConversationContext::estimate_tokens(t),
+                crate::llm::MessageContent::Parts(parts) => parts
+                    .iter()
+                    .map(|p| match p {
+                        crate::llm::ContentPart::Text { text } => {
+                            ConversationContext::estimate_tokens(text)
+                        }
+                        crate::llm::ContentPart::ToolUse { input, .. } => {
+                            ConversationContext::estimate_tokens(&input.to_string())
+                        }
+                        crate::llm::ContentPart::ToolResult { content, .. } => {
+                            ConversationContext::estimate_tokens(content)
+                        }
+                    })
+                    .sum(),
+            })
+            .sum()
+    }
+
     /// Get the current mode
     pub fn mode(&self) -> AgentMode {
         self.mode

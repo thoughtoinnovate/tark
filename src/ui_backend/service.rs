@@ -15,7 +15,7 @@ use crate::core::session_manager::SessionManager;
 use crate::storage::TarkStorage;
 
 use super::commands::{BuildMode, Command};
-use super::conversation::ConversationService;
+use super::conversation::{CompactionResult, ConversationService};
 use super::events::AppEvent;
 use super::git_service::GitService;
 use super::session_service::SessionService;
@@ -288,6 +288,7 @@ impl AppService {
                         next.display_name()
                     )))
                     .ok();
+                self.save_preferences();
             }
             Command::SetAgentMode(mode) => {
                 self.state.set_agent_mode(mode);
@@ -309,6 +310,7 @@ impl AppService {
                         mode.display_name()
                     )))
                     .ok();
+                self.save_preferences();
             }
 
             // Build mode
@@ -323,6 +325,7 @@ impl AppService {
                         next.display_name()
                     )))
                     .ok();
+                self.save_preferences();
             }
             Command::SetBuildMode(mode) => {
                 self.state.set_build_mode(mode);
@@ -333,6 +336,7 @@ impl AppService {
                         mode.display_name()
                     )))
                     .ok();
+                self.save_preferences();
             }
             Command::OpenTrustLevelSelector => {
                 self.state.set_active_modal(Some(ModalType::TrustLevel));
@@ -358,6 +362,7 @@ impl AppService {
                 self.event_tx
                     .send(AppEvent::StatusChanged(format!("Trust level: {:?}", level)))
                     .ok();
+                self.save_preferences();
             }
 
             // UI toggles
@@ -1696,13 +1701,31 @@ impl AppService {
             self.conversation_svc.as_ref(),
             self.state.current_provider(),
         ) {
+            // Look up context limit from models.dev
+            let context_limit = crate::llm::models_db()
+                .get_context_limit(&provider, model)
+                .await;
+            let context_limit_opt = if context_limit > 0 {
+                Some(context_limit as usize)
+            } else {
+                None
+            };
+
             match crate::llm::create_provider_with_options(provider.as_str(), true, Some(model)) {
                 Ok(llm_provider) => {
-                    if let Err(e) = conv_svc.update_llm_provider(Arc::from(llm_provider)).await {
+                    if let Err(e) = conv_svc
+                        .update_llm_provider_with_context(
+                            Arc::from(llm_provider),
+                            context_limit_opt,
+                        )
+                        .await
+                    {
                         self.state.set_llm_connected(false);
                         let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
                     } else {
                         self.state.set_llm_connected(true);
+                        // Refresh sidebar to update context progress bar with new model's limit
+                        self.refresh_sidebar_data().await;
                     }
                 }
                 Err(e) => {
@@ -1740,6 +1763,20 @@ impl AppService {
         if let Some(ref session_svc) = self.session_svc {
             if let Err(err) = session_svc.append_message(message).await {
                 tracing::warn!("Failed to persist session message: {}", err);
+            }
+        }
+    }
+
+    /// Update the last tool message in the session with new content
+    ///
+    /// This persists the final tool status (✓ or ✗) when a tool completes.
+    pub async fn update_session_tool_message(&self, tool_name: &str, new_content: String) {
+        if let Some(ref session_svc) = self.session_svc {
+            if let Err(err) = session_svc
+                .update_last_tool_message(tool_name, new_content)
+                .await
+            {
+                tracing::warn!("Failed to update session tool message: {}", err);
             }
         }
     }
@@ -1843,8 +1880,23 @@ impl AppService {
         }
 
         if let Some(ref conv_svc) = self.conversation_svc {
-            let usage = conv_svc.context_usage().await;
-            self.state.set_tokens(usage.used_tokens, usage.max_tokens);
+            // Get detailed context breakdown from conversation service
+            let mut breakdown = conv_svc.context_breakdown().await;
+
+            // Add attachment tokens from pending attachments
+            // Estimate ~4 characters per token
+            let attachment_tokens: usize = self
+                .attachment_manager
+                .pending()
+                .iter()
+                .map(|a| a.size as usize / 4) // Approximate: 4 bytes per token
+                .sum();
+
+            breakdown.attachments = attachment_tokens;
+            breakdown.recalculate_total();
+
+            // Set the full breakdown (also updates tokens_used/tokens_total)
+            self.state.set_context_breakdown(breakdown);
         }
 
         let git_changes = crate::tui_new::git_info::get_git_changes(&self.working_dir);
@@ -1946,8 +1998,23 @@ impl AppService {
         }
     }
 
+    /// Force context compaction to free up space
+    ///
+    /// This manually triggers compaction regardless of current context usage.
+    /// Useful when the user wants to clear context before it hits the auto-compaction threshold.
+    pub async fn compact_context(&self) -> Result<CompactionResult> {
+        if let Some(ref conv_svc) = self.conversation_svc {
+            conv_svc
+                .compact_context()
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        } else {
+            Err(anyhow::anyhow!("Conversation service not initialized"))
+        }
+    }
+
     /// Load and restore the current active session
-    pub async fn load_active_session(&self) -> Result<()> {
+    pub async fn load_active_session(&mut self) -> Result<()> {
         if let Some(ref session_svc) = self.session_svc {
             // Try to get current session info
             if let Some(session_info) = session_svc.get_current().await.into() {
@@ -1984,6 +2051,33 @@ impl AppService {
                             }
                         }
                     }
+
+                    // Load and apply preferences (agent mode, build mode)
+                    let tark_dir = self.working_dir.join(".tark");
+                    if let Ok(prefs) = crate::tui_new::TuiPreferences::load_for_session(
+                        &tark_dir,
+                        &session_info.session_id,
+                    ) {
+                        // Apply agent mode
+                        self.state.set_agent_mode(prefs.agent_mode);
+                        self.tools.set_mode(prefs.agent_mode);
+
+                        // Apply build mode / trust level
+                        self.state.set_build_mode(prefs.build_mode);
+                        let trust_level = match prefs.build_mode {
+                            BuildMode::Manual => crate::tools::TrustLevel::Manual,
+                            BuildMode::Balanced => crate::tools::TrustLevel::Balanced,
+                            BuildMode::Careful => crate::tools::TrustLevel::Careful,
+                        };
+                        self.state.set_trust_level(trust_level);
+                        self.tools.set_trust_level(trust_level).await;
+
+                        tracing::info!(
+                            "Restored preferences: agent_mode={:?}, build_mode={:?}",
+                            prefs.agent_mode,
+                            prefs.build_mode
+                        );
+                    }
                 }
                 tracing::info!("Restored active session");
             }
@@ -1998,6 +2092,25 @@ impl AppService {
             tracing::info!("Saved current session");
         }
         Ok(())
+    }
+
+    /// Save current preferences (agent mode, build mode, etc.) to disk
+    fn save_preferences(&self) {
+        if let Some(session_info) = self.state.session() {
+            let tark_dir = self.working_dir.join(".tark");
+            let prefs = crate::tui_new::TuiPreferences {
+                agent_mode: self.state.agent_mode(),
+                build_mode: self.state.build_mode(),
+                thinking_enabled: self.state.thinking_enabled(),
+                selected_provider: self.state.current_provider(),
+                selected_model: self.state.current_model(),
+                selected_model_name: None,
+                theme: crate::ui_backend::ThemePreset::default(),
+            };
+            if let Err(e) = prefs.save_for_session(&tark_dir, &session_info.session_id) {
+                tracing::warn!("Failed to save preferences: {}", e);
+            }
+        }
     }
 
     /// Internal method to update LLM provider without state updates

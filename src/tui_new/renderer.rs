@@ -13,10 +13,12 @@ use std::time::{Duration, Instant};
 use crate::ui_backend::UiRenderer;
 use crate::ui_backend::{
     AppEvent, Command, FocusedComponent, MessageRole as UiMessageRole, ModalType, SharedState,
+    TaskStatus as StateTaskStatus,
 };
 
 use super::modals::{
-    ApprovalModal, DeviceFlowModal, PluginModal, SessionSwitchConfirmModal, ToolsModal, TrustModal,
+    ApprovalModal, DeviceFlowModal, PluginModal, SessionSwitchConfirmModal, TaskDeleteConfirmModal,
+    TaskEditModal, ToolsModal, TrustModal,
 };
 use super::theme::Theme;
 use super::widgets::{
@@ -138,19 +140,47 @@ impl<B: Backend> TuiRenderer<B> {
             // Vim keybindings for messages panel and sidebar
             // These should only consume the key if actually used, otherwise fall through to insert
             // IMPORTANT: Questionnaire takes priority over all these
+            // IMPORTANT: Pickers with text filter need all chars including vim keys for typing
             (KeyCode::Char('j'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
+                // Pickers with text filter: pass character through for typing
+                // Note: FilePicker is handled separately as it has its own filter mechanism
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("j".to_string()));
+                }
+                // FilePicker: update filter directly (it uses a different mechanism)
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}j", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('j'));
+                    }
+                    return None;
+                }
                 // Questionnaire takes priority - j navigates down
                 if state.active_questionnaire().is_some() {
                     return Some(Command::QuestionDown);
                 }
-                // Check if approval modal is active
+                // Check if approval modal is active - j/k for navigation
                 if state.active_modal() == Some(ModalType::Approval) {
                     state.approval_select_next();
                     return None;
                 }
                 // SessionSwitchConfirm modal navigation
                 if state.active_modal() == Some(ModalType::SessionSwitchConfirm) {
+                    return Some(Command::ModalDown);
+                }
+                // Trust/Tools/Plugin modals: j/k for navigation (selection only, no text input)
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::TrustLevel) | Some(ModalType::Tools) | Some(ModalType::Plugin)
+                ) {
                     return Some(Command::ModalDown);
                 }
                 match (state.focused_component(), state.vim_mode()) {
@@ -162,17 +192,44 @@ impl<B: Backend> TuiRenderer<B> {
             }
             (KeyCode::Char('k'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
+                // Pickers with text filter: pass character through for typing
+                // Note: FilePicker is handled separately as it has its own filter mechanism
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("k".to_string()));
+                }
+                // FilePicker: update filter directly (it uses a different mechanism)
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}k", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('k'));
+                    }
+                    return None;
+                }
                 // Questionnaire takes priority - k navigates up
                 if state.active_questionnaire().is_some() {
                     return Some(Command::QuestionUp);
                 }
-                // Check if approval modal is active
+                // Check if approval modal is active - j/k for navigation
                 if state.active_modal() == Some(ModalType::Approval) {
                     state.approval_select_prev();
                     return None;
                 }
                 // SessionSwitchConfirm modal navigation
                 if state.active_modal() == Some(ModalType::SessionSwitchConfirm) {
+                    return Some(Command::ModalUp);
+                }
+                // Trust/Tools/Plugin modals: j/k for navigation (selection only, no text input)
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::TrustLevel) | Some(ModalType::Tools) | Some(ModalType::Plugin)
+                ) {
                     return Some(Command::ModalUp);
                 }
                 match (state.focused_component(), state.vim_mode()) {
@@ -182,8 +239,102 @@ impl<B: Backend> TuiRenderer<B> {
                     _ => None,
                 }
             }
+            (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                // Pickers with text filter: pass character through for typing
+                // Note: FilePicker is handled separately as it has its own filter mechanism
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("l".to_string()));
+                }
+                // FilePicker: update filter directly (it uses a different mechanism)
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}l", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('l'));
+                    }
+                    return None;
+                }
+                // Questionnaire takes priority
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('l');
+                    }
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Panel, VimMode::Normal) => Some(Command::SidebarEnter),
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('l')),
+                    _ => None,
+                }
+            }
+            (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                // Pickers with text filter: pass character through for typing
+                // Note: FilePicker is handled separately as it has its own filter mechanism
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("h".to_string()));
+                }
+                // FilePicker: update filter directly (it uses a different mechanism)
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}h", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('h'));
+                    }
+                    return None;
+                }
+                // Questionnaire takes priority
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('h');
+                    }
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Panel, VimMode::Normal) => Some(Command::SidebarExit),
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('h')),
+                    _ => None,
+                }
+            }
             (KeyCode::Char('y'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
+                // Pickers with text filter: pass character through for typing
+                // Note: FilePicker is handled separately as it has its own filter mechanism
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("y".to_string()));
+                }
+                // FilePicker: update filter directly (it uses a different mechanism)
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}y", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('y'));
+                    }
+                    return None;
+                }
                 // Questionnaire takes priority - block y from going to input
                 if let Some(q) = state.active_questionnaire() {
                     if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
@@ -202,6 +353,26 @@ impl<B: Backend> TuiRenderer<B> {
             }
             (KeyCode::Char('v'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
+                // Pickers with text filter: pass character through for typing
+                // Note: FilePicker is handled separately as it has its own filter mechanism
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("v".to_string()));
+                }
+                // FilePicker: update filter directly (it uses a different mechanism)
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}v", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('v'));
+                    }
+                    return None;
+                }
                 // Questionnaire takes priority - block v from going to input
                 if let Some(q) = state.active_questionnaire() {
                     if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
@@ -219,8 +390,242 @@ impl<B: Backend> TuiRenderer<B> {
                     _ => None,
                 }
             }
+            // Task queue management: 'e' to edit selected task
+            (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                // Pass through for pickers with text filter
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("e".to_string()));
+                }
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}e", current_filter));
+                    return None;
+                }
+                // Questionnaire free text input
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('e');
+                    }
+                    return None;
+                }
+                // Panel focused + Tasks panel + item selected -> edit task
+                if state.focused_component() == FocusedComponent::Panel
+                    && state.sidebar_selected_panel() == 2
+                {
+                    if let Some(item_idx) = state.sidebar_selected_item() {
+                        // Only allow editing queued tasks (skip active tasks in the count)
+                        // Active tasks are at the beginning, so we need to offset
+                        let tasks = state.tasks();
+                        let active_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Active)
+                            .count();
+                        let completed_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Completed)
+                            .count();
+                        // Queue index = item_idx - active_count - completed_count
+                        if item_idx >= active_count + completed_count {
+                            let queue_idx = item_idx - active_count - completed_count;
+                            return Some(Command::EditQueuedTask(queue_idx));
+                        }
+                    }
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('e')),
+                    _ => None,
+                }
+            }
+            // Task queue management: 'd' or 'x' to delete selected task
+            (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                // Pass through for pickers with text filter
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("d".to_string()));
+                }
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}d", current_filter));
+                    return None;
+                }
+                // Questionnaire free text input
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('d');
+                    }
+                    return None;
+                }
+                // Panel focused + Tasks panel + queued item selected -> delete task
+                if state.focused_component() == FocusedComponent::Panel
+                    && state.sidebar_selected_panel() == 2
+                {
+                    if let Some(item_idx) = state.sidebar_selected_item() {
+                        let tasks = state.tasks();
+                        let active_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Active)
+                            .count();
+                        let completed_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Completed)
+                            .count();
+                        if item_idx >= active_count + completed_count {
+                            let queue_idx = item_idx - active_count - completed_count;
+                            return Some(Command::DeleteQueuedTask(queue_idx));
+                        }
+                    }
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Input, VimMode::Normal) => Some(Command::DeleteLine),
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('d')),
+                    _ => None,
+                }
+            }
+            // Task queue management: 'x' also deletes (alternative to 'd')
+            (KeyCode::Char('x'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                // Pass through for pickers with text filter
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("x".to_string()));
+                }
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}x", current_filter));
+                    return None;
+                }
+                // Questionnaire free text input
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('x');
+                    }
+                    return None;
+                }
+                // Panel focused + Tasks panel + queued item selected -> delete task
+                if state.focused_component() == FocusedComponent::Panel
+                    && state.sidebar_selected_panel() == 2
+                {
+                    if let Some(item_idx) = state.sidebar_selected_item() {
+                        let tasks = state.tasks();
+                        let active_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Active)
+                            .count();
+                        let completed_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Completed)
+                            .count();
+                        if item_idx >= active_count + completed_count {
+                            let queue_idx = item_idx - active_count - completed_count;
+                            return Some(Command::DeleteQueuedTask(queue_idx));
+                        }
+                    }
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Input, VimMode::Normal) => Some(Command::DeleteCharAfter),
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('x')),
+                    _ => None,
+                }
+            }
+            // Task queue management: Shift+K to move task up
+            (KeyCode::Char('K'), KeyModifiers::SHIFT) => {
+                // Panel focused + Tasks panel + queued item selected -> move task up
+                if state.focused_component() == FocusedComponent::Panel
+                    && state.sidebar_selected_panel() == 2
+                {
+                    if let Some(item_idx) = state.sidebar_selected_item() {
+                        let tasks = state.tasks();
+                        let active_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Active)
+                            .count();
+                        let completed_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Completed)
+                            .count();
+                        if item_idx >= active_count + completed_count {
+                            let queue_idx = item_idx - active_count - completed_count;
+                            if queue_idx > 0 {
+                                return Some(Command::MoveTaskUp(queue_idx));
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            // Task queue management: Shift+J to move task down
+            (KeyCode::Char('J'), KeyModifiers::SHIFT) => {
+                // Panel focused + Tasks panel + queued item selected -> move task down
+                if state.focused_component() == FocusedComponent::Panel
+                    && state.sidebar_selected_panel() == 2
+                {
+                    if let Some(item_idx) = state.sidebar_selected_item() {
+                        let tasks = state.tasks();
+                        let active_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Active)
+                            .count();
+                        let completed_count = tasks
+                            .iter()
+                            .filter(|t| t.status == StateTaskStatus::Completed)
+                            .count();
+                        let queued_count = state.queued_message_count();
+                        if item_idx >= active_count + completed_count {
+                            let queue_idx = item_idx - active_count - completed_count;
+                            if queue_idx < queued_count.saturating_sub(1) {
+                                return Some(Command::MoveTaskDown(queue_idx));
+                            }
+                        }
+                    }
+                }
+                None
+            }
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
+                // Pickers with text filter: pass character through for typing
+                // Note: FilePicker is handled separately as it has its own filter mechanism
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("g".to_string()));
+                }
+                // FilePicker: update filter directly (it uses a different mechanism)
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}g", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('g'));
+                    }
+                    return None;
+                }
                 // Questionnaire takes priority - block g from going to input
                 if let Some(q) = state.active_questionnaire() {
                     if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
@@ -242,6 +647,26 @@ impl<B: Backend> TuiRenderer<B> {
             }
             (KeyCode::Char('G'), KeyModifiers::SHIFT) => {
                 use crate::ui_backend::VimMode;
+                // Pickers with text filter: pass character through for typing
+                // Note: FilePicker is handled separately as it has its own filter mechanism
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("G".to_string()));
+                }
+                // FilePicker: update filter directly (it uses a different mechanism)
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}G", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('G'));
+                    }
+                    return None;
+                }
                 // Questionnaire takes priority - block G from going to input
                 if let Some(q) = state.active_questionnaire() {
                     if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
@@ -304,8 +729,12 @@ impl<B: Backend> TuiRenderer<B> {
 
             // Escape to close modal or switch to Normal mode
             (KeyCode::Esc, _) => {
-                if state.active_modal().is_some() {
-                    Some(Command::CloseModal)
+                if let Some(modal) = state.active_modal() {
+                    match modal {
+                        ModalType::TaskEdit => Some(Command::CancelTaskEdit),
+                        ModalType::TaskDeleteConfirm => Some(Command::CancelDeleteTask),
+                        _ => Some(Command::CloseModal),
+                    }
                 } else {
                     use crate::ui_backend::VimMode;
                     // Switch to Normal mode when in Input or Messages
@@ -351,6 +780,8 @@ impl<B: Backend> TuiRenderer<B> {
                                 Some(Command::ApproveOperation)
                             }
                         }
+                        ModalType::TaskEdit => Some(Command::ConfirmTaskEdit),
+                        ModalType::TaskDeleteConfirm => Some(Command::ConfirmDeleteTask),
                         _ => Some(Command::ConfirmModal),
                     }
                 } else if matches!(state.focused_component(), FocusedComponent::Input) {
@@ -402,6 +833,21 @@ impl<B: Backend> TuiRenderer<B> {
                                 's' => Some(Command::DenyOperation),
                                 _ => None,
                             }
+                        }
+                        Some(ModalType::TaskDeleteConfirm) => {
+                            // Quick keys for delete confirmation
+                            match c.to_ascii_lowercase() {
+                                'y' => Some(Command::ConfirmDeleteTask),
+                                'n' => Some(Command::CancelDeleteTask),
+                                _ => None,
+                            }
+                        }
+                        Some(ModalType::TaskEdit) => {
+                            // In edit modal, characters go to the edit buffer
+                            let mut content = state.editing_task_content();
+                            content.push(c);
+                            state.set_editing_task_content(content);
+                            None
                         }
                         Some(ModalType::FilePicker) => {
                             // FilePicker is an overlay - pass through to input
@@ -587,20 +1033,16 @@ impl<B: Backend> TuiRenderer<B> {
             }
 
             // Cursor movement
-            (KeyCode::Left, KeyModifiers::NONE) => {
-                if state.focused_component() == FocusedComponent::Messages {
-                    Some(Command::PrevMessage)
-                } else {
-                    Some(Command::CursorLeft)
-                }
-            }
-            (KeyCode::Right, KeyModifiers::NONE) => {
-                if state.focused_component() == FocusedComponent::Messages {
-                    Some(Command::NextMessage)
-                } else {
-                    Some(Command::CursorRight)
-                }
-            }
+            (KeyCode::Left, KeyModifiers::NONE) => match state.focused_component() {
+                FocusedComponent::Messages => Some(Command::PrevMessage),
+                FocusedComponent::Panel => Some(Command::SidebarExit),
+                _ => Some(Command::CursorLeft),
+            },
+            (KeyCode::Right, KeyModifiers::NONE) => match state.focused_component() {
+                FocusedComponent::Messages => Some(Command::NextMessage),
+                FocusedComponent::Panel => Some(Command::SidebarEnter),
+                _ => Some(Command::CursorRight),
+            },
             (KeyCode::Home, _) => Some(Command::CursorToLineStart),
             (KeyCode::End, _) => Some(Command::CursorToLineEnd),
             (KeyCode::Left, KeyModifiers::CONTROL) => Some(Command::CursorWordBackward),
@@ -768,18 +1210,20 @@ impl<B: Backend> TuiRenderer<B> {
             ClickTarget::Messages => Some(Command::FocusMessages),
             ClickTarget::Input => Some(Command::FocusInput),
             ClickTarget::Sidebar => {
-                // Check if theme header was clicked (first 2 lines of sidebar content)
-                let inner_y = 1u16;
-                if row >= inner_y && row < inner_y + 2 {
-                    // Theme header clicked
-                    return Some(Command::ToggleThemePicker);
-                }
-
                 // Determine which sidebar panel was clicked based on row
                 let panel_idx = self.get_clicked_sidebar_panel(row, state);
                 if let Some(idx) = panel_idx {
-                    // Toggle the clicked panel
-                    Some(Command::ToggleSidebarPanel(idx))
+                    // Select the clicked panel
+                    state.set_sidebar_selected_panel(idx);
+                    state.set_sidebar_selected_item(None);
+
+                    if idx == 4 {
+                        // Theme panel clicked - open theme picker
+                        Some(Command::ToggleThemePicker)
+                    } else {
+                        // Regular panel - toggle expansion
+                        Some(Command::ToggleSidebarPanel(idx))
+                    }
                 } else {
                     // Just focus sidebar if we can't determine panel
                     Some(Command::FocusPanel)
@@ -802,34 +1246,57 @@ impl<B: Backend> TuiRenderer<B> {
     }
 
     /// Determine which sidebar panel was clicked based on row position
-    fn get_clicked_sidebar_panel(&self, row: u16, _state: &SharedState) -> Option<usize> {
+    fn get_clicked_sidebar_panel(&self, row: u16, state: &SharedState) -> Option<usize> {
+        // Get terminal size to calculate sidebar area
+        let size = self.terminal.size().unwrap_or_default();
+        let sidebar_height = size.height.saturating_sub(2); // Account for top/bottom borders
+
+        // Footer is the last 1-2 lines of the sidebar
+        // Check if click is in footer area (theme icon)
+        if row >= sidebar_height.saturating_sub(1) {
+            return Some(4); // Theme panel
+        }
+
         let inner_y = 1u16;
 
-        // Fixed panel heights (match Sidebar layout)
-        let header_h = 3u16;
-        let session_h = 6u16;
-        let context_h = 8u16;
-        let tasks_h = 8u16;
-        let git_h = 8u16;
+        // Panel heights - use dynamic approach based on expansion state
+        let header_h = 2u16; // VIM mode indicator
+        let panels = state.sidebar_expanded_panels();
+
+        // Calculate approximate panel positions
+        // When collapsed: 1 line for header only
+        // When expanded: varies by content, but we use reasonable estimates
+        let session_h = if panels[0] { 5u16 } else { 1u16 };
+        let context_h = if panels[1] { 6u16 } else { 1u16 };
+        let tasks_h = if panels[2] { 4u16 } else { 1u16 };
 
         if row < inner_y + header_h {
-            return None;
+            return None; // Header area (VIM mode)
         }
 
         let mut cursor = inner_y + header_h;
+
+        // Session panel (index 0)
         if row >= cursor && row < cursor + session_h {
             return Some(0);
         }
         cursor += session_h;
+
+        // Context panel (index 1)
         if row >= cursor && row < cursor + context_h {
             return Some(1);
         }
         cursor += context_h;
+
+        // Tasks panel (index 2)
         if row >= cursor && row < cursor + tasks_h {
             return Some(2);
         }
         cursor += tasks_h;
-        if row >= cursor && row < cursor + git_h {
+
+        // Git panel (index 3) - takes remaining space above footer
+        // If we're past all known panels and before footer, it's Git
+        if row >= cursor && row < sidebar_height.saturating_sub(1) {
             return Some(3);
         }
 
@@ -1240,6 +1707,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 let mut sidebar = Sidebar::new(theme)
                     .visible(true)
                     .theme_name(current_theme_name)
+                    .theme_preset(state.theme())
                     .focused(is_sidebar_focused)
                     .selected_panel(state.sidebar_selected_panel())
                     .vim_mode(state.vim_mode())
@@ -1258,7 +1726,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                             })
                             .collect(),
                     )
-                    .tokens(state.tokens_used(), state.tokens_total())
+                    .context_breakdown(state.context_breakdown())
                     .tasks(tasks_widget)
                     .git_changes(git_changes_widget)
                     .git_branch(crate::tui_new::git_info::get_current_branch(
@@ -1388,6 +1856,27 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     ModalType::SessionSwitchConfirm => {
                         let selected = state.session_switch_confirm_selected();
                         let modal = SessionSwitchConfirmModal::new(theme).selected(selected);
+                        frame.render_widget(modal, area);
+                    }
+                    ModalType::TaskEdit => {
+                        let content = state.editing_task_content();
+                        let cursor_pos = content.len(); // Cursor at end
+                        let modal = TaskEditModal::new(theme)
+                            .content(&content)
+                            .cursor_position(cursor_pos);
+                        frame.render_widget(modal, area);
+                    }
+                    ModalType::TaskDeleteConfirm => {
+                        // Get preview of task to delete
+                        let preview = if let Some(idx) = state.pending_delete_task_index() {
+                            let messages = state.queued_messages();
+                            messages.get(idx).cloned().unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        let modal = TaskDeleteConfirmModal::new(theme)
+                            .task_preview(&preview)
+                            .selected(0); // Default to Cancel
                         frame.render_widget(modal, area);
                     }
                 }
@@ -1577,6 +2066,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 mod tests {
     use super::*;
     use crate::ui_backend::ModelInfo;
+    use crossterm::event::KeyEvent;
 
     #[test]
     fn test_model_display_name_ignores_picker_selection() {
@@ -1605,5 +2095,190 @@ mod tests {
 
         let name = resolve_model_display_name(&state, &state.current_model());
         assert_eq!(name.as_deref(), Some("Model A"));
+    }
+
+    // ========== Vim Key Handling Tests ==========
+
+    /// Helper to create a key event
+    fn key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    /// Test: Vim keys (j, k, h, l) should be typed as characters in picker modals with filter
+    #[test]
+    fn test_vim_keys_go_to_filter_in_model_picker() {
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::ModelPicker));
+
+        let cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_k = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('k'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_h = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('h'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_l = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('l'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_j, Some(Command::ModalFilter("j".to_string())));
+        assert_eq!(cmd_k, Some(Command::ModalFilter("k".to_string())));
+        assert_eq!(cmd_h, Some(Command::ModalFilter("h".to_string())));
+        assert_eq!(cmd_l, Some(Command::ModalFilter("l".to_string())));
+    }
+
+    #[test]
+    fn test_vim_keys_go_to_filter_in_theme_picker() {
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::ThemePicker));
+
+        let cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_k = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('k'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_j, Some(Command::ModalFilter("j".to_string())));
+        assert_eq!(cmd_k, Some(Command::ModalFilter("k".to_string())));
+    }
+
+    #[test]
+    fn test_vim_keys_go_to_filter_in_provider_picker() {
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::ProviderPicker));
+
+        let cmd_y = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('y'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_v = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('v'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_g = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('g'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_y, Some(Command::ModalFilter("y".to_string())));
+        assert_eq!(cmd_v, Some(Command::ModalFilter("v".to_string())));
+        assert_eq!(cmd_g, Some(Command::ModalFilter("g".to_string())));
+    }
+
+    #[test]
+    fn test_vim_keys_go_to_filter_in_session_picker() {
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::SessionPicker));
+
+        let cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_l = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('l'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_j, Some(Command::ModalFilter("j".to_string())));
+        assert_eq!(cmd_l, Some(Command::ModalFilter("l".to_string())));
+    }
+
+    /// Test: Vim keys (j, k) should navigate in selection-only modals (no text input)
+    #[test]
+    fn test_vim_keys_navigate_in_trust_modal() {
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::TrustLevel));
+
+        let cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_k = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('k'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_j, Some(Command::ModalDown));
+        assert_eq!(cmd_k, Some(Command::ModalUp));
+    }
+
+    #[test]
+    fn test_vim_keys_navigate_in_tools_modal() {
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::Tools));
+
+        let cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_k = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('k'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_j, Some(Command::ModalDown));
+        assert_eq!(cmd_k, Some(Command::ModalUp));
+    }
+
+    #[test]
+    fn test_vim_keys_navigate_in_plugin_modal() {
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::Plugin));
+
+        let cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_k = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('k'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_j, Some(Command::ModalDown));
+        assert_eq!(cmd_k, Some(Command::ModalUp));
+    }
+
+    /// Test: Arrow keys work for navigation in filter pickers (using ModalUp/ModalDown)
+    #[test]
+    fn test_arrow_keys_navigate_in_model_picker() {
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::ModelPicker));
+
+        let cmd_up = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Up, KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_down = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Down, KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_up, Some(Command::ModalUp));
+        assert_eq!(cmd_down, Some(Command::ModalDown));
+    }
+
+    /// Test: FilePicker has its own filter mechanism (updates state directly)
+    #[test]
+    fn test_vim_keys_update_file_picker_filter_directly() {
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::FilePicker));
+        state.set_file_picker_filter("test".to_string());
+
+        let _cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+
+        // FilePicker updates the filter directly in the key handler
+        assert_eq!(state.file_picker_filter(), "testj");
     }
 }

@@ -225,6 +225,13 @@ impl QuestionnaireState {
 
     /// Auto-select the currently focused option (for single choice)
     fn auto_select_focused(&mut self) {
+        // Don't deselect "Other" if user has typed text in it - preserve their input
+        if !self.other_text.trim().is_empty() {
+            // Keep other_selected true, just clear regular selection
+            self.selected.clear();
+            return;
+        }
+
         self.selected.clear();
         self.other_selected = false;
 

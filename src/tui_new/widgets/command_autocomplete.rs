@@ -21,6 +21,7 @@ pub enum SlashCommand {
     Provider,
     Theme,
     Clear,
+    Compact,
     Think,
     Tools,
     Sessions,
@@ -40,6 +41,7 @@ impl SlashCommand {
             Self::Provider,
             Self::Theme,
             Self::Clear,
+            Self::Compact,
             Self::Think,
             Self::Tools,
             Self::Sessions,
@@ -59,6 +61,7 @@ impl SlashCommand {
             Self::Provider => "provider",
             Self::Theme => "theme",
             Self::Clear => "clear",
+            Self::Compact => "compact",
             Self::Think => "think",
             Self::Tools => "tools",
             Self::Sessions => "sessions",
@@ -78,6 +81,7 @@ impl SlashCommand {
             Self::Provider => "Open provider picker",
             Self::Theme => "Open theme picker",
             Self::Clear => "Clear conversation history",
+            Self::Compact => "Compact context to free up space",
             Self::Think => "Toggle thinking mode",
             Self::Tools => "Show available tools",
             Self::Sessions => "Open sessions list",
@@ -97,6 +101,7 @@ impl SlashCommand {
             Self::Provider => "🔌",
             Self::Theme => "🎨",
             Self::Clear => "🗑️",
+            Self::Compact => "📦",
             Self::Think => "🧠",
             Self::Tools => "🔧",
             Self::Sessions => "🗂️",
@@ -308,9 +313,21 @@ mod tests {
     }
 
     #[test]
+    fn test_slash_command_find_matches_c() {
+        let matches = SlashCommand::find_matches("c");
+        assert_eq!(matches.len(), 2); // clear, compact
+        assert!(matches.contains(&SlashCommand::Clear));
+        assert!(matches.contains(&SlashCommand::Compact));
+    }
+
+    #[test]
     fn test_slash_command_exact_match() {
         assert_eq!(SlashCommand::exact_match("help"), Some(SlashCommand::Help));
         assert_eq!(SlashCommand::exact_match("hel"), None);
+        assert_eq!(
+            SlashCommand::exact_match("compact"),
+            Some(SlashCommand::Compact)
+        );
     }
 
     #[test]
@@ -320,5 +337,15 @@ mod tests {
         assert!(state.active);
         assert_eq!(state.matches.len(), 1); // model
         assert_eq!(state.selected_command(), Some(SlashCommand::Model));
+    }
+
+    #[test]
+    fn test_compact_command_properties() {
+        assert_eq!(SlashCommand::Compact.name(), "compact");
+        assert_eq!(
+            SlashCommand::Compact.description(),
+            "Compact context to free up space"
+        );
+        assert_eq!(SlashCommand::Compact.icon(), "📦");
     }
 }

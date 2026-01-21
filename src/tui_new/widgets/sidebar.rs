@@ -8,6 +8,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::super::theme::Theme;
+use crate::core::context_tracker::ContextBreakdown;
+use crate::ui_backend::ThemePreset;
 
 /// Sidebar panel type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +18,7 @@ pub enum SidebarPanel {
     Context,
     Tasks,
     GitChanges,
+    Theme,
 }
 
 impl SidebarPanel {
@@ -26,6 +29,7 @@ impl SidebarPanel {
             SidebarPanel::Context => "Context",
             SidebarPanel::Tasks => "Tasks",
             SidebarPanel::GitChanges => "Git Changes",
+            SidebarPanel::Theme => "Theme",
         }
     }
 
@@ -36,6 +40,7 @@ impl SidebarPanel {
             SidebarPanel::Context => "📂",
             SidebarPanel::Tasks => "✓",
             SidebarPanel::GitChanges => "⎇",
+            SidebarPanel::Theme => "🎨",
         }
     }
 }
@@ -72,6 +77,17 @@ pub struct GitChange {
     pub deletions: usize,
 }
 
+/// Format token count for display (e.g., 1234 -> "1.2k", 123456 -> "123k")
+fn format_tokens(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f32 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f32 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
 /// Sidebar widget
 #[derive(Debug)]
 pub struct Sidebar<'a> {
@@ -84,6 +100,8 @@ pub struct Sidebar<'a> {
     /// Token usage
     pub tokens_used: usize,
     pub tokens_total: usize,
+    /// Detailed context breakdown by source
+    pub context_breakdown: ContextBreakdown,
     /// Tasks
     pub tasks: Vec<Task>,
     /// Git changes
@@ -92,6 +110,8 @@ pub struct Sidebar<'a> {
     pub git_branch: String,
     /// Theme
     pub theme: &'a Theme,
+    /// Current theme preset (for icon display)
+    pub theme_preset: ThemePreset,
     /// Current theme name for display
     pub current_theme_name: String,
     /// Which panels are expanded (Session, Context, Tasks, GitChanges)
@@ -131,10 +151,12 @@ impl<'a> Sidebar<'a> {
             context_files: Vec::new(),
             tokens_used: 0,
             tokens_total: 1_000_000,
+            context_breakdown: ContextBreakdown::default(),
             tasks: Vec::new(),
             git_changes: Vec::new(),
             git_branch: String::new(),
             theme,
+            theme_preset: ThemePreset::default(),
             current_theme_name: "Catppuccin Mocha".to_string(),
             expanded_panels: [true, true, true, true], // All expanded by default
             selected_panel: 0,
@@ -153,6 +175,11 @@ impl<'a> Sidebar<'a> {
 
     pub fn theme_name(mut self, name: String) -> Self {
         self.current_theme_name = name;
+        self
+    }
+
+    pub fn theme_preset(mut self, preset: ThemePreset) -> Self {
+        self.theme_preset = preset;
         self
     }
 
@@ -196,14 +223,14 @@ impl<'a> Sidebar<'a> {
 
     /// Navigate to next panel
     pub fn next_panel(&mut self) {
-        self.selected_panel = (self.selected_panel + 1) % 4;
+        self.selected_panel = (self.selected_panel + 1) % 5;
         self.selected_item = None;
     }
 
     /// Navigate to previous panel
     pub fn prev_panel(&mut self) {
         self.selected_panel = if self.selected_panel == 0 {
-            3
+            4
         } else {
             self.selected_panel - 1
         };
@@ -212,6 +239,11 @@ impl<'a> Sidebar<'a> {
 
     /// Navigate down within current panel
     pub fn next_item(&mut self) {
+        // Theme panel (index 4) doesn't have items to navigate
+        if self.selected_panel == 4 {
+            return;
+        }
+
         if !self.expanded_panels[self.selected_panel] {
             return; // Can't navigate inside collapsed panel
         }
@@ -221,6 +253,7 @@ impl<'a> Sidebar<'a> {
             1 => self.context_files.len(),
             2 => self.tasks.len(),
             3 => self.git_changes.len(),
+            4 => 0, // Theme panel has no items
             _ => 0,
         };
 
@@ -270,6 +303,13 @@ impl<'a> Sidebar<'a> {
     pub fn tokens(mut self, used: usize, total: usize) -> Self {
         self.tokens_used = used;
         self.tokens_total = total;
+        self
+    }
+
+    pub fn context_breakdown(mut self, breakdown: ContextBreakdown) -> Self {
+        self.tokens_used = breakdown.total;
+        self.tokens_total = breakdown.max_tokens;
+        self.context_breakdown = breakdown;
         self
     }
 
@@ -553,7 +593,7 @@ impl Widget for Sidebar<'_> {
                 0.0
             };
 
-            let usage_color = if usage_percent < 50.0 {
+            let usage_color = if usage_percent < 60.0 {
                 self.theme.green
             } else if usage_percent < 80.0 {
                 self.theme.yellow
@@ -561,30 +601,79 @@ impl Widget for Sidebar<'_> {
                 self.theme.red
             };
 
+            // Token count line
             Self::push_line(
                 &mut context_lines,
                 &mut all_lines,
                 Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
-                        format!("{} / {} tokens", self.tokens_used, self.tokens_total),
-                        Style::default().fg(self.theme.text_muted),
+                        format!(
+                            "{} / {} tokens ({:.1}%)",
+                            format_tokens(self.tokens_used),
+                            format_tokens(self.tokens_total),
+                            usage_percent
+                        ),
+                        Style::default().fg(usage_color),
                     ),
                 ]),
             );
+
+            // Visual progress bar
+            let bar_width = 20usize; // Fixed width for consistent appearance
+            let filled = ((bar_width as f32) * (usage_percent / 100.0)).round() as usize;
+            let empty = bar_width.saturating_sub(filled);
+            let bar_str = format!("  {}{}", "█".repeat(filled), "░".repeat(empty));
+
             Self::push_line(
                 &mut context_lines,
                 &mut all_lines,
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("Usage: {:.1}%", usage_percent),
-                        Style::default()
-                            .fg(usage_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
+                Line::from(Span::styled(bar_str, Style::default().fg(usage_color))),
             );
+
+            // Breakdown by source (only show if we have meaningful data)
+            let breakdown = &self.context_breakdown;
+            if breakdown.total > 0 {
+                Self::push_line(
+                    &mut context_lines,
+                    &mut all_lines,
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("Sys: ", Style::default().fg(self.theme.text_muted)),
+                        Span::styled(
+                            format_tokens(breakdown.system_prompt),
+                            Style::default().fg(self.theme.cyan),
+                        ),
+                        Span::styled("  Hist: ", Style::default().fg(self.theme.text_muted)),
+                        Span::styled(
+                            format_tokens(breakdown.conversation_history),
+                            Style::default().fg(self.theme.blue),
+                        ),
+                    ]),
+                );
+
+                // Second breakdown line for tools and files
+                if breakdown.tool_schemas > 0 || breakdown.attachments > 0 {
+                    Self::push_line(
+                        &mut context_lines,
+                        &mut all_lines,
+                        Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled("Tools: ", Style::default().fg(self.theme.text_muted)),
+                            Span::styled(
+                                format_tokens(breakdown.tool_schemas),
+                                Style::default().fg(self.theme.purple),
+                            ),
+                            Span::styled("  Files: ", Style::default().fg(self.theme.text_muted)),
+                            Span::styled(
+                                format_tokens(breakdown.attachments),
+                                Style::default().fg(self.theme.yellow),
+                            ),
+                        ]),
+                    );
+                }
+            }
+
             Self::push_line(
                 &mut context_lines,
                 &mut all_lines,
@@ -645,15 +734,32 @@ impl Widget for Sidebar<'_> {
             .filter(|t| t.status == TaskStatus::Queued)
             .collect();
 
+        // Golden/amber header when there are active tasks
+        let has_active_tasks = !active_tasks.is_empty();
+        let tasks_header_color = if has_active_tasks {
+            self.theme.yellow // Golden/amber for active tasks
+        } else if self.focused && tasks_selected {
+            self.theme.cyan
+        } else {
+            self.theme.text_primary
+        };
+
         let tasks_header_style = if self.focused && tasks_selected {
             Style::default()
-                .fg(self.theme.cyan)
+                .fg(tasks_header_color)
                 .add_modifier(Modifier::BOLD)
                 .bg(Color::Rgb(45, 60, 83))
         } else {
             Style::default()
-                .fg(self.theme.text_primary)
+                .fg(tasks_header_color)
                 .add_modifier(Modifier::BOLD)
+        };
+
+        // Badge color also reflects active state
+        let badge_color = if has_active_tasks {
+            self.theme.yellow
+        } else {
+            self.theme.blue
         };
 
         Self::push_line(
@@ -670,7 +776,7 @@ impl Widget for Sidebar<'_> {
                     format!("{}", task_count),
                     Style::default()
                         .fg(self.theme.bg_main)
-                        .bg(self.theme.blue)
+                        .bg(badge_color)
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
@@ -679,7 +785,7 @@ impl Widget for Sidebar<'_> {
         if tasks_expanded {
             let mut task_idx = 0;
 
-            // Active tasks with spinner icon and highlight color per mock design
+            // Active tasks with filled green circle (●) and "Active" label below
             for task in active_tasks.iter() {
                 let item_selected = self.focused
                     && self.selected_panel == 2
@@ -693,21 +799,30 @@ impl Widget for Sidebar<'_> {
                     Style::default().fg(self.theme.green)
                 };
 
-                // Use animated spinner indicator ⟳ for active tasks
-                // Truncate task name to fit within available width (prefix "  ⟳ " = 4 chars)
+                // Green filled circle (●) for active tasks
+                // Truncate task name to fit within available width (prefix "  ● " = 4 chars)
                 let truncated_name = Self::truncate_text(&task.name, content_width, 4);
                 Self::push_line(
                     &mut tasks_lines,
                     &mut all_lines,
                     Line::from(vec![
                         Span::styled(
-                            "  ⟳ ",
+                            "  ● ",
                             Style::default()
                                 .fg(self.theme.green)
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(truncated_name, item_style),
                     ]),
+                );
+                // "Active" label below the task name
+                Self::push_line(
+                    &mut tasks_lines,
+                    &mut all_lines,
+                    Line::from(vec![Span::styled(
+                        "    Active",
+                        Style::default().fg(self.theme.green),
+                    )]),
                 );
                 task_idx += 1;
             }
@@ -769,17 +884,34 @@ impl Widget for Sidebar<'_> {
                         Style::default().fg(self.theme.text_secondary)
                     };
 
-                    // Queued tasks show unchecked circle icon ○
-                    // Truncate task name to fit within available width (prefix "  ○ " = 4 chars)
-                    let truncated_name = Self::truncate_text(&task.name, content_width, 4);
-                    Self::push_line(
-                        &mut tasks_lines,
-                        &mut all_lines,
-                        Line::from(vec![
-                            Span::styled("  ○ ", Style::default().fg(self.theme.text_muted)),
-                            Span::styled(truncated_name, item_style),
-                        ]),
-                    );
+                    // Queued tasks show:
+                    // - Selection indicator (▸) when selected
+                    // - Gray empty circle (○)
+                    // - Task name
+                    // - Action icons (≡ x) only on selected row
+                    let prefix = if item_selected { " ▸" } else { "  " };
+
+                    // When selected, need extra space for action icons (≡ x = 4 chars)
+                    let icon_space = if item_selected { 5 } else { 0 };
+                    let truncated_name =
+                        Self::truncate_text(&task.name, content_width, 4 + icon_space);
+
+                    let mut spans = vec![
+                        Span::styled(prefix, Style::default().fg(self.theme.cyan)),
+                        Span::styled("○ ", Style::default().fg(self.theme.text_muted)),
+                        Span::styled(truncated_name, item_style),
+                    ];
+
+                    // Add action icons only on selected row
+                    if item_selected {
+                        spans.push(Span::styled(
+                            " ≡",
+                            Style::default().fg(self.theme.text_muted),
+                        ));
+                        spans.push(Span::styled(" x", Style::default().fg(self.theme.red)));
+                    }
+
+                    Self::push_line(&mut tasks_lines, &mut all_lines, Line::from(spans));
                     task_idx += 1;
                 }
             }
@@ -924,25 +1056,48 @@ impl Widget for Sidebar<'_> {
             // No truncation; rely on sidebar scroll
         }
 
-        // Footer section: theme selector with palette icon
+        // Footer section: theme icon only, navigable
+        let footer_selected = self.focused && self.selected_panel == 4;
+        let footer_style = if footer_selected {
+            Style::default()
+                .fg(self.theme.cyan)
+                .bg(Color::Rgb(45, 60, 83))
+        } else {
+            Style::default().fg(self.theme.cyan)
+        };
+
+        // Get icon from current theme preset
+        let theme_icon = self.theme_preset.icon();
+
         footer_lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("🎨 ", Style::default().fg(self.theme.cyan)),
-            Span::styled(
-                &self.current_theme_name,
-                Style::default().fg(self.theme.text_primary),
-            ),
-            Span::raw("  "),
-            Span::styled("▼", Style::default().fg(self.theme.text_muted)),
+            Span::styled(theme_icon, footer_style),
+            Span::styled(" ▼", Style::default().fg(self.theme.text_muted)),
         ]));
 
-        // Layout fixed panels (header + 4 panels + footer)
+        // Layout with dynamic panel heights based on actual content
+        let session_height = if session_expanded {
+            session_lines.len() as u16
+        } else {
+            1 // Just header when collapsed
+        };
+        let context_height = if context_expanded {
+            context_lines.len() as u16
+        } else {
+            1
+        };
+        let tasks_height = if tasks_expanded {
+            tasks_lines.len() as u16
+        } else {
+            1
+        };
+
         let panel_constraints = [
             Constraint::Length(header_lines.len() as u16),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(8),
+            Constraint::Length(session_height),
+            Constraint::Length(context_height),
+            Constraint::Length(tasks_height),
+            Constraint::Min(1), // Git gets remaining space, scrolls if needed
             Constraint::Length(footer_lines.len() as u16),
         ];
         let panel_chunks = Layout::default()
