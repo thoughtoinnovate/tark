@@ -12,6 +12,7 @@ mod tui_test_driver;
 use insta::assert_snapshot;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use regex::Regex;
 use tark_cli::tui_new::TuiApp;
 
 /// Create a test app with specified size
@@ -21,6 +22,32 @@ fn create_test_app(width: u16, height: u16) -> TuiApp<TestBackend> {
     let mut app = TuiApp::new(terminal);
     app.state_mut().set_terminal_size(width, height);
     app
+}
+
+/// Normalize environment-specific values in the buffer output
+/// This ensures snapshots are consistent across different machines/CI
+fn normalize_output(output: String) -> String {
+    // Get the current working directory to replace it with a placeholder
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+
+    let mut result = output;
+
+    // Replace the actual working directory with a placeholder
+    if !cwd.is_empty() {
+        result = result.replace(&cwd, "<WORKING_DIR>");
+    }
+
+    // Also normalize common CI paths that might appear
+    // GitHub Actions: /home/runner/work/repo/repo
+    // Generic patterns for absolute paths after "Tark Terminal"
+    let path_regex = Regex::new(r"(Tark Terminal\s+)(/[^\s│┐]+)").unwrap();
+    result = path_regex
+        .replace_all(&result, "${1}<WORKING_DIR>")
+        .to_string();
+
+    result
 }
 
 /// Capture buffer as string for snapshot
@@ -36,7 +63,9 @@ fn capture_buffer(app: &mut TuiApp<TestBackend>) -> String {
         }
         result.push('\n');
     }
-    result
+
+    // Normalize environment-specific values before returning
+    normalize_output(result)
 }
 
 // ============================================================================
