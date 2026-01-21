@@ -3,8 +3,8 @@
 # Copy this file to ~/.config/tark/config.toml
 
 [llm]
-# Default LLM provider: "claude", "openai", or "ollama"
-default_provider = "openai"
+# Default LLM provider: "claude", "openai", "tark_sim", or "ollama"
+default_provider = "tark_sim"
 
 [llm.claude]
 model = "claude-sonnet-4-20250514"
@@ -19,6 +19,7 @@ max_tokens = 4096
 base_url = "http://localhost:11434"
 # Model to use (run `ollama list` to see available models)
 # Good coding models: codellama, deepseek-coder, qwen2.5-coder, starcoder2
+# Note: Available models are loaded dynamically from your local Ollama instance
 model = "codellama"
 
 [server]

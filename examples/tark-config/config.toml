@@ -8,7 +8,7 @@ default_provider = "tark_sim"
 # Enabled providers to show in TUI provider picker
 # Empty list = show all providers from models.dev
 # Specify only the providers you want to use
-enabled_providers = ["tark_sim", "openai", "google", "claude"]
+enabled_providers = ["tark_sim", "openai", "google", "claude", "ollama"]
 
 [llm.tark_sim]
 model = "tark_llm"

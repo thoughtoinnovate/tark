@@ -32,7 +32,7 @@ pub use debug_wrapper::DebugProviderWrapper;
 pub use error::LlmError;
 pub use gemini::GeminiProvider;
 pub use models_db::{init_models_db, models_db, ModelCapabilities};
-pub use ollama::OllamaProvider;
+pub use ollama::{list_local_ollama_models, OllamaProvider};
 pub use openai::OpenAiProvider;
 // OpenAI-compatible provider components - public API for plugin providers
 #[allow(unused_imports)]

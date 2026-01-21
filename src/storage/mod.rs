@@ -1158,8 +1158,8 @@ pub struct WorkspaceConfig {
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
-            provider: "openai".to_string(),
-            model: None,
+            provider: "tark_sim".to_string(),
+            model: Some("tark_llm".to_string()),
             default_mode: "build".to_string(),
             verbose: false,
             custom_instructions: None,
@@ -1179,7 +1179,7 @@ impl WorkspaceConfig {
     /// Merge another config into this one (other takes precedence for set values)
     pub fn merge(&mut self, other: WorkspaceConfig) {
         // Only override if explicitly set (non-default)
-        if other.provider != "openai" {
+        if other.provider != "tark_sim" {
             self.provider = other.provider;
         }
         if other.model.is_some() {

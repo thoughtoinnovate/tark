@@ -51,6 +51,7 @@ impl Default for LlmConfig {
                 "openai".to_string(),
                 "google".to_string(),
                 "tark_sim".to_string(),
+                "ollama".to_string(),
             ],
         }
     }

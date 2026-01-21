@@ -201,12 +201,12 @@ impl<B: Backend> TuiRenderer<B> {
                     }
                     return None;
                 }
-                if state.focused_component() == FocusedComponent::Messages
-                    && state.vim_mode() == VimMode::Normal
-                {
-                    Some(Command::SetVimMode(VimMode::Visual))
-                } else {
-                    None
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal) => {
+                        Some(Command::SetVimMode(VimMode::Visual))
+                    }
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('v')),
+                    _ => None,
                 }
             }
             (KeyCode::Char('g'), KeyModifiers::NONE) => {

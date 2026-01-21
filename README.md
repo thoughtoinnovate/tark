@@ -279,7 +279,12 @@ tark --version
 
 ```toml
 [llm]
-default_provider = "openai"
+# Default provider (tark_sim is built-in for testing, no API key required)
+default_provider = "tark_sim"
+
+[llm.tark_sim]
+model = "tark_llm"
+max_tokens = 8192
 
 [llm.openai]
 model = "gpt-4o"

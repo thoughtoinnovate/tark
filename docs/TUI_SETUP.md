@@ -41,7 +41,7 @@ ssh -t user@host  # -t forces TTY allocation
 
 ### Provider Filtering (New Feature)
 
-By default, the TUI only shows **OpenAI** and **Gemini** providers.
+By default, the TUI shows **tark_sim** (built-in test provider), **OpenAI**, **Gemini**, and **Ollama** (local) providers.
 
 **To customize which providers are shown:**
 
@@ -50,18 +50,19 @@ Create or edit `~/.config/tark/config.toml`:
 ```toml
 [llm]
 # List only the providers you want to use
-enabled_providers = ["openai", "google", "anthropic"]
+enabled_providers = ["openai", "google", "anthropic", "ollama"]
 
 # Or leave empty to show ALL providers from models.dev
 # enabled_providers = []
 ```
 
 **Available providers:**
+- `tark_sim` - Built-in test provider (no API key required)
 - `openai` - OpenAI GPT models
 - `google` - Google Gemini
 - `anthropic` - Anthropic Claude
 - `openrouter` - OpenRouter (200+ models)
-- `ollama` - Local Ollama
+- `ollama` - Local Ollama (loads models dynamically from your local instance)
 - Plus any installed plugin providers
 
 ### API Key Setup
@@ -255,6 +256,21 @@ ollama pull codellama
 ---
 
 ## Example Configurations
+
+### Default (Test/Demo Mode)
+```toml
+[llm]
+default_provider = "tark_sim"  # Built-in test provider, no API key required
+enabled_providers = ["tark_sim", "openai", "google", "ollama"]
+
+[llm.tark_sim]
+model = "tark_llm"
+max_tokens = 8192
+
+[llm.ollama]
+base_url = "http://localhost:11434"
+model = "codellama"  # Models load dynamically from local Ollama
+```
 
 ### Minimal (OpenAI only)
 ```toml

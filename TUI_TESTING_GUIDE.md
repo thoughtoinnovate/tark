@@ -109,16 +109,16 @@ cat tui-debug.log | grep -A5 "AgentBridge"
 **Log messages you should see:**
 ```
 INFO  tark::tui::agent_bridge > Initializing AgentBridge in "/path/to/work"
-DEBUG tark::tui::agent_bridge > Config loaded, default provider: openai
+DEBUG tark::tui::agent_bridge > Config loaded, default provider: tark_sim
 DEBUG tark::tui::agent_bridge > Storage initialized at "/path/to/work/.tark"
 DEBUG tark::tui::agent_bridge > Session loaded: <session-id>
-INFO  tark::tui::agent_bridge > Using config default provider: openai
-INFO  tark::tui::agent_bridge > Using default model for openai: gpt-4o
-INFO  tark::tui::agent_bridge > Creating LLM provider: openai with model: gpt-4o
+INFO  tark::tui::agent_bridge > Using config default provider: tark_sim
+INFO  tark::tui::agent_bridge > Using default model for tark_sim: tark_llm
+INFO  tark::tui::agent_bridge > Creating LLM provider: tark_sim with model: tark_llm
 INFO  tark::tui::agent_bridge > LLM provider created successfully
 INFO  tark::ui_backend::service > AgentBridge initialized successfully
-INFO  tark::ui_backend::service > LLM provider set to: openai
-INFO  tark::ui_backend::service > LLM model set to: gpt-4o
+INFO  tark::ui_backend::service > LLM provider set to: tark_sim
+INFO  tark::ui_backend::service > LLM model set to: tark_llm
 ```
 
 **If you see an error:**
@@ -134,7 +134,7 @@ This will tell us exactly what's failing.
 
 ### Default Enabled Providers
 
-By default, only **OpenAI** and **Gemini** are enabled in the provider picker.
+By default, **tark_sim** (test provider), **OpenAI**, **Gemini**, and **Ollama** (local) are enabled in the provider picker.
 
 **To change this:**
 
@@ -142,10 +142,10 @@ Create `~/.config/tark/config.toml`:
 
 ```toml
 [llm]
-default_provider = "openai"
+default_provider = "tark_sim"
 
 # Only show these providers in TUI
-enabled_providers = ["openai", "google"]
+enabled_providers = ["tark_sim", "openai", "google", "ollama"]
 
 # Or show all available providers:
 # enabled_providers = []

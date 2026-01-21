@@ -130,7 +130,7 @@ impl AppService {
         // Initialize ChatAgent
         let chat_agent_result = (|| -> Result<crate::agent::ChatAgent> {
             // Create LLM provider
-            let provider_name = provider.clone().unwrap_or_else(|| "openai".to_string());
+            let provider_name = provider.clone().unwrap_or_else(|| "tark_sim".to_string());
             let llm_provider = crate::llm::create_provider_with_options(
                 &provider_name,
                 true, // silent
@@ -172,11 +172,25 @@ impl AppService {
                 if let Some(ref prov) = provider {
                     state.set_provider(Some(prov.clone()));
                 } else {
-                    state.set_provider(Some("openai".to_string()));
+                    state.set_provider(Some("tark_sim".to_string()));
                 }
-                // Note: Model will be set when user selects via model picker
-                // The initial model ID from CLI is stored internally but display name
-                // needs to come from the model picker for proper status bar display
+
+                // Set initial model in state
+                if let Some(ref mdl) = model {
+                    state.set_model(Some(mdl.clone()));
+                } else {
+                    // Default to tark_llm for tark_sim provider
+                    let default_model =
+                        if provider.as_deref() == Some("tark_sim") || provider.is_none() {
+                            "tark_llm"
+                        } else {
+                            // For other providers, don't set a model yet - wait for user selection
+                            ""
+                        };
+                    if !default_model.is_empty() {
+                        state.set_model(Some(default_model.to_string()));
+                    }
+                }
 
                 tracing::info!("Services initialized successfully");
 
@@ -1265,7 +1279,7 @@ impl AppService {
                                 )));
 
                                 let config = crate::config::Config::load().unwrap_or_default();
-                                let default_provider = "tark_sim".to_string();
+                                let default_provider = config.llm.default_provider.clone();
                                 let default_model = config.llm.tark_sim.model.clone();
 
                                 if !default_provider.is_empty() {

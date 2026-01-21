@@ -398,6 +398,47 @@ impl ModelsDbManager {
             }));
         }
 
+        // Special handling for Ollama - load from local instance
+        if provider_key == "ollama" {
+            match crate::llm::list_local_ollama_models().await {
+                Ok(ollama_models) => {
+                    // Find the requested model
+                    for m in ollama_models {
+                        if m.name == model_id {
+                            let supports_tools = Self::ollama_model_supports_tools(&m.name);
+                            return Ok(Some(ModelInfo {
+                                id: m.name.clone(),
+                                name: m.name.clone(),
+                                family: None,
+                                attachment: false,
+                                reasoning: false,
+                                tool_call: supports_tools,
+                                temperature: true,
+                                structured_output: None,
+                                knowledge: None,
+                                release_date: None,
+                                last_updated: Some(m.modified_at),
+                                modalities: ModelModalities {
+                                    input: vec!["text".to_string()],
+                                    output: vec!["text".to_string()],
+                                },
+                                open_weights: true,
+                                cost: ModelCost::default(),
+                                limit: ModelLimits {
+                                    context: 8192,
+                                    output: 4096,
+                                },
+                            }));
+                        }
+                    }
+                    return Ok(None); // Model not found
+                }
+                Err(_) => {
+                    return Ok(None); // Ollama not available
+                }
+            }
+        }
+
         if let Some(provider_info) = db.providers.get(&provider_key) {
             // Try exact match first
             if let Some(model) = provider_info.models.get(model_id) {
@@ -464,6 +505,66 @@ impl ModelsDbManager {
             }));
         }
 
+        // Special handling for Ollama - load from local instance
+        if provider_key == "ollama" {
+            match crate::llm::list_local_ollama_models().await {
+                Ok(ollama_models) => {
+                    let mut models = HashMap::new();
+                    for m in ollama_models {
+                        let supports_tools = Self::ollama_model_supports_tools(&m.name);
+                        models.insert(
+                            m.name.clone(),
+                            ModelInfo {
+                                id: m.name.clone(),
+                                name: m.name.clone(),
+                                family: None,
+                                attachment: false,
+                                reasoning: false,
+                                tool_call: supports_tools,
+                                temperature: true,
+                                structured_output: None,
+                                knowledge: None,
+                                release_date: None,
+                                last_updated: Some(m.modified_at),
+                                modalities: ModelModalities {
+                                    input: vec!["text".to_string()],
+                                    output: vec!["text".to_string()],
+                                },
+                                open_weights: true,
+                                cost: ModelCost::default(),
+                                limit: ModelLimits {
+                                    context: 8192,
+                                    output: 4096,
+                                },
+                            },
+                        );
+                    }
+
+                    return Ok(Some(ProviderInfo {
+                        id: "ollama".to_string(),
+                        name: "Ollama".to_string(),
+                        env: vec![], // Ollama uses localhost by default, no env required
+                        npm: None,
+                        api: Some("http://localhost:11434".to_string()),
+                        doc: Some("https://ollama.ai".to_string()),
+                        models,
+                    }));
+                }
+                Err(_) => {
+                    // Return empty provider if Ollama not available
+                    return Ok(Some(ProviderInfo {
+                        id: "ollama".to_string(),
+                        name: "Ollama".to_string(),
+                        env: vec![], // Ollama uses localhost by default, no env required
+                        npm: None,
+                        api: Some("http://localhost:11434".to_string()),
+                        doc: Some("https://ollama.ai".to_string()),
+                        models: HashMap::new(),
+                    }));
+                }
+            }
+        }
+
         Ok(db.providers.get(&provider_key).cloned())
     }
 
@@ -472,6 +573,7 @@ impl ModelsDbManager {
         let db = self.get_database().await?;
         let mut providers: Vec<String> = db.providers.keys().cloned().collect();
         providers.push("tark_sim".to_string());
+        providers.push("ollama".to_string());
         Ok(providers)
     }
 
@@ -504,6 +606,47 @@ impl ModelsDbManager {
                     output: 4096,
                 },
             }]);
+        }
+
+        // Special handling for Ollama - load models from local instance
+        if provider_key == "ollama" {
+            match crate::llm::list_local_ollama_models().await {
+                Ok(ollama_models) => {
+                    return Ok(ollama_models
+                        .into_iter()
+                        .map(|m| {
+                            let supports_tools = Self::ollama_model_supports_tools(&m.name);
+                            ModelInfo {
+                                id: m.name.clone(),
+                                name: m.name.clone(),
+                                family: None,
+                                attachment: false,
+                                reasoning: false,
+                                tool_call: supports_tools,
+                                temperature: true,
+                                structured_output: None,
+                                knowledge: None,
+                                release_date: None,
+                                last_updated: Some(m.modified_at),
+                                modalities: ModelModalities {
+                                    input: vec!["text".to_string()],
+                                    output: vec!["text".to_string()],
+                                },
+                                open_weights: true,
+                                cost: ModelCost::default(), // Local models are free
+                                limit: ModelLimits {
+                                    context: 8192, // Default, varies by model
+                                    output: 4096,
+                                },
+                            }
+                        })
+                        .collect());
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load Ollama models: {}", e);
+                    return Ok(vec![]); // Graceful degradation if Ollama not running
+                }
+            }
         }
 
         if let Some(provider_info) = db.providers.get(&provider_key) {
@@ -673,6 +816,69 @@ impl ModelsDbManager {
         }
 
         lower
+    }
+
+    /// Check if an Ollama model supports native tool calling
+    ///
+    /// Models known to support native Ollama tool calling API:
+    /// - FunctionGemma (specialized for function calling)
+    /// - Llama 3.1, Llama 4
+    /// - Mistral Nemo
+    /// - Firefunction v2
+    /// - Command-R, Command-R+
+    /// - Qwen 2.5, Qwen 3, Qwen 2.5 Coder
+    /// - Devstral
+    fn ollama_model_supports_tools(model_name: &str) -> bool {
+        let lower = model_name.to_lowercase();
+
+        // FunctionGemma - specialized for function calling
+        if lower.contains("functiongemma") || lower.contains("function-gemma") {
+            return true;
+        }
+
+        // Llama 3.1+ and Llama 4
+        if lower.contains("llama3.1")
+            || lower.contains("llama-3.1")
+            || lower.contains("llama3:") && lower.contains("3.1")
+            || lower.contains("llama4")
+            || lower.contains("llama-4")
+        {
+            return true;
+        }
+
+        // Mistral Nemo
+        if lower.contains("mistral-nemo") || lower.contains("mistral:nemo") {
+            return true;
+        }
+
+        // Firefunction
+        if lower.contains("firefunction") {
+            return true;
+        }
+
+        // Command-R variants
+        if lower.contains("command-r") || lower.contains("command:r") {
+            return true;
+        }
+
+        // Qwen 2.5+ and Qwen 3
+        if lower.contains("qwen2.5")
+            || lower.contains("qwen-2.5")
+            || lower.contains("qwen3")
+            || lower.contains("qwen-3")
+            || lower.contains("qwen:2.5")
+            || lower.contains("qwen:3")
+        {
+            return true;
+        }
+
+        // Devstral
+        if lower.contains("devstral") {
+            return true;
+        }
+
+        // Default: no native tool calling
+        false
     }
 
     /// Calculate cost for a request

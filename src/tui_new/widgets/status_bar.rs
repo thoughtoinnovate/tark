@@ -44,8 +44,8 @@ impl<'a> StatusBar<'a> {
         Self {
             agent_mode: AgentMode::Build,
             build_mode: BuildMode::Balanced,
-            model_name: "Claude 3.5 Sonnet",
-            provider_name: "Anthropic",
+            model_name: "tark_llm",
+            provider_name: "tark_sim",
             thinking_enabled: true,
             queue_count: 0,
             is_processing: false,
