@@ -2281,14 +2281,23 @@ impl<B: Backend> TuiController<B> {
                 state.clear_messages();
                 state.set_messages_scroll_offset(0);
 
-                // Clear backend conversation history
-                self.service.clear_conversation().await;
+                // Clear context files (attached files)
+                state.clear_context_files();
+
+                // Clear queued messages
+                state.clear_message_queue();
+
+                // Clear backend conversation history and context (including plan context)
+                self.service.clear_conversation_and_context().await;
+
+                // Update tasks display (will be empty after queue clear)
+                self.service.refresh_sidebar_data().await;
 
                 // Add confirmation message
                 use crate::ui_backend::{Message, MessageRole};
                 let msg = Message {
                     role: MessageRole::System,
-                    content: "Chat cleared.".to_string(),
+                    content: "Chat and context cleared.".to_string(),
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),

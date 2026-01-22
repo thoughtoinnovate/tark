@@ -1005,8 +1005,13 @@ impl ChatAgent {
     }
 
     /// Clear conversation history (keeps system prompt)
+    ///
+    /// Also clears the plan context to ensure a fresh start.
     pub fn clear_history(&mut self) {
-        // Get the current system prompt
+        // Clear plan context for a complete fresh start
+        self.plan_context = None;
+
+        // Get the current system prompt (now without plan context)
         let supports_thinking = self.llm.supports_native_thinking();
         let thinking_enabled = self.is_thinking_enabled();
         let system_prompt = get_system_prompt(
@@ -1014,14 +1019,14 @@ impl ChatAgent {
             supports_thinking,
             thinking_enabled,
             self.trust_level,
-            self.plan_context.as_ref(),
+            None, // No plan context after clear
         );
 
         // Clear and reinitialize with system prompt
         self.context.clear();
         self.context.add_system(system_prompt);
 
-        tracing::info!("Conversation history cleared");
+        tracing::info!("Conversation history and plan context cleared");
     }
 
     /// Restore conversation from a saved session

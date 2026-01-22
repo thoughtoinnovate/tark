@@ -2019,6 +2019,20 @@ impl AppService {
         }
     }
 
+    /// Clear conversation history and reset context (attachments, context breakdown)
+    pub async fn clear_conversation_and_context(&self) {
+        // Clear conversation history
+        self.clear_conversation().await;
+
+        // Clear context files from state
+        self.state.clear_context_files();
+
+        // Reset context breakdown to reflect cleared state
+        if let Some(ref conv_svc) = self.conversation_svc {
+            conv_svc.reset_context_breakdown().await;
+        }
+    }
+
     /// Force context compaction to free up space
     ///
     /// This manually triggers compaction regardless of current context usage.

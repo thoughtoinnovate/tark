@@ -592,6 +592,19 @@ impl ConversationService {
         let mut conv = self.conversation_mgr.write().await;
         conv.clear_messages();
         conv.clear_streaming();
+
+        // Also clear the ChatAgent's conversation context
+        let mut agent = self.chat_agent.write().await;
+        agent.clear_history();
+    }
+
+    /// Reset context breakdown (called after clearing conversation and context)
+    pub async fn reset_context_breakdown(&self) {
+        // The context breakdown is computed from the ChatAgent's messages
+        // After clear_history, it should already be reset
+        // This method exists for explicit reset when clearing context files too
+        let mut agent = self.chat_agent.write().await;
+        agent.clear_history();
     }
 
     /// Get message count
