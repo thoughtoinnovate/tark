@@ -63,6 +63,10 @@ pub struct TuiRenderer<B: Backend> {
     last_esc_time: Option<Instant>,
     /// Working directory for git context
     working_dir: PathBuf,
+    /// Cache for incremental markdown rendering during streaming
+    streaming_markdown_cache: super::widgets::markdown::StreamingMarkdownCache,
+    /// Cache for incremental thinking markdown rendering during streaming
+    streaming_thinking_cache: super::widgets::markdown::StreamingMarkdownCache,
 }
 
 impl<B: Backend> TuiRenderer<B> {
@@ -73,6 +77,8 @@ impl<B: Backend> TuiRenderer<B> {
             theme: Theme::default(),
             last_esc_time: None,
             working_dir,
+            streaming_markdown_cache: super::widgets::markdown::StreamingMarkdownCache::new(),
+            streaming_thinking_cache: super::widgets::markdown::StreamingMarkdownCache::new(),
         }
     }
 
@@ -1734,6 +1740,45 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 None
             };
 
+            // Calculate bubble width for markdown rendering
+            let bubble_content_width = chunks[1].width.saturating_sub(8) as usize;
+
+            // Use incremental markdown rendering for streaming content
+            // This avoids O(n) re-parsing of the entire content on every frame
+            let streaming_lines = if let Some(ref content) = streaming_content {
+                if !content.is_empty() {
+                    let lines = self.streaming_markdown_cache.render_incremental(
+                        content,
+                        theme,
+                        bubble_content_width.saturating_sub(2),
+                    );
+                    Some(lines)
+                } else {
+                    None
+                }
+            } else {
+                // No streaming content - clear cache
+                self.streaming_markdown_cache.clear();
+                None
+            };
+
+            // Similarly for thinking content
+            let thinking_lines = if let Some(ref thinking) = streaming_thinking {
+                if !thinking.is_empty() {
+                    let lines = self.streaming_thinking_cache.render_incremental(
+                        thinking,
+                        theme,
+                        bubble_content_width.saturating_sub(2),
+                    );
+                    Some(lines)
+                } else {
+                    None
+                }
+            } else {
+                self.streaming_thinking_cache.clear();
+                None
+            };
+
             let message_area = MessageArea::new(&message_widgets, theme)
                 .agent_name(&config.agent_name_short)
                 .focused(matches!(focused_component, FocusedComponent::Messages))
@@ -1741,7 +1786,10 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .scroll(state.messages_scroll_offset())
                 .vim_mode(state.vim_mode())
                 .streaming_content(streaming_content)
-                .streaming_thinking(streaming_thinking);
+                .streaming_thinking(streaming_thinking)
+                .streaming_lines(streaming_lines)
+                .thinking_lines(thinking_lines)
+                .processing(state.llm_processing());
             let (total_lines, viewport_height) = message_area.metrics(chunks[1]);
             state.set_messages_metrics(total_lines, viewport_height);
             frame.render_widget(message_area, chunks[1]);
@@ -2122,8 +2170,15 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
     }
 
     fn poll_input(&mut self, state: &SharedState) -> Result<Option<Command>> {
-        // Non-blocking poll with short timeout
-        if event::poll(Duration::from_millis(50))? {
+        // Use shorter poll timeout during streaming for faster UI updates (100+ fps)
+        // Use longer timeout when idle to reduce CPU usage
+        let poll_timeout = if state.llm_processing() {
+            Duration::from_millis(8) // ~120fps during streaming
+        } else {
+            Duration::from_millis(50) // Normal idle polling
+        };
+
+        if event::poll(poll_timeout)? {
             match event::read()? {
                 Event::Key(key) => {
                     // Special handling for ESC key
@@ -2210,11 +2265,14 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
         // All accumulation happens in BFF layer (SharedState.streaming_content).
         // Events are only used to trigger UI refresh.
         match event {
-            AppEvent::LlmTextChunk(_)
-            | AppEvent::LlmThinkingChunk(_)
-            | AppEvent::LlmCompleted { .. }
-            | AppEvent::LlmError(_) => {
+            AppEvent::LlmTextChunk(_) | AppEvent::LlmThinkingChunk(_) => {
                 // Just trigger a render cycle - state is already updated by BFF
+                // Cache is updated incrementally during render()
+            }
+            AppEvent::LlmCompleted { .. } | AppEvent::LlmError(_) => {
+                // Streaming completed or errored - clear the incremental markdown caches
+                self.streaming_markdown_cache.clear();
+                self.streaming_thinking_cache.clear();
             }
             _ => {}
         }

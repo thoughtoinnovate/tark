@@ -30,10 +30,15 @@ pub use debug_logger::{DebugLogEntry, DebugLogger, DebugLoggerConfig, LogCategor
 pub use services::PlanService;
 pub use storage::{TarkStorage, WorkspaceConfig};
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// Global debug logger instance
 static TARK_DEBUG_LOGGER: OnceLock<DebugLogger> = OnceLock::new();
+
+/// Fast path check for whether debug logging is enabled.
+/// This atomic bool avoids the overhead of checking OnceLock on every log call.
+static DEBUG_LOGGING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Initialize the global debug logger
 pub fn init_debug_logger(config: DebugLoggerConfig) -> anyhow::Result<()> {
@@ -41,7 +46,17 @@ pub fn init_debug_logger(config: DebugLoggerConfig) -> anyhow::Result<()> {
     TARK_DEBUG_LOGGER
         .set(logger)
         .map_err(|_| anyhow::anyhow!("Debug logger already initialized"))?;
+    // Set the fast-path flag
+    DEBUG_LOGGING_ENABLED.store(true, Ordering::Release);
     Ok(())
+}
+
+/// Fast check if debug logging is enabled (zero-cost when disabled)
+///
+/// Use this for early-bail in hot paths before constructing log entries.
+#[inline(always)]
+pub fn is_debug_logging_enabled() -> bool {
+    DEBUG_LOGGING_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Get the global debug logger (if initialized)
@@ -56,23 +71,38 @@ pub fn debug_log(entry: DebugLogEntry) {
     }
 }
 
-/// Helper macro for logging debug entries
+/// Helper macro for logging debug entries with zero-cost when disabled.
+///
+/// This macro first checks a fast atomic bool before evaluating any arguments,
+/// making it truly zero-cost when debug logging is not initialized.
+///
+/// # Examples
+/// ```ignore
+/// tark_debug_log!(correlation_id, LogCategory::Service, "event_name");
+/// tark_debug_log!(correlation_id, LogCategory::Service, "event_name", json!({"key": "value"}));
+/// ```
 #[macro_export]
 macro_rules! tark_debug_log {
     ($correlation_id:expr, $category:expr, $event:expr) => {
-        if let Some(logger) = $crate::debug_logger() {
-            logger.log($crate::DebugLogEntry::new(
-                $correlation_id,
-                $category,
-                $event,
-            ));
+        // Fast path: check atomic bool first (single load instruction)
+        if $crate::is_debug_logging_enabled() {
+            if let Some(logger) = $crate::debug_logger() {
+                logger.log($crate::DebugLogEntry::new(
+                    $correlation_id,
+                    $category,
+                    $event,
+                ));
+            }
         }
     };
     ($correlation_id:expr, $category:expr, $event:expr, $data:expr) => {
-        if let Some(logger) = $crate::debug_logger() {
-            logger.log(
-                $crate::DebugLogEntry::new($correlation_id, $category, $event).with_data($data),
-            );
+        // Fast path: check atomic bool first (single load instruction)
+        if $crate::is_debug_logging_enabled() {
+            if let Some(logger) = $crate::debug_logger() {
+                logger.log(
+                    $crate::DebugLogEntry::new($correlation_id, $category, $event).with_data($data),
+                );
+            }
         }
     };
 }

@@ -199,6 +199,13 @@ pub struct MessageArea<'a> {
     streaming_content: Option<String>,
     /// Streaming thinking content
     streaming_thinking: Option<String>,
+    /// Pre-rendered streaming lines (for incremental rendering optimization)
+    /// Uses 'static lifetime since these come from a cache and are cloned
+    streaming_lines: Option<Vec<Line<'static>>>,
+    /// Pre-rendered thinking lines (for incremental rendering optimization)
+    thinking_lines: Option<Vec<Line<'static>>>,
+    /// Whether LLM is currently processing (shows placeholder before streaming starts)
+    is_processing: bool,
     /// Agent name for display
     agent_name: &'a str,
     /// Index of currently focused message
@@ -217,6 +224,9 @@ impl<'a> MessageArea<'a> {
             focused: false,
             streaming_content: None,
             streaming_thinking: None,
+            streaming_lines: None,
+            thinking_lines: None,
+            is_processing: false,
             agent_name: "Tark", // Default
             focused_message_index: 0,
             vim_mode: crate::ui_backend::VimMode::Insert,
@@ -244,6 +254,27 @@ impl<'a> MessageArea<'a> {
     /// Set streaming thinking
     pub fn streaming_thinking(mut self, thinking: Option<String>) -> Self {
         self.streaming_thinking = thinking;
+        self
+    }
+
+    /// Set pre-rendered streaming lines (for incremental rendering optimization)
+    ///
+    /// When set, these lines are used instead of parsing streaming_content.
+    /// This avoids O(n) markdown parsing on every frame during streaming.
+    pub fn streaming_lines(mut self, lines: Option<Vec<Line<'static>>>) -> Self {
+        self.streaming_lines = lines;
+        self
+    }
+
+    /// Set pre-rendered thinking lines (for incremental rendering optimization)
+    pub fn thinking_lines(mut self, lines: Option<Vec<Line<'static>>>) -> Self {
+        self.thinking_lines = lines;
+        self
+    }
+
+    /// Set processing state (shows placeholder while waiting for first chunk)
+    pub fn processing(mut self, is_processing: bool) -> Self {
+        self.is_processing = is_processing;
         self
     }
 
@@ -532,81 +563,155 @@ impl<'a> MessageArea<'a> {
         }
 
         // Add streaming content if present
-        if let Some(ref content) = self.streaming_content {
-            if !content.is_empty() {
-                let icon = self.role_icon(MessageRole::Agent);
-                let mut header_spans = vec![
-                    Span::styled(
-                        format!("{} ", icon),
-                        Style::default().fg(self.theme.agent_bubble),
-                    ),
-                    Span::styled("Assistant", Style::default().fg(self.theme.text_muted)),
-                ];
+        // Use pre-rendered lines if available (incremental rendering optimization),
+        // otherwise fall back to parsing the raw content
+        let has_streaming = self
+            .streaming_content
+            .as_ref()
+            .is_some_and(|c| !c.is_empty())
+            || self.streaming_lines.is_some();
 
-                if self.focused {
-                    let cursor_visible = get_message_cursor_visible();
-                    let cursor = if cursor_visible {
-                        Span::styled("▮ ", Style::default().fg(self.theme.text_primary))
-                    } else {
-                        Span::raw("  ")
-                    };
-                    header_spans.insert(0, cursor);
+        // Show a "thinking" placeholder while processing but no streaming content yet
+        // This provides visual feedback during the waiting period before first chunk
+        let show_thinking_placeholder = self.is_processing && !has_streaming;
+
+        if show_thinking_placeholder {
+            let icon = self.role_icon(MessageRole::Agent);
+            let header_spans = vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("{} ", icon),
+                    Style::default().fg(self.theme.agent_bubble),
+                ),
+                Span::styled("Assistant", Style::default().fg(self.theme.text_muted)),
+            ];
+            lines.push(Line::from(header_spans));
+
+            let glow_color = self.theme.agent_bubble;
+            let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(top_border, Style::default().fg(glow_color)),
+            ]));
+
+            // Animated thinking indicator using the blink state
+            let indicator_visible = get_tool_indicator_visible();
+            let thinking_text = if indicator_visible {
+                "Thinking..."
+            } else {
+                "Thinking.  "
+            };
+            let padding = bubble_content_width.saturating_sub(2 + thinking_text.len());
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("│", Style::default().fg(glow_color)),
+                Span::raw(" "),
+                Span::styled(thinking_text, Style::default().fg(self.theme.text_muted)),
+                Span::raw(" ".repeat(padding + 1)),
+                Span::styled("│", Style::default().fg(glow_color)),
+            ]));
+
+            let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(bottom_border, Style::default().fg(glow_color)),
+            ]));
+            lines.push(Line::from(""));
+        } else if has_streaming {
+            let icon = self.role_icon(MessageRole::Agent);
+            let mut header_spans = vec![
+                Span::styled(
+                    format!("{} ", icon),
+                    Style::default().fg(self.theme.agent_bubble),
+                ),
+                Span::styled("Assistant", Style::default().fg(self.theme.text_muted)),
+            ];
+
+            if self.focused {
+                let cursor_visible = get_message_cursor_visible();
+                let cursor = if cursor_visible {
+                    Span::styled("▮ ", Style::default().fg(self.theme.text_primary))
                 } else {
-                    header_spans.insert(0, Span::raw("  "));
-                }
-                lines.push(Line::from(header_spans));
-
-                let glow_color = self.theme.agent_bubble;
-                let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(top_border, Style::default().fg(glow_color)),
-                ]));
-
-                let markdown_lines =
-                    super::markdown::render_markdown(content, self.theme, bubble_content_width - 2);
-                for md_line in markdown_lines {
-                    let line_width = md_line.width();
-                    let padding = bubble_content_width.saturating_sub(2 + line_width);
-                    let mut line_spans = vec![
-                        Span::raw("  "),
-                        Span::styled("│", Style::default().fg(glow_color)),
-                        Span::raw(" "),
-                    ];
-                    line_spans.extend(md_line.spans);
-                    line_spans.push(Span::raw(" ".repeat(padding + 1)));
-                    line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
-                    lines.push(Line::from(line_spans));
-                }
-
-                let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(bottom_border, Style::default().fg(glow_color)),
-                ]));
-                lines.push(Line::from(""));
+                    Span::raw("  ")
+                };
+                header_spans.insert(0, cursor);
+            } else {
+                header_spans.insert(0, Span::raw("  "));
             }
+            lines.push(Line::from(header_spans));
+
+            let glow_color = self.theme.agent_bubble;
+            let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(top_border, Style::default().fg(glow_color)),
+            ]));
+
+            // Use pre-rendered lines if available (incremental rendering),
+            // otherwise parse the streaming content
+            let markdown_lines: Vec<Line<'_>> = if let Some(ref pre_rendered) = self.streaming_lines
+            {
+                pre_rendered.clone()
+            } else if let Some(ref content) = self.streaming_content {
+                super::markdown::render_markdown(content, self.theme, bubble_content_width - 2)
+            } else {
+                vec![]
+            };
+
+            for md_line in markdown_lines {
+                let line_width = md_line.width();
+                let padding = bubble_content_width.saturating_sub(2 + line_width);
+                let mut line_spans = vec![
+                    Span::raw("  "),
+                    Span::styled("│", Style::default().fg(glow_color)),
+                    Span::raw(" "),
+                ];
+                line_spans.extend(md_line.spans);
+                line_spans.push(Span::raw(" ".repeat(padding + 1)));
+                line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
+                lines.push(Line::from(line_spans));
+            }
+
+            let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(bottom_border, Style::default().fg(glow_color)),
+            ]));
+            lines.push(Line::from(""));
         }
 
         // Add streaming thinking if present and thinking mode enabled
-        if let Some(ref thinking) = self.streaming_thinking {
-            if !thinking.is_empty() {
-                let icon = self.role_icon(MessageRole::Thinking);
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{} ", icon),
-                        Style::default().fg(self.theme.thinking_fg),
-                    ),
-                    Span::styled("▼ Thinking ", Style::default().fg(self.theme.text_primary)),
-                ]));
+        // Use pre-rendered lines if available (incremental rendering optimization)
+        let has_thinking = self
+            .streaming_thinking
+            .as_ref()
+            .is_some_and(|t| !t.is_empty())
+            || self.thinking_lines.is_some();
+
+        if has_thinking {
+            let icon = self.role_icon(MessageRole::Thinking);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} ", icon),
+                    Style::default().fg(self.theme.thinking_fg),
+                ),
+                Span::styled("▼ Thinking ", Style::default().fg(self.theme.text_primary)),
+            ]));
+
+            // Use pre-rendered lines if available, otherwise use raw thinking content
+            if let Some(ref pre_rendered) = self.thinking_lines {
+                for line in pre_rendered {
+                    lines.push(line.clone());
+                }
+            } else if let Some(ref thinking) = self.streaming_thinking {
                 lines.push(Line::from(Span::styled(
                     thinking.clone(),
                     Style::default()
                         .fg(self.theme.text_secondary)
                         .bg(self.theme.thinking_bubble_bg),
                 )));
-                lines.push(Line::from(""));
             }
+            lines.push(Line::from(""));
         }
 
         lines

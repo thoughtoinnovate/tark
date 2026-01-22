@@ -749,6 +749,11 @@ pub async fn run_tui_new(
 
     let working_dir = PathBuf::from(working_dir).canonicalize()?;
 
+    // Eagerly preload models.dev cache before TUI setup.
+    // This ensures model capabilities are available immediately when the first
+    // LLM call is made, avoiding UI "freeze" during supports_native_thinking_async().
+    crate::llm::models_db().preload_blocking().await;
+
     if debug {
         // Initialize debug logger
         let debug_config = crate::DebugLoggerConfig {

@@ -21,10 +21,15 @@ mod ui_backend;
 
 // Re-export debug logging utilities for use within the binary
 use debug_logger::{DebugLogEntry, DebugLogger, DebugLoggerConfig, LogCategory};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// Global debug logger instance
 static TARK_DEBUG_LOGGER: OnceLock<DebugLogger> = OnceLock::new();
+
+/// Fast path check for whether debug logging is enabled.
+/// This atomic bool avoids the overhead of checking OnceLock on every log call.
+static DEBUG_LOGGING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Initialize the global debug logger
 pub fn init_debug_logger(config: DebugLoggerConfig) -> anyhow::Result<()> {
@@ -32,7 +37,17 @@ pub fn init_debug_logger(config: DebugLoggerConfig) -> anyhow::Result<()> {
     TARK_DEBUG_LOGGER
         .set(logger)
         .map_err(|_| anyhow::anyhow!("Debug logger already initialized"))?;
+    // Set the fast-path flag
+    DEBUG_LOGGING_ENABLED.store(true, Ordering::Release);
     Ok(())
+}
+
+/// Fast check if debug logging is enabled (zero-cost when disabled)
+///
+/// Use this for early-bail in hot paths before constructing log entries.
+#[inline(always)]
+pub fn is_debug_logging_enabled() -> bool {
+    DEBUG_LOGGING_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Get the global debug logger (if initialized)

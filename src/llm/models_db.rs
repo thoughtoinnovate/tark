@@ -727,50 +727,78 @@ impl ModelsDbManager {
         let client = self.client.clone();
 
         tokio::spawn(async move {
-            // First try disk cache
-            if let Some(ref path) = cache_path {
-                if let Ok(content) = tokio::fs::read_to_string(path).await {
-                    if let Ok(entry) = serde_json::from_str::<CacheEntry>(&content) {
-                        if Self::is_cache_valid(&entry) {
-                            let mut guard = cache.write().await;
-                            *guard = Some(entry);
-                            tracing::debug!("Loaded models.dev from disk cache");
-                            return;
-                        }
-                    }
-                }
-            }
+            Self::preload_inner(cache, cache_path, client).await;
+        });
+    }
 
-            // Fetch from API
-            match client.get(MODELS_API_URL).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(db) = resp.json::<ModelsDatabase>().await {
-                        let entry = CacheEntry {
-                            timestamp: Self::current_timestamp(),
-                            data: db,
-                        };
+    /// Preload models database and wait for completion.
+    ///
+    /// Use this for TUI startup to ensure the cache is warm before the first LLM call.
+    /// This prevents the UI from appearing "frozen" while waiting for the initial
+    /// models.dev fetch during `supports_native_thinking_async()`.
+    pub async fn preload_blocking(&self) {
+        Self::preload_inner(
+            self.cache.clone(),
+            self.cache_path.clone(),
+            self.client.clone(),
+        )
+        .await;
+    }
 
-                        // Save to disk
-                        if let Some(ref path) = cache_path {
-                            if let Some(parent) = path.parent() {
-                                let _ = tokio::fs::create_dir_all(parent).await;
-                            }
-                            if let Ok(content) = serde_json::to_string(&entry) {
-                                let _ = tokio::fs::write(path, content).await;
-                            }
-                        }
-
-                        // Store in memory
+    /// Internal preload logic shared between async and spawned versions
+    async fn preload_inner(
+        cache: Arc<RwLock<Option<CacheEntry>>>,
+        cache_path: Option<PathBuf>,
+        client: reqwest::Client,
+    ) {
+        // First try disk cache
+        if let Some(ref path) = cache_path {
+            if let Ok(content) = tokio::fs::read_to_string(path).await {
+                if let Ok(entry) = serde_json::from_str::<CacheEntry>(&content) {
+                    if Self::is_cache_valid(&entry) {
                         let mut guard = cache.write().await;
                         *guard = Some(entry);
-                        tracing::debug!("Preloaded models.dev from API");
+                        tracing::debug!("Loaded models.dev from disk cache");
+                        return;
                     }
                 }
-                _ => {
-                    tracing::warn!("Failed to preload models.dev");
+            }
+        }
+
+        // Fetch from API with a shorter timeout for startup
+        match client
+            .get(MODELS_API_URL)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(db) = resp.json::<ModelsDatabase>().await {
+                    let entry = CacheEntry {
+                        timestamp: Self::current_timestamp(),
+                        data: db,
+                    };
+
+                    // Save to disk
+                    if let Some(ref path) = cache_path {
+                        if let Some(parent) = path.parent() {
+                            let _ = tokio::fs::create_dir_all(parent).await;
+                        }
+                        if let Ok(content) = serde_json::to_string(&entry) {
+                            let _ = tokio::fs::write(path, content).await;
+                        }
+                    }
+
+                    // Store in memory
+                    let mut guard = cache.write().await;
+                    *guard = Some(entry);
+                    tracing::debug!("Preloaded models.dev from API");
                 }
             }
-        });
+            _ => {
+                tracing::warn!("Failed to preload models.dev");
+            }
+        }
     }
 
     /// Normalize provider name to match models.dev keys (public wrapper)

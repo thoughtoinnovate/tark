@@ -774,23 +774,25 @@ impl AppService {
                 // If already processing, queue the message
                 let is_processing = self.state.llm_processing();
 
-                // Log the processing state check
-                if let Some(logger) = crate::debug_logger() {
-                    let correlation_id = self
-                        .state
-                        .current_correlation_id()
-                        .unwrap_or_else(|| "none".to_string());
-                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                        correlation_id,
-                        crate::LogCategory::Service,
-                        "send_message_check",
-                    )
-                    .with_data(serde_json::json!({
-                        "llm_processing": is_processing,
-                        "text": text,
-                        "will_queue": is_processing
-                    }));
-                    logger.log(entry);
+                // Log the processing state check (fast-path for zero-cost when disabled)
+                if crate::is_debug_logging_enabled() {
+                    if let Some(logger) = crate::debug_logger() {
+                        let correlation_id = self
+                            .state
+                            .current_correlation_id()
+                            .unwrap_or_else(|| "none".to_string());
+                        let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                            correlation_id,
+                            crate::LogCategory::Service,
+                            "send_message_check",
+                        )
+                        .with_data(serde_json::json!({
+                            "llm_processing": is_processing,
+                            "text": text,
+                            "will_queue": is_processing
+                        }));
+                        logger.log(entry);
+                    }
                 }
 
                 if is_processing {
@@ -801,22 +803,24 @@ impl AppService {
                     let queue_count = self.state.queued_message_count();
                     tracing::info!("Message queued: '{}', queue_count={}", text, queue_count);
 
-                    // Log to debug logger as well
-                    if let Some(logger) = crate::debug_logger() {
-                        let correlation_id = self
-                            .state
-                            .current_correlation_id()
-                            .unwrap_or_else(|| "none".to_string());
-                        let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                            correlation_id,
-                            crate::LogCategory::Service,
-                            "message_queued",
-                        )
-                        .with_data(serde_json::json!({
-                            "text": text,
-                            "queue_count": queue_count
-                        }));
-                        logger.log(entry);
+                    // Log to debug logger as well (fast-path for zero-cost when disabled)
+                    if crate::is_debug_logging_enabled() {
+                        if let Some(logger) = crate::debug_logger() {
+                            let correlation_id = self
+                                .state
+                                .current_correlation_id()
+                                .unwrap_or_else(|| "none".to_string());
+                            let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                correlation_id,
+                                crate::LogCategory::Service,
+                                "message_queued",
+                            )
+                            .with_data(serde_json::json!({
+                                "text": text,
+                                "queue_count": queue_count
+                            }));
+                            logger.log(entry);
+                        }
                     }
 
                     let queue_msg = Message {
@@ -864,19 +868,22 @@ impl AppService {
                 // Generate new correlation ID for this request
                 let correlation_id = self.state.generate_new_correlation_id();
 
-                if let Some(logger) = crate::debug_logger() {
-                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                        correlation_id.clone(),
-                        crate::LogCategory::Service,
-                        "llm_send_start",
-                    )
-                    .with_data(serde_json::json!({
-                        "provider": self.state.current_provider(),
-                        "model": self.state.current_model(),
-                        "queued_messages": self.state.queued_message_count(),
-                        "content_length": text.len()
-                    }));
-                    logger.log(entry);
+                // Fast-path check for zero-cost when debug logging is disabled
+                if crate::is_debug_logging_enabled() {
+                    if let Some(logger) = crate::debug_logger() {
+                        let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                            correlation_id.clone(),
+                            crate::LogCategory::Service,
+                            "llm_send_start",
+                        )
+                        .with_data(serde_json::json!({
+                            "provider": self.state.current_provider(),
+                            "model": self.state.current_model(),
+                            "queued_messages": self.state.queued_message_count(),
+                            "content_length": text.len()
+                        }));
+                        logger.log(entry);
+                    }
                 }
 
                 // Send to LLM via ConversationService
@@ -889,22 +896,24 @@ impl AppService {
                     let event_tx = self.event_tx.clone();
                     let state = self.state.clone();
 
-                    // Log the user message with correlation_id
-                    if let Some(logger) = crate::debug_logger() {
-                        let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                            correlation_id.clone(),
-                            crate::LogCategory::Service,
-                            "user_message",
-                        )
-                        .with_data(serde_json::json!({
-                            "content_preview": if text.len() > 100 {
-                                format!("{}...", &text[..100])
-                            } else {
-                                text.clone()
-                            },
-                            "content_length": text.len()
-                        }));
-                        logger.log(entry);
+                    // Log the user message with correlation_id (fast-path for zero-cost)
+                    if crate::is_debug_logging_enabled() {
+                        if let Some(logger) = crate::debug_logger() {
+                            let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                correlation_id.clone(),
+                                crate::LogCategory::Service,
+                                "user_message",
+                            )
+                            .with_data(serde_json::json!({
+                                "content_preview": if text.len() > 100 {
+                                    format!("{}...", &text[..100])
+                                } else {
+                                    text.clone()
+                                },
+                                "content_length": text.len()
+                            }));
+                            logger.log(entry);
+                        }
                     }
 
                     // Spawn task for async message sending
@@ -915,20 +924,28 @@ impl AppService {
                     let this_session_id = state.session().map(|s| s.session_id.clone());
                     state.set_processing_session_id(this_session_id.clone());
 
-                    if let Some(logger) = crate::debug_logger() {
-                        let entry = crate::DebugLogEntry::new(
-                            correlation_id.clone(),
-                            crate::LogCategory::Service,
-                            "processing_session_set",
-                        )
-                        .with_data(serde_json::json!({
-                            "processing_session_id": this_session_id,
-                            "correlation_id": this_correlation_id
-                        }));
-                        logger.log(entry);
+                    if crate::is_debug_logging_enabled() {
+                        if let Some(logger) = crate::debug_logger() {
+                            let entry = crate::DebugLogEntry::new(
+                                correlation_id.clone(),
+                                crate::LogCategory::Service,
+                                "processing_session_set",
+                            )
+                            .with_data(serde_json::json!({
+                                "processing_session_id": this_session_id,
+                                "correlation_id": this_correlation_id
+                            }));
+                            logger.log(entry);
+                        }
                     }
 
+                    // Capture debug logging state before spawn
+                    let debug_enabled = crate::is_debug_logging_enabled();
+
                     tokio::spawn(async move {
+                        // Import types for use in spawned context
+                        use crate::{debug_logger, DebugLogEntry, LogCategory};
+
                         if let Err(e) = conv_svc
                             .send_message(&text, Some(correlation_id.clone()))
                             .await
@@ -947,28 +964,32 @@ impl AppService {
                             state.scroll_to_bottom();
                             let _ = event_tx.send(AppEvent::MessageAdded(error_msg));
                             let _ = event_tx.send(AppEvent::LlmError(e.to_string()));
-                            if let Some(logger) = crate::debug_logger() {
-                                let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                            if debug_enabled {
+                                if let Some(logger) = debug_logger() {
+                                    let entry: DebugLogEntry = DebugLogEntry::new(
+                                        correlation_id.clone(),
+                                        LogCategory::Service,
+                                        "llm_send_error",
+                                    )
+                                    .with_data(serde_json::json!({
+                                        "error": e.to_string()
+                                    }));
+                                    logger.log(entry);
+                                }
+                            }
+                        } else if debug_enabled {
+                            if let Some(logger) = debug_logger() {
+                                let entry: DebugLogEntry = DebugLogEntry::new(
                                     correlation_id.clone(),
-                                    crate::LogCategory::Service,
-                                    "llm_send_error",
+                                    LogCategory::Service,
+                                    "llm_send_done",
                                 )
                                 .with_data(serde_json::json!({
-                                    "error": e.to_string()
+                                    "provider": state.current_provider(),
+                                    "model": state.current_model()
                                 }));
                                 logger.log(entry);
                             }
-                        } else if let Some(logger) = crate::debug_logger() {
-                            let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                                correlation_id.clone(),
-                                crate::LogCategory::Service,
-                                "llm_send_done",
-                            )
-                            .with_data(serde_json::json!({
-                                "provider": state.current_provider(),
-                                "model": state.current_model()
-                            }));
-                            logger.log(entry);
                         }
 
                         // Only reset processing if we're still the active request

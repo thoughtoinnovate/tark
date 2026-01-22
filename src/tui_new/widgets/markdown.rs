@@ -1,12 +1,146 @@
 //! Markdown rendering for TUI messages
 //!
-//! Converts markdown text to styled ratatui Lines/Spans
+//! Converts markdown text to styled ratatui Lines/Spans.
+//! Includes incremental rendering support for streaming content.
 
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::tui_new::theme::Theme;
+
+/// Cache for incremental markdown rendering during streaming.
+///
+/// This struct enables efficient rendering of streaming content by:
+/// - Caching already-rendered lines up to a "stable point" (paragraph break)
+/// - Only re-parsing content from the stable point onward
+///
+/// This avoids O(n) re-parsing of the entire content on every frame.
+#[derive(Debug, Clone, Default)]
+pub struct StreamingMarkdownCache {
+    /// Cached rendered lines (up to stable_byte_offset)
+    cached_lines: Vec<Line<'static>>,
+    /// Byte offset up to which we have stable, cached lines
+    stable_byte_offset: usize,
+    /// The max_width used for the cached lines (invalidates cache if changed)
+    cached_max_width: usize,
+}
+
+impl StreamingMarkdownCache {
+    /// Create a new empty cache
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Clear the cache (call when streaming completes or content changes)
+    pub fn clear(&mut self) {
+        self.cached_lines.clear();
+        self.stable_byte_offset = 0;
+        self.cached_max_width = 0;
+    }
+
+    /// Render markdown incrementally, using cached lines where possible.
+    ///
+    /// This finds the last "stable point" (double newline / paragraph break)
+    /// in the cached region and only re-parses from there.
+    pub fn render_incremental(
+        &mut self,
+        text: &str,
+        theme: &Theme,
+        max_width: usize,
+    ) -> Vec<Line<'static>> {
+        // If max_width changed, invalidate cache
+        if max_width != self.cached_max_width {
+            self.clear();
+            self.cached_max_width = max_width;
+        }
+
+        // Find the last stable point (paragraph break) in the already-processed region
+        // A paragraph break is "\n\n" which marks a clear boundary for markdown parsing
+        let stable_point = find_last_stable_point(text, self.stable_byte_offset);
+
+        // Ensure stable_point is at a valid char boundary before slicing
+        if stable_point > self.stable_byte_offset
+            && stable_point <= text.len()
+            && text.is_char_boundary(stable_point)
+        {
+            // We have new stable content - render and cache it
+            let stable_text = &text[..stable_point];
+            let new_cached_lines = render_markdown(stable_text, theme, max_width);
+            self.cached_lines = new_cached_lines;
+            self.stable_byte_offset = stable_point;
+        }
+
+        // Now render the unstable tail (from stable_point to end)
+        if self.stable_byte_offset < text.len() && text.is_char_boundary(self.stable_byte_offset) {
+            let unstable_text = &text[self.stable_byte_offset..];
+            let tail_lines = render_markdown(unstable_text, theme, max_width);
+
+            // Combine cached + tail
+            let mut result = self.cached_lines.clone();
+            result.extend(tail_lines);
+            result
+        } else if self.stable_byte_offset >= text.len() {
+            // All content is stable/cached
+            self.cached_lines.clone()
+        } else {
+            // stable_byte_offset is not at a valid char boundary, re-render everything
+            render_markdown(text, theme, max_width)
+        }
+    }
+}
+
+/// Find the last "stable point" in text where we can safely cache rendered lines.
+///
+/// A stable point is after a paragraph break ("\n\n") or at the start of the text.
+/// This ensures that markdown constructs (bold, code, etc.) are complete.
+fn find_last_stable_point(text: &str, min_offset: usize) -> usize {
+    // Look for the last "\n\n" that is after min_offset but before the end
+    // We want some buffer at the end to avoid re-parsing just for a few characters
+    const MIN_TAIL_SIZE: usize = 100; // Keep at least 100 bytes unparsed for the "tail"
+
+    if text.len() <= min_offset + MIN_TAIL_SIZE {
+        return min_offset; // Not enough new content to bother updating cache
+    }
+
+    // Ensure min_offset is at a valid char boundary
+    let safe_min_offset = if text.is_char_boundary(min_offset) {
+        min_offset
+    } else {
+        // Find the next valid char boundary
+        (min_offset..text.len())
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(text.len())
+    };
+
+    // Calculate end position and ensure it's at a valid char boundary
+    let end_pos = text.len().saturating_sub(MIN_TAIL_SIZE);
+    let safe_end_pos = if text.is_char_boundary(end_pos) {
+        end_pos
+    } else {
+        // Find the previous valid char boundary
+        (0..end_pos)
+            .rev()
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(0)
+    };
+
+    // If we can't create a valid slice, return the original min_offset
+    if safe_min_offset >= safe_end_pos {
+        return min_offset;
+    }
+
+    let search_region = &text[safe_min_offset..safe_end_pos];
+
+    // Find the last paragraph break in the search region
+    if let Some(pos) = search_region.rfind("\n\n") {
+        // Return the position after the paragraph break (start of next paragraph)
+        safe_min_offset + pos + 2
+    } else {
+        // No paragraph break found, keep existing stable point
+        min_offset
+    }
+}
 
 fn wrap_lines(lines: Vec<Line<'static>>, max_width: usize) -> Vec<Line<'static>> {
     if max_width == 0 {
@@ -250,5 +384,38 @@ mod tests {
             "Expected '<thinking>' to be preserved, got: {}",
             rendered
         );
+    }
+
+    #[test]
+    fn test_multibyte_characters_in_streaming() {
+        let theme = Theme::default();
+        // Text with curly apostrophe (3-byte UTF-8 character: U+2019)
+        let text = "So far, we haven't covered any specific programming tasks";
+        let mut cache = StreamingMarkdownCache::new();
+
+        // Should not panic with multi-byte characters
+        let lines = cache.render_incremental(text, &theme, 80);
+        assert!(!lines.is_empty());
+
+        // Verify the content is preserved
+        let rendered: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(rendered.contains("haven't"));
+    }
+
+    #[test]
+    fn test_streaming_cache_with_emoji() {
+        let theme = Theme::default();
+        // Text with emoji (4-byte UTF-8 character)
+        let text =
+            "Hello 👋 world! This is a longer message with emoji characters 🎉 to test streaming.";
+        let mut cache = StreamingMarkdownCache::new();
+
+        // Should not panic with multi-byte characters
+        let lines = cache.render_incremental(text, &theme, 80);
+        assert!(!lines.is_empty());
     }
 }

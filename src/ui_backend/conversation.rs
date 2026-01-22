@@ -225,17 +225,19 @@ impl ConversationService {
         // Get correlation_id (use provided or generate new)
         let correlation_id = correlation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        // Log LLM request start
-        if let Some(logger) = crate::debug_logger() {
-            let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                correlation_id.clone(),
-                crate::LogCategory::Service,
-                "llm_request_start",
-            )
-            .with_data(serde_json::json!({
-                "content_length": content.len()
-            }));
-            logger.log(entry);
+        // Log LLM request start (fast-path check avoids overhead when disabled)
+        if crate::is_debug_logging_enabled() {
+            if let Some(logger) = crate::debug_logger() {
+                let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                    correlation_id.clone(),
+                    crate::LogCategory::Service,
+                    "llm_request_start",
+                )
+                .with_data(serde_json::json!({
+                    "content_length": content.len()
+                }));
+                logger.log(entry);
+            }
         }
 
         // Add user message
@@ -275,18 +277,20 @@ impl ConversationService {
         let correlation_id_tool_start = correlation_id.clone();
         let on_tool_call = move |tool_name: String, tool_args: String| {
             if let Ok(args_json) = serde_json::from_str::<serde_json::Value>(&tool_args) {
-                // Log tool invocation
-                if let Some(logger) = crate::debug_logger() {
-                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                        correlation_id_tool_start.clone(),
-                        crate::LogCategory::Service,
-                        "tool_invocation",
-                    )
-                    .with_data(serde_json::json!({
-                        "tool": tool_name.clone(),
-                        "args": args_json.clone()
-                    }));
-                    logger.log(entry);
+                // Log tool invocation (fast-path check for zero-cost when disabled)
+                if crate::is_debug_logging_enabled() {
+                    if let Some(logger) = crate::debug_logger() {
+                        let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                            correlation_id_tool_start.clone(),
+                            crate::LogCategory::Service,
+                            "tool_invocation",
+                        )
+                        .with_data(serde_json::json!({
+                            "tool": tool_name.clone(),
+                            "args": args_json.clone()
+                        }));
+                        logger.log(entry);
+                    }
                 }
 
                 let _ = event_tx_tool_start.send(AppEvent::ToolStarted {
@@ -298,26 +302,28 @@ impl ConversationService {
 
         let correlation_id_tool_complete = correlation_id.clone();
         let on_tool_complete = move |tool_name: String, result: String, success: bool| {
-            // Log tool response
-            let result_preview = if result.len() > 500 {
-                format!("{}...", &result[..500])
-            } else {
-                result.clone()
-            };
+            // Log tool response (fast-path check for zero-cost when disabled)
+            if crate::is_debug_logging_enabled() {
+                let result_preview = if result.len() > 500 {
+                    format!("{}...", &result[..500])
+                } else {
+                    result.clone()
+                };
 
-            if let Some(logger) = crate::debug_logger() {
-                let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                    correlation_id_tool_complete.clone(),
-                    crate::LogCategory::Service,
-                    "tool_response",
-                )
-                .with_data(serde_json::json!({
-                    "tool": tool_name.clone(),
-                    "success": success,
-                    "result_preview": result_preview,
-                    "result_length": result.len()
-                }));
-                logger.log(entry);
+                if let Some(logger) = crate::debug_logger() {
+                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                        correlation_id_tool_complete.clone(),
+                        crate::LogCategory::Service,
+                        "tool_response",
+                    )
+                    .with_data(serde_json::json!({
+                        "tool": tool_name.clone(),
+                        "success": success,
+                        "result_preview": result_preview,
+                        "result_length": result.len()
+                    }));
+                    logger.log(entry);
+                }
             }
 
             if success {
@@ -353,21 +359,23 @@ impl ConversationService {
             let mut conv = self.conversation_mgr.write().await;
             match result {
                 Ok(response) => {
-                    // Log LLM response
-                    if let Some(logger) = crate::debug_logger() {
-                        logger.log(
-                            crate::DebugLogEntry::new(
-                                correlation_id.clone(),
-                                crate::LogCategory::Service,
-                                "llm_response",
-                            )
-                            .with_data(serde_json::json!({
-                                "text_length": response.text.len(),
-                                "tool_calls_made": response.tool_calls_made,
-                                "input_tokens": response.usage.as_ref().map(|u| u.input_tokens),
-                                "output_tokens": response.usage.as_ref().map(|u| u.output_tokens),
-                            })),
-                        );
+                    // Log LLM response (fast-path check for zero-cost when disabled)
+                    if crate::is_debug_logging_enabled() {
+                        if let Some(logger) = crate::debug_logger() {
+                            logger.log(
+                                crate::DebugLogEntry::new(
+                                    correlation_id.clone(),
+                                    crate::LogCategory::Service,
+                                    "llm_response",
+                                )
+                                .with_data(serde_json::json!({
+                                    "text_length": response.text.len(),
+                                    "tool_calls_made": response.tool_calls_made,
+                                    "input_tokens": response.usage.as_ref().map(|u| u.input_tokens),
+                                    "output_tokens": response.usage.as_ref().map(|u| u.output_tokens),
+                                })),
+                            );
+                        }
                     }
 
                     // Add assistant message
@@ -387,26 +395,29 @@ impl ConversationService {
                     });
                 }
                 Err(e) => {
-                    // Log LLM error with full context
-                    let error_context = crate::debug_logger::ErrorContext::from_error(e.as_ref());
-                    if let Some(logger) = crate::debug_logger() {
-                        let entry1: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                            correlation_id.clone(),
-                            crate::LogCategory::Service,
-                            "llm_error",
-                        )
-                        .with_data(serde_json::json!({
-                            "error_message": e.to_string()
-                        }));
-                        logger.log(entry1);
+                    // Log LLM error with full context (fast-path check for zero-cost when disabled)
+                    if crate::is_debug_logging_enabled() {
+                        let error_context =
+                            crate::debug_logger::ErrorContext::from_error(e.as_ref());
+                        if let Some(logger) = crate::debug_logger() {
+                            let entry1: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                correlation_id.clone(),
+                                crate::LogCategory::Service,
+                                "llm_error",
+                            )
+                            .with_data(serde_json::json!({
+                                "error_message": e.to_string()
+                            }));
+                            logger.log(entry1);
 
-                        let entry2: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                            correlation_id.clone(),
-                            crate::LogCategory::Service,
-                            "llm_error_detail",
-                        )
-                        .with_error_context(error_context);
-                        logger.log(entry2);
+                            let entry2: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                correlation_id.clone(),
+                                crate::LogCategory::Service,
+                                "llm_error_detail",
+                            )
+                            .with_error_context(error_context);
+                            logger.log(entry2);
+                        }
                     }
 
                     conv.handle_error(e.to_string(), false);
@@ -462,21 +473,37 @@ impl ConversationService {
     }
 
     /// Get current context usage
+    ///
+    /// Uses non-blocking try_read to avoid UI freezes during LLM streaming.
+    /// Returns default values if the lock is contended.
     pub async fn context_usage(&self) -> ContextUsage {
-        // Get actual token counts from ChatAgent (the real source of truth)
-        let agent = self.chat_agent.read().await;
-        let used_tokens = agent.estimated_context_tokens();
-        let max_tokens = agent.max_context_tokens();
-        let percent = if max_tokens == 0 {
-            0.0
-        } else {
-            (used_tokens as f32 / max_tokens as f32) * 100.0
-        };
+        // Try to get the lock without blocking - during streaming, the write lock
+        // is held by chat_streaming, and we don't want to freeze the UI waiting
+        match self.chat_agent.try_read() {
+            Ok(agent) => {
+                let used_tokens = agent.estimated_context_tokens();
+                let max_tokens = agent.max_context_tokens();
+                let percent = if max_tokens == 0 {
+                    0.0
+                } else {
+                    (used_tokens as f32 / max_tokens as f32) * 100.0
+                };
 
-        ContextUsage {
-            used_tokens,
-            max_tokens,
-            percent,
+                ContextUsage {
+                    used_tokens,
+                    max_tokens,
+                    percent,
+                }
+            }
+            Err(_) => {
+                // Lock is contended (streaming in progress) - return placeholder
+                // The UI will update properly once streaming completes
+                ContextUsage {
+                    used_tokens: 0,
+                    max_tokens: 100_000, // Safe default
+                    percent: 0.0,
+                }
+            }
         }
     }
 
@@ -487,22 +514,33 @@ impl ConversationService {
     /// - conversation_history: tokens in user/assistant messages
     /// - tool_schemas: estimated tokens for tool definitions
     /// - attachments: set to 0 (caller should add attachment tokens)
+    ///
+    /// Uses non-blocking try_read to avoid UI freezes during LLM streaming.
     pub async fn context_breakdown(&self) -> ContextBreakdown {
-        let agent = self.chat_agent.read().await;
+        // Try to get the lock without blocking - during streaming, the write lock
+        // is held by chat_streaming, and we don't want to freeze the UI waiting
+        match self.chat_agent.try_read() {
+            Ok(agent) => {
+                let system_prompt = agent.system_prompt_tokens();
+                let conversation_history = agent.conversation_history_tokens();
+                let tool_schemas = agent.tool_schema_tokens();
+                let max_tokens = agent.max_context_tokens();
 
-        let system_prompt = agent.system_prompt_tokens();
-        let conversation_history = agent.conversation_history_tokens();
-        let tool_schemas = agent.tool_schema_tokens();
-        let max_tokens = agent.max_context_tokens();
-
-        // Attachments are managed at the service layer, not here
-        ContextBreakdown::new(
-            system_prompt,
-            conversation_history,
-            tool_schemas,
-            0, // Attachments will be added by AppService
-            max_tokens,
-        )
+                // Attachments are managed at the service layer, not here
+                ContextBreakdown::new(
+                    system_prompt,
+                    conversation_history,
+                    tool_schemas,
+                    0, // Attachments will be added by AppService
+                    max_tokens,
+                )
+            }
+            Err(_) => {
+                // Lock is contended (streaming in progress) - return empty breakdown
+                // The UI will update properly once streaming completes
+                ContextBreakdown::default()
+            }
+        }
     }
 
     /// Compact context (remove older messages)
@@ -533,9 +571,14 @@ impl ConversationService {
     }
 
     /// Check if context should be compacted (80% threshold)
+    ///
+    /// Uses non-blocking try_read - if lock is contended, returns false
+    /// (compaction check will happen after streaming completes)
     pub async fn should_compact(&self) -> bool {
-        let agent = self.chat_agent.read().await;
-        agent.is_context_near_limit()
+        match self.chat_agent.try_read() {
+            Ok(agent) => agent.is_context_near_limit(),
+            Err(_) => false, // Don't compact while streaming
+        }
     }
 
     /// Restore conversation from a session
