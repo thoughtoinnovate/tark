@@ -137,9 +137,15 @@ name = "cucumber_integration_example"
 harness = false
 required-features = ["cucumber-tests"]
 
+[[test]]
+name = "tui_snapshot_tests"
+required-features = ["snapshot-tests"]
+
 [features]
 default = ["test-sim", "mcp-client"]
 test-sim = ["gherkin", "tiktoken-rs", "sha2"]
 mcp-client = ["mcp-protocol-sdk"]
 # BDD/Cucumber tests - not in default, run with: cargo test --features cucumber-tests
 cucumber-tests = ["cucumber"]
+# Snapshot tests - not in default, run with: cargo test --features snapshot-tests
+snapshot-tests = []

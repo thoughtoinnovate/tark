@@ -1,3 +1,4 @@
+#![cfg(feature = "snapshot-tests")]
 //! TUI Snapshot Tests using insta
 //!
 //! These tests use insta for fast visual regression testing.
