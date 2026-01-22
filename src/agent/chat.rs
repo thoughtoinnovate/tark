@@ -1156,7 +1156,10 @@ impl ChatAgent {
                             ContentPart::ToolResult { content, .. } => {
                                 // Truncate tool results in summary
                                 Some(if content.len() > 200 {
-                                    format!("{}...(truncated)", &content[..200])
+                                    format!(
+                                        "{}...(truncated)",
+                                        truncate_at_char_boundary(content, 200)
+                                    )
                                 } else {
                                     content.clone()
                                 })
@@ -1170,7 +1173,7 @@ impl ChatAgent {
 
             // Truncate long messages
             let truncated = if content.len() > 500 {
-                format!("{}...(truncated)", &content[..500])
+                format!("{}...(truncated)", truncate_at_char_boundary(&content, 500))
             } else {
                 content
             };
@@ -1247,7 +1250,7 @@ impl ChatAgent {
                     .filter_map(|p| match p {
                         ContentPart::Text { text } => Some(text.clone()),
                         ContentPart::ToolResult { content, .. } => Some(if content.len() > 200 {
-                            format!("{}...(truncated)", &content[..200])
+                            format!("{}...(truncated)", truncate_at_char_boundary(content, 200))
                         } else {
                             content.clone()
                         }),
@@ -1258,7 +1261,7 @@ impl ChatAgent {
             };
 
             let truncated = if content.len() > 500 {
-                format!("{}...(truncated)", &content[..500])
+                format!("{}...(truncated)", truncate_at_char_boundary(&content, 500))
             } else {
                 content
             };

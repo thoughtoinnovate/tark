@@ -1870,7 +1870,10 @@ impl<B: Backend> TuiController<B> {
                     // Format the result nicely
                     // Format: "✓|tool_name|result"
                     let result_preview = if result.len() > 500 {
-                        format!("{}...", &result[..497])
+                        format!(
+                            "{}...",
+                            crate::core::truncate_at_char_boundary(result, 497)
+                        )
                     } else {
                         result.clone()
                     };

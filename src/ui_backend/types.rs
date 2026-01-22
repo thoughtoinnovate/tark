@@ -75,7 +75,7 @@ impl ActiveToolInfo {
                 if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
                     // Truncate long commands
                     if cmd.len() > 60 {
-                        format!("$ {}...", &cmd[..57])
+                        format!("$ {}...", crate::core::truncate_at_char_boundary(cmd, 57))
                     } else {
                         format!("$ {}", cmd)
                     }

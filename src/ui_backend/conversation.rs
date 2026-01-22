@@ -305,7 +305,10 @@ impl ConversationService {
             // Log tool response (fast-path check for zero-cost when disabled)
             if crate::is_debug_logging_enabled() {
                 let result_preview = if result.len() > 500 {
-                    format!("{}...", &result[..500])
+                    format!(
+                        "{}...",
+                        crate::core::truncate_at_char_boundary(&result, 500)
+                    )
                 } else {
                     result.clone()
                 };

@@ -55,8 +55,10 @@ use crate::llm::ToolDefinition;
 use crate::services::PlanService;
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -380,7 +382,25 @@ impl ToolRegistry {
             tracing::debug!("No approval gate configured for tool '{}'", name);
         }
 
-        tool.execute(params).await
+        // Wrap tool execution with panic recovery to prevent crashes
+        match AssertUnwindSafe(tool.execute(params)).catch_unwind().await {
+            Ok(result) => result,
+            Err(panic_info) => {
+                // Extract panic message
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                tracing::error!("Tool '{}' panicked: {}", name, panic_msg);
+                Ok(ToolResult::error(format!(
+                    "Tool '{}' crashed: {}. Please report this bug.",
+                    name, panic_msg
+                )))
+            }
+        }
     }
 
     /// Build a human-readable command string from tool name and params

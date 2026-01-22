@@ -906,7 +906,7 @@ impl AppService {
                             )
                             .with_data(serde_json::json!({
                                 "content_preview": if text.len() > 100 {
-                                    format!("{}...", &text[..100])
+                                    format!("{}...", crate::core::truncate_at_char_boundary(&text, 100))
                                 } else {
                                     text.clone()
                                 },
@@ -1967,7 +1967,10 @@ impl AppService {
             {
                 // Truncate long messages for display
                 let task_name = if last_user_msg.content.len() > 50 {
-                    format!("{}...", &last_user_msg.content[..47])
+                    format!(
+                        "{}...",
+                        crate::core::truncate_at_char_boundary(&last_user_msg.content, 47)
+                    )
                 } else {
                     last_user_msg.content.clone()
                 };
@@ -1985,7 +1988,7 @@ impl AppService {
         let queued_messages = self.state.queued_messages();
         for (idx, msg) in queued_messages.iter().enumerate() {
             let task_name = if msg.len() > 50 {
-                format!("{}...", &msg[..47])
+                format!("{}...", crate::core::truncate_at_char_boundary(msg, 47))
             } else {
                 msg.clone()
             };

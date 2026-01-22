@@ -292,7 +292,10 @@ impl Widget for InputWidget<'_> {
                 let filename = file.split('/').next_back().unwrap_or(file);
                 // Truncate long filenames with ellipsis
                 let display_name = if filename.len() > 15 {
-                    format!("{}...", &filename[..12])
+                    format!(
+                        "{}...",
+                        crate::core::truncate_at_char_boundary(filename, 12)
+                    )
                 } else {
                     filename.to_string()
                 };

@@ -77,7 +77,10 @@ pub fn log_thinking(provider: &str, content: &str) {
 
     // Log a truncated version to tracing
     let truncated = if content.len() > 200 {
-        format!("{}...", &content[..200])
+        format!(
+            "{}...",
+            crate::core::truncate_at_char_boundary(content, 200)
+        )
     } else {
         content.to_string()
     };
@@ -133,7 +136,10 @@ pub fn log_tool_result(provider: &str, tool_id: &str, result_preview: &str, is_e
 
     // Truncate result preview
     let preview = if result_preview.len() > 500 {
-        format!("{}...", &result_preview[..500])
+        format!(
+            "{}...",
+            crate::core::truncate_at_char_boundary(result_preview, 500)
+        )
     } else {
         result_preview.to_string()
     };

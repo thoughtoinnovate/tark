@@ -259,7 +259,7 @@ pub async fn update_status(action: &str, tool: Option<&str>, arg: Option<&str>, 
     status.tool_name = tool.map(|s| s.to_string());
     status.tool_arg = arg.map(|s| {
         if s.len() > 50 {
-            format!("{}...", &s[..47])
+            format!("{}...", crate::core::truncate_at_char_boundary(s, 47))
         } else {
             s.to_string()
         }

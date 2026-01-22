@@ -981,8 +981,9 @@ impl Widget for MessageArea<'_> {
                         ),
                         Span::raw("  "),
                         Span::styled(
-                            if content.len() > 50 && effective_collapsed {
-                                format!("{}...", &content[..47])
+                            if content.chars().count() > 50 && effective_collapsed {
+                                let truncated: String = content.chars().take(47).collect();
+                                format!("{}...", truncated)
                             } else if effective_collapsed {
                                 content.clone()
                             } else {

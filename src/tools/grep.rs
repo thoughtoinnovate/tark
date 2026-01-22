@@ -482,7 +482,10 @@ impl Tool for FindReferencesTool {
                     file,
                     line,
                     if content.len() > 80 {
-                        format!("{}...", &content[..77])
+                        format!(
+                            "{}...",
+                            crate::core::truncate_at_char_boundary(content, 77)
+                        )
                     } else {
                         content.clone()
                     }
