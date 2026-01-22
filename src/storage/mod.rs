@@ -1305,6 +1305,30 @@ pub struct McpServer {
     /// Server capabilities/tools it provides
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Tark-specific configuration
+    #[serde(default)]
+    pub tark: Option<McpServerTarkConfig>,
+}
+
+/// Tark-specific MCP server configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpServerTarkConfig {
+    /// Override risk level for all tools from this server
+    #[serde(default)]
+    pub risk_level: Option<String>,
+    /// Auto-connect on startup
+    #[serde(default)]
+    pub auto_connect: bool,
+    /// Timeout in seconds for tool calls
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u32,
+    /// Namespace prefix for tool names (e.g., "gh" -> "gh:create_issue")
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+fn default_timeout() -> u32 {
+    30
 }
 
 fn default_true() -> bool {

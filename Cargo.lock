@@ -2404,6 +2404,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-protocol-sdk"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebef22fd782a7b183d727388043ba6f8044c601e299c1b87e8a9fe18733f464b"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4055,6 +4072,7 @@ dependencies = [
  "ignore",
  "image",
  "insta",
+ "mcp-protocol-sdk",
  "once_cell",
  "portable-pty",
  "predicates",
@@ -4727,6 +4745,7 @@ checksum = "e2e054861b4bd027cd373e18e8d8d8e6548085000e41290d95ce0c373a654b4a"
 dependencies = [
  "getrandom 0.3.4",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

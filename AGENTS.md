@@ -97,10 +97,18 @@ tark/
 │   │   ├── risk.rs              # RiskLevel and TrustLevel enums
 │   │   ├── approval.rs          # ApprovalGate with pattern matching
 │   │   ├── questionnaire.rs     # User interaction requests
+│   │   ├── builtin/             # Built-in native tools
+│   │   │   ├── thinking.rs      # ThinkTool for structured reasoning
+│   │   │   └── memory.rs        # Memory tools with SQLite backend
 │   │   ├── readonly/            # Read-only tools (grep, file_preview, safe_shell)
 │   │   ├── write/               # Write tools
 │   │   ├── risky/               # Shell tools
 │   │   └── dangerous/           # Destructive tools
+│   ├── mcp/                     # MCP client (feature-gated)
+│   │   ├── client.rs            # McpServerManager
+│   │   ├── transport.rs         # STDIO transport
+│   │   ├── wrapper.rs           # Tool wrapper adapters
+│   │   └── types.rs             # MCP protocol types
 │   └── transport/               # HTTP server and CLI
 │       ├── cli.rs               # CLI commands
 │       └── dashboard.rs         # Usage dashboard HTML
@@ -287,6 +295,19 @@ For TUI features, you MUST:
 | `src/tools/risk.rs` | RiskLevel and TrustLevel enums | Changing risk categories |
 | `src/tools/approval.rs` | ApprovalGate with pattern matching | Changing approval flow |
 | `src/tools/questionnaire.rs` | User interaction requests | Adding question types |
+| `src/tools/builtin/thinking.rs` | Sequential thinking tool | Modifying thinking behavior |
+| `src/tools/builtin/memory.rs` | Persistent memory with SQLite | Modifying memory storage |
+
+### MCP Client (Model Context Protocol)
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
+| `src/mcp/client.rs` | McpServerManager, connection handling | Adding MCP features |
+| `src/mcp/transport.rs` | STDIO transport for MCP servers | Changing communication |
+| `src/mcp/wrapper.rs` | McpToolWrapper (adapts MCP → Tool) | Changing tool adaptation |
+| `src/mcp/types.rs` | MCP protocol data structures | Changing MCP types |
+| `src/storage/mod.rs` | McpServer config (servers.toml) | Changing MCP configuration |
+| `examples/tark-config/mcp/servers.toml` | Example MCP server configs | Adding examples |
 
 ### LLM Providers
 
@@ -316,6 +337,41 @@ For TUI features, you MUST:
 | `.github/workflows/release.yml` | Release automation | Adding platforms |
 
 ## Common Tasks
+
+### Using Built-in Tools
+
+**Thinking Tool**: The `think` tool allows agents to record structured reasoning steps. It's automatically registered for all modes.
+
+**Memory Tools**: Four tools for persistent knowledge storage:
+- `memory_store`: Save information for later recall
+- `memory_query`: Search stored memories
+- `memory_list`: List all memories
+- `memory_delete`: Remove a memory
+
+Memory is stored in `.tark/memory.db` using SQLite.
+
+### Using MCP Servers
+
+**Configuration**: Add MCP servers in `~/.config/tark/mcp/servers.toml` or `.tark/mcp/servers.toml`.
+
+**Example**:
+```toml
+[servers.github]
+name = "GitHub Integration"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+enabled = true
+env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
+
+[servers.github.tark]
+risk_level = "risky"
+auto_connect = false
+timeout_seconds = 30
+namespace = "gh"
+```
+
+**User manages**: Installing MCP servers (npm, pip, etc.) and setting environment variables.
+**tark manages**: Connecting, discovering tools, and executing them with risk level enforcement.
 
 ### Adding a New Tool
 

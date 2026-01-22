@@ -103,6 +103,9 @@ gherkin = { version = "0.14", optional = true }
 tiktoken-rs = { version = "0.5", optional = true }
 sha2 = { version = "0.10", optional = true }
 
+# MCP Client support (optional)
+mcp-protocol-sdk = { version = "0.5", optional = true, default-features = false, features = ["stdio"] }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
@@ -125,5 +128,6 @@ name = "cucumber_e2e"
 harness = false
 
 [features]
-default = ["test-sim"]
+default = ["test-sim", "mcp-client"]
 test-sim = ["gherkin", "tiktoken-rs", "sha2"]
+mcp-client = ["mcp-protocol-sdk"]

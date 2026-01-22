@@ -10,6 +10,7 @@
 
 // Tool category modules
 pub mod approval;
+pub mod builtin;
 pub mod dangerous;
 pub mod plan;
 pub mod readonly;
@@ -51,6 +52,12 @@ pub use readonly::{FilePreviewTool, RipgrepTool, SafeShellTool};
 pub use risk::{MatchType, RiskLevel, TrustLevel};
 pub use shell::ShellTool;
 
+// Built-in extra tools
+pub use builtin::{
+    MemoryDeleteTool, MemoryListTool, MemoryQueryTool, MemoryStoreTool, TarkMemory, ThinkTool,
+    ThinkingTracker,
+};
+
 use crate::llm::ToolDefinition;
 use crate::services::PlanService;
 use anyhow::Result;
@@ -60,7 +67,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // Re-export canonical AgentMode from core::types
 pub use crate::core::types::AgentMode;
@@ -203,6 +210,28 @@ impl ToolRegistry {
         };
 
         tracing::debug!("Creating tool registry for mode: {:?}", mode);
+
+        // ===== Built-in extra tools (available in ALL modes) =====
+
+        // Thinking tool - always available, helps with reasoning
+        let thinking_tracker = Arc::new(Mutex::new(ThinkingTracker::new()));
+        registry.register(Arc::new(ThinkTool::new(thinking_tracker)));
+
+        // Memory tools - persistent storage across sessions
+        let memory_db_path = working_dir.join(".tark").join("memory.db");
+        match TarkMemory::open(&memory_db_path) {
+            Ok(memory) => {
+                let memory = Arc::new(memory);
+                registry.register(Arc::new(MemoryStoreTool::new(memory.clone())));
+                registry.register(Arc::new(MemoryQueryTool::new(memory.clone())));
+                registry.register(Arc::new(MemoryListTool::new(memory.clone())));
+                registry.register(Arc::new(MemoryDeleteTool::new(memory)));
+                tracing::debug!("Registered memory tools (db: {})", memory_db_path.display());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize memory tools: {}", e);
+            }
+        }
 
         // ===== Read-only tools (available in ALL modes) =====
 

@@ -25,6 +25,10 @@ pub mod transport;
 pub mod tui_new;
 pub mod ui_backend;
 
+// MCP client (behind feature flag)
+#[cfg(feature = "mcp-client")]
+pub mod mcp;
+
 pub use config::Config;
 pub use debug_logger::{DebugLogEntry, DebugLogger, DebugLoggerConfig, LogCategory};
 pub use services::PlanService;
