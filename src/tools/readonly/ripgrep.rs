@@ -194,7 +194,15 @@ impl Tool for RipgrepTool {
         let count = *match_count.lock().unwrap();
 
         if results.is_empty() {
-            Ok(ToolResult::success("No matches found."))
+            // Include search context in the "no matches" message
+            let search_location = search_path
+                .strip_prefix(&self.working_dir)
+                .unwrap_or(&search_path)
+                .display();
+            Ok(ToolResult::success(format!(
+                "No matches for \"{}\" in {}",
+                params.pattern, search_location
+            )))
         } else {
             let truncated = count >= max_results;
             let mut output = results.join("\n");

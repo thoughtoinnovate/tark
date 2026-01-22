@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 /// Dangerous command patterns that should be blocked
@@ -146,6 +147,10 @@ impl Tool for ShellTool {
         })
     }
 
+    fn risk_level(&self) -> super::RiskLevel {
+        super::RiskLevel::Risky
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolResult> {
         #[derive(Deserialize)]
         struct Params {
@@ -181,6 +186,7 @@ impl Tool for ShellTool {
         let timeout = std::time::Duration::from_secs(params.timeout_secs.unwrap_or(60));
 
         // Determine shell based on OS (prefer bash/Powershell, fallback to sh/cmd)
+        // Note: We use -c instead of -lc to avoid slow login shell initialization
         let (shell, shell_args): (&str, &[&str]) = if cfg!(windows) {
             // Check for PowerShell; fallback to cmd if unavailable
             let ps_available = std::process::Command::new("powershell")
@@ -203,8 +209,9 @@ impl Tool for ShellTool {
             }
         } else {
             // Prefer bash; fallback to sh if unavailable
+            // Use -c (non-login) instead of -lc to avoid slow shell initialization
             let bash_available = std::process::Command::new("bash")
-                .arg("-lc")
+                .arg("-c")
                 .arg("echo ok")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -212,49 +219,100 @@ impl Tool for ShellTool {
                 .is_ok();
 
             if bash_available {
-                ("bash", &["-lc"] as &[&str])
+                ("bash", &["-c"] as &[&str])
             } else {
                 ("sh", &["-c"] as &[&str])
             }
         };
 
-        let result = tokio::time::timeout(
-            timeout,
-            Command::new(shell)
+        // Use spawn() with incremental reading to allow the TUI event loop to remain responsive
+        let result = tokio::time::timeout(timeout, async {
+            let mut child = Command::new(shell)
                 .args(shell_args)
                 .arg(&params.command)
                 .current_dir(&working_dir)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .output(),
-        )
+                .spawn()?;
+
+            let stdout = child.stdout.take().expect("stdout was piped");
+            let stderr = child.stderr.take().expect("stderr was piped");
+
+            let mut stdout_reader = BufReader::new(stdout).lines();
+            let mut stderr_reader = BufReader::new(stderr).lines();
+
+            let mut stdout_lines: Vec<String> = Vec::new();
+            let mut stderr_lines: Vec<String> = Vec::new();
+
+            // Read stdout and stderr concurrently using select
+            loop {
+                tokio::select! {
+                    biased;
+
+                    line = stdout_reader.next_line() => {
+                        match line {
+                            Ok(Some(l)) => stdout_lines.push(l),
+                            Ok(None) => {
+                                // stdout closed, drain stderr and wait for process
+                                while let Ok(Some(l)) = stderr_reader.next_line().await {
+                                    stderr_lines.push(l);
+                                    // Yield periodically to keep TUI responsive
+                                    if stderr_lines.len().is_multiple_of(50) {
+                                        tokio::task::yield_now().await;
+                                    }
+                                }
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Error reading stdout: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    line = stderr_reader.next_line() => {
+                        match line {
+                            Ok(Some(l)) => stderr_lines.push(l),
+                            Ok(None) => {} // stderr closed, continue reading stdout
+                            Err(e) => {
+                                tracing::warn!("Error reading stderr: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                // Yield periodically to keep TUI responsive during long output
+                if (stdout_lines.len() + stderr_lines.len()).is_multiple_of(50) {
+                    tokio::task::yield_now().await;
+                }
+            }
+
+            let status = child.wait().await?;
+            Ok::<_, std::io::Error>((status, stdout_lines, stderr_lines))
+        })
         .await;
 
         match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
+            Ok(Ok((status, stdout_lines, stderr_lines))) => {
                 let mut result_text = String::new();
 
-                if !stdout.is_empty() {
-                    result_text.push_str(&stdout);
+                if !stdout_lines.is_empty() {
+                    result_text.push_str(&stdout_lines.join("\n"));
                 }
 
-                if !stderr.is_empty() {
+                if !stderr_lines.is_empty() {
                     if !result_text.is_empty() {
                         result_text.push_str("\n--- stderr ---\n");
                     }
-                    result_text.push_str(&stderr);
+                    result_text.push_str(&stderr_lines.join("\n"));
                 }
 
-                if output.status.success() {
+                if status.success() {
                     if result_text.is_empty() {
                         result_text = "Command completed successfully (no output)".to_string();
                     }
                     Ok(ToolResult::success(result_text))
                 } else {
-                    let exit_code = output.status.code().unwrap_or(-1);
+                    let exit_code = status.code().unwrap_or(-1);
                     result_text.push_str(&format!("\nExit code: {}", exit_code));
                     Ok(ToolResult::error(result_text))
                 }

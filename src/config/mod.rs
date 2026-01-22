@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::ui_backend::ThemePreset;
+
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -17,6 +19,7 @@ pub struct Config {
     pub agent: AgentConfig,
     pub tools: ToolsConfig,
     pub thinking: ThinkingConfig,
+    pub tui: TuiConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,18 +32,46 @@ pub struct LlmConfig {
     pub copilot: CopilotConfig,
     pub gemini: GeminiConfig,
     pub openrouter: OpenRouterConfig,
+    pub tark_sim: TarkSimConfig,
+    /// List of enabled providers to show in TUI (empty = show all)
+    #[serde(default)]
+    pub enabled_providers: Vec<String>,
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            default_provider: "openai".to_string(),
+            default_provider: "tark_sim".to_string(),
             claude: ClaudeConfig::default(),
             openai: OpenAiConfig::default(),
             ollama: OllamaConfig::default(),
             copilot: CopilotConfig::default(),
             gemini: GeminiConfig::default(),
             openrouter: OpenRouterConfig::default(),
+            tark_sim: TarkSimConfig::default(),
+            // Default to only OpenAI and Gemini for now
+            enabled_providers: vec![
+                "openai".to_string(),
+                "google".to_string(),
+                "tark_sim".to_string(),
+                "ollama".to_string(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TarkSimConfig {
+    pub model: String,
+    pub max_tokens: usize,
+}
+
+impl Default for TarkSimConfig {
+    fn default() -> Self {
+        Self {
+            model: "tark_llm".to_string(),
+            max_tokens: 8192,
         }
     }
 }
@@ -204,7 +235,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 25,
+            max_iterations: 50, // Increased from 25 for complex multi-step tasks
             working_directory: ".".to_string(),
         }
     }
@@ -222,6 +253,42 @@ impl Default for ToolsConfig {
         Self {
             shell_enabled: true,
             allowed_paths: vec![".".to_string()],
+        }
+    }
+}
+
+/// TUI configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TuiConfig {
+    /// Default theme preset (e.g., "catppuccin_mocha", "nord", "tokyo_night")
+    pub theme: String,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            theme: "catppuccin_mocha".to_string(),
+        }
+    }
+}
+
+impl TuiConfig {
+    /// Parse the theme string to a ThemePreset enum
+    pub fn theme_preset(&self) -> ThemePreset {
+        match self.theme.to_lowercase().as_str() {
+            "catppuccin_mocha" => ThemePreset::CatppuccinMocha,
+            "catppuccin_macchiato" => ThemePreset::CatppuccinMacchiato,
+            "catppuccin_frappe" => ThemePreset::CatppuccinFrappe,
+            "catppuccin_latte" => ThemePreset::CatppuccinLatte,
+            "nord" => ThemePreset::Nord,
+            "tokyo_night" => ThemePreset::TokyoNight,
+            "gruvbox_dark" => ThemePreset::GruvboxDark,
+            "gruvbox_light" => ThemePreset::GruvboxLight,
+            "solarized_dark" => ThemePreset::SolarizedDark,
+            "solarized_light" => ThemePreset::SolarizedLight,
+            "one_dark" => ThemePreset::OneDark,
+            _ => ThemePreset::default(),
         }
     }
 }
@@ -347,7 +414,8 @@ impl Default for ThinkingConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::ThinkingConfig;
+    use super::{ThinkingConfig, TuiConfig};
+    use crate::ui_backend::ThemePreset;
 
     #[test]
     fn thinking_default_is_medium() {
@@ -371,6 +439,64 @@ mod tests {
             ..ThinkingConfig::default()
         };
         assert_eq!(cfg.effective_default_level_name(), "off");
+    }
+
+    #[test]
+    fn tui_config_default_theme() {
+        let cfg = TuiConfig::default();
+        assert_eq!(cfg.theme, "catppuccin_mocha");
+        assert_eq!(cfg.theme_preset(), ThemePreset::CatppuccinMocha);
+    }
+
+    #[test]
+    fn tui_config_parses_all_themes() {
+        let test_cases = vec![
+            ("catppuccin_mocha", ThemePreset::CatppuccinMocha),
+            ("catppuccin_macchiato", ThemePreset::CatppuccinMacchiato),
+            ("catppuccin_frappe", ThemePreset::CatppuccinFrappe),
+            ("catppuccin_latte", ThemePreset::CatppuccinLatte),
+            ("nord", ThemePreset::Nord),
+            ("tokyo_night", ThemePreset::TokyoNight),
+            ("gruvbox_dark", ThemePreset::GruvboxDark),
+            ("gruvbox_light", ThemePreset::GruvboxLight),
+            ("solarized_dark", ThemePreset::SolarizedDark),
+            ("solarized_light", ThemePreset::SolarizedLight),
+            ("one_dark", ThemePreset::OneDark),
+        ];
+
+        for (theme_str, expected_preset) in test_cases {
+            let cfg = TuiConfig {
+                theme: theme_str.to_string(),
+            };
+            assert_eq!(
+                cfg.theme_preset(),
+                expected_preset,
+                "Failed to parse theme: {}",
+                theme_str
+            );
+        }
+    }
+
+    #[test]
+    fn tui_config_parses_case_insensitive() {
+        let cfg_upper = TuiConfig {
+            theme: "NORD".to_string(),
+        };
+        let cfg_mixed = TuiConfig {
+            theme: "Tokyo_Night".to_string(),
+        };
+
+        assert_eq!(cfg_upper.theme_preset(), ThemePreset::Nord);
+        assert_eq!(cfg_mixed.theme_preset(), ThemePreset::TokyoNight);
+    }
+
+    #[test]
+    fn tui_config_parses_invalid_theme() {
+        let cfg = TuiConfig {
+            theme: "invalid_theme".to_string(),
+        };
+        // Should fall back to default
+        assert_eq!(cfg.theme_preset(), ThemePreset::default());
     }
 }
 

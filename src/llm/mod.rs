@@ -20,13 +20,19 @@ mod raw_log;
 pub mod streaming;
 mod types;
 
+// Test simulation provider (feature-gated)
+#[cfg(feature = "test-sim")]
+pub mod tark_sim;
+#[cfg(feature = "test-sim")]
+pub use tark_sim::TarkSimProvider;
+
 pub use claude::ClaudeProvider;
 pub use copilot::CopilotProvider;
 pub use debug_wrapper::DebugProviderWrapper;
 pub use error::LlmError;
 pub use gemini::GeminiProvider;
 pub use models_db::{init_models_db, models_db, ModelCapabilities};
-pub use ollama::OllamaProvider;
+pub use ollama::{list_local_ollama_models, OllamaProvider};
 pub use openai::OpenAiProvider;
 // OpenAI-compatible provider components - public API for plugin providers
 #[allow(unused_imports)]
@@ -288,6 +294,14 @@ pub fn create_provider_with_options(
         "openrouter" => {
             let mut p =
                 OpenRouterProvider::new()?.with_max_tokens(config.llm.openrouter.max_tokens);
+            if let Some(m) = model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
+        #[cfg(feature = "test-sim")]
+        "tark_sim" | "sim" | "test" => {
+            let mut p = TarkSimProvider::new();
             if let Some(m) = model {
                 p = p.with_model(m);
             }

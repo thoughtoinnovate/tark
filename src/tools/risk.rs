@@ -55,20 +55,41 @@ impl RiskLevel {
             Self::Dangerous => ratatui::style::Color::Red,
         }
     }
+
+    /// Get the group name for TUI tool grouping
+    pub fn group_name(&self) -> &'static str {
+        match self {
+            Self::ReadOnly => "Exploration",
+            Self::Write => "Changes",
+            Self::Risky => "Commands",
+            Self::Dangerous => "Destructive",
+        }
+    }
+
+    /// Parse from group name (reverse of group_name)
+    pub fn from_group_name(name: &str) -> Option<Self> {
+        match name {
+            "Exploration" => Some(Self::ReadOnly),
+            "Changes" => Some(Self::Write),
+            "Commands" => Some(Self::Risky),
+            "Destructive" => Some(Self::Dangerous),
+            _ => None,
+        }
+    }
 }
 
 /// Trust level determines when user confirmation is required.
 ///
 /// Three levels provide different amounts of agent autonomy:
-/// - `Balanced`: Auto-run reads & writes, prompt for shell/delete (default)
+/// - `Balanced`: Auto-run reads & writes, prompt for shell/delete
 /// - `Careful`: Auto-run reads only, prompt for all writes and above
 /// - `Manual`: Prompt for everything including reads
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TrustLevel {
-    /// Auto-run reads & writes, prompt for risky/dangerous only (default)
-    #[default]
+    /// Auto-run reads & writes, prompt for risky/dangerous only
     Balanced,
-    /// Auto-run reads only, prompt for writes and above
+    /// Auto-run reads only, prompt for writes and above (default)
+    #[default]
     Careful,
     /// Prompt for everything including reads
     Manual,

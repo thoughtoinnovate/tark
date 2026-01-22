@@ -91,13 +91,55 @@ crossterm = "0.28"
 arboard = "3.4"
 image = "0.25"
 unicode-width = "0.2.2"
+pulldown-cmark = "0.10"  # Markdown parsing
 
 # WASM Plugin Runtime
 wasmtime = "27"
 wasmtime-wasi = "27"
 semver = "1"
 
+# Test simulation dependencies (behind feature flag)
+gherkin = { version = "0.14", optional = true }
+tiktoken-rs = { version = "0.5", optional = true }
+sha2 = { version = "0.10", optional = true }
+
+# MCP Client support (optional)
+mcp-protocol-sdk = { version = "0.5", optional = true, default-features = false, features = ["stdio"] }
+
+# BDD/Cucumber testing (optional - run with: cargo test --features cucumber-tests)
+cucumber = { version = "0.21", optional = true }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
 proptest = "1.5"
+futures = "0.3"
+insta = { version = "1.40", features = ["filters"] }
+portable-pty = "0.8"
+
+[[test]]
+name = "cucumber_tui_new"
+harness = false
+required-features = ["cucumber-tests"]
+
+[[test]]
+name = "ui_backend_bdd"
+harness = false
+required-features = ["cucumber-tests"]
+
+[[test]]
+name = "cucumber_e2e"
+harness = false
+required-features = ["cucumber-tests"]
+
+[[test]]
+name = "cucumber_integration_example"
+harness = false
+required-features = ["cucumber-tests"]
+
+[features]
+default = ["test-sim", "mcp-client"]
+test-sim = ["gherkin", "tiktoken-rs", "sha2"]
+mcp-client = ["mcp-protocol-sdk"]
+# BDD/Cucumber tests - not in default, run with: cargo test --features cucumber-tests
+cucumber-tests = ["cucumber"]

@@ -147,7 +147,15 @@ impl Tool for GrepTool {
         }
 
         if results.is_empty() {
-            Ok(ToolResult::success("No matches found."))
+            // Include search context in the "no matches" message
+            let search_location = search_path
+                .strip_prefix(&self.working_dir)
+                .unwrap_or(&search_path)
+                .display();
+            Ok(ToolResult::success(format!(
+                "No matches for \"{}\" in {}",
+                params.pattern, search_location
+            )))
         } else {
             let truncated = results.len() >= max_results;
             let mut output = results.join("\n");
@@ -474,7 +482,7 @@ impl Tool for FindReferencesTool {
                     file,
                     line,
                     if content.len() > 80 {
-                        format!("{}...", &content[..77])
+                        format!("{}...", crate::core::truncate_at_char_boundary(content, 77))
                     } else {
                         content.clone()
                     }

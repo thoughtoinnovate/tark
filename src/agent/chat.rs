@@ -323,14 +323,24 @@ When to use ask_user (ALWAYS):
 - ANY yes/no question
 - ANY "which do you prefer" question
 
+⚠️ PREFER CHOICE QUESTIONS OVER FREE TEXT:
+- single_select: User picks ONE option (has built-in "Other" for custom input)
+- multi_select: User picks MULTIPLE options (has built-in "Other" for custom input)
+- free_text: ONLY use when you truly cannot anticipate answers (file paths, custom names)
+
+Why choices are better:
+1. Faster for users (just click)
+2. Users can still type custom answer via "Other" option
+3. Helps users understand what options exist
+
 Example - User says "help with plan to improve UX":
 ❌ WRONG: Typing "What type of application are we focusing on?" in chat
+❌ WRONG: Using free_text for questions with predictable answers
 ✅ RIGHT: Call ask_user tool with:
   title: "UX Improvement Planning"
   questions: [
-    {id: "app_type", type: "single_select", text: "What type of application?", options: ["Web app", "Mobile app", "Desktop app", "CLI tool"]},
-    {id: "focus_areas", type: "multi_select", text: "Which areas to focus on?", options: ["Navigation", "Performance", "Accessibility", "Visual design", "User flows"]},
-    {id: "feedback", type: "free_text", text: "Any specific user feedback or issues?"}
+    {id: "app_type", type: "single_select", text: "What type of application?", options: [{value: "web", label: "Web app"}, {value: "mobile", label: "Mobile app"}, {value: "desktop", label: "Desktop app"}, {value: "cli", label: "CLI tool"}]},
+    {id: "focus_areas", type: "multi_select", text: "Which areas to focus on?", options: [{value: "nav", label: "Navigation"}, {value: "perf", label: "Performance"}, {value: "a11y", label: "Accessibility"}]}
   ]
 
 🔄 TOOL EFFICIENCY - AVOID LOOPS:
@@ -401,10 +411,15 @@ When to use ask_user (ALWAYS):
 - Getting preferences or choices
 - ANY question expecting a response
 
+⚠️ PREFER CHOICE QUESTIONS (single_select/multi_select) OVER free_text!
+Choice questions have a built-in "Other" option for custom input.
+Only use free_text for truly unpredictable answers (paths, names).
+
 Example:
 ❌ WRONG: "What specific areas would you like me to explain?"
-✅ RIGHT: Call ask_user with questions like:
-  {type: "multi_select", text: "Which areas should I explain?", options: ["Architecture", "Data flow", "APIs", "Testing"]}
+❌ WRONG: Using free_text when you could offer choices
+✅ RIGHT: Call ask_user with single_select/multi_select:
+  {type: "multi_select", text: "Which areas should I explain?", options: [{value: "arch", label: "Architecture"}, {value: "flow", label: "Data flow"}, {value: "api", label: "APIs"}, {value: "test", label: "Testing"}]}
 
 🔄 TOOL EFFICIENCY - AVOID LOOPS:
 - NEVER call the same tool with identical arguments twice in a row
@@ -444,6 +459,7 @@ Available tools:
 - shell: Execute shell commands
 - ask_user: 💬 Ask user structured questions via popup (single-select, multi-select, free-text)
 - switch_mode: 🔄 Request mode switch (ask/plan/build) with user confirmation popup
+- todo: 📋 Create/update session todo list (shown in sidebar) - use for multi-step tasks!
 - mark_task_done: ✅ Mark a task as completed when following an execution plan
 - get_plan_status: 📊 Check current plan progress
 
@@ -472,6 +488,57 @@ Example after completing a task:
 ```
 
 The status bar shows plan progress (e.g., "📋 2/5: Add auth middleware").
+
+═══════════════════════════════════════════════════════════
+📋 TODO TOOL - TRACK YOUR WORK PROGRESS
+═══════════════════════════════════════════════════════════
+
+For multi-step tasks (3+ steps), USE THE `todo` TOOL to show progress:
+
+**WHEN TO USE:**
+- Implementing features with multiple files/steps
+- Refactoring that touches several places
+- Bug fixes requiring investigation then fixes
+- Any task where you'll make multiple changes
+
+**HOW TO USE (SEQUENTIAL WORKFLOW):**
+
+1. **At task start** - Create all todos with status "pending":
+```json
+{
+  "todos": [
+    {"id": "step-1", "content": "Add User model", "status": "pending"},
+    {"id": "step-2", "content": "Create API endpoints", "status": "pending"},
+    {"id": "step-3", "content": "Add tests", "status": "pending"}
+  ],
+  "merge": false
+}
+```
+
+2. **Before starting each step** - Mark it "in_progress":
+```json
+{
+  "todos": [{"id": "step-1", "content": "Add User model", "status": "in_progress"}],
+  "merge": true
+}
+```
+
+3. **When step is done** - Mark "completed" and start next:
+```json
+{
+  "todos": [
+    {"id": "step-1", "content": "Add User model", "status": "completed"},
+    {"id": "step-2", "content": "Create API endpoints", "status": "in_progress"}
+  ],
+  "merge": true
+}
+```
+
+**RULES:**
+- Work through todos SEQUENTIALLY (don't skip ahead)
+- Only ONE todo should be "in_progress" at a time
+- Mark completed IMMEDIATELY when done, before moving to next
+- User sees progress in sidebar (e.g., "📋 Todo 2/4")
 
 🔬 CODE UNDERSTANDING (use before modifying):
 - list_symbols: See all functions/types in a file
@@ -529,14 +596,19 @@ When to use ask_user (ALWAYS):
 - ANY yes/no question
 - ANY "which do you prefer" question
 
-Question types: single_select (pick one), multi_select (pick many), free_text (type answer)
+⚠️ PREFER CHOICE QUESTIONS OVER FREE TEXT:
+- single_select: User picks ONE option (has "Other" for custom input)
+- multi_select: User picks MANY options (has "Other" for custom input)
+- free_text: ONLY for truly unpredictable input (file paths, custom names)
+
 User can press Esc to cancel and answer via chat instead.
 
 Example - User says "add authentication":
 ❌ WRONG: "What authentication method would you prefer? JWT, sessions, or OAuth?"
-✅ RIGHT: Call ask_user with:
+❌ WRONG: Using free_text for questions with obvious choices
+✅ RIGHT: Call ask_user with single_select:
   title: "Authentication Setup"
-  questions: [{id: "method", type: "single_select", text: "Which authentication method?", options: ["JWT tokens", "Session-based", "OAuth2", "API keys"]}]
+  questions: [{id: "method", type: "single_select", text: "Which authentication method?", options: [{value: "jwt", label: "JWT tokens"}, {value: "session", label: "Session-based"}, {value: "oauth", label: "OAuth2"}, {value: "api_key", label: "API keys"}]}]
 
 ❌ NEVER DO THIS:
 - Say "I couldn't find X" without trying multiple search patterns
@@ -545,6 +617,7 @@ Example - User says "add authentication":
 - Say you "can't create diagrams" - YOU CAN with Mermaid/PlantUML!
 - Run dangerous shell commands (they will be blocked anyway)
 - Ask questions in chat text - USE ask_user tool instead!
+- Use free_text when you could provide choices - users prefer clicking over typing!
 
 🔄 TOOL EFFICIENCY - AVOID LOOPS:
 - NEVER call the same tool with identical arguments twice in a row
@@ -601,6 +674,8 @@ pub struct ToolCallLog {
 #[derive(Debug)]
 pub struct AgentResponse {
     pub text: String,
+    /// Accumulated intermediate reasoning from tool-calling iterations
+    pub thinking: Option<String>,
     pub tool_calls_made: usize,
     pub tool_call_log: Vec<ToolCallLog>,
     pub auto_compacted: bool,
@@ -853,6 +928,11 @@ impl ChatAgent {
         self.llm = llm;
     }
 
+    /// Update approval storage path (per session)
+    pub async fn set_approval_storage_path(&mut self, storage_path: std::path::PathBuf) {
+        self.tools.set_approval_storage_path(storage_path).await;
+    }
+
     /// Set the trust level for risky tool operations
     ///
     /// This updates both the tool registry and the cached trust level,
@@ -910,14 +990,82 @@ impl ChatAgent {
         self.context.is_near_limit()
     }
 
+    /// Get system prompt token count
+    ///
+    /// Returns the estimated tokens used by the system prompt message.
+    pub fn system_prompt_tokens(&self) -> usize {
+        use crate::llm::Role;
+        self.context
+            .messages()
+            .iter()
+            .find(|m| m.role == Role::System)
+            .map(|m| match &m.content {
+                crate::llm::MessageContent::Text(t) => ConversationContext::estimate_tokens(t),
+                crate::llm::MessageContent::Parts(parts) => parts
+                    .iter()
+                    .map(|p| match p {
+                        crate::llm::ContentPart::Text { text } => {
+                            ConversationContext::estimate_tokens(text)
+                        }
+                        _ => 0,
+                    })
+                    .sum(),
+            })
+            .unwrap_or(0)
+    }
+
+    /// Get estimated token count for tool schemas
+    ///
+    /// Estimates approximately 100 tokens per tool definition based on
+    /// average tool schema size (name, description, parameters).
+    pub fn tool_schema_tokens(&self) -> usize {
+        // Average tool definition is approximately 100 tokens
+        // (name ~5, description ~30, parameters ~65)
+        self.tools.definitions().len() * 100
+    }
+
+    /// Get conversation history token count (excludes system prompt)
+    ///
+    /// Returns estimated tokens for all user/assistant/tool messages.
+    pub fn conversation_history_tokens(&self) -> usize {
+        use crate::llm::Role;
+        self.context
+            .messages()
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .map(|m| match &m.content {
+                crate::llm::MessageContent::Text(t) => ConversationContext::estimate_tokens(t),
+                crate::llm::MessageContent::Parts(parts) => parts
+                    .iter()
+                    .map(|p| match p {
+                        crate::llm::ContentPart::Text { text } => {
+                            ConversationContext::estimate_tokens(text)
+                        }
+                        crate::llm::ContentPart::ToolUse { input, .. } => {
+                            ConversationContext::estimate_tokens(&input.to_string())
+                        }
+                        crate::llm::ContentPart::ToolResult { content, .. } => {
+                            ConversationContext::estimate_tokens(content)
+                        }
+                    })
+                    .sum(),
+            })
+            .sum()
+    }
+
     /// Get the current mode
     pub fn mode(&self) -> AgentMode {
         self.mode
     }
 
     /// Clear conversation history (keeps system prompt)
+    ///
+    /// Also clears the plan context to ensure a fresh start.
     pub fn clear_history(&mut self) {
-        // Get the current system prompt
+        // Clear plan context for a complete fresh start
+        self.plan_context = None;
+
+        // Get the current system prompt (now without plan context)
         let supports_thinking = self.llm.supports_native_thinking();
         let thinking_enabled = self.is_thinking_enabled();
         let system_prompt = get_system_prompt(
@@ -925,14 +1073,14 @@ impl ChatAgent {
             supports_thinking,
             thinking_enabled,
             self.trust_level,
-            self.plan_context.as_ref(),
+            None, // No plan context after clear
         );
 
         // Clear and reinitialize with system prompt
         self.context.clear();
         self.context.add_system(system_prompt);
 
-        tracing::info!("Conversation history cleared");
+        tracing::info!("Conversation history and plan context cleared");
     }
 
     /// Restore conversation from a saved session
@@ -1062,7 +1210,10 @@ impl ChatAgent {
                             ContentPart::ToolResult { content, .. } => {
                                 // Truncate tool results in summary
                                 Some(if content.len() > 200 {
-                                    format!("{}...(truncated)", &content[..200])
+                                    format!(
+                                        "{}...(truncated)",
+                                        truncate_at_char_boundary(content, 200)
+                                    )
                                 } else {
                                     content.clone()
                                 })
@@ -1076,7 +1227,7 @@ impl ChatAgent {
 
             // Truncate long messages
             let truncated = if content.len() > 500 {
-                format!("{}...(truncated)", &content[..500])
+                format!("{}...(truncated)", truncate_at_char_boundary(&content, 500))
             } else {
                 content
             };
@@ -1153,7 +1304,7 @@ impl ChatAgent {
                     .filter_map(|p| match p {
                         ContentPart::Text { text } => Some(text.clone()),
                         ContentPart::ToolResult { content, .. } => Some(if content.len() > 200 {
-                            format!("{}...(truncated)", &content[..200])
+                            format!("{}...(truncated)", truncate_at_char_boundary(content, 200))
                         } else {
                             content.clone()
                         }),
@@ -1164,7 +1315,7 @@ impl ChatAgent {
             };
 
             let truncated = if content.len() > 500 {
-                format!("{}...(truncated)", &content[..500])
+                format!("{}...(truncated)", truncate_at_char_boundary(&content, 500))
             } else {
                 content
             };
@@ -1281,6 +1432,7 @@ impl ChatAgent {
                     let context_usage_percent = self.context.usage_percentage();
                     return Ok(AgentResponse {
                         text,
+                        thinking: None,
                         tool_calls_made: total_tool_calls,
                         tool_call_log,
                         auto_compacted,
@@ -1464,6 +1616,7 @@ impl ChatAgent {
                         let context_usage_percent = self.context.usage_percentage();
                         return Ok(AgentResponse {
                             text: last_text,
+                            thinking: None,
                             tool_calls_made: total_tool_calls,
                             tool_call_log,
                             auto_compacted,
@@ -1647,6 +1800,7 @@ impl ChatAgent {
         let context_usage_percent = self.context.usage_percentage();
         Ok(AgentResponse {
             text: last_text,
+            thinking: None,
             tool_calls_made: total_tool_calls,
             tool_call_log,
             auto_compacted,
@@ -1686,6 +1840,7 @@ impl ChatAgent {
         if interrupt_check() {
             return Ok(AgentResponse {
                 text: "⚠️ *Operation interrupted*".to_string(),
+                thinking: None,
                 tool_calls_made: 0,
                 tool_call_log: vec![],
                 auto_compacted: false,
@@ -1725,6 +1880,7 @@ impl ChatAgent {
                     .add_assistant("⚠️ *Operation interrupted by user*");
                 return Ok(AgentResponse {
                     text: "⚠️ *Operation interrupted by user*".to_string(),
+                    thinking: None,
                     tool_calls_made: total_tool_calls,
                     tool_call_log,
                     auto_compacted,
@@ -1756,6 +1912,7 @@ impl ChatAgent {
                     .add_assistant("⚠️ *Operation interrupted by user*");
                 return Ok(AgentResponse {
                     text: "⚠️ *Operation interrupted by user*".to_string(),
+                    thinking: None,
                     tool_calls_made: total_tool_calls,
                     tool_call_log,
                     auto_compacted,
@@ -1779,6 +1936,7 @@ impl ChatAgent {
                     let context_usage_percent = self.context.usage_percentage();
                     return Ok(AgentResponse {
                         text,
+                        thinking: None,
                         tool_calls_made: total_tool_calls,
                         tool_call_log,
                         auto_compacted,
@@ -1821,6 +1979,7 @@ impl ChatAgent {
                                     "⚠️ *Operation interrupted before executing {}*",
                                     call.name
                                 ),
+                                thinking: None,
                                 tool_calls_made: total_tool_calls,
                                 tool_call_log,
                                 auto_compacted,
@@ -1933,6 +2092,7 @@ impl ChatAgent {
                         let context_usage_percent = self.context.usage_percentage();
                         return Ok(AgentResponse {
                             text: last_text,
+                            thinking: None,
                             tool_calls_made: total_tool_calls,
                             tool_call_log,
                             auto_compacted,
@@ -1982,6 +2142,7 @@ impl ChatAgent {
                                     "⚠️ *Operation interrupted before executing {}*",
                                     call.name
                                 ),
+                                thinking: None,
                                 tool_calls_made: total_tool_calls,
                                 tool_call_log,
                                 auto_compacted,
@@ -2080,6 +2241,7 @@ impl ChatAgent {
         let context_usage_percent = self.context.usage_percentage();
         Ok(AgentResponse {
             text: last_text,
+            thinking: None,
             tool_calls_made: total_tool_calls,
             tool_call_log,
             auto_compacted,
@@ -2100,7 +2262,9 @@ impl ChatAgent {
     /// * `on_thinking` - Callback for each thinking/reasoning chunk
     /// * `on_tool_call` - Callback when a tool call starts (name, args preview)
     /// * `on_tool_complete` - Callback when a tool call completes (name, result preview, success)
-    pub async fn chat_streaming<F, T, K, C, D>(
+    /// * `on_commit_intermediate` - Callback when intermediate content should be committed as a message
+    #[allow(clippy::too_many_arguments)]
+    pub async fn chat_streaming<F, T, K, C, D, P>(
         &mut self,
         user_message: &str,
         interrupt_check: F,
@@ -2108,6 +2272,7 @@ impl ChatAgent {
         on_thinking: K,
         on_tool_call: C,
         on_tool_complete: D,
+        on_commit_intermediate: P,
     ) -> Result<AgentResponse>
     where
         F: Fn() -> bool + Send + Sync,
@@ -2115,6 +2280,7 @@ impl ChatAgent {
         K: Fn(String) + Send + Sync + 'static,
         C: Fn(String, String) + Send + Sync + 'static,
         D: Fn(String, String, bool) + Send + Sync + 'static,
+        P: Fn(String) + Send + Sync + 'static,
     {
         // Wrap callbacks in Arc so they can be shared with the streaming callback
         let on_text = std::sync::Arc::new(on_text);
@@ -2127,6 +2293,7 @@ impl ChatAgent {
         if interrupt_check() {
             return Ok(AgentResponse {
                 text: "⚠️ *Operation interrupted*".to_string(),
+                thinking: None,
                 tool_calls_made: 0,
                 tool_call_log: vec![],
                 auto_compacted: false,
@@ -2167,6 +2334,7 @@ impl ChatAgent {
                     .add_assistant("⚠️ *Operation interrupted by user*");
                 return Ok(AgentResponse {
                     text: "⚠️ *Operation interrupted by user*".to_string(),
+                    thinking: None,
                     tool_calls_made: total_tool_calls,
                     tool_call_log,
                     auto_compacted,
@@ -2245,6 +2413,7 @@ impl ChatAgent {
                     .add_assistant("⚠️ *Operation interrupted by user*");
                 return Ok(AgentResponse {
                     text: "⚠️ *Operation interrupted by user*".to_string(),
+                    thinking: None,
                     tool_calls_made: total_tool_calls,
                     tool_call_log,
                     auto_compacted,
@@ -2276,6 +2445,7 @@ impl ChatAgent {
                     let context_usage_percent = self.context.usage_percentage();
                     return Ok(AgentResponse {
                         text: final_text,
+                        thinking: None,
                         tool_calls_made: total_tool_calls,
                         tool_call_log,
                         auto_compacted,
@@ -2303,15 +2473,6 @@ impl ChatAgent {
                     // First, add the assistant message with tool calls (required for OpenAI)
                     self.context.add_assistant_tool_calls(limited_calls);
 
-                    // CRITICAL FIX: Emit a preamble before the first tool call if no text has been emitted yet
-                    // This prevents the UI from showing a blank assistant message before tools
-                    if accumulated_text.is_empty() && total_tool_calls == 0 {
-                        let preamble = "Let me check the codebase for you.";
-                        on_text(preamble.to_string());
-                        accumulated_text = preamble.to_string();
-                        tracing::debug!("Emitted preamble before first tool execution");
-                    }
-
                     // Execute each tool call and add results
                     for call in limited_calls.iter() {
                         // Check for interrupt before each tool
@@ -2321,6 +2482,7 @@ impl ChatAgent {
                                 .add_assistant("⚠️ *Operation interrupted by user*");
                             return Ok(AgentResponse {
                                 text: "⚠️ *Operation interrupted by user*".to_string(),
+                                thinking: None,
                                 tool_calls_made: total_tool_calls,
                                 tool_call_log,
                                 auto_compacted,
@@ -2329,10 +2491,20 @@ impl ChatAgent {
                             });
                         }
 
+                        // Commit any accumulated text before this tool invocation
+                        // This creates a separate bubble per tool boundary (if text exists)
+                        if !accumulated_text.is_empty() {
+                            on_commit_intermediate(accumulated_text.clone());
+                            accumulated_text.clear();
+                        }
+
                         // Notify about tool call
                         let args_preview = serde_json::to_string(&call.arguments)
                             .unwrap_or_else(|_| "{}".to_string());
                         on_tool_call(call.name.clone(), args_preview);
+
+                        // Yield to allow the UI to render the "tool started" state
+                        tokio::task::yield_now().await;
 
                         tracing::info!(
                             "Executing tool: {} with args: {} (mode: {:?})",
@@ -2482,6 +2654,7 @@ impl ChatAgent {
                                 .add_assistant("⚠️ *Operation interrupted by user*");
                             return Ok(AgentResponse {
                                 text: "⚠️ *Operation interrupted by user*".to_string(),
+                                thinking: None,
                                 tool_calls_made: total_tool_calls,
                                 tool_call_log,
                                 auto_compacted,
@@ -2493,6 +2666,9 @@ impl ChatAgent {
                         let args_preview = serde_json::to_string(&call.arguments)
                             .unwrap_or_else(|_| "{}".to_string());
                         on_tool_call(call.name.clone(), args_preview);
+
+                        // Yield to allow the UI to render the "tool started" state
+                        tokio::task::yield_now().await;
 
                         let result =
                             match self.tools.execute(&call.name, call.arguments.clone()).await {
@@ -2589,11 +2765,84 @@ impl ChatAgent {
         let context_usage_percent = self.context.usage_percentage();
         Ok(AgentResponse {
             text: last_text,
+            thinking: None,
             tool_calls_made: total_tool_calls,
             tool_call_log,
             auto_compacted,
             context_usage_percent,
             usage: Some(accumulated_usage),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatAgent;
+    use crate::llm::{LlmProvider, LlmResponse, Message, ToolDefinition};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct TestProvider {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl LlmProvider for TestProvider {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: Option<&[ToolDefinition]>,
+        ) -> anyhow::Result<LlmResponse> {
+            Ok(LlmResponse::Text {
+                text: self.name.to_string(),
+                usage: None,
+            })
+        }
+
+        async fn complete_fim(
+            &self,
+            _prefix: &str,
+            _suffix: &str,
+            _language: &str,
+        ) -> anyhow::Result<crate::llm::CompletionResult> {
+            unimplemented!("test provider")
+        }
+
+        async fn explain_code(&self, _code: &str, _context: &str) -> anyhow::Result<String> {
+            unimplemented!("test provider")
+        }
+
+        async fn suggest_refactorings(
+            &self,
+            _code: &str,
+            _context: &str,
+        ) -> anyhow::Result<Vec<crate::llm::RefactoringSuggestion>> {
+            unimplemented!("test provider")
+        }
+
+        async fn review_code(
+            &self,
+            _code: &str,
+            _language: &str,
+        ) -> anyhow::Result<Vec<crate::llm::CodeIssue>> {
+            unimplemented!("test provider")
+        }
+    }
+
+    #[test]
+    fn update_provider_replaces_llm() {
+        let provider_a = Arc::new(TestProvider { name: "provider_a" });
+        let provider_b = Arc::new(TestProvider { name: "provider_b" });
+        let tools = crate::tools::ToolRegistry::new(std::path::PathBuf::from("."));
+
+        let mut agent = ChatAgent::new(provider_a, tools);
+        assert_eq!(agent.llm.name(), "provider_a");
+
+        agent.update_provider(provider_b);
+        assert_eq!(agent.llm.name(), "provider_b");
     }
 }

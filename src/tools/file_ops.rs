@@ -172,13 +172,18 @@ impl Tool for ReadFileTool {
                 let output = match (params.start_line, params.end_line) {
                     (Some(start), Some(end)) => {
                         let lines: Vec<&str> = content.lines().collect();
-                        let start = start.saturating_sub(1);
+                        let start = start.saturating_sub(1).min(lines.len());
                         let end = end.min(lines.len());
-                        lines[start..end].join("\n")
+                        if start >= end {
+                            // Return empty if range is invalid or empty
+                            String::new()
+                        } else {
+                            lines[start..end].join("\n")
+                        }
                     }
                     (Some(start), None) => {
                         let lines: Vec<&str> = content.lines().collect();
-                        let start = start.saturating_sub(1);
+                        let start = start.saturating_sub(1).min(lines.len());
                         lines[start..].join("\n")
                     }
                     (None, Some(end)) => {
@@ -240,6 +245,10 @@ impl Tool for WriteFileTool {
             },
             "required": ["path", "content"]
         })
+    }
+
+    fn risk_level(&self) -> super::RiskLevel {
+        super::RiskLevel::Write
     }
 
     async fn execute(&self, params: Value) -> Result<ToolResult> {
@@ -358,6 +367,10 @@ impl Tool for PatchFileTool {
         })
     }
 
+    fn risk_level(&self) -> super::RiskLevel {
+        super::RiskLevel::Write
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolResult> {
         #[derive(Deserialize)]
         struct Params {
@@ -444,6 +457,10 @@ impl Tool for DeleteFileTool {
             },
             "required": ["path"]
         })
+    }
+
+    fn risk_level(&self) -> super::RiskLevel {
+        super::RiskLevel::Dangerous
     }
 
     async fn execute(&self, params: Value) -> Result<ToolResult> {

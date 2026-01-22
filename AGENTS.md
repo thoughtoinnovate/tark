@@ -17,6 +17,7 @@ This document helps AI coding agents understand the tark codebase and make effec
 5. ✅ **Include/update tests** - No code change without corresponding tests
 6. ✅ **Update documentation** - README.md, AGENTS.md, or doc comments for significant changes
 7. ✅ **Use clean git workflow** - Stash unrelated changes, commit logical units separately
+8. ✅ **Verify performance** - For core agent code changes, ensure no performance regressions
 
 **See the [Pre-Commit Checklist](#pre-commit-checklist-) for the complete workflow.**
 
@@ -31,59 +32,115 @@ This document helps AI coding agents understand the tark codebase and make effec
 
 ## Architecture
 
+The TUI uses a **Backend-for-Frontend (BFF)** pattern separating UI rendering from business logic.
+
 ```
 tark/
-├── src/                    # Rust backend (tark server)
-│   ├── main.rs             # CLI entry point
-│   ├── lib.rs              # Library exports
-│   ├── agent/              # Chat agent with tool execution
-│   ├── completion/         # FIM (fill-in-middle) completions
-│   ├── config/             # Configuration management
-│   ├── diagnostics/        # Code analysis
-│   ├── llm/                # LLM providers + model DB
-│   │   ├── claude.rs       # Anthropic Claude
-│   │   ├── openai.rs       # OpenAI GPT
-│   │   ├── gemini.rs       # Google Gemini
-│   │   ├── copilot.rs      # GitHub Copilot
-│   │   ├── openrouter.rs   # OpenRouter
-│   │   ├── ollama.rs       # Local Ollama
-│   │   ├── models_db.rs    # models.dev integration
-│   │   └── types.rs        # Shared LLM types
-│   ├── lsp/                # LSP server implementation
-│   ├── storage/            # Persistent storage (.tark/)
-│   │   └── usage.rs        # Usage tracking with SQLite
-│   ├── tools/              # Agent tools with risk-based categorization
-│   │   ├── mod.rs          # Tool registry with mode-based composition
-│   │   ├── risk.rs         # RiskLevel and TrustLevel enums
-│   │   ├── approval.rs     # ApprovalGate with pattern matching
-│   │   ├── readonly/       # Read-only tools (grep, file_preview, safe_shell)
-│   │   ├── write/          # Write tools (reserved for future)
-│   │   ├── risky/          # Shell tools (reserved for future)
-│   │   └── dangerous/      # Destructive tools (reserved for future)
-│   ├── tui/                # Terminal UI
-│   │   └── widgets/        # TUI components
-│   │       ├── approval_card.rs           # Approval request popup
-│   │       └── approval_mode_selector.rs  # Trust level selector (Shift+A, Build mode only)
-│   └── transport/          # HTTP server and CLI
-│       └── dashboard.rs    # Usage dashboard HTML
-├── lua/                    # Neovim plugin (Lua)
+├── src/                         # Rust backend (tark server)
+│   ├── main.rs                  # CLI entry point
+│   ├── lib.rs                   # Library exports
+│   │
+│   ├── core/                    # Shared core modules
+│   │   ├── attachments.rs       # File attachment handling
+│   │   ├── context_tracker.rs   # Context window management
+│   │   ├── conversation_manager.rs # Conversation state
+│   │   ├── session_manager.rs   # Session persistence
+│   │   ├── tokenizer.rs         # Token counting
+│   │   └── types.rs             # AgentMode, BuildMode, ThinkLevel
+│   │
+│   ├── ui_backend/              # BFF layer (Backend-for-Frontend)
+│   │   ├── traits.rs            # UiRenderer trait
+│   │   ├── events.rs            # AppEvent enum
+│   │   ├── service.rs           # AppService orchestrator
+│   │   ├── state.rs             # SharedState (Arc<RwLock<>>)
+│   │   ├── commands.rs          # Command enum (100+ variants)
+│   │   ├── types.rs             # UI data structures
+│   │   ├── approval.rs          # ApprovalCardState
+│   │   └── questionnaire.rs     # QuestionnaireState
+│   │
+│   ├── tui_new/                 # New TUI implementation (ratatui)
+│   │   ├── controller.rs        # Event loop coordinator
+│   │   ├── renderer.rs          # UiRenderer implementation
+│   │   ├── theme.rs             # Theme system (6 presets)
+│   │   ├── modals/              # Modal widgets
+│   │   │   ├── approval_modal.rs
+│   │   │   ├── trust_modal.rs
+│   │   │   ├── session_picker.rs
+│   │   │   ├── task_edit_modal.rs
+│   │   │   └── ...
+│   │   └── widgets/             # UI components
+│   │       ├── header.rs        # Title bar
+│   │       ├── message_area.rs  # Chat messages
+│   │       ├── input.rs         # Input field
+│   │       ├── sidebar.rs       # Session/Context/Tasks/Git
+│   │       ├── status_bar.rs    # Mode/Provider/Model
+│   │       └── modal.rs         # Picker modals
+│   │
+│   ├── agent/                   # Chat agent with tool execution
+│   ├── completion/              # FIM (fill-in-middle) completions
+│   ├── config/                  # Configuration management
+│   ├── diagnostics/             # Code analysis
+│   ├── llm/                     # LLM providers + model DB
+│   │   ├── claude.rs            # Anthropic Claude
+│   │   ├── openai.rs            # OpenAI GPT
+│   │   ├── gemini.rs            # Google Gemini
+│   │   ├── copilot.rs           # GitHub Copilot
+│   │   ├── openrouter.rs        # OpenRouter
+│   │   ├── ollama.rs            # Local Ollama (with tool calling)
+│   │   ├── tark_sim.rs          # Built-in test provider
+│   │   ├── models_db.rs         # models.dev integration
+│   │   └── types.rs             # Shared LLM types
+│   ├── lsp/                     # LSP server implementation
+│   ├── storage/                 # Persistent storage (.tark/)
+│   │   └── usage.rs             # Usage tracking with SQLite
+│   ├── tools/                   # Agent tools with risk-based categorization
+│   │   ├── mod.rs               # Tool registry with mode-based composition
+│   │   ├── risk.rs              # RiskLevel and TrustLevel enums
+│   │   ├── approval.rs          # ApprovalGate with pattern matching
+│   │   ├── questionnaire.rs     # User interaction requests
+│   │   ├── builtin/             # Built-in native tools
+│   │   │   ├── thinking.rs      # ThinkTool for structured reasoning
+│   │   │   └── memory.rs        # Memory tools with SQLite backend
+│   │   ├── readonly/            # Read-only tools (grep, file_preview, safe_shell)
+│   │   ├── write/               # Write tools
+│   │   ├── risky/               # Shell tools
+│   │   └── dangerous/           # Destructive tools
+│   ├── mcp/                     # MCP client (feature-gated)
+│   │   ├── client.rs            # McpServerManager
+│   │   ├── transport.rs         # STDIO transport
+│   │   ├── wrapper.rs           # Tool wrapper adapters
+│   │   └── types.rs             # MCP protocol types
+│   └── transport/               # HTTP server and CLI
+│       ├── cli.rs               # CLI commands
+│       └── dashboard.rs         # Usage dashboard HTML
+│
+├── lua/                         # Neovim plugin (Lua)
 │   └── tark/
-│       ├── init.lua        # Plugin entry point & setup
-│       ├── binary.lua      # Binary find/download/version
-│       ├── tui.lua         # TUI integration (socket RPC)
-│       ├── ghost.lua       # Ghost text completions
-│       ├── lsp.lua         # LSP integration helpers
-│       ├── statusline.lua  # Statusline helpers
-│       └── health.lua      # :checkhealth integration
-├── plugin/
-│   └── tark.lua            # Command registration
-├── .github/workflows/      # CI/CD
-│   ├── ci.yml              # Tests, build, lint
-│   ├── release.yml         # Multi-platform releases
-│   └── docker.yml          # Docker image builds
-├── Dockerfile              # Minimal scratch image (~15MB)
-├── Dockerfile.alpine       # Alpine image with shell (~30MB)
-└── install.sh              # Binary installer with checksum verification
+│       ├── init.lua             # Plugin entry point & setup
+│       ├── binary.lua           # Binary find/download/version
+│       ├── tui.lua              # TUI integration (socket RPC)
+│       ├── ghost.lua            # Ghost text completions
+│       ├── lsp.lua              # LSP integration helpers
+│       ├── statusline.lua       # Statusline helpers
+│       └── health.lua           # :checkhealth integration
+│
+├── tests/                       # Test suite
+│   ├── cucumber_tui_new.rs      # BDD integration tests
+│   ├── tui_snapshot_tests.rs    # Visual snapshot tests
+│   ├── tui_widget_tests.rs      # Widget unit tests
+│   └── visual/                  # Visual E2E tests
+│       └── tui/features/        # Gherkin feature files
+│
+├── docs/                        # Documentation
+│   ├── BFF_ARCHITECTURE.md      # BFF design details
+│   ├── TUI_SETUP.md             # Setup guide
+│   ├── THEMES.md                # Theme system
+│   └── TUI_MODAL_DESIGN_GUIDE.md # Modal design patterns
+│
+├── .github/workflows/           # CI/CD
+├── Dockerfile                   # Minimal scratch image (~15MB)
+├── Dockerfile.alpine            # Alpine image with shell (~30MB)
+└── install.sh                   # Binary installer with checksum verification
 ```
 
 ## Do's ✅
@@ -101,6 +158,51 @@ tark/
 - **Use `tracing`** for logging, not `println!`
 - **Async by default** - Use `tokio` for async operations
 - **Keep LLM providers isolated** - Each in its own file under `src/llm/`
+
+### Performance (Core Agent Code) ⚡
+
+**CRITICAL**: When modifying core agent code (`src/agent/`, `src/tools/`, `src/mcp/`, `src/llm/`), you MUST verify performance is not negatively impacted.
+
+**Before making changes**:
+- Understand the hot paths in the code you're modifying
+- Note current response times for typical operations
+- Consider the impact on streaming latency and tool execution time
+
+**After making changes**:
+1. **Measure response time** - Compare before/after for common operations
+2. **Check memory usage** - Ensure no memory leaks or excessive allocations
+3. **Verify streaming latency** - Token streaming should remain responsive
+4. **Test with multiple tools** - Tool execution overhead should be minimal
+
+**Performance best practices**:
+- **Avoid unnecessary allocations** - Reuse buffers, use `&str` over `String` where possible
+- **Minimize cloning** - Use references or `Arc` for shared data
+- **Batch operations** - Combine multiple small operations when possible
+- **Lazy evaluation** - Don't compute values until needed
+- **Efficient data structures** - Use `HashMap` for lookups, `Vec` for sequential access
+- **Avoid blocking in async** - Never block the async runtime; use `tokio::spawn_blocking` for CPU-heavy work
+
+**How to profile**:
+```bash
+# Build with debug symbols for profiling
+cargo build --release
+
+# Use flamegraph for CPU profiling (requires cargo-flamegraph)
+cargo flamegraph --bin tark -- tui
+
+# Use heaptrack or valgrind for memory profiling
+heaptrack ./target/release/tark tui
+
+# Simple timing with tracing
+RUST_LOG=debug ./target/release/tark tui  # Check span timings in logs
+```
+
+**Performance improvements to consider**:
+- Cache frequently accessed data (e.g., tool schemas, model info)
+- Use connection pooling for HTTP clients
+- Implement request batching where applicable
+- Consider lazy initialization for expensive resources
+- Profile before optimizing - measure, don't guess
 
 ### Lua Plugin
 
@@ -130,6 +232,40 @@ tark/
   - Bug fixes → Regression tests
   - Refactors → Maintain existing test coverage
 
+### TUI Testing (CRITICAL)
+
+The TUI has a multi-level testing strategy. See `tests/TUI_TESTING_README.md` for details.
+
+**Test Levels:**
+
+| Level | Tool | Purpose | Command |
+|-------|------|---------|---------|
+| Unit | `#[test]` | Widget functions | `cargo test --test tui_widget_tests` |
+| Snapshot | `insta` | Visual regression | `cargo test --test tui_snapshot_tests` |
+| Integration | Cucumber | Component interactions | `cargo test --test cucumber_tui_new` |
+| E2E | Cucumber + PTY | Real binary | `cargo test --test cucumber_e2e --release` |
+
+**⚠️ Cucumber step definitions can CHEAT by directly manipulating state instead of testing real code paths.**
+
+For TUI features, you MUST:
+
+1. **Write unit tests for widget logic in `tests/tui_widget_tests.rs`**
+
+2. **Use snapshot tests for visual changes in `tests/tui_snapshot_tests.rs`**
+   ```bash
+   cargo test --test tui_snapshot_tests
+   cargo insta review  # Review snapshot changes
+   ```
+
+3. **Manual smoke test after EVERY TUI change**:
+   ```bash
+   cargo build --release
+   ./target/release/tark tui
+   # Verify: /help, /model, /theme, Ctrl+?, Escape, Enter all work
+   ```
+
+4. **If manual test fails, fix `src/tui_new/controller.rs` or `renderer.rs`** - Not the test step definitions
+
 ### Versioning
 
 - **Keep versions in sync**:
@@ -158,6 +294,15 @@ tark/
 - **Don't add new LLM providers without tests**
 - **Don't change tool schemas** without updating the agent prompts
 
+### Performance (Core Agent Code)
+
+- **Don't skip performance verification** for core agent code changes
+- **Don't add synchronous I/O** in async hot paths - Use async alternatives
+- **Don't clone large data structures** unnecessarily - Use references or `Arc`
+- **Don't allocate in tight loops** - Pre-allocate or reuse buffers
+- **Don't ignore performance regressions** - If you notice slowdowns, investigate before committing
+- **Don't optimize without measuring** - Profile first, then optimize based on data
+
 ### Lua Plugin
 
 - **Don't use global variables** - Keep state in module tables
@@ -175,25 +320,145 @@ tark/
 
 ## Key Files to Understand
 
+### BFF Layer (Backend-for-Frontend)
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
+| `src/ui_backend/service.rs` | AppService orchestrator | Adding UI-agnostic features |
+| `src/ui_backend/commands.rs` | Command enum (100+ variants) | Adding new user actions |
+| `src/ui_backend/events.rs` | AppEvent enum | Adding new async events |
+| `src/ui_backend/state.rs` | SharedState (Arc<RwLock>) | Adding state fields |
+| `src/ui_backend/types.rs` | UI data structures | Adding new UI types |
+| `src/core/types.rs` | AgentMode, BuildMode, ThinkLevel | Changing core types |
+
+### TUI Layer (Presentation)
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
+| `src/tui_new/controller.rs` | Event loop coordinator | Changing event handling |
+| `src/tui_new/renderer.rs` | Key-to-command mapping, rendering | Adding keybindings |
+| `src/tui_new/theme.rs` | Theme presets and colors | Adding themes |
+| `src/tui_new/widgets/*.rs` | UI widgets | Modifying widgets |
+| `src/tui_new/modals/*.rs` | Modal dialogs | Adding modals |
+
+### Agent & Tools
+
 | File | Purpose | When to Modify |
 |------|---------|----------------|
 | `src/agent/chat.rs` | Chat agent logic | Adding agent features |
 | `src/tools/mod.rs` | Tool registry & mode composition | Adding/modifying tools |
-| `src/tools/risk.rs` | Risk levels & trust levels | Changing risk categories |
-| `src/tools/approval.rs` | Approval gate & pattern matching | Changing approval flow |
-| `src/tools/readonly/` | Safe read-only tools | Adding read-only tools |
+| `src/tools/risk.rs` | RiskLevel and TrustLevel enums | Changing risk categories |
+| `src/tools/approval.rs` | ApprovalGate with pattern matching | Changing approval flow |
+| `src/tools/questionnaire.rs` | User interaction requests | Adding question types |
+| `src/tools/builtin/thinking.rs` | Sequential thinking tool | Modifying thinking behavior |
+| `src/tools/builtin/memory.rs` | Persistent memory with SQLite | Modifying memory storage |
+
+### MCP Client (Model Context Protocol)
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
+| `src/mcp/client.rs` | McpServerManager, connection handling | Adding MCP features |
+| `src/mcp/transport.rs` | STDIO transport for MCP servers | Changing communication |
+| `src/mcp/wrapper.rs` | McpToolWrapper (adapts MCP → Tool) | Changing tool adaptation |
+| `src/mcp/types.rs` | MCP protocol data structures | Changing MCP types |
+| `src/storage/mod.rs` | McpServer config (servers.toml) | Changing MCP configuration |
+| `examples/tark-config/mcp/servers.toml` | Example MCP server configs | Adding examples |
+
+### LLM Providers
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
 | `src/llm/types.rs` | LLM message types | Changing API contracts |
-| `src/completion/engine.rs` | FIM completion logic | Changing completion behavior |
-| `src/storage/usage.rs` | Usage tracking & SQLite | Adding usage analytics |
-| `src/transport/dashboard.rs` | Usage dashboard HTML | Modifying dashboard UI |
-| `src/tui/widgets/approval_card.rs` | Approval popup UI | Changing approval UX |
+| `src/llm/ollama.rs` | Ollama provider (with tool calling) | Ollama features |
+| `src/llm/tark_sim.rs` | Built-in test provider | Testing/demo |
+| `src/llm/models_db.rs` | models.dev integration | Model metadata |
+
+### Neovim Plugin
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
 | `lua/tark/init.lua` | Plugin entry & config | Adding config options |
 | `lua/tark/tui.lua` | TUI integration | Socket RPC handlers |
 | `lua/tark/binary.lua` | Binary management | Download/version logic |
 | `plugin/tark.lua` | Command registration | Adding new commands |
+
+### Infrastructure
+
+| File | Purpose | When to Modify |
+|------|---------|----------------|
+| `src/completion/engine.rs` | FIM completion logic | Changing completion behavior |
+| `src/storage/usage.rs` | Usage tracking & SQLite | Adding usage analytics |
+| `src/transport/dashboard.rs` | Usage dashboard HTML | Modifying dashboard UI |
 | `.github/workflows/release.yml` | Release automation | Adding platforms |
 
 ## Common Tasks
+
+### Using Built-in Tools
+
+**Thinking Tool**: The `think` tool allows agents to record structured reasoning steps. It's automatically registered for all modes.
+
+**Memory Tools**: Four tools for persistent knowledge storage:
+- `memory_store`: Save information for later recall
+- `memory_query`: Search stored memories
+- `memory_list`: List all memories
+- `memory_delete`: Remove a memory
+
+Memory is stored in `.tark/memory.db` using SQLite.
+
+**Todo Tool**: The `todo` tool provides session-scoped task tracking with a live-updating widget in the message area. It's automatically registered for all modes.
+
+Use this tool to:
+- Show users what steps you're working on
+- Track progress on immediate tasks within the current request
+- Display a visual checklist with progress bar
+
+The todo list:
+- Updates in-place (single live widget, not new messages)
+- Returns full current state so you know what todos exist
+- Persists during the session, cleared when session ends
+- Supports merge (update by id) and replace (new list) modes
+
+Example usage:
+```rust
+// Create initial todo list
+todo({
+  "todos": [
+    {"id": "read", "content": "Read existing code"},
+    {"id": "impl", "content": "Implement feature"},
+    {"id": "test", "content": "Add tests"}
+  ],
+  "merge": false  // Replace any existing todos
+})
+
+// Update specific todo as you progress
+todo({
+  "todos": [{"id": "read", "status": "completed"}],
+  "merge": true   // Merge with existing (default)
+})
+```
+
+### Using MCP Servers
+
+**Configuration**: Add MCP servers in `~/.config/tark/mcp/servers.toml` or `.tark/mcp/servers.toml`.
+
+**Example**:
+```toml
+[servers.github]
+name = "GitHub Integration"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+enabled = true
+env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
+
+[servers.github.tark]
+risk_level = "risky"
+auto_connect = false
+timeout_seconds = 30
+namespace = "gh"
+```
+
+**User manages**: Installing MCP servers (npm, pip, etc.) and setting environment variables.
+**tark manages**: Connecting, discovering tools, and executing them with risk level enforcement.
 
 ### Adding a New Tool
 
@@ -209,6 +474,31 @@ tark/
 3. Export in `src/llm/mod.rs`
 4. Add config in `src/config/mod.rs`
 5. Add to provider selection in chat
+
+### Adding a New TUI Modal
+
+1. Add modal type to `ModalType` enum in `src/ui_backend/state.rs`
+2. Create modal widget in `src/tui_new/modals/` (follow `docs/TUI_MODAL_DESIGN_GUIDE.md`)
+3. Add rendering in `src/tui_new/renderer.rs` render method
+4. Add keyboard handling in `renderer.rs` `key_to_command()` function
+5. Add any needed state fields to `SharedState`
+6. Add command handling in `src/tui_new/controller.rs`
+7. Update `docs/TUI_MODAL_DESIGN_GUIDE.md` with new modal
+
+### Adding a New Command
+
+1. Add variant to `Command` enum in `src/ui_backend/commands.rs`
+2. Handle command in `src/ui_backend/service.rs` `handle_command()`
+3. If TUI-specific, add keybinding in `src/tui_new/renderer.rs`
+4. Update `README.md` keyboard shortcuts table
+
+### Adding a New Theme
+
+1. Add variant to `ThemePreset` enum in `src/tui_new/theme.rs`
+2. Implement `Theme::your_theme()` method with colors
+3. Update `from_preset()` match statement
+4. Update `display_name()` and `all()` methods
+5. Update `docs/THEMES.md`
 
 ### Adding a Config Option
 
@@ -429,6 +719,7 @@ Then check GitHub Actions to ensure CI passes. If CI fails:
 □ Rust tests pass (cargo test --all-features)
 □ Lua tests pass (if applicable: nvim --headless ... PlenaryBustedDirectory)
 □ Tests added/updated for code changes
+□ Performance verified (for core agent code: no regressions, consider improvements)
 □ Documentation updated (README.md, AGENTS.md, doc comments)
 □ Versions synced (if needed: Cargo.toml & lua/tark/init.lua)
 □ Git history clean (stashed unrelated changes)

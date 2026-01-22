@@ -1,51 +1,101 @@
 # MCP (Model Context Protocol) Server Configuration
-# Place in ~/.config/tark/mcp/servers.toml for global, or .tark/mcp/servers.toml for project
 #
-# MCP servers extend tark with additional tools. They run as separate processes
-# and communicate via stdin/stdout using the MCP protocol.
+# tark can connect to external MCP servers that you install and manage.
+# Place this file in:
+#   - ~/.config/tark/mcp/servers.toml (global)
+#   - .tark/mcp/servers.toml (project-specific)
 #
-# See: https://modelcontextprotocol.io/
+# USER RESPONSIBILITY:
+#   - Install MCP servers (via npm, pip, cargo, etc.)
+#   - Manage server binaries and updates
+#   - Set required environment variables (API keys, etc.)
+#
+# TARK RESPONSIBILITY:
+#   - Load configuration from this file
+#   - Connect to configured servers
+#   - Discover and expose tools to the agent
+#   - Enforce risk levels and approval gates
 
-# Example: Filesystem MCP server
-[servers.filesystem]
-name = "Filesystem Tools"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
-enabled = true
-capabilities = ["read_file", "write_file", "list_directory"]
-
-# Example: GitHub MCP server
+# ==============================================================================
+# EXAMPLE: GitHub MCP Server (npm-based)
+# Install: npm install -g @modelcontextprotocol/server-github
+# ==============================================================================
 [servers.github]
 name = "GitHub Integration"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "" }  # Set your token here or use env var
-enabled = false
-capabilities = ["create_issue", "list_issues", "create_pr"]
+enabled = false  # Set to true after installing and setting GITHUB_TOKEN
+env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
+capabilities = ["create_issue", "list_issues", "create_pr", "search_repos"]
 
-# Example: Database MCP server
+[servers.github.tark]
+risk_level = "risky"
+auto_connect = false
+timeout_seconds = 30
+namespace = "gh"
+
+# ==============================================================================
+# EXAMPLE: Brave Search MCP Server
+# Install: npm install -g @anthropics/mcp-server-brave-search
+# ==============================================================================
+[servers.brave_search]
+name = "Brave Search"
+command = "npx"
+args = ["-y", "@anthropics/mcp-server-brave-search"]
+enabled = false  # Set to true after setting BRAVE_API_KEY
+env = { BRAVE_API_KEY = "${BRAVE_API_KEY}" }
+capabilities = ["web_search"]
+
+[servers.brave_search.tark]
+risk_level = "readonly"
+auto_connect = false
+timeout_seconds = 15
+
+# ==============================================================================
+# EXAMPLE: Filesystem MCP Server
+# Install: npm install -g @modelcontextprotocol/server-filesystem
+# ==============================================================================
+[servers.filesystem]
+name = "Filesystem Tools"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
+enabled = false
+capabilities = ["read_file", "write_file", "list_directory"]
+
+[servers.filesystem.tark]
+risk_level = "write"
+timeout_seconds = 10
+
+# ==============================================================================
+# EXAMPLE: PostgreSQL MCP Server
+# Install: npm install -g @modelcontextprotocol/server-postgres
+# ==============================================================================
 [servers.postgres]
 name = "PostgreSQL"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-postgres"]
-env = { DATABASE_URL = "postgresql://localhost/mydb" }
 enabled = false
+env = { DATABASE_URL = "postgresql://user:pass@localhost/mydb" }
 capabilities = ["query", "list_tables", "describe_table"]
 
-# Example: Custom MCP server
-[servers.custom]
-name = "My Custom Tools"
-command = "./my-mcp-server"
-args = ["--config", ".tark/mcp/custom-config.json"]
-enabled = false
-capabilities = ["custom_tool_1", "custom_tool_2"]
+[servers.postgres.tark]
+risk_level = "risky"
+timeout_seconds = 60
 
-# Example: Brave Search MCP server
-[servers.brave_search]
-name = "Brave Search"
-command = "npx"
-args = ["-y", "@anthropic-ai/mcp-server-brave-search"]
-env = { BRAVE_API_KEY = "" }
-enabled = false
-capabilities = ["web_search", "local_search"]
-
+# ==============================================================================
+# TEMPLATE: Custom MCP Server
+# Copy and modify this template for your own MCP servers
+# ==============================================================================
+# [servers.my_custom]
+# name = "My Custom Tools"
+# command = "/path/to/my-mcp-server"
+# args = ["--config", "config.json"]
+# enabled = false
+# env = { MY_API_KEY = "${MY_API_KEY}" }
+# capabilities = ["tool1", "tool2"]
+#
+# [servers.my_custom.tark]
+# risk_level = "risky"  # Options: readonly, write, risky, dangerous
+# auto_connect = false  # Set true to connect on startup
+# timeout_seconds = 30
+# namespace = "custom"  # Optional: prefix tool names (e.g., "custom:tool1")

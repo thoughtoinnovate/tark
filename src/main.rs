@@ -5,6 +5,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod agent;
 mod completion;
 mod config;
+mod core;
+mod debug_logger;
 mod diagnostics;
 mod llm;
 mod lsp;
@@ -13,7 +15,52 @@ mod services;
 mod storage;
 mod tools;
 mod transport;
-mod tui;
+// Old TUI removed - using tui_new architecture
+mod tui_new;
+mod ui_backend;
+
+// Re-export debug logging utilities for use within the binary
+use debug_logger::{DebugLogEntry, DebugLogger, DebugLoggerConfig, LogCategory};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+
+/// Global debug logger instance
+static TARK_DEBUG_LOGGER: OnceLock<DebugLogger> = OnceLock::new();
+
+/// Fast path check for whether debug logging is enabled.
+/// This atomic bool avoids the overhead of checking OnceLock on every log call.
+static DEBUG_LOGGING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Initialize the global debug logger
+pub fn init_debug_logger(config: DebugLoggerConfig) -> anyhow::Result<()> {
+    let logger = DebugLogger::new(config)?;
+    TARK_DEBUG_LOGGER
+        .set(logger)
+        .map_err(|_| anyhow::anyhow!("Debug logger already initialized"))?;
+    // Set the fast-path flag
+    DEBUG_LOGGING_ENABLED.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Fast check if debug logging is enabled (zero-cost when disabled)
+///
+/// Use this for early-bail in hot paths before constructing log entries.
+#[inline(always)]
+pub fn is_debug_logging_enabled() -> bool {
+    DEBUG_LOGGING_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Get the global debug logger (if initialized)
+pub fn debug_logger() -> Option<&'static DebugLogger> {
+    TARK_DEBUG_LOGGER.get()
+}
+
+/// Log a debug entry to the global logger (if enabled)
+pub fn debug_log(entry: DebugLogEntry) {
+    if let Some(logger) = debug_logger() {
+        logger.log(entry);
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "tark")]
@@ -77,6 +124,25 @@ enum Commands {
         model: Option<String>,
 
         /// Enable debug logging to tark-debug.log
+        #[arg(long)]
+        debug: bool,
+    },
+
+    /// NEW: Interactive TUI mode (TDD implementation)
+    Tui {
+        /// Working directory for file operations
+        #[arg(short, long)]
+        cwd: Option<String>,
+
+        /// LLM provider to use
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// Model to use
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Enable debug logging
         #[arg(long)]
         debug: bool,
     },
@@ -161,6 +227,10 @@ enum PluginCommands {
         /// Branch or tag (default: main)
         #[arg(short, long, default_value = "main")]
         branch: String,
+
+        /// Subdirectory path within the repository (for monorepos)
+        #[arg(short, long)]
+        path: Option<String>,
     },
 
     /// Uninstall a plugin
@@ -300,8 +370,8 @@ async fn main() -> Result<()> {
             PluginCommands::Info { plugin_id } => {
                 transport::plugin_cli::run_plugin_info(&plugin_id).await?;
             }
-            PluginCommands::Add { url, branch } => {
-                transport::plugin_cli::run_plugin_add(&url, &branch).await?;
+            PluginCommands::Add { url, branch, path } => {
+                transport::plugin_cli::run_plugin_add(&url, &branch, path.as_deref()).await?;
             }
             PluginCommands::Remove { plugin_id } => {
                 transport::plugin_cli::run_plugin_remove(&plugin_id).await?;
@@ -313,6 +383,19 @@ async fn main() -> Result<()> {
                 transport::plugin_cli::run_plugin_disable(&plugin_id).await?;
             }
         },
+        Commands::Tui {
+            cwd,
+            provider,
+            model,
+            debug,
+        } => {
+            let working_dir = cwd.unwrap_or_else(|| ".".to_string());
+            tracing::info!(
+                "Starting NEW TUI (TDD implementation), cwd: {}",
+                working_dir
+            );
+            transport::cli::run_tui_new(&working_dir, provider, model, debug).await?;
+        }
     }
 
     Ok(())

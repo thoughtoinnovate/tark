@@ -79,8 +79,7 @@ pub struct ApprovalGate {
 
 impl ApprovalGate {
     /// Create a new approval gate
-    pub fn new(tark_dir: PathBuf, interaction_tx: Option<InteractionSender>) -> Self {
-        let storage_path = tark_dir.join("approvals.json");
+    pub fn new(storage_path: PathBuf, interaction_tx: Option<InteractionSender>) -> Self {
         let (approvals, denials) = Self::load_persistent(&storage_path);
 
         Self {
@@ -92,6 +91,21 @@ impl ApprovalGate {
             persistent_approvals: approvals,
             persistent_denials: denials,
         }
+    }
+
+    /// Update storage path and reload persistent approvals
+    pub fn set_storage_path(&mut self, storage_path: PathBuf) {
+        self.storage_path = storage_path;
+        let (approvals, denials) = Self::load_persistent(&self.storage_path);
+        self.persistent_approvals = approvals;
+        self.persistent_denials = denials;
+        self.session_approvals.clear();
+        self.session_denials.clear();
+    }
+
+    #[cfg(test)]
+    pub fn storage_path(&self) -> &PathBuf {
+        &self.storage_path
     }
 
     /// Create an approval gate without persistence (for testing)
@@ -216,7 +230,7 @@ impl ApprovalGate {
     }
 
     /// Create an approval request with smart pattern suggestions
-    fn create_approval_request(
+    pub fn create_approval_request(
         &self,
         tool: &str,
         command: &str,
@@ -522,6 +536,13 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_path_assignment() {
+        let storage_path = std::path::PathBuf::from("/tmp/approvals.json");
+        let gate = ApprovalGate::new(storage_path.clone(), None);
+        assert_eq!(gate.storage_path(), &storage_path);
+    }
+
+    #[test]
     fn test_session_approvals() {
         let mut gate = ApprovalGate::new_memory_only(None);
 
@@ -567,12 +588,7 @@ mod tests {
     fn test_trust_level_cycle() {
         let mut gate = ApprovalGate::new_memory_only(None);
 
-        // Default is Balanced
-        assert_eq!(gate.trust_level, TrustLevel::Balanced);
-
-        // Cycle to Careful
-        let level = gate.cycle_trust_level();
-        assert_eq!(level, TrustLevel::Careful);
+        // Default is Careful
         assert_eq!(gate.trust_level, TrustLevel::Careful);
 
         // Cycle to Manual
@@ -580,10 +596,15 @@ mod tests {
         assert_eq!(level, TrustLevel::Manual);
         assert_eq!(gate.trust_level, TrustLevel::Manual);
 
-        // Cycle back to Balanced
+        // Cycle to Balanced
         let level = gate.cycle_trust_level();
         assert_eq!(level, TrustLevel::Balanced);
         assert_eq!(gate.trust_level, TrustLevel::Balanced);
+
+        // Cycle back to Careful
+        let level = gate.cycle_trust_level();
+        assert_eq!(level, TrustLevel::Careful);
+        assert_eq!(gate.trust_level, TrustLevel::Careful);
     }
 
     #[test]

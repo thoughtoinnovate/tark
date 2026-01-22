@@ -10,8 +10,16 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
+
+/// Generate a unique tool call ID for Ollama tool calls
+fn generate_tool_call_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("ollama_call_{}", id)
+}
 
 pub struct OllamaProvider {
     client: reqwest::Client,
@@ -27,6 +35,40 @@ pub struct OllamaModelInfo {
     pub size: u64,
     #[serde(default)]
     pub modified_at: String,
+}
+
+/// List available models from local Ollama instance (standalone function)
+///
+/// This function queries the local Ollama server for installed models.
+/// Returns an empty list if Ollama is not running or unreachable.
+pub async fn list_local_ollama_models() -> Result<Vec<OllamaModelInfo>> {
+    let base_url = env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/tags", base_url);
+
+    let response = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .context("Failed to connect to Ollama - is it running? Try: ollama serve")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        anyhow::bail!("Ollama API error ({})", status);
+    }
+
+    #[derive(Deserialize)]
+    struct TagsResponse {
+        models: Vec<OllamaModelInfo>,
+    }
+
+    let resp: TagsResponse = response
+        .json()
+        .await
+        .context("Failed to parse Ollama response")?;
+
+    Ok(resp.models)
 }
 
 impl OllamaProvider {
@@ -107,13 +149,29 @@ impl OllamaProvider {
                     Role::System => "system",
                     Role::User => "user",
                     Role::Assistant => "assistant",
-                    Role::Tool => "user", // Ollama doesn't have tool role, use user
+                    Role::Tool => "tool", // Native tool role for tool responses
                 };
 
                 OllamaMessage {
                     role: role.to_string(),
                     content: msg.content.as_text().unwrap_or("").to_string(),
+                    tool_calls: None,
                 }
+            })
+            .collect()
+    }
+
+    /// Convert ToolDefinition to native Ollama tool format
+    fn convert_tools(tools: &[ToolDefinition]) -> Vec<OllamaTool> {
+        tools
+            .iter()
+            .map(|t| OllamaTool {
+                type_field: "function".to_string(),
+                function: OllamaFunction {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: t.parameters.clone(),
+                },
             })
             .collect()
     }
@@ -203,66 +261,47 @@ impl LlmProvider for OllamaProvider {
     ) -> Result<LlmResponse> {
         let ollama_messages = self.convert_messages(messages);
 
-        // Note: Most Ollama models don't support tool calling natively
-        // We'll handle tools via prompting if needed
-        if let Some(tools) = tools {
-            if !tools.is_empty() {
-                // Add tool descriptions to system prompt
-                let tool_desc = tools
-                    .iter()
-                    .map(|t| format!("- {}: {}", t.name, t.description))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let mut modified_messages = ollama_messages.clone();
-
-                // Find or create system message
-                if let Some(sys_msg) = modified_messages.iter_mut().find(|m| m.role == "system") {
-                    sys_msg.content = format!(
-                        "{}\n\nYou have access to these tools:\n{}\n\nTo use a tool, respond with JSON: {{\"tool\": \"name\", \"args\": {{...}}}}",
-                        sys_msg.content, tool_desc
-                    );
-                } else {
-                    modified_messages.insert(0, OllamaMessage {
-                        role: "system".to_string(),
-                        content: format!(
-                            "You have access to these tools:\n{}\n\nTo use a tool, respond with JSON: {{\"tool\": \"name\", \"args\": {{...}}}}",
-                            tool_desc
-                        ),
-                    });
-                }
-
-                let request = OllamaRequest {
-                    model: self.model.clone(),
-                    messages: modified_messages,
-                    stream: false,
-                };
-
-                let response = self.send_request(request).await?;
-                let content = response.message.content;
-
-                // Try to parse tool call from response
-                if let Some(tool_call) = self.parse_tool_call(&content) {
-                    return Ok(LlmResponse::ToolCalls {
-                        calls: vec![tool_call],
-                        usage: None, // Ollama doesn't provide usage info
-                    });
-                }
-
-                return Ok(LlmResponse::Text {
-                    text: content,
-                    usage: None, // Ollama doesn't provide usage info
-                });
-            }
-        }
+        // Convert tools to native Ollama format
+        let ollama_tools = tools.filter(|t| !t.is_empty()).map(Self::convert_tools);
 
         let request = OllamaRequest {
             model: self.model.clone(),
             messages: ollama_messages,
             stream: false,
+            tools: ollama_tools,
         };
 
         let response = self.send_request(request).await?;
+
+        // Check if model returned tool calls (native tool calling)
+        if let Some(tool_calls) = response.message.tool_calls {
+            if !tool_calls.is_empty() {
+                let calls = tool_calls
+                    .into_iter()
+                    .map(|tc| ToolCall {
+                        id: generate_tool_call_id(),
+                        name: tc.function.name,
+                        arguments: tc.function.arguments,
+                        thought_signature: None,
+                    })
+                    .collect();
+
+                return Ok(LlmResponse::ToolCalls {
+                    calls,
+                    usage: None, // Ollama doesn't provide usage info in standard response
+                });
+            }
+        }
+
+        // Fallback: try to parse tool call from text (for models that output JSON)
+        let content = &response.message.content;
+        if let Some(tool_call) = self.parse_tool_call(content) {
+            return Ok(LlmResponse::ToolCalls {
+                calls: vec![tool_call],
+                usage: None,
+            });
+        }
+
         Ok(LlmResponse::Text {
             text: response.message.content,
             usage: None, // Ollama doesn't provide usage info
@@ -288,44 +327,15 @@ impl LlmProvider for OllamaProvider {
 
         let ollama_messages = self.convert_messages(messages);
 
-        // Handle tools via prompting (same as non-streaming)
-        let (messages_to_send, has_tools) = if let Some(tools) = tools {
-            if !tools.is_empty() {
-                let tool_desc = tools
-                    .iter()
-                    .map(|t| format!("- {}: {}", t.name, t.description))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let mut modified_messages = ollama_messages.clone();
-
-                if let Some(sys_msg) = modified_messages.iter_mut().find(|m| m.role == "system") {
-                    sys_msg.content = format!(
-                        "{}\n\nYou have access to these tools:\n{}\n\nTo use a tool, respond with JSON: {{\"tool\": \"name\", \"args\": {{...}}}}",
-                        sys_msg.content, tool_desc
-                    );
-                } else {
-                    modified_messages.insert(0, OllamaMessage {
-                        role: "system".to_string(),
-                        content: format!(
-                            "You have access to these tools:\n{}\n\nTo use a tool, respond with JSON: {{\"tool\": \"name\", \"args\": {{...}}}}",
-                            tool_desc
-                        ),
-                    });
-                }
-
-                (modified_messages, true)
-            } else {
-                (ollama_messages, false)
-            }
-        } else {
-            (ollama_messages, false)
-        };
+        // Convert tools to native Ollama format
+        let ollama_tools = tools.filter(|t| !t.is_empty()).map(Self::convert_tools);
+        let has_tools = ollama_tools.is_some();
 
         let request = OllamaRequest {
             model: self.model.clone(),
-            messages: messages_to_send,
+            messages: ollama_messages,
             stream: true, // Enable streaming
+            tools: ollama_tools,
         };
 
         let url = format!("{}/api/chat", self.base_url);
@@ -397,10 +407,46 @@ impl LlmProvider for OllamaProvider {
                 if let Ok(chunk) = serde_json::from_str::<OllamaStreamChunk>(&line) {
                     if chunk.done {
                         callback(StreamEvent::Done);
+
+                        // Check for tool calls in the final message
+                        if let Some(ref message) = chunk.message {
+                            if let Some(ref tool_calls) = message.tool_calls {
+                                if !tool_calls.is_empty() {
+                                    let calls = tool_calls
+                                        .iter()
+                                        .map(|tc| ToolCall {
+                                            id: generate_tool_call_id(),
+                                            name: tc.function.name.clone(),
+                                            arguments: tc.function.arguments.clone(),
+                                            thought_signature: None,
+                                        })
+                                        .collect();
+
+                                    return Ok(LlmResponse::ToolCalls { calls, usage: None });
+                                }
+                            }
+                        }
                         continue;
                     }
 
                     if let Some(message) = chunk.message {
+                        // Check for tool calls in streaming chunks
+                        if let Some(ref tool_calls) = message.tool_calls {
+                            if !tool_calls.is_empty() {
+                                let calls = tool_calls
+                                    .iter()
+                                    .map(|tc| ToolCall {
+                                        id: generate_tool_call_id(),
+                                        name: tc.function.name.clone(),
+                                        arguments: tc.function.arguments.clone(),
+                                        thought_signature: None,
+                                    })
+                                    .collect();
+
+                                return Ok(LlmResponse::ToolCalls { calls, usage: None });
+                            }
+                        }
+
                         if !message.content.is_empty() {
                             let event = StreamEvent::TextDelta(message.content);
                             builder.process(&event);
@@ -411,7 +457,7 @@ impl LlmProvider for OllamaProvider {
             }
         }
 
-        // Try to parse tool call from accumulated text (if tools were provided)
+        // Fallback: try to parse tool call from accumulated text
         let final_text = builder.text.clone();
         if has_tools {
             if let Some(tool_call) = self.parse_tool_call(&final_text) {
@@ -468,6 +514,7 @@ impl LlmProvider for OllamaProvider {
                 role: "system".to_string(),
                 content: "You are a helpful code assistant. Explain code clearly and concisely."
                     .to_string(),
+                tool_calls: None,
             },
             OllamaMessage {
                 role: "user".to_string(),
@@ -475,6 +522,7 @@ impl LlmProvider for OllamaProvider {
                     "Explain this code:\n\n```\n{}\n```\n\nContext:\n{}",
                     code, context
                 ),
+                tool_calls: None,
             },
         ];
 
@@ -482,6 +530,7 @@ impl LlmProvider for OllamaProvider {
             model: self.model.clone(),
             messages,
             stream: false,
+            tools: None,
         };
 
         let response = self.send_request(request).await?;
@@ -499,10 +548,12 @@ impl LlmProvider for OllamaProvider {
                 content: r#"You are a code refactoring assistant. Suggest improvements and return them as a JSON array:
 [{"title": "Brief title", "description": "Why this helps", "new_code": "The refactored code"}]
 Only return valid JSON, no other text."#.to_string(),
+                tool_calls: None,
             },
             OllamaMessage {
                 role: "user".to_string(),
                 content: format!("Suggest refactorings for:\n\n```\n{}\n```\n\nContext:\n{}", code, context),
+                tool_calls: None,
             },
         ];
 
@@ -510,6 +561,7 @@ Only return valid JSON, no other text."#.to_string(),
             model: self.model.clone(),
             messages,
             stream: false,
+            tools: None,
         };
 
         let response = self.send_request(request).await?;
@@ -542,10 +594,12 @@ Only return valid JSON, no other text."#.to_string(),
                 content: r#"You are a code review assistant. Find potential issues and return them as a JSON array:
 [{"severity": "error|warning|info|hint", "message": "Description", "line": 1, "end_line": null, "column": null, "end_column": null}]
 Line numbers are 1-indexed. Only return valid JSON, no other text."#.to_string(),
+                tool_calls: None,
             },
             OllamaMessage {
                 role: "user".to_string(),
                 content: format!("Review this {} code:\n\n```{}\n{}\n```", language, language, code),
+                tool_calls: None,
             },
         ];
 
@@ -553,6 +607,7 @@ Line numbers are 1-indexed. Only return valid JSON, no other text."#.to_string()
             model: self.model.clone(),
             messages,
             stream: false,
+            tools: None,
         };
 
         let response = self.send_request(request).await?;
@@ -621,17 +676,49 @@ struct OllamaRequest {
     model: String,
     messages: Vec<OllamaMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OllamaTool>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OllamaMessage {
     role: String,
+    #[serde(default)]
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OllamaToolCall>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OllamaResponse {
     message: OllamaMessage,
+}
+
+// Native tool calling types
+#[derive(Debug, Clone, Serialize)]
+struct OllamaTool {
+    #[serde(rename = "type")]
+    type_field: String,
+    function: OllamaFunction,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OllamaFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OllamaToolCall {
+    function: OllamaToolCallFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OllamaToolCallFunction {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]

@@ -198,33 +198,80 @@ cd /my/project && tark chat
 
 Press `<leader>tc` (or your configured keymap) to toggle the chat window.
 
-### Chat Commands
+### Slash Commands
 
 | Command | Description |
 |---------|-------------|
-| `/help` | Show all commands |
+| `/help` | Show all available commands |
 | `/model` | Open provider/model picker |
+| `/provider` | Open provider picker |
+| `/theme` | Open theme picker with live preview |
 | `/ask` | Switch to Ask mode (read-only) |
 | `/plan` | Switch to Plan mode (propose changes) |
 | `/build` | Switch to Build mode (full access) |
-| `/approval` | Open approval mode selector (or `/approval risky\|reads\|zero-trust`) |
+| `/trust` | Open trust level selector |
 | `/clear` | Clear chat history |
-| `/attach <file>` | Attach a file |
-| `/sessions` | List and switch sessions |
+| `/compact` | Manually compact context window |
+| `/attach <file>` | Attach a file to context |
+| `/file` | Open file picker |
+| `/sessions` | List all sessions |
+| `/session <id>` | Switch to specific session |
 | `/new` | Start a new session |
-| `/usage` | Show usage stats |
+| `/export [path]` | Export session to JSON |
+| `/import <path>` | Import session from JSON |
+| `/tools` | Show available tools |
+| `/plugins` | Show installed plugins |
+| `/usage` | Show usage statistics |
 | `/exit` | Close chat |
 
 ### Keyboard Shortcuts
 
+#### Global
+
 | Key | Description |
 |-----|-------------|
-| `Ctrl-v` | Paste image from clipboard |
-| `@filepath` | Inline file attachment |
-| `j/k` | Vim-style navigation in messages |
-| `Tab` | Cycle modes (Ask → Plan → Build) |
-| `Ctrl+Alt+A` | Cycle approval modes |
-| `Ctrl-c` | Cancel current request |
+| `Ctrl+C` | Cancel LLM request / Quit (when idle) |
+| `Ctrl+Q` | Quit application |
+| `Ctrl+?` | Toggle help modal |
+| `Tab` | Cycle focus (Input → Messages → Sidebar) |
+| `Shift+Tab` | Cycle agent mode (Build → Plan → Ask) |
+| `Ctrl+B` | Toggle sidebar visibility |
+| `Ctrl+T` | Toggle thinking blocks display |
+| `Ctrl+M` | Cycle build mode (Manual → Balanced → Careful) |
+| `Ctrl+Shift+B` | Open trust level selector (Build mode only) |
+| `Esc` | Close modal / Cancel operation |
+| `Esc Esc` | Cancel ongoing agent operation (double-tap) |
+
+#### Input Area
+
+| Key | Description |
+|-----|-------------|
+| `Enter` | Send message |
+| `Shift+Enter` | Insert newline |
+| `Ctrl+Left/Right` | Word navigation |
+| `Home/End` | Line start/end |
+| `Up/Down` | Input history navigation |
+| `@` | Open file picker for attachments |
+
+#### Message Area (Vim-style)
+
+| Key | Description |
+|-----|-------------|
+| `j/k` | Scroll down/up |
+| `y` | Yank (copy) selected message |
+| `Enter` | Toggle message collapse |
+
+#### Sidebar Navigation
+
+| Key | Description |
+|-----|-------------|
+| `j/k` | Navigate items |
+| `Enter` | Expand/collapse panel or select item |
+| `h/l` | Exit/enter panel |
+| `d` | Delete context file (in Context panel) |
+| `e` | Edit task (in Tasks panel) |
+| `D` | Delete task (in Tasks panel) |
+| `J/K` | Move task up/down (in Tasks panel) |
 
 ### Agent Modes
 
@@ -234,22 +281,31 @@ Press `<leader>tc` (or your configured keymap) to toggle the chat window.
 | **Plan** | Read-only + propose | Propose changes as diffs without applying |
 | **Build** | Full access | Execute changes, run commands |
 
-### Approval Modes
+### Trust Levels (Build Mode)
 
-Risky operations (shell, delete) can require approval. Use `/approval` command or `Ctrl+Alt+A` to change mode:
+Control how risky operations are approved. Use `/trust` command or `Ctrl+Shift+B` in Build mode:
 
-| Mode | Icon | Prompts For |
-|------|------|-------------|
-| **Ask Risky** | 🟡 | Risky + Dangerous operations (default) |
-| **Only Reads** | 🔵 | Only reads auto-approved, all writes need approval |
-| **Zero Trust** | 🔴 | Everything including reads needs approval |
+| Trust Level | Description |
+|-------------|-------------|
+| **Manual** | All tool executions require explicit approval |
+| **Balanced** | Auto-approve reads; prompt for writes and risky ops (default) |
+| **Careful** | Auto-approve most ops; only prompt for dangerous operations |
 
-When prompted, you can:
-- `y` - Approve once
-- `s` - Approve for this session
-- `p` - Approve always (saved to `.tark/approvals.json`)
-- `n` - Deny once
-- `N` - Deny always
+When prompted for approval, you can:
+- `Y` - Approve once
+- `S` - Approve for this session (pattern-matched)
+- `A` - Always approve (persisted to `.tark/approvals.json`)
+- `N` - Deny once
+- `D` - Always deny (persisted)
+
+### Task Queue
+
+When you send multiple messages while the agent is working, they're queued and processed in order.
+
+**Managing queued tasks (in Sidebar → Tasks panel):**
+- `e` - Edit a queued task before it runs
+- `D` - Delete a queued task
+- `J/K` - Reorder tasks in the queue
 
 ## CLI Usage
 
@@ -279,7 +335,12 @@ tark --version
 
 ```toml
 [llm]
-default_provider = "openai"
+# Default provider (tark_sim is built-in for testing, no API key required)
+default_provider = "tark_sim"
+
+[llm.tark_sim]
+model = "tark_llm"
+max_tokens = 8192
 
 [llm.openai]
 model = "gpt-4o"
@@ -352,39 +413,63 @@ vim.o.statusline = "%f %m %= " .. require('tark.statusline').status_with_hl()
 
 ## Docs
 
+### Setup & Configuration
+- [TUI Setup Guide](docs/TUI_SETUP.md) - Terminal requirements, provider configuration
 - [Provider Setup (Copilot/Gemini/OpenRouter)](docs/NEW_PROVIDERS.md)
-- [Neovim Plugin Tests](tests/README.md)
-- [Contributing Guide](CONTRIBUTING.md)
+
+### Customization
+- [Theme System](docs/THEMES.md) - Full theme documentation
+- [Theme Quick Start](docs/THEME_QUICKSTART.md) - Quick guide to theme switching
+
+### Architecture
+- [BFF Architecture](docs/BFF_ARCHITECTURE.md) - Backend-for-Frontend design
 - [Architecture & Agent Guidelines](AGENTS.md)
 - [External Agent Integration (RFC)](docs/EXTERNAL_AGENTS_ARCHITECTURE.md)
 
+### Development
+- [TUI Modal Design Guide](docs/TUI_MODAL_DESIGN_GUIDE.md) - Design patterns for modals
+- [Contributing Guide](CONTRIBUTING.md)
+- [Neovim Plugin Tests](tests/README.md)
+
 ## Architecture
 
+The TUI uses a Backend-for-Frontend (BFF) architecture separating UI from business logic:
+
 ```
-┌─────────────────────────────────────────┐
-│              Neovim                      │
-│  ┌─────────────────────────────────┐    │
-│  │         Terminal Window          │    │
-│  │    (tark chat --socket ...)     │    │
-│  └──────────────┬──────────────────┘    │
-└─────────────────┼────────────────────────┘
-                  │ Unix Socket
-                  ▼
-       ┌───────────────────────┐
-       │      tark TUI         │
-       │   (Rust + ratatui)    │
-       ├───────────────────────┤
-       │  ┌─────────────────┐  │
-       │  │  Agent + Tools  │  │
-       │  └────────┬────────┘  │
-       └───────────┼───────────┘
-                   │
-       ┌───────────┴───────────┐
-       │     LLM Providers      │
-       │ OpenAI│Claude│Gemini│  │
-       │ Copilot│Ollama         │
-       └───────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    Presentation Layer                    │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │              TuiRenderer (ratatui)                │  │
+│  │   • Widgets: Header, Messages, Input, Sidebar     │  │
+│  │   • Modals: Provider, Model, Theme, Help, etc.    │  │
+│  └───────────────────────┬───────────────────────────┘  │
+└──────────────────────────┼──────────────────────────────┘
+                           │ Commands / Events
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│                      BFF Layer                           │
+│  ┌─────────────────┐  ┌─────────────────┐              │
+│  │  TuiController  │─▶│   AppService    │              │
+│  └─────────────────┘  └────────┬────────┘              │
+│                                │                        │
+│  ┌─────────────────────────────┼─────────────────────┐ │
+│  │              SharedState (Arc<RwLock>)            │ │
+│  │   • messages, streaming, provider, model          │ │
+│  │   • agent_mode, build_mode, trust_level           │ │
+│  │   • sidebar_data, context_files, tasks            │ │
+│  └───────────────────────────────────────────────────┘ │
+└────────────────────────────┬────────────────────────────┘
+                             │
+┌────────────────────────────┼────────────────────────────┐
+│                     Domain Layer                         │
+│  ┌──────────────┐  ┌─────────────┐  ┌────────────────┐ │
+│  │  ChatAgent   │  │   Tools     │  │  LLM Provider  │ │
+│  │  + Context   │  │  Registry   │  │   (multiple)   │ │
+│  └──────────────┘  └─────────────┘  └────────────────┘ │
+└─────────────────────────────────────────────────────────┘
 ```
+
+See [BFF Architecture](docs/BFF_ARCHITECTURE.md) for details.
 
 ## Plugins
 

@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Approval Modal Test</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            background: #1e1e2e; 
+            color: #cdd6f4; 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            padding: 40px;
+        }
+        .approval-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: rgba(249, 226, 175, 0.05);
+            border: 1px solid rgba(249, 226, 175, 0.2);
+            border-radius: 8px;
+            padding: 20px;
+        }
+        .approval-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .icon {
+            width: 24px;
+            height: 24px;
+            background: rgba(249, 226, 175, 0.15);
+            border: 1px solid rgba(249, 226, 175, 0.3);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #f9e2af;
+            font-size: 14px;
+        }
+        .risk-badge {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #f87171;
+        }
+        .command-box {
+            background: #1e1e2e;
+            border: 1px solid rgba(249, 226, 175, 0.3);
+            border-radius: 6px;
+            padding: 12px;
+            margin: 16px 0;
+        }
+        .command-box code {
+            color: #f9e2af;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+        }
+        .button {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            margin: 8px 0;
+            background: rgba(49, 50, 68, 0.5);
+            border: 1px solid #313244;
+            border-radius: 6px;
+            color: rgba(205, 214, 244, 0.8);
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: left;
+        }
+        .button:hover {
+            background: rgba(249, 226, 175, 0.1);
+            border-color: rgba(249, 226, 175, 0.3);
+        }
+        .button-icon {
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+        .button-content {
+            flex: 1;
+        }
+        .button-title {
+            font-size: 14px;
+            font-weight: 500;
+            color: #cdd6f4;
+            margin-bottom: 4px;
+        }
+        .button-desc {
+            font-size: 12px;
+            color: rgba(205, 214, 244, 0.5);
+        }
+        h1 {
+            color: #f9e2af;
+            margin-bottom: 32px;
+            font-size: 24px;
+        }
+        .section-title {
+            font-size: 12px;
+            color: rgba(205, 214, 244, 0.7);
+            margin: 16px 0 8px 0;
+        }
+        .desc {
+            font-size: 12px;
+            color: rgba(205, 214, 244, 0.6);
+            margin: 12px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>🛡️ Approval Modal Design</h1>
+    
+    <div class="approval-container">
+        <div class="approval-header">
+            <div class="icon">🛡️</div>
+            <div>
+                <div style="font-size: 11px; color: rgba(249, 226, 175, 0.8); font-weight: 500;">Approval Required</div>
+            </div>
+        </div>
+
+        <div class="risk-badge">HIGH RISK</div>
+
+        <div class="section-title">Command:</div>
+        <div class="command-box">
+            <code>rm -rf node_modules && npm install --force</code>
+        </div>
+
+        <div class="desc">
+            This command will delete the node_modules directory and reinstall dependencies with --force flag.
+        </div>
+
+        <div class="section-title">Choose an action:</div>
+
+        <button class="button" onclick="alert('Run Once selected')">
+            <div class="button-icon" style="color: #f9e2af;">▶</div>
+            <div class="button-content">
+                <div class="button-title">Run Once</div>
+                <div class="button-desc">Execute this command one time only</div>
+            </div>
+        </button>
+
+        <button class="button" onclick="alert('Always Allow selected')">
+            <div class="button-icon" style="color: #a6e3a1;">🛡️</div>
+            <div class="button-content">
+                <div class="button-title">Always Allow</div>
+                <div class="button-desc">Add exact command to approval list</div>
+            </div>
+        </button>
+
+        <button class="button" onclick="alert('Pattern Match selected')">
+            <div class="button-icon" style="color: #89b4fa;">✱</div>
+            <div class="button-content">
+                <div class="button-title">Pattern Match</div>
+                <div class="button-desc">Allow similar commands using wildcards</div>
+            </div>
+        </button>
+
+        <button class="button" onclick="alert('Skip selected')">
+            <div class="button-icon" style="color: #f38ba8;">🚫</div>
+            <div class="button-content">
+                <div class="button-title">Skip</div>
+                <div class="button-desc">Don't run this command</div>
+            </div>
+        </button>
+    </div>
+
+    <div style="margin-top: 40px; text-align: center; color: rgba(205, 214, 244, 0.5); font-size: 14px;">
+        <p>This is what the approval modal should look like in the React app</p>
+        <p style="margin-top: 8px;">Location: <code style="color: #f9e2af;">http://localhost:5173/</code> or <code style="color: #f9e2af;">http://172.19.0.2:5173/</code></p>
+    </div>
+</body>
+</html>

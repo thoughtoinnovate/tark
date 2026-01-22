@@ -1,0 +1,38 @@
+# Custom Theme Example
+# Place this in ~/.config/tark/themes/custom.toml
+
+[theme]
+name = "My Custom Theme"
+
+[theme.colors]
+# Background colors (hex or rgb)
+bg_main = "#1e1e2e"
+bg_dark = "#181825"
+bg_sidebar = "#1e1e2e"
+bg_code = "#313244"
+
+# Border colors
+border = "#313244"
+border_focused = "#89b4fa"
+
+# Text colors
+text_primary = "#cdd6f4"
+text_secondary = "#a6adc8"
+text_muted = "#6c7086"
+
+# Accent colors
+cyan = "#94e2d5"
+blue = "#89b4fa"
+green = "#a6e3a1"
+yellow = "#f9e2af"
+red = "#f38ba8"
+purple = "#cba6f7"
+
+# Message-specific colors
+system_fg = "#94e2d5"
+user_bubble = "#89b4fa"
+agent_bubble = "#a6e3a1"
+tool_fg = "#a6adc8"
+thinking_fg = "#f9e2af"
+question_fg = "#89dceb"
+command_fg = "#a6e3a1"

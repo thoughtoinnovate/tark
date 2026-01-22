@@ -26,7 +26,7 @@ jobs:
         with:
           prefix-key: ${{ env.CACHE_VERSION }}
       
-      - name: Run tests
+      - name: Run tests (BDD/Cucumber tests excluded via feature flag)
         run: cargo test --all-features
 
   # Build only on Linux for regular CI (fast feedback)
@@ -107,11 +107,10 @@ jobs:
             echo "Error: Neovim 0.8.0+ required, found $VERSION"
             exit 1
           fi
-          echo "✓ Neovim $VERSION meets minimum requirement (0.8.0+)"
+          echo "Neovim $VERSION meets minimum requirement (0.8.0+)"
       
       - name: Install plenary.nvim
         run: |
-          # Ensure Neovim data directory exists
           mkdir -p "$HOME/.local/share/nvim"
           PLENARY_DIR="$HOME/.local/share/nvim/plenary.nvim"
           if [ ! -d "$PLENARY_DIR" ]; then
@@ -126,3 +125,94 @@ jobs:
           nvim --headless -u tests/minimal_init.lua \
             -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
 
+  # E2E Visual Tests
+  e2e-smoke:
+    name: E2E Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      
+      - name: Install E2E dependencies
+        run: |
+          sudo apt-get update
+          # Core tools + fonts for Unicode icons and emoji support in recordings
+          sudo apt-get install -y asciinema expect imagemagick bc \
+            fonts-noto-color-emoji fonts-symbola fontconfig
+          fc-cache -f
+          cargo install --git https://github.com/asciinema/agg || cargo install agg || true
+      
+      - name: Build with test-sim
+        run: cargo build --release --features test-sim
+      
+      - name: Run smoke tests (P0)
+        run: ./tests/visual/e2e_runner.sh --tier p0
+        continue-on-error: true
+      
+      - name: Upload recordings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-smoke-recordings
+          path: |
+            tests/visual/chat/recordings/*.gif
+            tests/visual/chat/recordings/*.cast
+            tests/visual/chat/current/*.png
+            tests/visual/logs/*.log
+          retention-days: 7
+
+  # Full E2E suite on PRs
+  e2e-full:
+    name: E2E Full Suite
+    runs-on: ubuntu-latest
+    needs: [e2e-smoke]
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      
+      - name: Install E2E dependencies
+        run: |
+          sudo apt-get update
+          # Core tools + fonts for Unicode icons and emoji support in recordings
+          sudo apt-get install -y asciinema expect imagemagick bc \
+            fonts-noto-color-emoji fonts-symbola fontconfig
+          fc-cache -f
+          cargo install --git https://github.com/asciinema/agg || cargo install agg || true
+      
+      - name: Build with test-sim
+        run: cargo build --release --features test-sim
+      
+      - name: Run full E2E suite (P1)
+        run: ./tests/visual/e2e_runner.sh --tier p1
+      
+      - name: Verify snapshots
+        run: ./tests/visual/e2e_runner.sh --verify
+        continue-on-error: true
+      
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-full-artifacts
+          path: |
+            tests/visual/chat/recordings/
+            tests/visual/chat/current/
+            tests/visual/chat/diffs/
+            tests/visual/logs/
+          retention-days: 7

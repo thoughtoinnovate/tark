@@ -337,8 +337,15 @@ impl OpenAiProvider {
                         for part in parts {
                             match part {
                                 ContentPart::Text { text } => {
-                                    content_parts
-                                        .push(ResponsesContentPart::Text { text: text.clone() });
+                                    if role == "assistant" {
+                                        content_parts.push(ResponsesContentPart::OutputText {
+                                            text: text.clone(),
+                                        });
+                                    } else {
+                                        content_parts.push(ResponsesContentPart::Text {
+                                            text: text.clone(),
+                                        });
+                                    }
                                 }
                                 ContentPart::ToolUse {
                                     id, name, input, ..
@@ -346,12 +353,16 @@ impl OpenAiProvider {
                                     // The Responses API doesn't accept 'function_call' as an input type
                                     // Serialize tool calls as text so the model can see what it did
                                     let args_str = serde_json::to_string(input).unwrap_or_default();
-                                    content_parts.push(ResponsesContentPart::Text {
-                                        text: format!(
-                                            "[Previous tool call: {} (id={}) with args: {}]",
-                                            name, id, args_str
-                                        ),
-                                    });
+                                    let text = format!(
+                                        "[Previous tool call: {} (id={}) with args: {}]",
+                                        name, id, args_str
+                                    );
+                                    if role == "assistant" {
+                                        content_parts
+                                            .push(ResponsesContentPart::OutputText { text });
+                                    } else {
+                                        content_parts.push(ResponsesContentPart::Text { text });
+                                    }
                                 }
                                 ContentPart::ToolResult {
                                     tool_use_id: _,
@@ -359,9 +370,15 @@ impl OpenAiProvider {
                                 } => {
                                     // Tool results in Parts are converted to plain text
                                     // The Responses API doesn't support special function result types
-                                    content_parts.push(ResponsesContentPart::Text {
-                                        text: content.clone(),
-                                    });
+                                    if role == "assistant" {
+                                        content_parts.push(ResponsesContentPart::OutputText {
+                                            text: content.clone(),
+                                        });
+                                    } else {
+                                        content_parts.push(ResponsesContentPart::Text {
+                                            text: content.clone(),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -1614,6 +1631,8 @@ enum ResponsesContent {
 enum ResponsesContentPart {
     #[serde(rename = "input_text")]
     Text { text: String },
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
     #[serde(rename = "function_call")]
     FunctionCall {
         id: String,

@@ -356,10 +356,19 @@ impl TarkStorage {
         // Create plans subdirectory
         std::fs::create_dir_all(session_dir.join("plans"))?;
 
+        // Create conversations subdirectory
+        let conversations_dir = session_dir.join("conversations");
+        std::fs::create_dir_all(&conversations_dir)?;
+
         // Save session.json in the directory
         let path = session_dir.join("session.json");
         let content = serde_json::to_string_pretty(session)?;
         std::fs::write(&path, content)?;
+
+        // Save conversation messages in session conversations directory
+        let conversations_path = conversations_dir.join("conversation.json");
+        let messages_content = serde_json::to_string_pretty(&session.messages)?;
+        std::fs::write(&conversations_path, messages_content)?;
 
         // Update current session pointer
         std::fs::write(self.current_session_file(), &session.id)?;
@@ -373,7 +382,24 @@ impl TarkStorage {
         let dir_path = self.session_dir(id).join("session.json");
         if dir_path.exists() {
             let content = std::fs::read_to_string(&dir_path)?;
-            return serde_json::from_str(&content).context("Failed to parse session");
+            let mut session: ChatSession =
+                serde_json::from_str(&content).context("Failed to parse session")?;
+
+            let conversations_path = self
+                .session_dir(id)
+                .join("conversations")
+                .join("conversation.json");
+            if conversations_path.exists() {
+                if let Ok(conversations_content) = std::fs::read_to_string(&conversations_path) {
+                    if let Ok(messages) =
+                        serde_json::from_str::<Vec<SessionMessage>>(&conversations_content)
+                    {
+                        session.messages = messages;
+                    }
+                }
+            }
+
+            return Ok(session);
         }
 
         // Fall back to flat file (for backwards compatibility)
@@ -485,6 +511,68 @@ impl TarkStorage {
         }
 
         Ok(())
+    }
+
+    // ========== Compaction Records (Session-Scoped) ==========
+
+    /// Get compactions directory for a session
+    pub fn compactions_dir(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("compactions")
+    }
+
+    /// Save a compaction record
+    pub fn save_compaction(&self, session_id: &str, record: &CompactionRecord) -> Result<()> {
+        let dir = self.compactions_dir(session_id);
+        std::fs::create_dir_all(&dir)?;
+
+        let path = dir.join(format!("{}.json", record.id));
+        let content = serde_json::to_string_pretty(record)?;
+        std::fs::write(path, content)?;
+
+        tracing::debug!(
+            "Saved compaction record {} for session {}",
+            record.id,
+            session_id
+        );
+        Ok(())
+    }
+
+    /// Load a compaction record
+    pub fn load_compaction(
+        &self,
+        session_id: &str,
+        compaction_id: &str,
+    ) -> Result<CompactionRecord> {
+        let path = self
+            .compactions_dir(session_id)
+            .join(format!("{}.json", compaction_id));
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str(&content).context("Failed to parse compaction record")
+    }
+
+    /// List all compaction records for a session (most recent first)
+    pub fn list_compactions(&self, session_id: &str) -> Result<Vec<CompactionRecord>> {
+        let dir = self.compactions_dir(session_id);
+        let mut records = Vec::new();
+
+        if dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "json").unwrap_or(false) {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            if let Ok(record) = serde_json::from_str::<CompactionRecord>(&content) {
+                                records.push(record);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by timestamp (most recent first)
+        records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(records)
     }
 
     // ========== Execution Plans (Session-Scoped) ==========
@@ -912,6 +1000,35 @@ impl TarkStorage {
 
     // ========== Plugins (merged: global + project) ==========
 
+    /// Load disabled plugins list from ~/.tark/plugins.json
+    pub fn load_disabled_plugins(&self) -> Result<Vec<String>> {
+        let path = self.global.root().join("plugins.json");
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+
+        let content = std::fs::read_to_string(&path)?;
+        let data: serde_json::Value = serde_json::from_str(&content)?;
+
+        Ok(data
+            .get("disabled")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Save disabled plugins list
+    pub fn save_disabled_plugins(&self, disabled: &[String]) -> Result<()> {
+        let path = self.global.root().join("plugins.json");
+        let data = serde_json::json!({ "disabled": disabled });
+        std::fs::write(&path, serde_json::to_string_pretty(&data)?)?;
+        Ok(())
+    }
+
     /// List all plugins (global + project)
     pub fn list_plugins(&self) -> Result<Vec<PluginInfo>> {
         let mut plugins_map: HashMap<String, PluginInfo> = HashMap::new();
@@ -1103,8 +1220,8 @@ pub struct WorkspaceConfig {
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
-            provider: "openai".to_string(),
-            model: None,
+            provider: "tark_sim".to_string(),
+            model: Some("tark_llm".to_string()),
             default_mode: "build".to_string(),
             verbose: false,
             custom_instructions: None,
@@ -1124,7 +1241,7 @@ impl WorkspaceConfig {
     /// Merge another config into this one (other takes precedence for set values)
     pub fn merge(&mut self, other: WorkspaceConfig) {
         // Only override if explicitly set (non-default)
-        if other.provider != "openai" {
+        if other.provider != "tark_sim" {
             self.provider = other.provider;
         }
         if other.model.is_some() {
@@ -1188,6 +1305,30 @@ pub struct McpServer {
     /// Server capabilities/tools it provides
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Tark-specific configuration
+    #[serde(default)]
+    pub tark: Option<McpServerTarkConfig>,
+}
+
+/// Tark-specific MCP server configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpServerTarkConfig {
+    /// Override risk level for all tools from this server
+    #[serde(default)]
+    pub risk_level: Option<String>,
+    /// Auto-connect on startup
+    #[serde(default)]
+    pub auto_connect: bool,
+    /// Timeout in seconds for tool calls
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u32,
+    /// Namespace prefix for tool names (e.g., "gh" -> "gh:create_issue")
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+fn default_timeout() -> u32 {
+    30
 }
 
 fn default_true() -> bool {
@@ -1808,6 +1949,44 @@ impl From<&ChatSession> for SessionMeta {
             message_count: session.messages.len(),
             is_current: false,    // Will be set by caller
             agent_running: false, // Will be set by caller
+        }
+    }
+}
+
+// ========== Compaction Records ==========
+
+/// Record of a context compaction operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionRecord {
+    /// Unique compaction ID
+    pub id: String,
+    /// When compaction occurred
+    pub timestamp: DateTime<Utc>,
+    /// Token count before compaction
+    pub old_tokens: usize,
+    /// Token count after compaction
+    pub new_tokens: usize,
+    /// Number of messages removed
+    pub messages_removed: usize,
+    /// Summary generated by compaction (if LLM summarization was used)
+    pub summary: Option<String>,
+}
+
+impl CompactionRecord {
+    /// Create a new compaction record
+    pub fn new(
+        old_tokens: usize,
+        new_tokens: usize,
+        messages_removed: usize,
+        summary: Option<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            old_tokens,
+            new_tokens,
+            messages_removed,
+            summary,
         }
     }
 }
@@ -3126,6 +3305,29 @@ mod tests {
         // But tokens should only reflect current context
         assert_eq!(session.input_tokens, 75);
         assert_eq!(session.output_tokens, 150);
+    }
+
+    #[test]
+    fn test_session_conversations_persisted_in_session_dir() {
+        let temp = TempDir::new().unwrap();
+        let storage = TarkStorage::new(temp.path()).unwrap();
+
+        let mut session = ChatSession::new();
+        session.add_message("user", "Hello");
+        session.add_message("assistant", "Hi");
+
+        storage.save_session(&session).unwrap();
+
+        let conversations_path = storage
+            .session_dir(&session.id)
+            .join("conversations")
+            .join("conversation.json");
+        assert!(conversations_path.exists());
+
+        let loaded = storage.load_session(&session.id).unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[0].content, "Hello");
+        assert_eq!(loaded.messages[1].content, "Hi");
     }
 
     #[test]

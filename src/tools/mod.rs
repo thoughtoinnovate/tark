@@ -10,6 +10,7 @@
 
 // Tool category modules
 pub mod approval;
+pub mod builtin;
 pub mod dangerous;
 pub mod plan;
 pub mod readonly;
@@ -41,63 +42,37 @@ pub use plan::{
     GetPlanStatusTool, MarkTaskDoneTool, PreviewPlanTool, SavePlanTool, UpdatePlanTool,
 };
 pub use questionnaire::{
-    interaction_channel, ApprovalChoice, ApprovalPattern, ApprovalRequest, ApprovalResponse,
-    AskUserTool, InteractionReceiver, InteractionRequest, InteractionSender, SuggestedPattern,
+    interaction_channel, ApprovalPattern, AskUserTool, InteractionReceiver, InteractionSender,
+};
+#[allow(unused_imports)]
+pub use questionnaire::{
+    ApprovalChoice, ApprovalRequest, ApprovalResponse, InteractionRequest, SuggestedPattern,
 };
 pub use readonly::{FilePreviewTool, RipgrepTool, SafeShellTool};
 pub use risk::{MatchType, RiskLevel, TrustLevel};
 pub use shell::ShellTool;
 
+// Built-in extra tools
+#[allow(unused_imports)]
+pub use builtin::TodoItem;
+pub use builtin::{
+    MemoryDeleteTool, MemoryListTool, MemoryQueryTool, MemoryStoreTool, TarkMemory, ThinkTool,
+    ThinkingTracker, TodoTool, TodoTracker,
+};
+
 use crate::llm::ToolDefinition;
 use crate::services::PlanService;
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-/// Agent mode determines which tools are available
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum AgentMode {
-    /// Ask mode: read-only tools for exploring and answering questions
-    Ask,
-    /// Plan mode: read-only tools + propose_change for planning
-    Plan,
-    /// Build mode: all tools for executing changes
-    #[default]
-    Build,
-}
-
-impl AgentMode {
-    /// Get display label for this mode
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Ask => "Ask",
-            Self::Plan => "Plan",
-            Self::Build => "Build",
-        }
-    }
-
-    /// Get icon for this mode
-    pub fn icon(&self) -> &'static str {
-        match self {
-            Self::Ask => "❓",
-            Self::Plan => "📋",
-            Self::Build => "🔨",
-        }
-    }
-
-    /// Get description for this mode
-    pub fn description(&self) -> &'static str {
-        match self {
-            Self::Ask => "Read-only exploration and Q&A",
-            Self::Plan => "Read + propose changes (no execution)",
-            Self::Build => "Full access to read, write, and execute",
-        }
-    }
-}
+// Re-export canonical AgentMode from core::types
+pub use crate::core::types::AgentMode;
 
 /// Result of executing a tool
 #[derive(Debug, Clone)]
@@ -122,6 +97,18 @@ impl ToolResult {
     }
 }
 
+/// Tool category for UI organization
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolCategory {
+    /// Core tools: file_read, grep, shell, etc.
+    #[default]
+    Core,
+    /// Built-in extra tools: think, memory_*
+    Builtin,
+    /// External MCP server tools
+    External,
+}
+
 /// Trait for agent tools
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -140,6 +127,11 @@ pub trait Tool: Send + Sync {
     /// Get the risk level for this tool (default: ReadOnly)
     fn risk_level(&self) -> RiskLevel {
         RiskLevel::ReadOnly
+    }
+
+    /// Get the category for this tool (default: Core)
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Core
     }
 
     /// Get the command string for approval (used for pattern matching)
@@ -205,7 +197,15 @@ impl ToolRegistry {
         shell_enabled: bool,
         interaction_tx: Option<InteractionSender>,
     ) -> Self {
-        Self::for_mode_with_services(working_dir, mode, shell_enabled, interaction_tx, None)
+        Self::for_mode_with_services(
+            working_dir,
+            mode,
+            shell_enabled,
+            interaction_tx,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Create a registry with full service support including plan tools
@@ -213,17 +213,24 @@ impl ToolRegistry {
     /// When `plan_service` is provided, plan management tools are registered:
     /// - `save_plan`: Available in Plan mode only
     /// - `mark_task_done`: Available in Plan and Build modes
+    ///
+    /// When `todo_tracker` is provided, the todo tool will use that shared tracker.
+    /// Otherwise, a new tracker is created.
     pub fn for_mode_with_services(
         working_dir: PathBuf,
         mode: AgentMode,
         shell_enabled: bool,
         interaction_tx: Option<InteractionSender>,
         plan_service: Option<Arc<PlanService>>,
+        approvals_path: Option<PathBuf>,
+        todo_tracker: Option<Arc<Mutex<TodoTracker>>>,
     ) -> Self {
         // Create approval gate if we have an interaction channel
         let approval_gate = interaction_tx.as_ref().map(|tx| {
-            let tark_dir = working_dir.join(".tark");
-            tokio::sync::Mutex::new(approval::ApprovalGate::new(tark_dir, Some(tx.clone())))
+            let storage_path = approvals_path
+                .clone()
+                .unwrap_or_else(|| working_dir.join(".tark").join("approvals.json"));
+            tokio::sync::Mutex::new(approval::ApprovalGate::new(storage_path, Some(tx.clone())))
         });
 
         let mut registry = Self {
@@ -234,6 +241,33 @@ impl ToolRegistry {
         };
 
         tracing::debug!("Creating tool registry for mode: {:?}", mode);
+
+        // ===== Built-in extra tools (available in ALL modes) =====
+
+        // Thinking tool - always available, helps with reasoning
+        let thinking_tracker = Arc::new(Mutex::new(ThinkingTracker::new()));
+        registry.register(Arc::new(ThinkTool::new(thinking_tracker)));
+
+        // Memory tools - persistent storage across sessions
+        let memory_db_path = working_dir.join(".tark").join("memory.db");
+        match TarkMemory::open(&memory_db_path) {
+            Ok(memory) => {
+                let memory = Arc::new(memory);
+                registry.register(Arc::new(MemoryStoreTool::new(memory.clone())));
+                registry.register(Arc::new(MemoryQueryTool::new(memory.clone())));
+                registry.register(Arc::new(MemoryListTool::new(memory.clone())));
+                registry.register(Arc::new(MemoryDeleteTool::new(memory)));
+                tracing::debug!("Registered memory tools (db: {})", memory_db_path.display());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize memory tools: {}", e);
+            }
+        }
+
+        // Todo tool - session-scoped task tracking
+        let todo_tracker = todo_tracker.unwrap_or_else(|| Arc::new(Mutex::new(TodoTracker::new())));
+        registry.register(Arc::new(TodoTool::new(todo_tracker)));
+        tracing::debug!("Registered todo tool");
 
         // ===== Read-only tools (available in ALL modes) =====
 
@@ -386,14 +420,23 @@ impl ToolRegistry {
                 }
                 Ok(approval::ApprovalStatus::Denied) => {
                     tracing::info!("Tool '{}' denied by user", name);
+                    let request = gate.create_approval_request(name, &command, risk_level);
+                    let suggestions = serde_json::to_string_pretty(&request.suggested_patterns)
+                        .unwrap_or_else(|_| "[]".to_string());
                     return Ok(ToolResult::error(format!(
-                        "Operation denied by user: {} {}",
-                        name, command
+                        "Operation denied by user: {} {}\nSuggested patterns: {}",
+                        name, command, suggestions
                     )));
                 }
                 Ok(approval::ApprovalStatus::Blocked(reason)) => {
                     tracing::info!("Tool '{}' blocked: {}", name, reason);
-                    return Ok(ToolResult::error(format!("Operation blocked: {}", reason)));
+                    let request = gate.create_approval_request(name, &command, risk_level);
+                    let suggestions = serde_json::to_string_pretty(&request.suggested_patterns)
+                        .unwrap_or_else(|_| "[]".to_string());
+                    return Ok(ToolResult::error(format!(
+                        "Operation blocked: {}\nSuggested patterns: {}",
+                        reason, suggestions
+                    )));
                 }
                 Err(e) => {
                     tracing::warn!("Approval check failed, auto-approving: {}", e);
@@ -404,7 +447,25 @@ impl ToolRegistry {
             tracing::debug!("No approval gate configured for tool '{}'", name);
         }
 
-        tool.execute(params).await
+        // Wrap tool execution with panic recovery to prevent crashes
+        match AssertUnwindSafe(tool.execute(params)).catch_unwind().await {
+            Ok(result) => result,
+            Err(panic_info) => {
+                // Extract panic message
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                tracing::error!("Tool '{}' panicked: {}", name, panic_msg);
+                Ok(ToolResult::error(format!(
+                    "Tool '{}' crashed: {}. Please report this bug.",
+                    name, panic_msg
+                )))
+            }
+        }
     }
 
     /// Build a human-readable command string from tool name and params
@@ -483,6 +544,14 @@ impl ToolRegistry {
             gate.trust_level
         } else {
             TrustLevel::default()
+        }
+    }
+
+    /// Update approval storage path (per session)
+    pub async fn set_approval_storage_path(&self, storage_path: PathBuf) {
+        if let Some(ref gate_mutex) = self.approval_gate {
+            let mut gate = gate_mutex.lock().await;
+            gate.set_storage_path(storage_path);
         }
     }
 }

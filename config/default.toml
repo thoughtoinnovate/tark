@@ -3,8 +3,8 @@
 # Copy this file to ~/.config/tark/config.toml
 
 [llm]
-# Default LLM provider: "claude", "openai", or "ollama"
-default_provider = "openai"
+# Default LLM provider: "claude", "openai", "tark_sim", or "ollama"
+default_provider = "tark_sim"
 
 [llm.claude]
 model = "claude-sonnet-4-20250514"
@@ -19,6 +19,7 @@ max_tokens = 4096
 base_url = "http://localhost:11434"
 # Model to use (run `ollama list` to see available models)
 # Good coding models: codellama, deepseek-coder, qwen2.5-coder, starcoder2
+# Note: Available models are loaded dynamically from your local Ollama instance
 model = "codellama"
 
 [server]
@@ -38,8 +39,8 @@ context_lines_before = 50
 context_lines_after = 20
 
 [agent]
-# Maximum tool call iterations per query
-max_iterations = 10
+# Maximum tool call iterations per query (increase for complex multi-step tasks)
+max_iterations = 50
 # Default working directory (. = current directory)
 working_directory = "."
 
@@ -50,28 +51,11 @@ shell_enabled = true
 allowed_paths = ["."]
 
 # TUI (Terminal User Interface) Configuration
-[tui.attachments]
-# Maximum file size for attachments in bytes (default: 10MB)
-max_attachment_size = 10485760
-# Maximum number of attachments per message (default: 10)
-max_attachments = 10
-
-[tui.theme]
-# Theme name: "dark" or "light"
-name = "dark"
-
-# Optional custom colors (uncomment to override)
-# [tui.theme.colors]
-# primary = "cyan"
-# secondary = "magenta"
-# background = "#1e1e1e"
-# foreground = "#d4d4d4"
-# error = "red"
-# warning = "yellow"
-# success = "green"
-
-# Custom keybindings (uncomment to override defaults)
-# [tui.keybindings.custom]
-# quit = "Ctrl-q"
-# submit = "Ctrl-Enter"
+[tui]
+# Default theme preset
+# Options: catppuccin_mocha, catppuccin_macchiato, catppuccin_frappe, catppuccin_latte,
+#          nord, tokyo_night, gruvbox_dark, gruvbox_light,
+#          solarized_dark, solarized_light, one_dark
+# Note: Sessions can override this theme, but this sets the default for new sessions
+theme = "catppuccin_mocha"
 

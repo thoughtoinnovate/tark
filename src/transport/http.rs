@@ -259,7 +259,7 @@ pub async fn update_status(action: &str, tool: Option<&str>, arg: Option<&str>, 
     status.tool_name = tool.map(|s| s.to_string());
     status.tool_arg = arg.map(|s| {
         if s.len() > 50 {
-            format!("{}...", &s[..47])
+            format!("{}...", crate::core::truncate_at_char_boundary(s, 47))
         } else {
             s.to_string()
         }
@@ -333,15 +333,20 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
     // Load saved session or use defaults
     let (default_provider, default_model) = if let Some(ref s) = storage {
         let saved_config = s.load_config().unwrap_or_default();
-        let provider = if saved_config.provider != "openai" {
+        let provider = if saved_config.provider != "tark_sim" {
             saved_config.provider
         } else {
             config.llm.default_provider.clone()
         };
-        let model = saved_config.model.unwrap_or_else(|| "gpt-4o".to_string());
+        let model = saved_config
+            .model
+            .unwrap_or_else(|| config.llm.tark_sim.model.clone());
         (provider, model)
     } else {
-        (config.llm.default_provider.clone(), "gpt-4o".to_string())
+        (
+            config.llm.default_provider.clone(),
+            config.llm.tark_sim.model.clone(),
+        )
     };
 
     // Try to create initial chat agent - try multiple providers in order of preference
