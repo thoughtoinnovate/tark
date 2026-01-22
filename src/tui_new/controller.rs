@@ -96,8 +96,14 @@ impl<B: Backend> TuiController<B> {
                 break;
             }
 
-            // Small sleep to avoid busy-waiting
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Adaptive sleep: shorter during streaming for faster UI updates,
+            // longer when idle to reduce CPU usage
+            let sleep_duration = if state.llm_processing() {
+                Duration::from_millis(2) // Minimal sleep during streaming
+            } else {
+                Duration::from_millis(10) // Normal idle sleep
+            };
+            tokio::time::sleep(sleep_duration).await;
         }
 
         Ok(())
@@ -190,14 +196,19 @@ impl<B: Backend> TuiController<B> {
                             }
                         }
 
-                        state.set_active_questionnaire(Some(question_state));
+                        // Store responder FIRST (before questionnaire is visible)
+                        // This prevents a race condition where user submits before responder is stored
+                        let mut guard = questionnaire_responder.lock().await;
+                        *guard = Some(responder);
+                        drop(guard);
 
                         // Store full questionnaire for multi-question navigation
                         let mut pending_guard = pending_questionnaire.lock().await;
                         *pending_guard = Some(data);
+                        drop(pending_guard);
 
-                        let mut guard = questionnaire_responder.lock().await;
-                        *guard = Some(responder);
+                        // THEN make questionnaire visible (user can now respond safely)
+                        state.set_active_questionnaire(Some(question_state));
                     }
                     InteractionRequest::Approval { request, responder } => {
                         let risk_level = match request.risk_level {
