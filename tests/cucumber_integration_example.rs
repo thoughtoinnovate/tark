@@ -1,3 +1,4 @@
+#![cfg(feature = "cucumber-tests")]
 //! Example: Cucumber Integration Tests with Test Driver
 //!
 //! This shows the BETTER pattern for integration tests using the test driver

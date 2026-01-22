@@ -26,8 +26,8 @@ jobs:
         with:
           prefix-key: ${{ env.CACHE_VERSION }}
       
-      - name: Run tests (skip slow BDD/E2E - covered by dedicated jobs)
-        run: cargo test --all-features -- --skip cucumber --skip e2e
+      - name: Run tests (BDD/Cucumber tests excluded via feature flag)
+        run: cargo test --all-features
 
   # Build only on Linux for regular CI (fast feedback)
   # Full multi-platform builds happen in release.yml

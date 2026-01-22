@@ -1,3 +1,4 @@
+#![cfg(feature = "cucumber-tests")]
 //! E2E Cucumber Tests with PTY
 //!
 //! These tests spawn the real binary in a pseudo-terminal

@@ -1,3 +1,4 @@
+#![cfg(feature = "cucumber-tests")]
 //! Cucumber BDD Test Harness for NEW TUI
 //!
 //! CRITICAL: NO MOCKS. Tests MUST FAIL until features are implemented.

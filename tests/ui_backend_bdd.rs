@@ -1,3 +1,4 @@
+#![cfg(feature = "cucumber-tests")]
 //! BDD Tests for UI Backend (BFF) Layer
 //!
 //! Tests the Backend-for-Frontend abstraction layer that separates
