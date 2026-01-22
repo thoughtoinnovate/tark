@@ -459,6 +459,7 @@ Available tools:
 - shell: Execute shell commands
 - ask_user: 💬 Ask user structured questions via popup (single-select, multi-select, free-text)
 - switch_mode: 🔄 Request mode switch (ask/plan/build) with user confirmation popup
+- todo: 📋 Create/update session todo list (shown in sidebar) - use for multi-step tasks!
 - mark_task_done: ✅ Mark a task as completed when following an execution plan
 - get_plan_status: 📊 Check current plan progress
 
@@ -487,6 +488,57 @@ Example after completing a task:
 ```
 
 The status bar shows plan progress (e.g., "📋 2/5: Add auth middleware").
+
+═══════════════════════════════════════════════════════════
+📋 TODO TOOL - TRACK YOUR WORK PROGRESS
+═══════════════════════════════════════════════════════════
+
+For multi-step tasks (3+ steps), USE THE `todo` TOOL to show progress:
+
+**WHEN TO USE:**
+- Implementing features with multiple files/steps
+- Refactoring that touches several places
+- Bug fixes requiring investigation then fixes
+- Any task where you'll make multiple changes
+
+**HOW TO USE (SEQUENTIAL WORKFLOW):**
+
+1. **At task start** - Create all todos with status "pending":
+```json
+{
+  "todos": [
+    {"id": "step-1", "content": "Add User model", "status": "pending"},
+    {"id": "step-2", "content": "Create API endpoints", "status": "pending"},
+    {"id": "step-3", "content": "Add tests", "status": "pending"}
+  ],
+  "merge": false
+}
+```
+
+2. **Before starting each step** - Mark it "in_progress":
+```json
+{
+  "todos": [{"id": "step-1", "content": "Add User model", "status": "in_progress"}],
+  "merge": true
+}
+```
+
+3. **When step is done** - Mark "completed" and start next:
+```json
+{
+  "todos": [
+    {"id": "step-1", "content": "Add User model", "status": "completed"},
+    {"id": "step-2", "content": "Create API endpoints", "status": "in_progress"}
+  ],
+  "merge": true
+}
+```
+
+**RULES:**
+- Work through todos SEQUENTIALLY (don't skip ahead)
+- Only ONE todo should be "in_progress" at a time
+- Mark completed IMMEDIATELY when done, before moving to next
+- User sees progress in sidebar (e.g., "📋 Todo 2/4")
 
 🔬 CODE UNDERSTANDING (use before modifying):
 - list_symbols: See all functions/types in a file
@@ -622,6 +674,8 @@ pub struct ToolCallLog {
 #[derive(Debug)]
 pub struct AgentResponse {
     pub text: String,
+    /// Accumulated intermediate reasoning from tool-calling iterations
+    pub thinking: Option<String>,
     pub tool_calls_made: usize,
     pub tool_call_log: Vec<ToolCallLog>,
     pub auto_compacted: bool,
@@ -1378,6 +1432,7 @@ impl ChatAgent {
                     let context_usage_percent = self.context.usage_percentage();
                     return Ok(AgentResponse {
                         text,
+                        thinking: None,
                         tool_calls_made: total_tool_calls,
                         tool_call_log,
                         auto_compacted,
@@ -1561,6 +1616,7 @@ impl ChatAgent {
                         let context_usage_percent = self.context.usage_percentage();
                         return Ok(AgentResponse {
                             text: last_text,
+                            thinking: None,
                             tool_calls_made: total_tool_calls,
                             tool_call_log,
                             auto_compacted,
@@ -1744,6 +1800,7 @@ impl ChatAgent {
         let context_usage_percent = self.context.usage_percentage();
         Ok(AgentResponse {
             text: last_text,
+            thinking: None,
             tool_calls_made: total_tool_calls,
             tool_call_log,
             auto_compacted,
@@ -1783,6 +1840,7 @@ impl ChatAgent {
         if interrupt_check() {
             return Ok(AgentResponse {
                 text: "⚠️ *Operation interrupted*".to_string(),
+                thinking: None,
                 tool_calls_made: 0,
                 tool_call_log: vec![],
                 auto_compacted: false,
@@ -1822,6 +1880,7 @@ impl ChatAgent {
                     .add_assistant("⚠️ *Operation interrupted by user*");
                 return Ok(AgentResponse {
                     text: "⚠️ *Operation interrupted by user*".to_string(),
+                    thinking: None,
                     tool_calls_made: total_tool_calls,
                     tool_call_log,
                     auto_compacted,
@@ -1853,6 +1912,7 @@ impl ChatAgent {
                     .add_assistant("⚠️ *Operation interrupted by user*");
                 return Ok(AgentResponse {
                     text: "⚠️ *Operation interrupted by user*".to_string(),
+                    thinking: None,
                     tool_calls_made: total_tool_calls,
                     tool_call_log,
                     auto_compacted,
@@ -1876,6 +1936,7 @@ impl ChatAgent {
                     let context_usage_percent = self.context.usage_percentage();
                     return Ok(AgentResponse {
                         text,
+                        thinking: None,
                         tool_calls_made: total_tool_calls,
                         tool_call_log,
                         auto_compacted,
@@ -1918,6 +1979,7 @@ impl ChatAgent {
                                     "⚠️ *Operation interrupted before executing {}*",
                                     call.name
                                 ),
+                                thinking: None,
                                 tool_calls_made: total_tool_calls,
                                 tool_call_log,
                                 auto_compacted,
@@ -2030,6 +2092,7 @@ impl ChatAgent {
                         let context_usage_percent = self.context.usage_percentage();
                         return Ok(AgentResponse {
                             text: last_text,
+                            thinking: None,
                             tool_calls_made: total_tool_calls,
                             tool_call_log,
                             auto_compacted,
@@ -2079,6 +2142,7 @@ impl ChatAgent {
                                     "⚠️ *Operation interrupted before executing {}*",
                                     call.name
                                 ),
+                                thinking: None,
                                 tool_calls_made: total_tool_calls,
                                 tool_call_log,
                                 auto_compacted,
@@ -2177,6 +2241,7 @@ impl ChatAgent {
         let context_usage_percent = self.context.usage_percentage();
         Ok(AgentResponse {
             text: last_text,
+            thinking: None,
             tool_calls_made: total_tool_calls,
             tool_call_log,
             auto_compacted,
@@ -2197,7 +2262,9 @@ impl ChatAgent {
     /// * `on_thinking` - Callback for each thinking/reasoning chunk
     /// * `on_tool_call` - Callback when a tool call starts (name, args preview)
     /// * `on_tool_complete` - Callback when a tool call completes (name, result preview, success)
-    pub async fn chat_streaming<F, T, K, C, D>(
+    /// * `on_commit_intermediate` - Callback when intermediate content should be committed as a message
+    #[allow(clippy::too_many_arguments)]
+    pub async fn chat_streaming<F, T, K, C, D, P>(
         &mut self,
         user_message: &str,
         interrupt_check: F,
@@ -2205,6 +2272,7 @@ impl ChatAgent {
         on_thinking: K,
         on_tool_call: C,
         on_tool_complete: D,
+        on_commit_intermediate: P,
     ) -> Result<AgentResponse>
     where
         F: Fn() -> bool + Send + Sync,
@@ -2212,6 +2280,7 @@ impl ChatAgent {
         K: Fn(String) + Send + Sync + 'static,
         C: Fn(String, String) + Send + Sync + 'static,
         D: Fn(String, String, bool) + Send + Sync + 'static,
+        P: Fn(String) + Send + Sync + 'static,
     {
         // Wrap callbacks in Arc so they can be shared with the streaming callback
         let on_text = std::sync::Arc::new(on_text);
@@ -2224,6 +2293,7 @@ impl ChatAgent {
         if interrupt_check() {
             return Ok(AgentResponse {
                 text: "⚠️ *Operation interrupted*".to_string(),
+                thinking: None,
                 tool_calls_made: 0,
                 tool_call_log: vec![],
                 auto_compacted: false,
@@ -2264,6 +2334,7 @@ impl ChatAgent {
                     .add_assistant("⚠️ *Operation interrupted by user*");
                 return Ok(AgentResponse {
                     text: "⚠️ *Operation interrupted by user*".to_string(),
+                    thinking: None,
                     tool_calls_made: total_tool_calls,
                     tool_call_log,
                     auto_compacted,
@@ -2342,6 +2413,7 @@ impl ChatAgent {
                     .add_assistant("⚠️ *Operation interrupted by user*");
                 return Ok(AgentResponse {
                     text: "⚠️ *Operation interrupted by user*".to_string(),
+                    thinking: None,
                     tool_calls_made: total_tool_calls,
                     tool_call_log,
                     auto_compacted,
@@ -2373,6 +2445,7 @@ impl ChatAgent {
                     let context_usage_percent = self.context.usage_percentage();
                     return Ok(AgentResponse {
                         text: final_text,
+                        thinking: None,
                         tool_calls_made: total_tool_calls,
                         tool_call_log,
                         auto_compacted,
@@ -2400,15 +2473,6 @@ impl ChatAgent {
                     // First, add the assistant message with tool calls (required for OpenAI)
                     self.context.add_assistant_tool_calls(limited_calls);
 
-                    // CRITICAL FIX: Emit a preamble before the first tool call if no text has been emitted yet
-                    // This prevents the UI from showing a blank assistant message before tools
-                    if accumulated_text.is_empty() && total_tool_calls == 0 {
-                        let preamble = "Let me check the codebase for you.";
-                        on_text(preamble.to_string());
-                        accumulated_text = preamble.to_string();
-                        tracing::debug!("Emitted preamble before first tool execution");
-                    }
-
                     // Execute each tool call and add results
                     for call in limited_calls.iter() {
                         // Check for interrupt before each tool
@@ -2418,12 +2482,20 @@ impl ChatAgent {
                                 .add_assistant("⚠️ *Operation interrupted by user*");
                             return Ok(AgentResponse {
                                 text: "⚠️ *Operation interrupted by user*".to_string(),
+                                thinking: None,
                                 tool_calls_made: total_tool_calls,
                                 tool_call_log,
                                 auto_compacted,
                                 context_usage_percent: self.context.usage_percentage(),
                                 usage: Some(accumulated_usage),
                             });
+                        }
+
+                        // Commit any accumulated text before this tool invocation
+                        // This creates a separate bubble per tool boundary (if text exists)
+                        if !accumulated_text.is_empty() {
+                            on_commit_intermediate(accumulated_text.clone());
+                            accumulated_text.clear();
                         }
 
                         // Notify about tool call
@@ -2582,6 +2654,7 @@ impl ChatAgent {
                                 .add_assistant("⚠️ *Operation interrupted by user*");
                             return Ok(AgentResponse {
                                 text: "⚠️ *Operation interrupted by user*".to_string(),
+                                thinking: None,
                                 tool_calls_made: total_tool_calls,
                                 tool_call_log,
                                 auto_compacted,
@@ -2692,6 +2765,7 @@ impl ChatAgent {
         let context_usage_percent = self.context.usage_percentage();
         Ok(AgentResponse {
             text: last_text,
+            thinking: None,
             tool_calls_made: total_tool_calls,
             tool_call_log,
             auto_compacted,

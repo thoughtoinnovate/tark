@@ -185,6 +185,19 @@ impl Message {
     }
 }
 
+/// A group of consecutive tools with the same risk level
+#[derive(Debug, Clone)]
+pub struct ToolGroup {
+    /// Risk level group name (Exploration, Changes, Commands, Destructive)
+    pub risk_group: String,
+    /// Message indices of tools in this group
+    pub tool_indices: Vec<usize>,
+    /// Starting message index (first tool in group)
+    pub start_index: usize,
+    /// Whether all tools in the group are completed
+    pub all_completed: bool,
+}
+
 /// Message area widget displaying chat history
 pub struct MessageArea<'a> {
     /// Messages to display
@@ -210,8 +223,85 @@ pub struct MessageArea<'a> {
     agent_name: &'a str,
     /// Index of currently focused message
     focused_message_index: usize,
+    /// Sub-index for hierarchical navigation within tool groups
+    focused_sub_index: Option<usize>,
     /// Vim mode
     vim_mode: crate::ui_backend::VimMode,
+    /// Set of collapsed tool group start indices
+    collapsed_tool_groups: &'a std::collections::HashSet<usize>,
+}
+
+/// Static empty hashset for default collapsed_tool_groups
+static EMPTY_HASHSET: std::sync::LazyLock<std::collections::HashSet<usize>> =
+    std::sync::LazyLock::new(std::collections::HashSet::new);
+
+/// Parse risk group from tool message content
+/// Format: "status|name|risk_group|content" or legacy "status|name|content"
+pub fn parse_tool_risk_group(content: &str) -> &str {
+    let parts: Vec<&str> = content.splitn(4, '|').collect();
+    if parts.len() >= 4 {
+        // New format: status|name|risk_group|content
+        parts[2]
+    } else {
+        // Legacy format: status|name|content - default to Exploration
+        "Exploration"
+    }
+}
+
+/// Collect consecutive tool messages into groups by risk level
+fn collect_tool_groups(messages: &[Message]) -> Vec<ToolGroup> {
+    let mut groups: Vec<ToolGroup> = Vec::new();
+    let mut current_group: Option<ToolGroup> = None;
+
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role == MessageRole::Tool {
+            let risk_group = parse_tool_risk_group(&msg.content);
+
+            // Check if tool is completed (status is ✓ or ✗)
+            let is_completed = msg.content.starts_with('✓') || msg.content.starts_with('✗');
+
+            match &mut current_group {
+                Some(group) if group.risk_group == risk_group => {
+                    // Same risk group - add to current group
+                    group.tool_indices.push(idx);
+                    if !is_completed {
+                        group.all_completed = false;
+                    }
+                }
+                Some(group) => {
+                    // Different risk group - save current and start new
+                    groups.push(group.clone());
+                    current_group = Some(ToolGroup {
+                        risk_group: risk_group.to_string(),
+                        tool_indices: vec![idx],
+                        start_index: idx,
+                        all_completed: is_completed,
+                    });
+                }
+                None => {
+                    // Start new group
+                    current_group = Some(ToolGroup {
+                        risk_group: risk_group.to_string(),
+                        tool_indices: vec![idx],
+                        start_index: idx,
+                        all_completed: is_completed,
+                    });
+                }
+            }
+        } else {
+            // Non-tool message - save any current group
+            if let Some(group) = current_group.take() {
+                groups.push(group);
+            }
+        }
+    }
+
+    // Don't forget the last group
+    if let Some(group) = current_group {
+        groups.push(group);
+    }
+
+    groups
 }
 
 impl<'a> MessageArea<'a> {
@@ -229,7 +319,9 @@ impl<'a> MessageArea<'a> {
             is_processing: false,
             agent_name: "Tark", // Default
             focused_message_index: 0,
+            focused_sub_index: None,
             vim_mode: crate::ui_backend::VimMode::Insert,
+            collapsed_tool_groups: &EMPTY_HASHSET,
         }
     }
 
@@ -290,8 +382,23 @@ impl<'a> MessageArea<'a> {
         self
     }
 
+    /// Set focused sub-index for hierarchical navigation
+    pub fn focused_sub_index(mut self, sub: Option<usize>) -> Self {
+        self.focused_sub_index = sub;
+        self
+    }
+
     pub fn vim_mode(mut self, mode: crate::ui_backend::VimMode) -> Self {
         self.vim_mode = mode;
+        self
+    }
+
+    /// Set collapsed tool groups
+    pub fn collapsed_tool_groups(
+        mut self,
+        collapsed: &'a std::collections::HashSet<usize>,
+    ) -> Self {
+        self.collapsed_tool_groups = collapsed;
         self
     }
 
@@ -803,6 +910,9 @@ impl Widget for MessageArea<'_> {
             .max(40)
             .min(available_width);
 
+        // Collect tool groups for collapsible group headers
+        let tool_groups = collect_tool_groups(self.messages);
+
         // Build lines from messages
         let mut lines: Vec<Line> = Vec::new();
 
@@ -812,8 +922,7 @@ impl Widget for MessageArea<'_> {
             let fg_color = self.role_color(msg.role);
             let bg_color = self.role_bg_color(msg.role);
 
-            // Check if this message is focused
-            let is_focused_msg = self.focused && msg_idx == self.focused_message_index;
+            // Check visual mode state
             let is_visual = self.focused && self.vim_mode == crate::ui_backend::VimMode::Visual;
 
             // Handle question messages specially
@@ -901,15 +1010,132 @@ impl Widget for MessageArea<'_> {
 
             if is_collapsible {
                 if msg.role == MessageRole::Tool {
-                    // Professional tool message rendering
-                    // Format: "status|tool_name|content" or legacy "tool_name: content"
-                    let parts: Vec<&str> = msg.content.splitn(3, '|').collect();
+                    // Detect if we need a separator before this tool sequence
+                    let prev_role = if msg_idx > 0 {
+                        Some(self.messages[msg_idx - 1].role)
+                    } else {
+                        None
+                    };
 
-                    let (status_icon, tool_name, content) = if parts.len() == 3 {
-                        // New format: status|name|content
+                    // Find the group this tool belongs to
+                    let tool_group = tool_groups
+                        .iter()
+                        .find(|g| g.tool_indices.contains(&msg_idx));
+
+                    // Check if this is the first tool in a group with 2+ tools
+                    let is_group_first = tool_group
+                        .map(|g| g.tool_indices.len() >= 2 && g.tool_indices[0] == msg_idx)
+                        .unwrap_or(false);
+
+                    // Check if the group is collapsed
+                    let group_is_collapsed = tool_group
+                        .map(|g| self.collapsed_tool_groups.contains(&g.start_index))
+                        .unwrap_or(false);
+
+                    // Render group header if this is the first tool in a multi-tool group
+                    if is_group_first {
+                        if let Some(group) = tool_group {
+                            // Add separator when transitioning to Tools (from User, Agent, or first message)
+                            if prev_role == Some(MessageRole::Agent)
+                                || prev_role == Some(MessageRole::User)
+                                || (prev_role.is_none() && msg_idx == 0)
+                            {
+                                lines.push(Line::from("")); // Spacing before group
+                            }
+
+                            // Get color for risk level
+                            let risk_color = match group.risk_group.as_str() {
+                                "Exploration" => self.theme.green,
+                                "Changes" => self.theme.blue,
+                                "Commands" => self.theme.yellow,
+                                "Destructive" => self.theme.red,
+                                _ => self.theme.text_muted,
+                            };
+
+                            // Group header with collapse indicator
+                            let collapse_icon = if group_is_collapsed { "▶" } else { "▼" };
+                            let tool_count = group.tool_indices.len();
+                            let status_text = if group.all_completed {
+                                "completed"
+                            } else {
+                                "in progress"
+                            };
+
+                            let mut header_spans = vec![];
+
+                            // Focus/position indicator for group header
+                            // Only show cursor on group header when NOT navigating within group
+                            let is_at_position = msg_idx == self.focused_message_index
+                                && self.focused_sub_index.is_none();
+                            if is_at_position {
+                                if self.focused {
+                                    // Focused panel: blinking cursor
+                                    let cursor_visible = get_message_cursor_visible();
+                                    if cursor_visible {
+                                        header_spans.push(Span::styled(
+                                            "▶ ",
+                                            Style::default().fg(self.theme.cyan),
+                                        ));
+                                    } else {
+                                        header_spans.push(Span::styled(
+                                            "▷ ",
+                                            Style::default().fg(self.theme.text_muted),
+                                        ));
+                                    }
+                                } else {
+                                    // Not focused: dim position indicator
+                                    header_spans.push(Span::styled(
+                                        "› ",
+                                        Style::default().fg(self.theme.text_muted),
+                                    ));
+                                }
+                            } else {
+                                header_spans.push(Span::raw("  "));
+                            }
+
+                            header_spans.extend([
+                                Span::styled(
+                                    format!("{} ", collapse_icon),
+                                    Style::default().fg(risk_color),
+                                ),
+                                Span::styled(
+                                    format!("{}", group.risk_group),
+                                    Style::default()
+                                        .fg(risk_color)
+                                        .add_modifier(ratatui::style::Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    format!(" ({} tools)", tool_count),
+                                    Style::default().fg(self.theme.text_muted),
+                                ),
+                                Span::styled(
+                                    format!(" ─ {}", status_text),
+                                    Style::default().fg(self.theme.text_muted),
+                                ),
+                            ]);
+
+                            lines.push(Line::from(header_spans));
+                        }
+                    } else if prev_role == Some(MessageRole::Agent)
+                        || prev_role == Some(MessageRole::User)
+                        || (prev_role.is_none() && msg_idx == 0)
+                    {
+                        // Single tool (not in a multi-tool group) - add spacing
+                        lines.push(Line::from("")); // Spacing
+                    }
+
+                    // Parse tool message content
+                    // Format: "status|name|risk_group|content" or legacy "status|name|content"
+                    let parts: Vec<&str> = msg.content.splitn(4, '|').collect();
+
+                    let (status_icon, tool_name, content) = if parts.len() >= 4 {
+                        // New format: status|name|risk_group|content
+                        (parts[0], parts[1], parts[3].to_string())
+                    } else if parts.len() == 3 {
+                        // Legacy format: status|name|content
                         (parts[0], parts[1], parts[2].to_string())
                     } else if let Some(colon_idx) = msg.content.find(':') {
-                        // Legacy format: name: content
+                        // Very old format: name: content
                         (
                             "🔧",
                             &msg.content[..colon_idx],
@@ -919,8 +1145,42 @@ impl Widget for MessageArea<'_> {
                         ("🔧", "tool", msg.content.clone())
                     };
 
-                    // Determine colors based on status with blinking for running tools
+                    // Check if tool is running
                     let is_running = status_icon == "⋯";
+
+                    // Skip individual tool rendering if group is collapsed and tool is not running
+                    if group_is_collapsed && !is_running {
+                        continue;
+                    }
+
+                    // Determine tool position in group (for border characters)
+                    let (is_first_in_group, is_last_in_group) = if let Some(group) = tool_group {
+                        if group.tool_indices.len() >= 2 {
+                            let pos = group
+                                .tool_indices
+                                .iter()
+                                .position(|&i| i == msg_idx)
+                                .unwrap_or(0);
+                            (pos == 0, pos == group.tool_indices.len() - 1)
+                        } else {
+                            (true, true) // Single tool
+                        }
+                    } else {
+                        (true, true) // Not in a group
+                    };
+
+                    // Determine border character
+                    let border_char = if is_first_in_group && is_last_in_group {
+                        "─" // Single tool
+                    } else if is_first_in_group {
+                        "╭" // First in group
+                    } else if is_last_in_group {
+                        "╰" // Last in group
+                    } else {
+                        "├" // Middle of group
+                    };
+
+                    // Determine colors based on status with blinking for running tools
                     let tool_visible = get_tool_indicator_visible();
                     let (status_color, status_display) = match status_icon {
                         "⋯" => {
@@ -945,24 +1205,68 @@ impl Widget for MessageArea<'_> {
                     // Chevron for expand/collapse (shows navigation hint when focused)
                     let chevron = if effective_collapsed { "▶" } else { "▼" };
 
-                    // Check if this tool message is focused
-                    let is_tool_focused = self.focused && msg_idx == self.focused_message_index;
+                    // Check if this tool message is at the current position
+                    // If we're navigating within a group (focused_sub_index is Some),
+                    // the cursor is at: group_start + sub_index
+                    let is_at_position = if let Some(sub_idx) = self.focused_sub_index {
+                        // In group navigation mode - cursor at group_start + sub_idx
+                        msg_idx == self.focused_message_index + sub_idx
+                    } else {
+                        // Message level navigation - only show on group header (first tool)
+                        msg_idx == self.focused_message_index && is_first_in_group
+                    };
 
-                    // Tool header: "● ▶ tool_name  description"
+                    // Tool header: "╭ ● ▶ tool_name  description  (0.2s)"
                     let mut header_spans = vec![];
 
-                    // Add focus indicator for tool messages
-                    if is_tool_focused {
-                        let cursor_visible = get_message_cursor_visible();
-                        let cursor = if cursor_visible {
-                            Span::styled("▶ ", Style::default().fg(self.theme.cyan))
+                    // Add border character for visual grouping
+                    header_spans.push(Span::styled(
+                        format!("{} ", border_char),
+                        Style::default().fg(self.theme.text_muted),
+                    ));
+
+                    // Add focus/position indicator for tool messages
+                    // Always show position, but dim when panel not focused
+                    if is_at_position {
+                        if self.focused {
+                            // Focused panel: blinking cursor
+                            let cursor_visible = get_message_cursor_visible();
+                            let cursor = if cursor_visible {
+                                Span::styled("▶ ", Style::default().fg(self.theme.cyan))
+                            } else {
+                                Span::styled("▷ ", Style::default().fg(self.theme.text_muted))
+                            };
+                            header_spans.push(cursor);
                         } else {
-                            Span::styled("▷ ", Style::default().fg(self.theme.text_muted))
-                        };
-                        header_spans.push(cursor);
-                    } else if self.focused {
+                            // Not focused: dim position indicator
+                            header_spans.push(Span::styled(
+                                "› ",
+                                Style::default().fg(self.theme.text_muted),
+                            ));
+                        }
+                    } else {
                         header_spans.push(Span::raw("  "));
                     }
+
+                    // Extract elapsed time if present in format "content (Xs)" or "content (X.Ys)"
+                    let (display_content, elapsed_time) =
+                        if let Some(time_start) = content.rfind(" (") {
+                            if content.ends_with(')') {
+                                let time_part = &content[time_start..];
+                                if time_part.contains("ms") || time_part.contains('s') {
+                                    (
+                                        content[..time_start].to_string(),
+                                        Some(time_part.to_string()),
+                                    )
+                                } else {
+                                    (content.clone(), None)
+                                }
+                            } else {
+                                (content.clone(), None)
+                            }
+                        } else {
+                            (content.clone(), None)
+                        };
 
                     header_spans.extend([
                         Span::styled(
@@ -981,27 +1285,37 @@ impl Widget for MessageArea<'_> {
                         ),
                         Span::raw("  "),
                         Span::styled(
-                            if content.chars().count() > 50 && effective_collapsed {
-                                let truncated: String = content.chars().take(47).collect();
+                            if display_content.chars().count() > 50 && effective_collapsed {
+                                let truncated: String = display_content.chars().take(47).collect();
                                 format!("{}...", truncated)
                             } else if effective_collapsed {
-                                content.clone()
+                                display_content.clone()
                             } else {
                                 String::new()
                             },
                             Style::default().fg(self.theme.text_muted),
                         ),
                     ]);
+
+                    // Add elapsed time at the end if present
+                    if let Some(time) = elapsed_time {
+                        header_spans.push(Span::styled(
+                            format!(" {}", time),
+                            Style::default().fg(self.theme.text_muted),
+                        ));
+                    }
                     let header_line = Line::from(header_spans);
                     lines.push(header_line);
 
                     // Show content only if not collapsed
                     if !effective_collapsed {
-                        // Add indented content with nice formatting
-                        let content_lines = wrap_text(&content, available_width.saturating_sub(4));
+                        // Add indented content with nice formatting and border continuation
+                        let content_lines =
+                            wrap_text(&display_content, available_width.saturating_sub(6));
                         for line in content_lines {
                             lines.push(Line::from(vec![
-                                Span::raw("    "), // Indent
+                                Span::styled("│ ", Style::default().fg(self.theme.text_muted)), // Border continuation
+                                Span::raw("   "), // Indent
                                 Span::styled(line, Style::default().fg(self.theme.text_secondary)),
                             ]));
                         }
@@ -1036,20 +1350,29 @@ impl Widget for MessageArea<'_> {
                     // Header line: icon with label (outside bubble)
                     let mut header_spans = vec![];
 
-                    // Add blinking cursor indicator if this message is focused
-                    if is_focused_msg {
-                        let cursor_visible = get_message_cursor_visible();
-                        if is_visual {
-                            header_spans.push(Span::styled(
-                                "▮ ",
-                                Style::default().fg(self.theme.bg_main).bg(self.theme.cyan),
-                            ));
-                        } else if cursor_visible {
-                            header_spans
-                                .push(Span::styled("▶ ", Style::default().fg(self.theme.cyan)));
+                    // Add position indicator - always show, but dim when not focused
+                    let is_at_position = msg_idx == self.focused_message_index;
+                    if is_at_position {
+                        if self.focused {
+                            let cursor_visible = get_message_cursor_visible();
+                            if is_visual {
+                                header_spans.push(Span::styled(
+                                    "▮ ",
+                                    Style::default().fg(self.theme.bg_main).bg(self.theme.cyan),
+                                ));
+                            } else if cursor_visible {
+                                header_spans
+                                    .push(Span::styled("▶ ", Style::default().fg(self.theme.cyan)));
+                            } else {
+                                header_spans.push(Span::styled(
+                                    "▷ ",
+                                    Style::default().fg(self.theme.text_muted),
+                                ));
+                            }
                         } else {
+                            // Not focused: dim position indicator
                             header_spans.push(Span::styled(
-                                "▷ ",
+                                "› ",
                                 Style::default().fg(self.theme.text_muted),
                             ));
                         }
@@ -1136,22 +1459,34 @@ impl Widget for MessageArea<'_> {
                     // System, Tool, Command messages: simple format
                     let mut spans = vec![];
 
-                    // Add blinking cursor indicator if this message is focused
-                    if is_focused_msg {
-                        let cursor_visible = get_message_cursor_visible();
-                        if is_visual {
-                            spans.push(Span::styled(
-                                "▮ ",
-                                Style::default().fg(self.theme.bg_main).bg(self.theme.cyan),
-                            ));
-                        } else if cursor_visible {
-                            spans.push(Span::styled("▶ ", Style::default().fg(self.theme.cyan)));
+                    // Add position indicator - always show, but dim when not focused
+                    let is_at_position = msg_idx == self.focused_message_index;
+                    if is_at_position {
+                        if self.focused {
+                            let cursor_visible = get_message_cursor_visible();
+                            if is_visual {
+                                spans.push(Span::styled(
+                                    "▮ ",
+                                    Style::default().fg(self.theme.bg_main).bg(self.theme.cyan),
+                                ));
+                            } else if cursor_visible {
+                                spans
+                                    .push(Span::styled("▶ ", Style::default().fg(self.theme.cyan)));
+                            } else {
+                                spans.push(Span::styled(
+                                    "▷ ",
+                                    Style::default().fg(self.theme.text_muted),
+                                ));
+                            }
                         } else {
+                            // Not focused: dim position indicator
                             spans.push(Span::styled(
-                                "▷ ",
+                                "› ",
                                 Style::default().fg(self.theme.text_muted),
                             ));
                         }
+                    } else {
+                        spans.push(Span::raw("  "));
                     }
 
                     spans.push(Span::styled(
@@ -1171,10 +1506,7 @@ impl Widget for MessageArea<'_> {
                     }
 
                     // Calculate prefix width for indentation
-                    let mut prefix_width = 0;
-                    if is_focused_msg {
-                        prefix_width += 2; // "▶ " or "  "
-                    }
+                    let mut prefix_width = 2; // Always have "▶ " or "  " now
                     prefix_width += icon.chars().count() + 1; // "icon "
                     prefix_width += label.chars().count();
                     prefix_width += 1; // " "
@@ -1208,6 +1540,79 @@ impl Widget for MessageArea<'_> {
             }
 
             // Add empty line between messages
+            lines.push(Line::from(""));
+        }
+
+        // Add streaming thinking FIRST (before streaming content)
+        // This represents reasoning from previous turn(s) that happened before current response
+        let has_thinking = self
+            .streaming_thinking
+            .as_ref()
+            .is_some_and(|t| !t.is_empty())
+            || self.thinking_lines.is_some();
+
+        if has_thinking {
+            let icon = self.role_icon(MessageRole::Thinking);
+            let border_fg = self.theme.thinking_fg;
+            let glow_color = dim_color(border_fg, 0.5);
+
+            // Header line
+            let header_spans = vec![
+                Span::styled(format!(" {} ", icon), Style::default().fg(border_fg)),
+                Span::styled("Thinking", Style::default().fg(self.theme.text_secondary)),
+                Span::styled(" (reasoning)", Style::default().fg(self.theme.text_muted)),
+            ];
+            lines.push(Line::from(header_spans));
+
+            // Top border
+            let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(top_border, Style::default().fg(glow_color)),
+            ]));
+
+            // Use pre-rendered lines if available, otherwise render raw thinking content
+            if let Some(ref pre_rendered) = self.thinking_lines {
+                for md_line in pre_rendered {
+                    let line_width = md_line.width();
+                    let padding = bubble_content_width.saturating_sub(2 + line_width);
+                    let mut line_spans = vec![
+                        Span::raw("  "),
+                        Span::styled("│", Style::default().fg(glow_color)),
+                        Span::raw(" "),
+                    ];
+                    line_spans.extend(md_line.spans.clone());
+                    line_spans.push(Span::raw(" ".repeat(padding + 1)));
+                    line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
+                    lines.push(Line::from(line_spans));
+                }
+            } else if let Some(ref thinking) = self.streaming_thinking {
+                let markdown_lines = super::markdown::render_markdown(
+                    thinking,
+                    self.theme,
+                    bubble_content_width - 2,
+                );
+                for md_line in markdown_lines {
+                    let line_width = md_line.width();
+                    let padding = bubble_content_width.saturating_sub(2 + line_width);
+                    let mut line_spans = vec![
+                        Span::raw("  "),
+                        Span::styled("│", Style::default().fg(glow_color)),
+                        Span::raw(" "),
+                    ];
+                    line_spans.extend(md_line.spans);
+                    line_spans.push(Span::raw(" ".repeat(padding + 1)));
+                    line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
+                    lines.push(Line::from(line_spans));
+                }
+            }
+
+            // Bottom border
+            let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(bottom_border, Style::default().fg(glow_color)),
+            ]));
             lines.push(Line::from(""));
         }
 
@@ -1258,27 +1663,6 @@ impl Widget for MessageArea<'_> {
                     Span::raw("  "),
                     Span::styled(bottom_border, Style::default().fg(glow_color)),
                 ]));
-                lines.push(Line::from(""));
-            }
-        }
-
-        // Add streaming thinking if present and thinking mode enabled
-        if let Some(ref thinking) = self.streaming_thinking {
-            if !thinking.is_empty() {
-                let icon = self.role_icon(MessageRole::Thinking);
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{} ", icon),
-                        Style::default().fg(self.theme.thinking_fg),
-                    ),
-                    Span::styled("▼ Thinking ", Style::default().fg(self.theme.text_primary)),
-                ]));
-                lines.push(Line::from(Span::styled(
-                    thinking,
-                    Style::default()
-                        .fg(self.theme.text_secondary)
-                        .bg(self.theme.thinking_bubble_bg),
-                )));
                 lines.push(Line::from(""));
             }
         }

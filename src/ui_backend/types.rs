@@ -135,6 +135,33 @@ impl ActiveToolInfo {
         self.ended_at = Some(chrono::Local::now().format("%H:%M:%S").to_string());
     }
 
+    /// Calculate elapsed time in seconds (returns None if not completed)
+    pub fn elapsed_time(&self) -> Option<f64> {
+        use chrono::NaiveTime;
+
+        if let Some(ref ended) = self.ended_at {
+            let start = NaiveTime::parse_from_str(&self.started_at, "%H:%M:%S").ok()?;
+            let end = NaiveTime::parse_from_str(ended, "%H:%M:%S").ok()?;
+
+            // Calculate duration (handle day boundary wraparound)
+            let duration = if end >= start {
+                end.signed_duration_since(start)
+            } else {
+                // Wrapped around midnight
+                let duration_to_midnight = NaiveTime::from_hms_opt(23, 59, 59)?
+                    .signed_duration_since(start)
+                    + chrono::Duration::seconds(1);
+                let duration_from_midnight =
+                    end.signed_duration_since(NaiveTime::from_hms_opt(0, 0, 0)?);
+                duration_to_midnight + duration_from_midnight
+            };
+
+            Some(duration.num_milliseconds() as f64 / 1000.0)
+        } else {
+            None
+        }
+    }
+
     /// Get status icon
     pub fn status_icon(&self) -> &'static str {
         match self.status {
@@ -169,6 +196,16 @@ pub struct Message {
     pub segments: Vec<MessageSegment>,
 }
 
+/// Source of an LLM provider
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ProviderSource {
+    /// Built-in native provider (OpenAI, Claude, etc.)
+    #[default]
+    Native,
+    /// Provider from an installed plugin
+    Plugin,
+}
+
 /// LLM Provider information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderInfo {
@@ -177,6 +214,9 @@ pub struct ProviderInfo {
     pub description: String,
     pub configured: bool,
     pub icon: String,
+    /// Source of this provider (native or plugin)
+    #[serde(default)]
+    pub source: ProviderSource,
 }
 
 /// LLM Model information

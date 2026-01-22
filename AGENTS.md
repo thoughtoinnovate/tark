@@ -17,6 +17,7 @@ This document helps AI coding agents understand the tark codebase and make effec
 5. ✅ **Include/update tests** - No code change without corresponding tests
 6. ✅ **Update documentation** - README.md, AGENTS.md, or doc comments for significant changes
 7. ✅ **Use clean git workflow** - Stash unrelated changes, commit logical units separately
+8. ✅ **Verify performance** - For core agent code changes, ensure no performance regressions
 
 **See the [Pre-Commit Checklist](#pre-commit-checklist-) for the complete workflow.**
 
@@ -158,6 +159,51 @@ tark/
 - **Async by default** - Use `tokio` for async operations
 - **Keep LLM providers isolated** - Each in its own file under `src/llm/`
 
+### Performance (Core Agent Code) ⚡
+
+**CRITICAL**: When modifying core agent code (`src/agent/`, `src/tools/`, `src/mcp/`, `src/llm/`), you MUST verify performance is not negatively impacted.
+
+**Before making changes**:
+- Understand the hot paths in the code you're modifying
+- Note current response times for typical operations
+- Consider the impact on streaming latency and tool execution time
+
+**After making changes**:
+1. **Measure response time** - Compare before/after for common operations
+2. **Check memory usage** - Ensure no memory leaks or excessive allocations
+3. **Verify streaming latency** - Token streaming should remain responsive
+4. **Test with multiple tools** - Tool execution overhead should be minimal
+
+**Performance best practices**:
+- **Avoid unnecessary allocations** - Reuse buffers, use `&str` over `String` where possible
+- **Minimize cloning** - Use references or `Arc` for shared data
+- **Batch operations** - Combine multiple small operations when possible
+- **Lazy evaluation** - Don't compute values until needed
+- **Efficient data structures** - Use `HashMap` for lookups, `Vec` for sequential access
+- **Avoid blocking in async** - Never block the async runtime; use `tokio::spawn_blocking` for CPU-heavy work
+
+**How to profile**:
+```bash
+# Build with debug symbols for profiling
+cargo build --release
+
+# Use flamegraph for CPU profiling (requires cargo-flamegraph)
+cargo flamegraph --bin tark -- tui
+
+# Use heaptrack or valgrind for memory profiling
+heaptrack ./target/release/tark tui
+
+# Simple timing with tracing
+RUST_LOG=debug ./target/release/tark tui  # Check span timings in logs
+```
+
+**Performance improvements to consider**:
+- Cache frequently accessed data (e.g., tool schemas, model info)
+- Use connection pooling for HTTP clients
+- Implement request batching where applicable
+- Consider lazy initialization for expensive resources
+- Profile before optimizing - measure, don't guess
+
 ### Lua Plugin
 
 - **Lazy-load modules** - Use `require()` inside functions, not at top level
@@ -247,6 +293,15 @@ For TUI features, you MUST:
 - **Don't block the async runtime** - Use `tokio::spawn` for CPU-heavy work
 - **Don't add new LLM providers without tests**
 - **Don't change tool schemas** without updating the agent prompts
+
+### Performance (Core Agent Code)
+
+- **Don't skip performance verification** for core agent code changes
+- **Don't add synchronous I/O** in async hot paths - Use async alternatives
+- **Don't clone large data structures** unnecessarily - Use references or `Arc`
+- **Don't allocate in tight loops** - Pre-allocate or reuse buffers
+- **Don't ignore performance regressions** - If you notice slowdowns, investigate before committing
+- **Don't optimize without measuring** - Profile first, then optimize based on data
 
 ### Lua Plugin
 
@@ -349,6 +404,38 @@ For TUI features, you MUST:
 - `memory_delete`: Remove a memory
 
 Memory is stored in `.tark/memory.db` using SQLite.
+
+**Todo Tool**: The `todo` tool provides session-scoped task tracking with a live-updating widget in the message area. It's automatically registered for all modes.
+
+Use this tool to:
+- Show users what steps you're working on
+- Track progress on immediate tasks within the current request
+- Display a visual checklist with progress bar
+
+The todo list:
+- Updates in-place (single live widget, not new messages)
+- Returns full current state so you know what todos exist
+- Persists during the session, cleared when session ends
+- Supports merge (update by id) and replace (new list) modes
+
+Example usage:
+```rust
+// Create initial todo list
+todo({
+  "todos": [
+    {"id": "read", "content": "Read existing code"},
+    {"id": "impl", "content": "Implement feature"},
+    {"id": "test", "content": "Add tests"}
+  ],
+  "merge": false  // Replace any existing todos
+})
+
+// Update specific todo as you progress
+todo({
+  "todos": [{"id": "read", "status": "completed"}],
+  "merge": true   // Merge with existing (default)
+})
+```
 
 ### Using MCP Servers
 
@@ -632,6 +719,7 @@ Then check GitHub Actions to ensure CI passes. If CI fails:
 □ Rust tests pass (cargo test --all-features)
 □ Lua tests pass (if applicable: nvim --headless ... PlenaryBustedDirectory)
 □ Tests added/updated for code changes
+□ Performance verified (for core agent code: no regressions, consider improvements)
 □ Documentation updated (README.md, AGENTS.md, doc comments)
 □ Versions synced (if needed: Cargo.toml & lua/tark/init.lua)
 □ Git history clean (stashed unrelated changes)

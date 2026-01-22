@@ -975,6 +975,13 @@ impl<B: Backend> TuiController<B> {
                         }
                         return Ok(());
                     }
+                    Some(crate::ui_backend::ModalType::Tools)
+                    | Some(crate::ui_backend::ModalType::Plugin) => {
+                        // Tools and Plugin modals - just close on Enter
+                        state.set_active_modal(None);
+                        state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
+                        return Ok(());
+                    }
                     _ => {
                         state.set_active_modal(None);
                         state.set_focused_component(crate::ui_backend::FocusedComponent::Input);
@@ -1076,7 +1083,14 @@ impl<B: Backend> TuiController<B> {
                         // Navigate up in tools list
                         let selected = state.tools_selected();
                         if selected > 0 {
-                            state.set_tools_selected(selected - 1);
+                            let new_selected = selected - 1;
+                            state.set_tools_selected(new_selected);
+
+                            // Auto-scroll up if selection goes above viewport
+                            let scroll = state.tools_scroll_offset();
+                            if new_selected < scroll {
+                                state.set_tools_scroll_offset(new_selected);
+                            }
                         }
                         return Ok(());
                     }
@@ -1198,9 +1212,20 @@ impl<B: Backend> TuiController<B> {
                     }
                     Some(crate::ui_backend::ModalType::Tools) => {
                         // Navigate down in tools list
+                        let tools_count = state.tools_for_modal().len();
                         let selected = state.tools_selected();
-                        // Note: The max limit will be checked by the tools list itself
-                        state.set_tools_selected(selected + 1);
+                        if selected + 1 < tools_count {
+                            let new_selected = selected + 1;
+                            state.set_tools_selected(new_selected);
+
+                            // Auto-scroll down if selection goes below viewport
+                            // Visible tools = ~6 (based on modal height minus header)
+                            let scroll = state.tools_scroll_offset();
+                            let visible_count = 6;
+                            if new_selected >= scroll + visible_count {
+                                state.set_tools_scroll_offset(new_selected - visible_count + 1);
+                            }
+                        }
                         return Ok(());
                     }
                     Some(crate::ui_backend::ModalType::Plugin) => {
@@ -1725,7 +1750,46 @@ impl<B: Backend> TuiController<B> {
                 }
             }
 
-            // Update state based on event type
+            // Handle CommitIntermediateResponse with owned match (zero-copy: String moves directly)
+            if let AppEvent::CommitIntermediateResponse(content) = event {
+                if !content.is_empty() {
+                    use crate::ui_backend::{Message, MessageRole};
+                    let msg = Message {
+                        role: MessageRole::Assistant,
+                        content, // Moved directly, no clone
+                        thinking: None,
+                        collapsed: false,
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        tool_calls: Vec::new(),
+                        segments: Vec::new(),
+                    };
+                    // Clear streaming_content to avoid duplication in live display
+                    state.set_streaming_content(None);
+                    // Persist first (needs reference), then move into state
+                    self.service.record_session_message(&msg).await;
+                    state.add_message(msg);
+                    state.scroll_to_bottom();
+
+                    // Fast-path debug logging
+                    if crate::is_debug_logging_enabled() {
+                        if let Some(logger) = crate::debug_logger() {
+                            logger.log(
+                                crate::DebugLogEntry::new(
+                                    state
+                                        .current_correlation_id()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    crate::LogCategory::Tui,
+                                    "commit_intermediate_response",
+                                )
+                                .with_data(serde_json::json!({ "committed": true })),
+                            );
+                        }
+                    }
+                }
+                continue; // Skip the borrow match below
+            }
+
+            // Update state based on event type (borrow match for other events)
             match &event {
                 AppEvent::LlmTextChunk(chunk) => {
                     state.append_streaming_content(chunk);
@@ -1735,14 +1799,33 @@ impl<B: Backend> TuiController<B> {
                     state.append_streaming_thinking(chunk);
                     state.scroll_to_bottom();
                 }
+                AppEvent::CommitIntermediateResponse(_) => unreachable!(), // Handled above
                 AppEvent::LlmCompleted {
                     text,
+                    thinking,
                     input_tokens,
                     output_tokens,
                 } => {
                     // Add assistant message with final text
                     use crate::ui_backend::{Message, MessageRole};
-                    let thinking_content = state.streaming_thinking();
+                    // Prefer thinking from AgentResponse, fallback to streaming_thinking
+                    let thinking_content = thinking.clone().or_else(|| state.streaming_thinking());
+
+                    // Fast-path debug logging
+                    if crate::is_debug_logging_enabled() {
+                        if let Some(logger) = crate::debug_logger() {
+                            logger.log(crate::DebugLogEntry::new(
+                                state.current_correlation_id().unwrap_or_else(|| "unknown".to_string()),
+                                crate::LogCategory::Tui,
+                                "llm_completed_state",
+                            ).with_data(serde_json::json!({
+                                "text_len": text.len(),
+                                "thinking_content_len": thinking_content.as_ref().map(|t| t.len()),
+                                "has_thinking": thinking_content.as_ref().is_some_and(|t| !t.is_empty())
+                            })));
+                        }
+                    }
+
                     let msg = Message {
                         role: MessageRole::Assistant,
                         content: text.clone(),
@@ -1838,6 +1921,25 @@ impl<B: Backend> TuiController<B> {
                     use crate::ui_backend::ActiveToolInfo;
                     use crate::ui_backend::{Message, MessageRole};
 
+                    // Debug log to trace tool event reception
+                    if crate::is_debug_logging_enabled() {
+                        if let Some(logger) = crate::debug_logger() {
+                            logger.log(
+                                crate::DebugLogEntry::new(
+                                    state
+                                        .current_correlation_id()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    crate::LogCategory::Tui,
+                                    "tool_started_received",
+                                )
+                                .with_data(serde_json::json!({
+                                    "tool_name": name,
+                                    "args_keys": args.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                                })),
+                            );
+                        }
+                    }
+
                     // Collapse all previous tool messages before adding the new one
                     state.collapse_all_tools_except_last();
 
@@ -1846,41 +1948,87 @@ impl<B: Backend> TuiController<B> {
                     let description = tool_info.description.clone();
                     state.add_active_tool(tool_info);
 
+                    // Look up risk level for the tool (default to ReadOnly if unknown)
+                    let risk_group = self
+                        .service
+                        .tool_risk_level(name)
+                        .map(|r| r.group_name())
+                        .unwrap_or("Exploration");
+
                     // Create a professional tool invocation message
-                    // Format: "⋯|tool_name|description"
+                    // Format: "⋯|tool_name|risk_group|description"
                     // Running tools will be rendered expanded by message_area
                     let msg = Message {
                         role: MessageRole::Tool,
-                        content: format!("⋯|{}|{}", name, description),
+                        content: format!("⋯|{}|{}|{}", name, risk_group, description),
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         collapsed: false, // Running tools are expanded (renderer also forces this)
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
+
+                    // Debug log before adding message
+                    if crate::is_debug_logging_enabled() {
+                        if let Some(logger) = crate::debug_logger() {
+                            logger.log(
+                                crate::DebugLogEntry::new(
+                                    state
+                                        .current_correlation_id()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    crate::LogCategory::Tui,
+                                    "tool_message_adding",
+                                )
+                                .with_data(serde_json::json!({
+                                    "tool_name": name,
+                                    "message_content": msg.content.clone(),
+                                    "message_count_before": state.messages().len()
+                                })),
+                            );
+                        }
+                    }
+
                     state.add_message(msg.clone());
                     self.service.record_session_message(&msg).await;
                     state.scroll_to_bottom();
                 }
                 AppEvent::ToolCompleted { ref name, result } => {
+                    // Get elapsed time before cleanup
+                    let elapsed_time = state
+                        .active_tools()
+                        .iter()
+                        .find(|t| &t.name == name)
+                        .and_then(|t| t.elapsed_time());
+
                     // Complete the active tool tracking
                     state.complete_active_tool(name, result.clone(), true);
                     state.cleanup_completed_tools();
 
+                    // Look up risk level for the tool (default to ReadOnly if unknown)
+                    let risk_group = self
+                        .service
+                        .tool_risk_level(name)
+                        .map(|r| r.group_name())
+                        .unwrap_or("Exploration");
+
                     // Format the result nicely
-                    // Format: "✓|tool_name|result"
+                    // Format: "✓|tool_name|risk_group|result (elapsed)"
                     let result_preview = if result.len() > 500 {
-                        format!(
-                            "{}...",
-                            crate::core::truncate_at_char_boundary(result, 497)
-                        )
+                        format!("{}...", crate::core::truncate_at_char_boundary(result, 497))
                     } else {
                         result.clone()
                     };
 
+                    // Add elapsed time to result if available
+                    let result_with_time = if let Some(elapsed) = elapsed_time {
+                        format!("{} ({:.1}s)", result_preview, elapsed)
+                    } else {
+                        result_preview
+                    };
+
                     // Update the existing tool message in-place (animation effect)
                     // Keep the completed tool expanded initially, collapse all others
-                    let new_content = format!("✓|{}|{}", name, result_preview);
+                    let new_content = format!("✓|{}|{}|{}", name, risk_group, result_with_time);
                     state.update_tool_message(name, new_content.clone(), true); // Collapse completed tool
                     state.collapse_all_tools_except_last(); // Make sure only most recent is visible
                     state.scroll_to_bottom();
@@ -1935,13 +2083,34 @@ impl<B: Backend> TuiController<B> {
                     }
                 }
                 AppEvent::ToolFailed { ref name, error } => {
+                    // Get elapsed time before cleanup
+                    let elapsed_time = state
+                        .active_tools()
+                        .iter()
+                        .find(|t| &t.name == name)
+                        .and_then(|t| t.elapsed_time());
+
                     // Complete the active tool as failed
                     state.complete_active_tool(name, error.clone(), false);
                     state.cleanup_completed_tools();
 
+                    // Look up risk level for the tool (default to ReadOnly if unknown)
+                    let risk_group = self
+                        .service
+                        .tool_risk_level(name)
+                        .map(|r| r.group_name())
+                        .unwrap_or("Exploration");
+
+                    // Add elapsed time to error if available
+                    let error_with_time = if let Some(elapsed) = elapsed_time {
+                        format!("{} ({:.1}s)", error, elapsed)
+                    } else {
+                        error.clone()
+                    };
+
                     // Update the existing tool message in-place (animation effect)
-                    // Format: "✗|tool_name|error"
-                    let new_content = format!("✗|{}|{}", name, error);
+                    // Format: "✗|tool_name|risk_group|error (elapsed)"
+                    let new_content = format!("✗|{}|{}|{}", name, risk_group, error_with_time);
                     state.update_tool_message(name, new_content.clone(), true); // Collapse failed tool
                     state.collapse_all_tools_except_last(); // Make sure only most recent is visible
                     state.scroll_to_bottom();
@@ -2382,14 +2551,24 @@ impl<B: Backend> TuiController<B> {
                 return Ok(());
             }
             "/tools" => {
-                // Open tools viewer modal with current mode's tools
-                let tools = self.service.get_tools();
-                use crate::ui_backend::{Message, MessageRole};
+                // External MCP tools only
+                use crate::tools::ToolCategory;
+                let all_tools = self.service.get_tools();
+                let tools: Vec<_> = all_tools
+                    .into_iter()
+                    .filter(|t| t.category == ToolCategory::External)
+                    .collect();
 
                 if tools.is_empty() {
+                    use crate::ui_backend::{Message, MessageRole};
                     let msg = Message {
                         role: MessageRole::System,
-                        content: "No tools available for current agent mode.".to_string(),
+                        content: "No external tools configured.\n\n\
+                            Configure MCP servers in:\n\
+                              ~/.config/tark/mcp/servers.toml (global)\n\
+                              .tark/mcp/servers.toml (project)\n\n\
+                            See: tark help mcp"
+                            .to_string(),
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
@@ -2398,10 +2577,29 @@ impl<B: Backend> TuiController<B> {
                     };
                     state.add_message(msg);
                 } else {
+                    state.set_tools_for_modal(tools);
                     state.set_tools_selected(0);
+                    state.set_tools_scroll_offset(0);
                     state.set_active_modal(Some(crate::ui_backend::ModalType::Tools));
                     state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
                 }
+                state.clear_input();
+                return Ok(());
+            }
+            "/_tools" => {
+                // Internal tools only (Core + Builtin) - developer command
+                use crate::tools::ToolCategory;
+                let all_tools = self.service.get_tools();
+                let tools: Vec<_> = all_tools
+                    .into_iter()
+                    .filter(|t| t.category != ToolCategory::External)
+                    .collect();
+
+                state.set_tools_for_modal(tools);
+                state.set_tools_selected(0);
+                state.set_tools_scroll_offset(0);
+                state.set_active_modal(Some(crate::ui_backend::ModalType::Tools));
+                state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
                 state.clear_input();
                 return Ok(());
             }

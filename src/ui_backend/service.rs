@@ -117,6 +117,10 @@ impl AppService {
     ) -> Result<Self> {
         let state = SharedState::new();
 
+        // Load global config and apply default theme
+        let global_config = crate::config::Config::load().unwrap_or_default();
+        state.set_theme(global_config.tui.theme_preset());
+
         // Initialize storage
         let storage_facade = super::StorageFacade::new(&working_dir)?;
         let tark_storage = TarkStorage::new(&working_dir)?;
@@ -137,7 +141,7 @@ impl AppService {
                 model.as_deref(),
             )?;
 
-            // Create tool registry
+            // Create tool registry with shared todo_tracker from state
             let tools = crate::tools::ToolRegistry::for_mode_with_services(
                 working_dir.clone(),
                 crate::core::types::AgentMode::Build,
@@ -145,6 +149,7 @@ impl AppService {
                 Some(interaction_tx.clone()),
                 None,
                 approvals_path.clone(),
+                Some(state.todo_tracker()),
             );
 
             Ok(crate::agent::ChatAgent::new(Arc::from(llm_provider), tools))
@@ -272,7 +277,13 @@ impl AppService {
                 self.state.set_agent_mode(next);
                 self.tools.set_mode(next);
                 if let Some(ref conv_svc) = self.conversation_svc {
-                    conv_svc.update_mode(self.working_dir.clone(), next).await;
+                    conv_svc
+                        .update_mode(
+                            self.working_dir.clone(),
+                            next,
+                            Some(self.state.todo_tracker()),
+                        )
+                        .await;
                 }
                 if let Some(ref session_svc) = self.session_svc {
                     if let (Some(provider), Some(model)) =
@@ -294,7 +305,13 @@ impl AppService {
                 self.state.set_agent_mode(mode);
                 self.tools.set_mode(mode);
                 if let Some(ref conv_svc) = self.conversation_svc {
-                    conv_svc.update_mode(self.working_dir.clone(), mode).await;
+                    conv_svc
+                        .update_mode(
+                            self.working_dir.clone(),
+                            mode,
+                            Some(self.state.todo_tracker()),
+                        )
+                        .await;
                 }
                 if let Some(ref session_svc) = self.session_svc {
                     if let (Some(provider), Some(model)) =
@@ -439,28 +456,139 @@ impl AppService {
                 if msg_count == 0 {
                     return Ok(());
                 }
+
+                // Check if we're navigating within a group
+                if let Some(sub_idx) = self.state.focused_sub_index() {
+                    let messages = self.state.messages();
+                    let focused = self.state.focused_message();
+
+                    // Find the group size
+                    if let Some(msg) = messages.get(focused) {
+                        if msg.role == crate::ui_backend::MessageRole::Tool {
+                            let risk_group =
+                                crate::tui_new::widgets::parse_tool_risk_group(&msg.content);
+                            let group_size = messages[focused..]
+                                .iter()
+                                .take_while(|m| {
+                                    m.role == crate::ui_backend::MessageRole::Tool
+                                        && crate::tui_new::widgets::parse_tool_risk_group(
+                                            &m.content,
+                                        ) == risk_group
+                                })
+                                .count();
+
+                            let next_sub = sub_idx + 1;
+                            if next_sub < group_size {
+                                // Move to next tool in group
+                                self.state.set_focused_sub_index(Some(next_sub));
+                            } else {
+                                // Exit group and move to next message after the group
+                                let next_msg = focused + group_size;
+                                if next_msg < msg_count {
+                                    self.state.set_focused_message(next_msg);
+                                }
+                            }
+                            self.state.ensure_focused_message_visible();
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Normal message-level navigation
                 let current = self.state.focused_message();
                 let next = (current + 1).min(msg_count - 1);
                 self.state.set_focused_message(next);
-                if next == msg_count - 1 {
-                    self.state.scroll_to_bottom();
-                }
+
+                // Ensure focused message is visible by scrolling if needed
+                self.state.ensure_focused_message_visible();
             }
             Command::PrevMessage => {
                 let msg_count = self.state.message_count();
                 if msg_count == 0 {
                     return Ok(());
                 }
+
+                // Check if we're navigating within a group
+                if let Some(sub_idx) = self.state.focused_sub_index() {
+                    if sub_idx > 0 {
+                        // Move to previous tool in group
+                        self.state.set_focused_sub_index(Some(sub_idx - 1));
+                        self.state.ensure_focused_message_visible();
+                        return Ok(());
+                    } else {
+                        // Exit group (go back to group header level)
+                        self.state.exit_group();
+                        self.state.ensure_focused_message_visible();
+                        return Ok(());
+                    }
+                }
+
+                // Normal message-level navigation
                 let current = self.state.focused_message();
                 let prev = current.saturating_sub(1);
                 self.state.set_focused_message(prev);
-                if prev == 0 {
-                    self.state.set_messages_scroll_offset(0);
-                }
+
+                // Ensure focused message is visible by scrolling if needed
+                self.state.ensure_focused_message_visible();
             }
             Command::ToggleMessageCollapse => {
                 let idx = self.state.focused_message();
+                let messages = self.state.messages();
+
+                // Check if we're already inside a group (navigating tools)
+                if let Some(sub_idx) = self.state.focused_sub_index() {
+                    // Toggle collapse of the specific tool at sub_idx
+                    let tool_idx = idx + sub_idx;
+                    self.state.toggle_message_collapse(tool_idx);
+                    return Ok(());
+                }
+
+                // Check if we're on a tool message that's the first in a group
+                if let Some(msg) = messages.get(idx) {
+                    if msg.role == crate::ui_backend::MessageRole::Tool {
+                        // Check if this is the first tool in a group with 2+ tools
+                        // by looking at the risk group of consecutive tools
+                        let risk_group =
+                            crate::tui_new::widgets::parse_tool_risk_group(&msg.content);
+
+                        // Count consecutive tools with same risk group starting from this message
+                        let group_size = messages[idx..]
+                            .iter()
+                            .take_while(|m| {
+                                m.role == crate::ui_backend::MessageRole::Tool
+                                    && crate::tui_new::widgets::parse_tool_risk_group(&m.content)
+                                        == risk_group
+                            })
+                            .count();
+
+                        // Check if previous message is a tool with same risk group (we're not first)
+                        let is_first_in_group = idx == 0
+                            || messages.get(idx - 1).is_none_or(|prev| {
+                                prev.role != crate::ui_backend::MessageRole::Tool
+                                    || crate::tui_new::widgets::parse_tool_risk_group(&prev.content)
+                                        != risk_group
+                            });
+
+                        if is_first_in_group && group_size >= 2 {
+                            // Check if group is collapsed
+                            if self.state.is_tool_group_collapsed(idx) {
+                                // Expand the group
+                                self.state.expand_tool_group(idx);
+                            } else {
+                                // Dive into the group (start navigating tools)
+                                self.state.dive_into_group();
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Default: toggle individual message collapse
                 self.state.toggle_message_collapse(idx);
+            }
+            Command::ExitGroup => {
+                // Exit from group navigation back to message level
+                self.state.exit_group();
             }
 
             // Input handling
@@ -1295,6 +1423,14 @@ impl AppService {
                         .ok();
                 }
             }
+            Command::QuestionStartEdit => {
+                // Start editing free text input (for FreeText questions)
+                self.state.questionnaire_start_edit();
+            }
+            Command::QuestionStopEdit => {
+                // Stop editing free text input (Escape while editing)
+                self.state.questionnaire_stop_edit();
+            }
             Command::CancelAgent => {
                 // Emergency stop for ongoing agent work (double-ESC)
                 // Uses the async interrupt to properly reset streaming state
@@ -1507,6 +1643,11 @@ impl AppService {
     pub fn get_tools(&self) -> Vec<super::tool_execution::ToolInfo> {
         let mode = self.state.agent_mode();
         self.tools.list_tools(mode)
+    }
+
+    /// Get risk level for a tool by name
+    pub fn tool_risk_level(&self, name: &str) -> Option<crate::tools::RiskLevel> {
+        self.tools.tool_risk_level(name)
     }
 
     /// Refresh file picker with workspace files
@@ -2090,7 +2231,11 @@ impl AppService {
                         }
                     }
 
-                    // Load and apply preferences (agent mode, build mode)
+                    // Load global config for default theme
+                    let global_config = crate::config::Config::load().unwrap_or_default();
+                    let global_default_theme = global_config.tui.theme_preset();
+
+                    // Load and apply preferences (agent mode, build mode, theme)
                     let tark_dir = self.working_dir.join(".tark");
                     if let Ok(prefs) = crate::tui_new::TuiPreferences::load_for_session(
                         &tark_dir,
@@ -2110,11 +2255,19 @@ impl AppService {
                         self.state.set_trust_level(trust_level);
                         self.tools.set_trust_level(trust_level).await;
 
+                        // Apply theme (use session theme or global default)
+                        let effective_theme = prefs.effective_theme(global_default_theme);
+                        self.state.set_theme(effective_theme);
+
                         tracing::info!(
-                            "Restored preferences: agent_mode={:?}, build_mode={:?}",
+                            "Restored preferences: agent_mode={:?}, build_mode={:?}, theme={:?}",
                             prefs.agent_mode,
-                            prefs.build_mode
+                            prefs.build_mode,
+                            effective_theme
                         );
+                    } else {
+                        // If preferences can't be loaded, at least apply global default theme
+                        self.state.set_theme(global_default_theme);
                     }
                 }
                 tracing::info!("Restored active session");
@@ -2143,7 +2296,7 @@ impl AppService {
                 selected_provider: self.state.current_provider(),
                 selected_model: self.state.current_model(),
                 selected_model_name: None,
-                theme: crate::ui_backend::ThemePreset::default(),
+                theme: Some(self.state.theme()),
             };
             if let Err(e) = prefs.save_for_session(&tark_dir, &session_info.session_id) {
                 tracing::warn!("Failed to save preferences: {}", e);

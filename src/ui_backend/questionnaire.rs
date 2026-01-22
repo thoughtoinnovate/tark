@@ -46,6 +46,12 @@ pub struct QuestionnaireState {
     pub total_questions: usize,
     /// Answers collected so far (for multi-question)
     pub collected_answers: Vec<AnsweredQuestion>,
+    /// Whether currently editing free text (for FreeText questions)
+    /// User must press Enter to start editing, then Enter again to submit
+    pub is_editing_free_text: bool,
+    /// Whether currently editing "Other" text (for choice questions)
+    /// User must press Enter to start editing after selecting Other, then Enter again to submit
+    pub is_editing_other_text: bool,
 }
 
 /// Type of question
@@ -82,6 +88,8 @@ impl Default for QuestionnaireState {
             current_question_index: 0,
             total_questions: 1,
             collected_answers: Vec::new(),
+            is_editing_free_text: false,
+            is_editing_other_text: false,
         }
     }
 }
@@ -112,6 +120,8 @@ impl QuestionnaireState {
             current_question_index: 0,
             total_questions: 1,
             collected_answers: Vec::new(),
+            is_editing_free_text: false,
+            is_editing_other_text: false,
         }
     }
 
@@ -143,6 +153,8 @@ impl QuestionnaireState {
             current_question_index: current_index,
             total_questions: total,
             collected_answers: Vec::new(),
+            is_editing_free_text: false,
+            is_editing_other_text: false,
         }
     }
 
@@ -320,25 +332,330 @@ impl QuestionnaireState {
     }
 
     /// Insert a character into free text answer or "Other" text
+    /// For FreeText questions, only works when in edit mode (is_editing_free_text is true)
+    /// For "Other" option, only works when in edit mode (is_editing_other_text is true)
     pub fn insert_char(&mut self, ch: char) {
         if self.question_type == QuestionType::FreeText {
-            self.free_text_answer.push(ch);
-        } else if self.is_focused_on_other() && self.other_selected {
+            // Only insert if in edit mode
+            if self.is_editing_free_text {
+                self.free_text_answer.push(ch);
+            }
+        } else if self.is_focused_on_other() && self.other_selected && self.is_editing_other_text {
+            // Only insert if in "Other" edit mode
             self.other_text.push(ch);
         }
     }
 
     /// Remove last character from free text answer or "Other" text
+    /// For FreeText questions, only works when in edit mode (is_editing_free_text is true)
+    /// For "Other" option, only works when in edit mode (is_editing_other_text is true)
     pub fn backspace(&mut self) {
         if self.question_type == QuestionType::FreeText {
-            self.free_text_answer.pop();
-        } else if self.is_focused_on_other() && self.other_selected {
+            // Only backspace if in edit mode
+            if self.is_editing_free_text {
+                self.free_text_answer.pop();
+            }
+        } else if self.is_focused_on_other() && self.other_selected && self.is_editing_other_text {
+            // Only backspace if in "Other" edit mode
             self.other_text.pop();
         }
     }
 
     /// Check if currently editing "Other" text
+    /// Returns true only if focused on "Other", it's selected, AND in edit mode
     pub fn is_editing_other(&self) -> bool {
-        self.is_focused_on_other() && self.other_selected
+        self.is_focused_on_other() && self.other_selected && self.is_editing_other_text
+    }
+
+    /// Start editing free text (for FreeText questions)
+    /// Called when user presses Enter on a FreeText question that isn't yet in edit mode
+    pub fn start_editing_free_text(&mut self) {
+        if self.question_type == QuestionType::FreeText {
+            self.is_editing_free_text = true;
+        }
+    }
+
+    /// Stop editing free text (for FreeText questions)
+    /// Called when user presses Escape while editing
+    pub fn stop_editing_free_text(&mut self) {
+        self.is_editing_free_text = false;
+    }
+
+    /// Check if currently in free text edit mode
+    pub fn is_in_free_text_edit_mode(&self) -> bool {
+        self.question_type == QuestionType::FreeText && self.is_editing_free_text
+    }
+
+    /// Start editing "Other" text (for choice questions)
+    /// Called when user presses Enter on "Other" option that is selected but not in edit mode
+    pub fn start_editing_other_text(&mut self) {
+        if self.is_focused_on_other() && self.other_selected {
+            self.is_editing_other_text = true;
+        }
+    }
+
+    /// Stop editing "Other" text (for choice questions)
+    /// Called when user presses Escape while editing "Other" text
+    pub fn stop_editing_other_text(&mut self) {
+        self.is_editing_other_text = false;
+    }
+
+    /// Check if currently in "Other" text edit mode
+    pub fn is_in_other_edit_mode(&self) -> bool {
+        self.is_focused_on_other() && self.other_selected && self.is_editing_other_text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test: start_editing_free_text only works for FreeText questions
+    #[test]
+    fn test_start_editing_free_text_only_for_freetext() {
+        // FreeText question should enter edit mode
+        let mut q = QuestionnaireState::new(
+            "test".to_string(),
+            "Question?".to_string(),
+            QuestionType::FreeText,
+            vec![],
+        );
+        assert!(!q.is_editing_free_text);
+        q.start_editing_free_text();
+        assert!(q.is_editing_free_text);
+
+        // SingleChoice question should NOT enter edit mode
+        let mut q2 = QuestionnaireState::new(
+            "test".to_string(),
+            "Question?".to_string(),
+            QuestionType::SingleChoice,
+            vec![],
+        );
+        assert!(!q2.is_editing_free_text);
+        q2.start_editing_free_text();
+        assert!(!q2.is_editing_free_text); // Should still be false
+    }
+
+    /// Test: stop_editing_free_text resets edit mode
+    #[test]
+    fn test_stop_editing_free_text() {
+        let mut q = QuestionnaireState::new(
+            "test".to_string(),
+            "Question?".to_string(),
+            QuestionType::FreeText,
+            vec![],
+        );
+        q.start_editing_free_text();
+        assert!(q.is_editing_free_text);
+        q.stop_editing_free_text();
+        assert!(!q.is_editing_free_text);
+    }
+
+    /// Test: is_in_free_text_edit_mode checks both conditions
+    #[test]
+    fn test_is_in_free_text_edit_mode() {
+        let mut q = QuestionnaireState::new(
+            "test".to_string(),
+            "Question?".to_string(),
+            QuestionType::FreeText,
+            vec![],
+        );
+        assert!(!q.is_in_free_text_edit_mode()); // Not editing yet
+        q.start_editing_free_text();
+        assert!(q.is_in_free_text_edit_mode()); // Now editing
+
+        // SingleChoice should never be in free text edit mode
+        let mut q2 = QuestionnaireState::new(
+            "test".to_string(),
+            "Question?".to_string(),
+            QuestionType::SingleChoice,
+            vec![],
+        );
+        q2.is_editing_free_text = true; // Force the flag
+        assert!(!q2.is_in_free_text_edit_mode()); // Still false because not FreeText
+    }
+
+    /// Test: insert_char only works when in edit mode for FreeText
+    #[test]
+    fn test_insert_char_requires_edit_mode() {
+        let mut q = QuestionnaireState::new(
+            "test".to_string(),
+            "Question?".to_string(),
+            QuestionType::FreeText,
+            vec![],
+        );
+
+        // Not in edit mode - insert should do nothing
+        q.insert_char('a');
+        assert_eq!(q.free_text_answer, "");
+
+        // Enter edit mode
+        q.start_editing_free_text();
+        q.insert_char('a');
+        q.insert_char('b');
+        assert_eq!(q.free_text_answer, "ab");
+    }
+
+    /// Test: backspace only works when in edit mode for FreeText
+    #[test]
+    fn test_backspace_requires_edit_mode() {
+        let mut q = QuestionnaireState::new(
+            "test".to_string(),
+            "Question?".to_string(),
+            QuestionType::FreeText,
+            vec![],
+        );
+
+        // Pre-populate some text (simulating previous edit)
+        q.is_editing_free_text = true;
+        q.insert_char('a');
+        q.insert_char('b');
+        q.is_editing_free_text = false;
+
+        // Not in edit mode - backspace should do nothing
+        q.backspace();
+        assert_eq!(q.free_text_answer, "ab");
+
+        // Enter edit mode
+        q.start_editing_free_text();
+        q.backspace();
+        assert_eq!(q.free_text_answer, "a");
+    }
+
+    // ========== "Other" Edit Mode Tests ==========
+
+    /// Helper to create a MultipleChoice question with "Other" option
+    fn create_multi_choice_with_other() -> QuestionnaireState {
+        QuestionnaireState::new(
+            "test".to_string(),
+            "Select options".to_string(),
+            QuestionType::MultipleChoice,
+            vec![
+                QuestionOption {
+                    text: "Option A".to_string(),
+                    value: "a".to_string(),
+                },
+                QuestionOption {
+                    text: "Option B".to_string(),
+                    value: "b".to_string(),
+                },
+            ],
+        )
+    }
+
+    /// Test: start_editing_other_text only works when focused on Other and it's selected
+    #[test]
+    fn test_start_editing_other_requires_focus_and_selection() {
+        let mut q = create_multi_choice_with_other();
+
+        // Not focused on Other, not selected - should not enter edit mode
+        assert!(!q.is_editing_other_text);
+        q.start_editing_other_text();
+        assert!(!q.is_editing_other_text);
+
+        // Focus on Other (index 2 for 2 options)
+        q.focused_index = 2;
+        assert!(q.is_focused_on_other());
+
+        // Focused but not selected - should not enter edit mode
+        q.start_editing_other_text();
+        assert!(!q.is_editing_other_text);
+
+        // Select Other
+        q.other_selected = true;
+
+        // Now focused and selected - should enter edit mode
+        q.start_editing_other_text();
+        assert!(q.is_editing_other_text);
+    }
+
+    /// Test: stop_editing_other_text resets edit mode
+    #[test]
+    fn test_stop_editing_other_text() {
+        let mut q = create_multi_choice_with_other();
+        q.focused_index = 2;
+        q.other_selected = true;
+        q.start_editing_other_text();
+        assert!(q.is_editing_other_text);
+
+        q.stop_editing_other_text();
+        assert!(!q.is_editing_other_text);
+    }
+
+    /// Test: is_editing_other requires all three conditions
+    #[test]
+    fn test_is_editing_other_requires_all_conditions() {
+        let mut q = create_multi_choice_with_other();
+
+        // Initially false
+        assert!(!q.is_editing_other());
+
+        // Focus on Other
+        q.focused_index = 2;
+        assert!(!q.is_editing_other()); // Not selected, not editing
+
+        // Select Other
+        q.other_selected = true;
+        assert!(!q.is_editing_other()); // Not in edit mode yet
+
+        // Enter edit mode
+        q.start_editing_other_text();
+        assert!(q.is_editing_other()); // Now all conditions met
+    }
+
+    /// Test: insert_char for "Other" only works in edit mode
+    #[test]
+    fn test_other_insert_char_requires_edit_mode() {
+        let mut q = create_multi_choice_with_other();
+        q.focused_index = 2;
+        q.other_selected = true;
+
+        // Not in edit mode - insert should do nothing
+        q.insert_char('x');
+        assert_eq!(q.other_text, "");
+
+        // Enter edit mode
+        q.start_editing_other_text();
+        q.insert_char('x');
+        q.insert_char('y');
+        assert_eq!(q.other_text, "xy");
+    }
+
+    /// Test: backspace for "Other" only works in edit mode
+    #[test]
+    fn test_other_backspace_requires_edit_mode() {
+        let mut q = create_multi_choice_with_other();
+        q.focused_index = 2;
+        q.other_selected = true;
+
+        // Pre-populate text
+        q.is_editing_other_text = true;
+        q.insert_char('a');
+        q.insert_char('b');
+        q.is_editing_other_text = false;
+
+        // Not in edit mode - backspace should do nothing
+        q.backspace();
+        assert_eq!(q.other_text, "ab");
+
+        // Enter edit mode
+        q.start_editing_other_text();
+        q.backspace();
+        assert_eq!(q.other_text, "a");
+    }
+
+    /// Test: is_in_other_edit_mode helper
+    #[test]
+    fn test_is_in_other_edit_mode() {
+        let mut q = create_multi_choice_with_other();
+
+        assert!(!q.is_in_other_edit_mode());
+
+        q.focused_index = 2;
+        q.other_selected = true;
+        assert!(!q.is_in_other_edit_mode());
+
+        q.start_editing_other_text();
+        assert!(q.is_in_other_edit_mode());
     }
 }

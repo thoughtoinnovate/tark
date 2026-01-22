@@ -1,18 +1,20 @@
 //! MCP transport implementations.
 //!
 //! Supports:
-//! - STDIO: Spawn a child process and communicate via stdin/stdout
+//! - STDIO: Spawn a child process and communicate via stdin/stdout (async)
 //! - HTTP/SSE: Connect to HTTP endpoints (future)
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
 
 /// JSON-RPC request
 #[derive(Debug, Clone, Serialize)]
@@ -44,21 +46,21 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
-/// STDIO transport for MCP servers
+/// STDIO transport for MCP servers (async)
 pub struct StdioTransport {
     /// Child process
     child: Arc<Mutex<Child>>,
     /// Request ID counter
     next_id: AtomicU64,
     /// Stdin writer
-    stdin: Arc<Mutex<std::process::ChildStdin>>,
-    /// Stdout reader  
-    stdout: Arc<Mutex<BufReader<std::process::ChildStdout>>>,
+    stdin: Arc<Mutex<tokio::process::ChildStdin>>,
+    /// Stdout reader
+    stdout: Arc<Mutex<BufReader<tokio::process::ChildStdout>>>,
 }
 
 impl StdioTransport {
-    /// Spawn a new MCP server process
-    pub fn spawn(
+    /// Spawn a new MCP server process (async)
+    pub async fn spawn(
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
@@ -68,7 +70,8 @@ impl StdioTransport {
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit()); // Pass stderr through for debugging
+            .stderr(Stdio::inherit()) // Pass stderr through for debugging
+            .kill_on_drop(true); // Auto-cleanup on drop
 
         // Set environment variables (expand ${VAR} references)
         for (key, value) in env {
@@ -102,8 +105,8 @@ impl StdioTransport {
         })
     }
 
-    /// Send a request and wait for response
-    pub fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
+    /// Send a request and wait for response (async)
+    pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let request = JsonRpcRequest {
@@ -113,21 +116,23 @@ impl StdioTransport {
             params,
         };
 
-        // Serialize and send
+        // Serialize request
         let request_str = serde_json::to_string(&request)?;
         tracing::debug!("MCP request: {}", request_str);
 
+        // Async write
         {
-            let mut stdin = self.stdin.lock().unwrap();
-            writeln!(stdin, "{}", request_str)?;
-            stdin.flush()?;
+            let mut stdin = self.stdin.lock().await;
+            stdin.write_all(request_str.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await?;
         }
 
-        // Read response
+        // Async read
         let response: JsonRpcResponse = {
-            let mut stdout = self.stdout.lock().unwrap();
+            let mut stdout = self.stdout.lock().await;
             let mut line = String::new();
-            stdout.read_line(&mut line)?;
+            stdout.read_line(&mut line).await?;
             tracing::debug!("MCP response: {}", line.trim());
             serde_json::from_str(&line)?
         };
@@ -146,8 +151,8 @@ impl StdioTransport {
             .ok_or_else(|| anyhow::anyhow!("MCP response missing result"))
     }
 
-    /// Send a notification (no response expected)
-    pub fn notify(&self, method: &str, params: Option<Value>) -> Result<()> {
+    /// Send a notification (no response expected) (async)
+    pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<()> {
         #[derive(Serialize)]
         struct JsonRpcNotification {
             jsonrpc: &'static str,
@@ -165,16 +170,17 @@ impl StdioTransport {
         let notification_str = serde_json::to_string(&notification)?;
         tracing::debug!("MCP notification: {}", notification_str);
 
-        let mut stdin = self.stdin.lock().unwrap();
-        writeln!(stdin, "{}", notification_str)?;
-        stdin.flush()?;
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(notification_str.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
 
         Ok(())
     }
 
-    /// Check if the child process is still running
-    pub fn is_alive(&self) -> bool {
-        let mut child = self.child.lock().unwrap();
+    /// Check if the child process is still running (async)
+    pub async fn is_alive(&self) -> bool {
+        let mut child = self.child.lock().await;
         match child.try_wait() {
             Ok(None) => true,     // Still running
             Ok(Some(_)) => false, // Exited
@@ -182,20 +188,15 @@ impl StdioTransport {
         }
     }
 
-    /// Kill the child process
-    pub fn kill(&self) -> Result<()> {
-        let mut child = self.child.lock().unwrap();
-        child.kill().context("Failed to kill MCP server")?;
+    /// Kill the child process (async)
+    pub async fn kill(&self) -> Result<()> {
+        let mut child = self.child.lock().await;
+        child.kill().await.context("Failed to kill MCP server")?;
         Ok(())
     }
 }
 
-impl Drop for StdioTransport {
-    fn drop(&mut self) {
-        // Try to gracefully terminate
-        let _ = self.kill();
-    }
-}
+// Note: No manual Drop needed - kill_on_drop(true) handles cleanup
 
 /// Expand environment variable references like ${VAR} in a string
 fn expand_env_vars(input: &str) -> String {

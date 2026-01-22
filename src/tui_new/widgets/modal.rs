@@ -173,7 +173,7 @@ impl Widget for HelpModal<'_> {
 /// Provider picker modal
 pub struct ProviderPickerModal<'a> {
     theme: &'a Theme,
-    providers: Vec<(String, String, String, bool)>, // (name, icon, description, configured)
+    providers: Vec<(String, String, String, bool, bool)>, // (name, icon, description, configured, is_plugin)
     selected: usize,
     filter: String,
 }
@@ -188,7 +188,7 @@ impl<'a> ProviderPickerModal<'a> {
         }
     }
 
-    pub fn providers(mut self, providers: Vec<(String, String, String, bool)>) -> Self {
+    pub fn providers(mut self, providers: Vec<(String, String, String, bool, bool)>) -> Self {
         self.providers = providers;
         self
     }
@@ -245,7 +245,7 @@ impl Widget for ProviderPickerModal<'_> {
             let filter_lower = self.filter.to_lowercase();
             self.providers
                 .iter()
-                .filter(|(name, _, _, _)| name.to_lowercase().contains(&filter_lower))
+                .filter(|(name, _, _, _, _)| name.to_lowercase().contains(&filter_lower))
                 .cloned()
                 .collect()
         };
@@ -257,7 +257,9 @@ impl Widget for ProviderPickerModal<'_> {
             )]));
         }
 
-        for (i, (name, icon, description, configured)) in filtered_providers.iter().enumerate() {
+        for (i, (name, icon, description, configured, is_plugin)) in
+            filtered_providers.iter().enumerate()
+        {
             let is_selected = i == self.selected;
             let prefix = if is_selected { "▸ " } else { "  " };
 
@@ -283,13 +285,27 @@ impl Widget for ProviderPickerModal<'_> {
                 self.theme.yellow
             };
 
-            content.push(Line::from(vec![
+            // Build the provider line with optional plugin indicator
+            let mut spans = vec![
                 Span::styled(prefix, name_style),
                 Span::styled(format!("{} ", icon), icon_style),
                 Span::styled(name.clone(), name_style),
-                Span::raw(" "),
-                Span::styled(status_icon, Style::default().fg(status_color)),
-            ]));
+            ];
+
+            // Add plugin indicator in muted/ghost color
+            if *is_plugin {
+                spans.push(Span::styled(
+                    " [plugin]",
+                    Style::default()
+                        .fg(self.theme.text_muted)
+                        .add_modifier(Modifier::DIM),
+                ));
+            }
+
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(status_icon, Style::default().fg(status_color)));
+
+            content.push(Line::from(spans));
 
             // Add description line if selected
             if is_selected && !description.is_empty() {

@@ -83,6 +83,10 @@ pub struct QuestionWidget {
     pub total_questions: usize,
     /// Questionnaire title (for multi-question)
     pub title: String,
+    /// Whether currently in free text edit mode (for FreeText questions)
+    pub is_editing_free_text: bool,
+    /// Whether currently in "Other" text edit mode (for choice questions)
+    pub is_editing_other_text: bool,
 }
 
 impl QuestionWidget {
@@ -102,6 +106,8 @@ impl QuestionWidget {
             current_index: 0,
             total_questions: 1,
             title: String::new(),
+            is_editing_free_text: false,
+            is_editing_other_text: false,
         }
     }
 
@@ -121,6 +127,8 @@ impl QuestionWidget {
             current_index: 0,
             total_questions: 1,
             title: String::new(),
+            is_editing_free_text: false,
+            is_editing_other_text: false,
         }
     }
 
@@ -140,6 +148,8 @@ impl QuestionWidget {
             current_index: 0,
             total_questions: 1,
             title: String::new(),
+            is_editing_free_text: false,
+            is_editing_other_text: false,
         }
     }
 
@@ -290,8 +300,10 @@ impl QuestionWidget {
     }
 
     /// Check if currently editing "Other" text
+    /// Check if currently editing "Other" text
+    /// Returns true only if focused on "Other", it's selected, AND in edit mode
     pub fn is_editing_other(&self) -> bool {
-        self.is_focused_on_other() && self.other_selected
+        self.is_focused_on_other() && self.other_selected && self.is_editing_other_text
     }
 }
 
@@ -432,17 +444,45 @@ impl Widget for ThemedQuestion<'_> {
                 Span::styled("your answer  ", Style::default().fg(self.theme.text_muted)),
                 Span::styled("Enter ", Style::default().fg(self.theme.green)),
                 Span::styled("submit  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("Esc ", Style::default().fg(self.theme.yellow)),
+                Span::styled("exit edit ", Style::default().fg(self.theme.text_muted)),
+            ])
+        } else if self.question.is_focused_on_other() && self.question.other_selected {
+            // "Other" is selected but not in edit mode - show edit prompt
+            Line::from(vec![
+                Span::styled("Enter ", Style::default().fg(self.theme.green)),
+                Span::styled("edit  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("↑↓ ", Style::default().fg(self.theme.yellow)),
+                Span::styled("navigate  ", Style::default().fg(self.theme.text_muted)),
                 Span::styled("Esc ", Style::default().fg(self.theme.red)),
                 Span::styled("cancel ", Style::default().fg(self.theme.text_muted)),
             ])
         } else {
             match self.question.question_type {
-                QuestionType::FreeText => Line::from(vec![
-                    Span::styled("Enter ", Style::default().fg(self.theme.green)),
-                    Span::styled("submit  ", Style::default().fg(self.theme.text_muted)),
-                    Span::styled("Esc ", Style::default().fg(self.theme.red)),
-                    Span::styled("cancel ", Style::default().fg(self.theme.text_muted)),
-                ]),
+                QuestionType::FreeText => {
+                    if self.question.is_editing_free_text {
+                        // Editing mode: show typing hints
+                        Line::from(vec![
+                            Span::styled("Type ", Style::default().fg(self.theme.cyan)),
+                            Span::styled(
+                                "your answer  ",
+                                Style::default().fg(self.theme.text_muted),
+                            ),
+                            Span::styled("Enter ", Style::default().fg(self.theme.green)),
+                            Span::styled("submit  ", Style::default().fg(self.theme.text_muted)),
+                            Span::styled("Esc ", Style::default().fg(self.theme.yellow)),
+                            Span::styled("exit edit ", Style::default().fg(self.theme.text_muted)),
+                        ])
+                    } else {
+                        // Not editing: show edit prompt
+                        Line::from(vec![
+                            Span::styled("Enter ", Style::default().fg(self.theme.green)),
+                            Span::styled("edit  ", Style::default().fg(self.theme.text_muted)),
+                            Span::styled("Esc ", Style::default().fg(self.theme.red)),
+                            Span::styled("cancel ", Style::default().fg(self.theme.text_muted)),
+                        ])
+                    }
+                }
                 QuestionType::SingleChoice => Line::from(vec![
                     // Single choice: arrow keys auto-select (no Space needed)
                     Span::styled("↑↓ ", Style::default().fg(self.theme.yellow)),
@@ -567,11 +607,23 @@ impl Widget for ThemedQuestion<'_> {
                     // Available width for the input text (account for cursor)
                     let input_width = (content_width as usize).saturating_sub(prefix_len + 2); // +2 for cursor and padding
 
+                    // Check if in edit mode for "Other"
+                    let is_editing_other = self.question.is_editing_other_text;
+
                     // Get the input text to display
-                    let input_text = if is_selected && !self.question.other_text.is_empty() {
+                    let input_text = if is_selected && is_editing_other {
+                        // In edit mode: show actual text or empty
+                        if self.question.other_text.is_empty() {
+                            "".to_string()
+                        } else {
+                            self.question.other_text.clone()
+                        }
+                    } else if is_selected && !self.question.other_text.is_empty() {
+                        // Selected but not editing, with text: show the text (dimmed)
                         self.question.other_text.clone()
                     } else if is_selected {
-                        "_".to_string() // Placeholder when selected but empty
+                        // Selected but not editing, empty: show hint
+                        "Press Enter to edit...".to_string()
                     } else {
                         "...".to_string() // Collapsed state
                     };
@@ -601,8 +653,8 @@ impl Widget for ThemedQuestion<'_> {
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(full_content, Style::default().fg(fg).bg(bg)),
-                        // Add cursor when editing
-                        if is_selected && is_focused {
+                        // Add cursor only when in edit mode
+                        if is_selected && is_focused && is_editing_other {
                             Span::styled(
                                 "▌",
                                 Style::default()
@@ -624,30 +676,54 @@ impl Widget for ThemedQuestion<'_> {
                 Paragraph::new(option_lines).render(chunks[1], buf);
             }
             QuestionType::FreeText => {
-                // Styled input area without double border
-                let display_text = if self.question.free_text_answer.is_empty() {
-                    Span::styled(
-                        "Type your answer...",
+                // Styled input area - different appearance based on edit mode
+                let is_editing = self.question.is_editing_free_text;
+
+                let (display_text, cursor) = if is_editing {
+                    // Editing mode: show answer with blinking cursor
+                    let text = if self.question.free_text_answer.is_empty() {
+                        Span::styled("", Style::default().fg(self.theme.text_primary))
+                    } else {
+                        Span::styled(
+                            self.question.free_text_answer.clone(),
+                            Style::default().fg(self.theme.text_primary),
+                        )
+                    };
+                    let cursor = Span::styled(
+                        "▌",
                         Style::default()
-                            .fg(self.theme.text_muted)
-                            .add_modifier(Modifier::ITALIC),
-                    )
+                            .fg(self.theme.question_fg)
+                            .add_modifier(Modifier::SLOW_BLINK),
+                    );
+                    (text, cursor)
                 } else {
-                    Span::styled(
-                        self.question.free_text_answer.clone(),
-                        Style::default().fg(self.theme.text_primary),
-                    )
+                    // Not editing: show placeholder or existing text (dimmed), no cursor
+                    let text = if self.question.free_text_answer.is_empty() {
+                        Span::styled(
+                            "Press Enter to edit...",
+                            Style::default()
+                                .fg(self.theme.text_muted)
+                                .add_modifier(Modifier::ITALIC),
+                        )
+                    } else {
+                        // Show existing text but dimmed to indicate not in edit mode
+                        Span::styled(
+                            self.question.free_text_answer.clone(),
+                            Style::default().fg(self.theme.text_muted),
+                        )
+                    };
+                    let cursor = Span::raw(""); // No cursor when not editing
+                    (text, cursor)
                 };
 
-                // Add blinking cursor
-                let cursor = Span::styled(
-                    "▌",
-                    Style::default()
-                        .fg(self.theme.question_fg)
-                        .add_modifier(Modifier::SLOW_BLINK),
-                );
-
                 let input_line = Line::from(vec![Span::raw("  "), display_text, cursor]);
+
+                // Underline color changes based on edit mode
+                let underline_color = if is_editing {
+                    self.theme.question_fg
+                } else {
+                    self.theme.text_muted
+                };
 
                 // Simple underline-style input
                 let input_para = Paragraph::new(vec![
@@ -655,7 +731,7 @@ impl Widget for ThemedQuestion<'_> {
                     input_line,
                     Line::from(Span::styled(
                         format!("  {}", "─".repeat((content_width - 4) as usize)),
-                        Style::default().fg(self.theme.question_fg),
+                        Style::default().fg(underline_color),
                     )),
                 ]);
                 input_para.render(chunks[1], buf);

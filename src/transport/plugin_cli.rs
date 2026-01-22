@@ -144,7 +144,12 @@ pub async fn run_plugin_info(plugin_id: &str) -> Result<()> {
 }
 
 /// Install a plugin from git repository or local path
-pub async fn run_plugin_add(url: &str, branch: &str) -> Result<()> {
+///
+/// # Arguments
+/// * `url` - Git repository URL or local path
+/// * `branch` - Branch or tag to clone (default: main)
+/// * `subpath` - Optional subdirectory path within the repository (for monorepos)
+pub async fn run_plugin_add(url: &str, branch: &str, subpath: Option<&str>) -> Result<()> {
     println!("{}", "=== Installing Plugin ===".bold().cyan());
     println!();
 
@@ -168,19 +173,29 @@ pub async fn run_plugin_add(url: &str, branch: &str) -> Result<()> {
             std::path::PathBuf::from(url)
         };
 
-        println!("Source: {} (local)", expanded.display());
+        // Apply subpath if provided
+        let final_path = if let Some(sub) = subpath {
+            expanded.join(sub)
+        } else {
+            expanded
+        };
+
+        println!("Source: {} (local)", final_path.display());
         println!();
 
-        if !expanded.exists() {
-            anyhow::bail!("Path does not exist: {}", expanded.display());
+        if !final_path.exists() {
+            anyhow::bail!("Path does not exist: {}", final_path.display());
         }
 
-        source_path = expanded;
+        source_path = final_path;
         _temp_dir = None;
     } else {
         // Git URL - clone to temp directory
         println!("Repository: {}", url);
         println!("Branch:     {}", branch);
+        if let Some(sub) = subpath {
+            println!("Path:       {}", sub);
+        }
         println!();
 
         let temp = tempfile::tempdir()?;
@@ -198,7 +213,21 @@ pub async fn run_plugin_add(url: &str, branch: &str) -> Result<()> {
             anyhow::bail!("git clone failed");
         }
 
-        source_path = clone_path;
+        // Apply subpath if provided
+        let final_path = if let Some(sub) = subpath {
+            clone_path.join(sub)
+        } else {
+            clone_path
+        };
+
+        if !final_path.exists() {
+            anyhow::bail!(
+                "Subdirectory '{}' not found in repository",
+                subpath.unwrap_or("")
+            );
+        }
+
+        source_path = final_path;
         _temp_dir = Some(temp);
     }
 

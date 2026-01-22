@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::llm::{models_db, ModelCapabilities};
 
 use super::errors::CatalogError;
-use super::types::{ModelInfo, ProviderInfo};
+use super::types::{ModelInfo, ProviderInfo, ProviderSource};
 
 /// Authentication status for a provider
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +136,24 @@ impl CatalogService {
                 description,
                 configured,
                 icon,
+                source: ProviderSource::Native,
+            });
+        }
+
+        // Add plugin providers
+        for (plugin_id, display_name) in crate::llm::list_plugin_providers() {
+            // Skip if already in list (avoid duplicates)
+            if providers.iter().any(|p| p.id == plugin_id) {
+                continue;
+            }
+
+            providers.push(ProviderInfo {
+                id: plugin_id.clone(),
+                name: display_name,
+                description: "Plugin provider".to_string(),
+                configured: true, // Plugin is installed = configured
+                icon: "🔌".to_string(),
+                source: ProviderSource::Plugin,
             });
         }
 

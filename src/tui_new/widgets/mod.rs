@@ -12,13 +12,14 @@ pub mod question;
 mod sidebar;
 mod status_bar;
 mod terminal_frame;
+pub mod todo;
 
 pub use command_autocomplete::{AutocompleteState, CommandAutocomplete, SlashCommand};
 pub use header::Header;
 #[allow(unused_imports)]
 pub use input::AttachmentBadge;
 pub use input::InputWidget;
-pub use message_area::{Message, MessageArea, MessageRole};
+pub use message_area::{parse_tool_risk_group, Message, MessageArea, MessageRole};
 pub use modal::{
     FilePickerModal, HelpModal, ModelPickerModal, ProviderPickerModal, SessionPickerModal,
     ThemePickerModal,
@@ -29,3 +30,5 @@ pub use question::{QuestionOption, QuestionType, QuestionWidget, ThemedQuestion}
 pub use sidebar::{GitChange, GitStatus, SessionInfo, Sidebar, SidebarPanel, Task, TaskStatus};
 pub use status_bar::StatusBar;
 pub use terminal_frame::TerminalFrame;
+#[allow(unused_imports)]
+pub use todo::TodoWidget;

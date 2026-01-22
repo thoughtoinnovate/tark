@@ -57,7 +57,7 @@ pub use state::{
 pub use storage_facade::StorageFacade;
 pub use tool_execution::ToolExecutionService;
 pub use traits::UiRenderer;
-pub use types::{MessageRole, ModelInfo, ProviderInfo, ThemePreset};
+pub use types::{MessageRole, ModelInfo, ProviderInfo, ProviderSource, ThemePreset};
 
 // Re-export for future use
 #[allow(unused_imports)]

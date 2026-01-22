@@ -24,8 +24,9 @@ pub struct TuiPreferences {
     pub selected_model: Option<String>,
     /// Selected model display name (for status bar)
     pub selected_model_name: Option<String>,
-    /// Current theme preset
-    pub theme: ThemePreset,
+    /// Current theme preset (None = use global default)
+    #[serde(default)]
+    pub theme: Option<ThemePreset>,
 }
 
 impl Default for TuiPreferences {
@@ -37,12 +38,17 @@ impl Default for TuiPreferences {
             selected_provider: None,
             selected_model: None,
             selected_model_name: None,
-            theme: ThemePreset::default(),
+            theme: None, // None = use global default
         }
     }
 }
 
 impl TuiPreferences {
+    /// Get the effective theme, falling back to global default if not set in session
+    pub fn effective_theme(&self, global_default: ThemePreset) -> ThemePreset {
+        self.theme.unwrap_or(global_default)
+    }
+
     /// Load preferences from a session directory
     pub fn load(session_dir: &Path) -> Result<Self> {
         let prefs_path = session_dir.join("tui_prefs.json");
@@ -148,10 +154,11 @@ impl PreferencesManager {
         }
     }
 
-    /// Update theme
+    /// Update theme (set to Some to override global default, None to use global)
     pub fn set_theme(&mut self, theme: ThemePreset) {
-        if self.prefs.theme != theme {
-            self.prefs.theme = theme;
+        let new_theme = Some(theme);
+        if self.prefs.theme != new_theme {
+            self.prefs.theme = new_theme;
             self.dirty = true;
         }
     }
@@ -200,6 +207,34 @@ mod tests {
         assert!(prefs.thinking_enabled);
         assert_eq!(prefs.agent_mode, AgentMode::default());
         assert_eq!(prefs.build_mode, BuildMode::default());
+        assert_eq!(prefs.theme, None); // Theme should be None by default
+    }
+
+    #[test]
+    fn test_effective_theme_uses_session_theme() {
+        let prefs = TuiPreferences {
+            theme: Some(ThemePreset::Nord),
+            ..Default::default()
+        };
+        let global_default = ThemePreset::TokyoNight;
+
+        // Should use session theme, not global default
+        assert_eq!(prefs.effective_theme(global_default), ThemePreset::Nord);
+    }
+
+    #[test]
+    fn test_effective_theme_uses_global_default() {
+        let prefs = TuiPreferences {
+            theme: None,
+            ..Default::default()
+        };
+        let global_default = ThemePreset::GruvboxDark;
+
+        // Should use global default when session theme is None
+        assert_eq!(
+            prefs.effective_theme(global_default),
+            ThemePreset::GruvboxDark
+        );
     }
 
     #[test]

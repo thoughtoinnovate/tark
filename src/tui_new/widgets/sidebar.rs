@@ -1,4 +1,4 @@
-//! Sidebar Widget - Context panels for session info, files, tasks, git
+//! Sidebar Widget - Context panels for session info, files, tasks, todos, git
 //!
 //! Reference: web/ui/mocks/src/app/components/Sidebar.tsx
 //! Feature: 13_sidebar.feature
@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::super::theme::Theme;
 use crate::core::context_tracker::ContextBreakdown;
+use crate::tools::builtin::{TodoItem, TodoStatus};
 use crate::ui_backend::ThemePreset;
 
 /// Sidebar panel type
@@ -17,6 +18,7 @@ pub enum SidebarPanel {
     Session,
     Context,
     Tasks,
+    Todo,
     GitChanges,
     Theme,
 }
@@ -28,6 +30,7 @@ impl SidebarPanel {
             SidebarPanel::Session => "Session",
             SidebarPanel::Context => "Context",
             SidebarPanel::Tasks => "Tasks",
+            SidebarPanel::Todo => "Todo",
             SidebarPanel::GitChanges => "Git Changes",
             SidebarPanel::Theme => "Theme",
         }
@@ -39,6 +42,7 @@ impl SidebarPanel {
             SidebarPanel::Session => "📊",
             SidebarPanel::Context => "📂",
             SidebarPanel::Tasks => "✓",
+            SidebarPanel::Todo => "📋",
             SidebarPanel::GitChanges => "⎇",
             SidebarPanel::Theme => "🎨",
         }
@@ -102,8 +106,10 @@ pub struct Sidebar<'a> {
     pub tokens_total: usize,
     /// Detailed context breakdown by source
     pub context_breakdown: ContextBreakdown,
-    /// Tasks
+    /// Tasks (high-level queued tasks)
     pub tasks: Vec<Task>,
+    /// Todos (agent's immediate work items)
+    pub todos: Vec<TodoItem>,
     /// Git changes
     pub git_changes: Vec<GitChange>,
     /// Current git branch
@@ -114,8 +120,8 @@ pub struct Sidebar<'a> {
     pub theme_preset: ThemePreset,
     /// Current theme name for display
     pub current_theme_name: String,
-    /// Which panels are expanded (Session, Context, Tasks, GitChanges)
-    pub expanded_panels: [bool; 4],
+    /// Which panels are expanded (Session, Context, Tasks, Todo, GitChanges)
+    pub expanded_panels: [bool; 5],
     /// Currently selected panel index
     pub selected_panel: usize,
     /// Selected item within panel (None = panel header selected)
@@ -127,7 +133,7 @@ pub struct Sidebar<'a> {
     /// Scroll offset for sidebar content
     pub scroll_offset: usize,
     /// Per-panel scroll offsets
-    pub panel_scrolls: [usize; 4],
+    pub panel_scrolls: [usize; 5],
     /// Index of task being dragged for reordering (within queued tasks)
     pub dragging_task_index: Option<usize>,
     /// Target position for the dragged task
@@ -157,18 +163,19 @@ impl<'a> Sidebar<'a> {
             tokens_total: 1_000_000,
             context_breakdown: ContextBreakdown::default(),
             tasks: Vec::new(),
+            todos: Vec::new(),
             git_changes: Vec::new(),
             git_branch: String::new(),
             theme,
             theme_preset: ThemePreset::default(),
             current_theme_name: "Catppuccin Mocha".to_string(),
-            expanded_panels: [true, true, true, true], // All expanded by default
+            expanded_panels: [true, true, true, true, true], // All expanded by default
             selected_panel: 0,
             selected_item: None,
             focused: false,
             vim_mode: crate::ui_backend::VimMode::Insert,
             scroll_offset: 0,
-            panel_scrolls: [0, 0, 0, 0],
+            panel_scrolls: [0, 0, 0, 0, 0],
             dragging_task_index: None,
             drag_target_index: None,
         }
@@ -196,7 +203,9 @@ impl<'a> Sidebar<'a> {
 
     pub fn expanded(mut self, panel: SidebarPanel, expanded: bool) -> Self {
         let idx = panel as usize;
-        self.expanded_panels[idx] = expanded;
+        if idx < 5 {
+            self.expanded_panels[idx] = expanded;
+        }
         self
     }
 
@@ -215,8 +224,14 @@ impl<'a> Sidebar<'a> {
         self
     }
 
-    pub fn panel_scrolls(mut self, scrolls: [usize; 4]) -> Self {
+    pub fn panel_scrolls(mut self, scrolls: [usize; 5]) -> Self {
         self.panel_scrolls = scrolls;
+        self
+    }
+
+    /// Set todos for the todo panel
+    pub fn todos(mut self, todos: Vec<TodoItem>) -> Self {
+        self.todos = todos;
         self
     }
 
@@ -229,21 +244,21 @@ impl<'a> Sidebar<'a> {
 
     /// Toggle panel expansion
     pub fn toggle_panel(&mut self, panel_idx: usize) {
-        if panel_idx < 4 {
+        if panel_idx < 5 {
             self.expanded_panels[panel_idx] = !self.expanded_panels[panel_idx];
         }
     }
 
     /// Navigate to next panel
     pub fn next_panel(&mut self) {
-        self.selected_panel = (self.selected_panel + 1) % 5;
+        self.selected_panel = (self.selected_panel + 1) % 6; // 6 panels: Session, Context, Tasks, Todo, GitChanges, Theme
         self.selected_item = None;
     }
 
     /// Navigate to previous panel
     pub fn prev_panel(&mut self) {
         self.selected_panel = if self.selected_panel == 0 {
-            4
+            5
         } else {
             self.selected_panel - 1
         };
@@ -252,8 +267,8 @@ impl<'a> Sidebar<'a> {
 
     /// Navigate down within current panel
     pub fn next_item(&mut self) {
-        // Theme panel (index 4) doesn't have items to navigate
-        if self.selected_panel == 4 {
+        // Theme panel (index 5) doesn't have items to navigate
+        if self.selected_panel == 5 {
             return;
         }
 
@@ -265,8 +280,9 @@ impl<'a> Sidebar<'a> {
             0 => 3 + self.session_info.model_costs.len(), // name line + cost line + tokens line + per-model lines
             1 => self.context_files.len(),
             2 => self.tasks.len(),
-            3 => self.git_changes.len(),
-            4 => 0, // Theme panel has no items
+            3 => self.todos.len(), // Todo panel
+            4 => self.git_changes.len(),
+            5 => 0, // Theme panel has no items
             _ => 0,
         };
 
@@ -439,6 +455,7 @@ impl Widget for Sidebar<'_> {
         let mut session_lines: Vec<Line> = vec![];
         let mut context_lines: Vec<Line> = vec![];
         let mut tasks_lines: Vec<Line> = vec![];
+        let mut todo_lines: Vec<Line> = vec![];
         let mut git_lines: Vec<Line> = vec![];
 
         // Available width for content (used for truncation)
@@ -971,9 +988,128 @@ impl Widget for Sidebar<'_> {
         }
         Self::push_line(&mut tasks_lines, &mut all_lines, Line::from(""));
 
+        // ======== TODO SECTION ========
+        let todo_expanded = self.expanded_panels[3];
+        let todo_selected = self.selected_panel == 3 && self.selected_item.is_none();
+        let chevron = if todo_expanded { "▼" } else { "▶" };
+        let todo_count = self.todos.len();
+        let completed_todos = self
+            .todos
+            .iter()
+            .filter(|t| t.status == TodoStatus::Completed)
+            .count();
+
+        // Calculate progress for badge color
+        let todo_progress = if todo_count > 0 {
+            (completed_todos as f32 / todo_count as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        let todo_header_style = if self.focused && todo_selected {
+            Style::default()
+                .fg(self.theme.cyan)
+                .add_modifier(Modifier::BOLD)
+                .bg(self.theme.selection_bg)
+        } else {
+            Style::default()
+                .fg(self.theme.text_primary)
+                .add_modifier(Modifier::BOLD)
+        };
+
+        // Badge color based on progress
+        let todo_badge_color = if todo_progress < 33.0 {
+            self.theme.red
+        } else if todo_progress < 66.0 {
+            self.theme.yellow
+        } else {
+            self.theme.green
+        };
+
+        Self::push_line(
+            &mut todo_lines,
+            &mut all_lines,
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", chevron),
+                    Style::default().fg(self.theme.text_muted),
+                ),
+                Span::styled("📋 Todo", todo_header_style),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{}/{}", completed_todos, todo_count),
+                    Style::default()
+                        .fg(self.theme.bg_main)
+                        .bg(todo_badge_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        );
+
+        if todo_expanded && !self.todos.is_empty() {
+            // Progress bar
+            let bar_width = 20usize;
+            let filled = ((bar_width as f32) * (todo_progress / 100.0)).round() as usize;
+            let empty = bar_width.saturating_sub(filled);
+            let bar_str = format!("  {}{}", "█".repeat(filled), "░".repeat(empty));
+
+            Self::push_line(
+                &mut todo_lines,
+                &mut all_lines,
+                Line::from(Span::styled(bar_str, Style::default().fg(todo_badge_color))),
+            );
+
+            // Todo items
+            for (i, item) in self.todos.iter().enumerate() {
+                let item_selected =
+                    self.focused && self.selected_panel == 3 && self.selected_item == Some(i);
+
+                // Status icon and color
+                let (icon, status_color) = match item.status {
+                    TodoStatus::Pending => ("○", self.theme.text_muted),
+                    TodoStatus::InProgress => ("●", self.theme.yellow),
+                    TodoStatus::Completed => ("✓", self.theme.green),
+                    TodoStatus::Cancelled => ("✗", self.theme.red),
+                };
+
+                let mut item_style = if item_selected {
+                    Style::default()
+                        .fg(self.theme.cyan)
+                        .bg(self.theme.selection_bg)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                };
+
+                // Strikethrough for cancelled items
+                if item.status == TodoStatus::Cancelled {
+                    item_style = item_style
+                        .fg(self.theme.text_muted)
+                        .add_modifier(Modifier::CROSSED_OUT);
+                }
+
+                // Dim completed items
+                if item.status == TodoStatus::Completed && !item_selected {
+                    item_style = item_style.fg(self.theme.text_muted);
+                }
+
+                // Truncate content to fit
+                let truncated_content = Self::truncate_text(&item.content, content_width, 4);
+
+                Self::push_line(
+                    &mut todo_lines,
+                    &mut all_lines,
+                    Line::from(vec![
+                        Span::styled(format!("  {} ", icon), Style::default().fg(status_color)),
+                        Span::styled(truncated_content, item_style),
+                    ]),
+                );
+            }
+        }
+        Self::push_line(&mut todo_lines, &mut all_lines, Line::from(""));
+
         // ======== GIT CHANGES SECTION ========
-        let git_expanded = self.expanded_panels[3];
-        let git_selected = self.selected_panel == 3 && self.selected_item.is_none();
+        let git_expanded = self.expanded_panels[4];
+        let git_selected = self.selected_panel == 4 && self.selected_item.is_none();
         let chevron = if git_expanded { "▼" } else { "▶" };
         let git_count = self.git_changes.len();
         let modified_count = self
@@ -1066,7 +1202,7 @@ impl Widget for Sidebar<'_> {
             // Show all files with status icons per mock design
             for (i, change) in self.git_changes.iter().enumerate() {
                 let item_selected =
-                    self.focused && self.selected_panel == 3 && self.selected_item == Some(i);
+                    self.focused && self.selected_panel == 4 && self.selected_item == Some(i);
                 let item_style = if item_selected {
                     Style::default()
                         .fg(self.theme.cyan)
@@ -1110,7 +1246,7 @@ impl Widget for Sidebar<'_> {
         }
 
         // Footer section: theme icon only, navigable
-        let footer_selected = self.focused && self.selected_panel == 4;
+        let footer_selected = self.focused && self.selected_panel == 5;
         let footer_style = if footer_selected {
             Style::default()
                 .fg(self.theme.cyan)
@@ -1144,12 +1280,18 @@ impl Widget for Sidebar<'_> {
         } else {
             1
         };
+        let todo_height = if todo_expanded {
+            todo_lines.len() as u16
+        } else {
+            1
+        };
 
         let panel_constraints = [
             Constraint::Length(header_lines.len() as u16),
             Constraint::Length(session_height),
             Constraint::Length(context_height),
             Constraint::Length(tasks_height),
+            Constraint::Length(todo_height),
             Constraint::Min(1), // Git gets remaining space, scrolls if needed
             Constraint::Length(footer_lines.len() as u16),
         ];
@@ -1162,14 +1304,16 @@ impl Widget for Sidebar<'_> {
         let session_area = panel_chunks[1];
         let context_area = panel_chunks[2];
         let tasks_area = panel_chunks[3];
-        let git_area = panel_chunks[4];
-        let footer_area = panel_chunks[5];
+        let todo_area = panel_chunks[4];
+        let git_area = panel_chunks[5];
+        let footer_area = panel_chunks[6];
 
         Paragraph::new(header_lines).render(header_area, buf);
         self.render_panel(session_area, session_lines, self.panel_scrolls[0], buf);
         self.render_panel(context_area, context_lines, self.panel_scrolls[1], buf);
         self.render_panel(tasks_area, tasks_lines, self.panel_scrolls[2], buf);
-        self.render_panel(git_area, git_lines, self.panel_scrolls[3], buf);
+        self.render_panel(todo_area, todo_lines, self.panel_scrolls[3], buf);
+        self.render_panel(git_area, git_lines, self.panel_scrolls[4], buf);
         Paragraph::new(footer_lines).render(footer_area, buf);
 
         // Global scrollbar (overall sidebar)

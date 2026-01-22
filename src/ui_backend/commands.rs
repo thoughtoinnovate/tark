@@ -171,6 +171,9 @@ pub enum Command {
     /// Collapse/expand focused message
     ToggleMessageCollapse,
 
+    /// Exit from tool group navigation (go back to message level)
+    ExitGroup,
+
     /// Yank (copy) message content
     YankMessage,
 
@@ -265,6 +268,12 @@ pub enum Command {
 
     /// Cancel/skip questionnaire (ESC)
     QuestionCancel,
+
+    /// Start editing free text input (Enter in FreeText question when not editing)
+    QuestionStartEdit,
+
+    /// Stop editing free text input (Escape in FreeText question when editing)
+    QuestionStopEdit,
 
     // ========== Agent Control ==========
     /// Cancel ongoing agent operation (double-ESC)

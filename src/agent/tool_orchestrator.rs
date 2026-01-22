@@ -473,6 +473,7 @@ impl LoopState {
     ) -> Result<AgentResponse> {
         Ok(AgentResponse {
             text,
+            thinking: None,
             tool_calls_made: self.tool_calls_made,
             tool_call_log: self.tool_log,
             auto_compacted: false, // TODO: Track compaction in orchestrator
@@ -485,6 +486,7 @@ impl LoopState {
     fn into_interrupted_response(self, context: &ConversationContext) -> Result<AgentResponse> {
         Ok(AgentResponse {
             text: "⚠️ *Operation interrupted by user*".to_string(),
+            thinking: None,
             tool_calls_made: self.tool_calls_made,
             tool_call_log: self.tool_log,
             auto_compacted: false,
@@ -504,6 +506,7 @@ impl LoopState {
 
         Ok(AgentResponse {
             text,
+            thinking: None,
             tool_calls_made: self.tool_calls_made,
             tool_call_log: self.tool_log,
             auto_compacted: false,

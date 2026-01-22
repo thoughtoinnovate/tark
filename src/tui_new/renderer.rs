@@ -169,8 +169,16 @@ impl<B: Backend> TuiRenderer<B> {
                     }
                     return None;
                 }
-                // Questionnaire takes priority - j navigates down
-                if state.active_questionnaire().is_some() {
+                // Questionnaire takes priority
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText {
+                        // For FreeText questions: only insert char if in edit mode
+                        if q.is_editing_free_text {
+                            state.questionnaire_insert_char('j');
+                        }
+                        // If not editing, do nothing (no navigation for FreeText)
+                        return None;
+                    }
                     return Some(Command::QuestionDown);
                 }
                 // Check if approval modal is active - j/k for navigation
@@ -218,8 +226,16 @@ impl<B: Backend> TuiRenderer<B> {
                     }
                     return None;
                 }
-                // Questionnaire takes priority - k navigates up
-                if state.active_questionnaire().is_some() {
+                // Questionnaire takes priority
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText {
+                        // For FreeText questions: only insert char if in edit mode
+                        if q.is_editing_free_text {
+                            state.questionnaire_insert_char('k');
+                        }
+                        // If not editing, do nothing (no navigation for FreeText)
+                        return None;
+                    }
                     return Some(Command::QuestionUp);
                 }
                 // Check if approval modal is active - j/k for navigation
@@ -269,7 +285,10 @@ impl<B: Backend> TuiRenderer<B> {
                 }
                 // Questionnaire takes priority
                 if let Some(q) = state.active_questionnaire() {
-                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                    // For FreeText: only insert if in edit mode
+                    // For Other: only insert if editing other
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
                         || q.is_editing_other()
                     {
                         state.questionnaire_insert_char('l');
@@ -306,7 +325,10 @@ impl<B: Backend> TuiRenderer<B> {
                 }
                 // Questionnaire takes priority
                 if let Some(q) = state.active_questionnaire() {
-                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                    // For FreeText: only insert if in edit mode
+                    // For Other: only insert if editing other
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
                         || q.is_editing_other()
                     {
                         state.questionnaire_insert_char('h');
@@ -343,7 +365,10 @@ impl<B: Backend> TuiRenderer<B> {
                 }
                 // Questionnaire takes priority - block y from going to input
                 if let Some(q) = state.active_questionnaire() {
-                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                    // For FreeText: only insert if in edit mode
+                    // For Other: only insert if editing other
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
                         || q.is_editing_other()
                     {
                         state.questionnaire_insert_char('y');
@@ -381,7 +406,10 @@ impl<B: Backend> TuiRenderer<B> {
                 }
                 // Questionnaire takes priority - block v from going to input
                 if let Some(q) = state.active_questionnaire() {
-                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                    // For FreeText: only insert if in edit mode
+                    // For Other: only insert if editing other
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
                         || q.is_editing_other()
                     {
                         state.questionnaire_insert_char('v');
@@ -416,7 +444,10 @@ impl<B: Backend> TuiRenderer<B> {
                 }
                 // Questionnaire free text input
                 if let Some(q) = state.active_questionnaire() {
-                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                    // For FreeText: only insert if in edit mode
+                    // For Other: only insert if editing other
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
                         || q.is_editing_other()
                     {
                         state.questionnaire_insert_char('e');
@@ -471,7 +502,10 @@ impl<B: Backend> TuiRenderer<B> {
                 }
                 // Questionnaire free text input
                 if let Some(q) = state.active_questionnaire() {
-                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                    // For FreeText: only insert if in edit mode
+                    // For Other: only insert if editing other
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
                         || q.is_editing_other()
                     {
                         state.questionnaire_insert_char('d');
@@ -524,7 +558,10 @@ impl<B: Backend> TuiRenderer<B> {
                 }
                 // Questionnaire free text input
                 if let Some(q) = state.active_questionnaire() {
-                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                    // For FreeText: only insert if in edit mode
+                    // For Other: only insert if editing other
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
                         || q.is_editing_other()
                     {
                         state.questionnaire_insert_char('x');
@@ -634,7 +671,10 @@ impl<B: Backend> TuiRenderer<B> {
                 }
                 // Questionnaire takes priority - block g from going to input
                 if let Some(q) = state.active_questionnaire() {
-                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                    // For FreeText: only insert if in edit mode
+                    // For Other: only insert if editing other
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
                         || q.is_editing_other()
                     {
                         state.questionnaire_insert_char('g');
@@ -675,7 +715,10 @@ impl<B: Backend> TuiRenderer<B> {
                 }
                 // Questionnaire takes priority - block G from going to input
                 if let Some(q) = state.active_questionnaire() {
-                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                    // For FreeText: only insert if in edit mode
+                    // For Other: only insert if editing other
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
                         || q.is_editing_other()
                     {
                         state.questionnaire_insert_char('G');
@@ -735,6 +778,21 @@ impl<B: Backend> TuiRenderer<B> {
 
             // Escape to close modal or switch to Normal mode
             (KeyCode::Esc, _) => {
+                // Check if in questionnaire edit mode first (FreeText or "Other")
+                if let Some(q) = state.active_questionnaire() {
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text
+                    {
+                        // Exit FreeText edit mode but keep the questionnaire open
+                        return Some(Command::QuestionStopEdit);
+                    }
+                    if q.is_editing_other_text {
+                        // Exit "Other" edit mode but keep the questionnaire open
+                        return Some(Command::QuestionStopEdit);
+                    }
+                    // Not in edit mode - cancel the questionnaire
+                    return Some(Command::QuestionCancel);
+                }
                 if let Some(modal) = state.active_modal() {
                     match modal {
                         ModalType::TaskEdit => Some(Command::CancelTaskEdit),
@@ -742,6 +800,13 @@ impl<B: Backend> TuiRenderer<B> {
                         _ => Some(Command::CloseModal),
                     }
                 } else {
+                    // Check if navigating within a tool group
+                    if matches!(state.focused_component(), FocusedComponent::Messages)
+                        && state.is_in_group()
+                    {
+                        return Some(Command::ExitGroup);
+                    }
+
                     use crate::ui_backend::VimMode;
                     // Switch to Normal mode when in Input or Messages
                     match state.focused_component() {
@@ -762,8 +827,24 @@ impl<B: Backend> TuiRenderer<B> {
                 }
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
-                if state.active_questionnaire().is_some() {
-                    Some(Command::QuestionSubmit)
+                if let Some(q) = state.active_questionnaire() {
+                    // For FreeText questions: Enter starts edit mode, or submits if already editing
+                    if q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText {
+                        if q.is_editing_free_text {
+                            Some(Command::QuestionSubmit)
+                        } else {
+                            Some(Command::QuestionStartEdit)
+                        }
+                    } else if q.is_focused_on_other() && q.other_selected {
+                        // "Other" is selected - check if editing
+                        if q.is_editing_other_text {
+                            Some(Command::QuestionSubmit)
+                        } else {
+                            Some(Command::QuestionStartEdit)
+                        }
+                    } else {
+                        Some(Command::QuestionSubmit)
+                    }
                 } else if let Some(modal) = state.active_modal() {
                     match modal {
                         ModalType::TrustLevel => {
@@ -813,8 +894,11 @@ impl<B: Backend> TuiRenderer<B> {
                     use crate::ui_backend::questionnaire::QuestionType;
 
                     if q.question_type == QuestionType::FreeText {
-                        // Free text: all typing goes to the answer
-                        state.questionnaire_insert_char(c);
+                        // Free text: only insert if in edit mode
+                        if q.is_editing_free_text {
+                            state.questionnaire_insert_char(c);
+                        }
+                        // Block all typing when not in edit mode
                         None
                     } else if q.is_editing_other() {
                         // "Other" is focused and selected: typing goes to other_text
@@ -985,12 +1069,16 @@ impl<B: Backend> TuiRenderer<B> {
                 if let Some(q) = state.active_questionnaire() {
                     use crate::ui_backend::questionnaire::QuestionType;
 
-                    if q.question_type == QuestionType::FreeText || q.is_editing_other() {
+                    // For FreeText: only backspace if in edit mode
+                    // For Other: only backspace if editing other
+                    if (q.question_type == QuestionType::FreeText && q.is_editing_free_text)
+                        || q.is_editing_other()
+                    {
                         // Backspace in free text or "Other" input
                         state.questionnaire_backspace();
                         return None;
                     }
-                    // For choice questions (not editing Other), block backspace from going to prompt
+                    // Block backspace when not editing (for FreeText) or for choice questions
                     return None;
                 }
 
@@ -1734,11 +1822,10 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .collect();
 
             let streaming_content = state.streaming_content();
-            let streaming_thinking = if thinking_enabled {
-                state.streaming_thinking()
-            } else {
-                None
-            };
+            // Always show streaming_thinking if present - it contains both:
+            // 1. Native thinking from LLMs (when thinking_enabled)
+            // 2. Promoted intermediate turn content (always)
+            let streaming_thinking = state.streaming_thinking();
 
             // Calculate bubble width for markdown rendering
             let bubble_content_width = chunks[1].width.saturating_sub(8) as usize;
@@ -1779,17 +1866,20 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 None
             };
 
+            let collapsed_groups = state.collapsed_tool_groups();
             let message_area = MessageArea::new(&message_widgets, theme)
                 .agent_name(&config.agent_name_short)
                 .focused(matches!(focused_component, FocusedComponent::Messages))
                 .focused_index(state.focused_message())
+                .focused_sub_index(state.focused_sub_index())
                 .scroll(state.messages_scroll_offset())
                 .vim_mode(state.vim_mode())
                 .streaming_content(streaming_content)
                 .streaming_thinking(streaming_thinking)
                 .streaming_lines(streaming_lines)
                 .thinking_lines(thinking_lines)
-                .processing(state.llm_processing());
+                .processing(state.llm_processing())
+                .collapsed_tool_groups(&collapsed_groups);
             let (total_lines, viewport_height) = message_area.metrics(chunks[1]);
             state.set_messages_metrics(total_lines, viewport_height);
             frame.render_widget(message_area, chunks[1]);
@@ -1917,6 +2007,17 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     })
                     .collect();
 
+                // Get todos from shared tracker (non-blocking)
+                let todo_items = {
+                    let tracker = state.todo_tracker();
+                    // Use try_lock to avoid blocking the render loop
+                    let items = match tracker.try_lock() {
+                        Ok(todos) => todos.items().to_vec(),
+                        Err(_) => Vec::new(), // Skip todos this frame if lock is held
+                    };
+                    items
+                };
+
                 let mut sidebar = Sidebar::new(theme)
                     .visible(true)
                     .theme_name(current_theme_name)
@@ -1941,6 +2042,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     )
                     .context_breakdown(state.context_breakdown())
                     .tasks(tasks_widget)
+                    .todos(todo_items)
                     .git_changes(git_changes_widget)
                     .git_branch(crate::tui_new::git_info::get_current_branch(
                         &self.working_dir,
@@ -1973,6 +2075,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                                     p.icon.clone(),
                                     p.description.clone(),
                                     p.configured,
+                                    p.source == crate::ui_backend::ProviderSource::Plugin,
                                 )
                             })
                             .collect();
@@ -2054,10 +2157,17 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                         frame.render_widget(modal, area);
                     }
                     ModalType::Tools => {
-                        // Get tools from service (via controller helper or store in state)
-                        // For now, create empty modal - tools should be cached in state
-                        let modal =
-                            ToolsModal::new(theme, agent_mode).selected(state.tools_selected());
+                        use crate::tools::ToolCategory;
+                        let tools = state.tools_for_modal();
+                        let is_external = tools
+                            .first()
+                            .map(|t| t.category == ToolCategory::External)
+                            .unwrap_or(false);
+                        let modal = ToolsModal::new(theme, agent_mode)
+                            .tools(tools)
+                            .selected(state.tools_selected())
+                            .scroll_offset(state.tools_scroll_offset())
+                            .external(is_external);
                         frame.render_widget(modal, area);
                     }
                     ModalType::Plugin => {
@@ -2142,6 +2252,8 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     current_index: q.current_question_index,
                     total_questions: q.total_questions,
                     title: q.title.clone(),
+                    is_editing_free_text: q.is_editing_free_text,
+                    is_editing_other_text: q.is_editing_other_text,
                 };
 
                 // ThemedQuestion handles its own centering, pass full area
@@ -2237,7 +2349,11 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     // Questionnaire takes priority for paste
                     if let Some(q) = state.active_questionnaire() {
                         use crate::ui_backend::questionnaire::QuestionType;
-                        if q.question_type == QuestionType::FreeText || q.is_editing_other() {
+                        // For FreeText: only paste if in edit mode
+                        // For Other: only paste if editing other
+                        if (q.question_type == QuestionType::FreeText && q.is_editing_free_text)
+                            || q.is_editing_other()
+                        {
                             // Insert pasted text into questionnaire
                             for c in text.chars() {
                                 state.questionnaire_insert_char(c);
@@ -2292,6 +2408,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_backend::questionnaire::QuestionnaireState;
     use crate::ui_backend::ModelInfo;
     use crossterm::event::KeyEvent;
 
@@ -2507,5 +2624,256 @@ mod tests {
 
         // FilePicker updates the filter directly in the key handler
         assert_eq!(state.file_picker_filter(), "testj");
+    }
+
+    // ========== FreeText Edit Mode Tests ==========
+
+    /// Helper to create a FreeText questionnaire for testing
+    fn create_free_text_questionnaire(is_editing: bool) -> QuestionnaireState {
+        let mut q = QuestionnaireState::new(
+            "test-id".to_string(),
+            "What is your name?".to_string(),
+            crate::ui_backend::questionnaire::QuestionType::FreeText,
+            vec![],
+        );
+        if is_editing {
+            q.start_editing_free_text();
+        }
+        q
+    }
+
+    /// Test: FreeText questionnaire - Enter starts edit mode when not editing
+    #[test]
+    fn test_freetext_enter_starts_edit_mode() {
+        let state = SharedState::new();
+        let q = create_free_text_questionnaire(false);
+        state.set_active_questionnaire(Some(q));
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Enter, KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd, Some(Command::QuestionStartEdit));
+    }
+
+    /// Test: FreeText questionnaire - Enter submits when in edit mode
+    #[test]
+    fn test_freetext_enter_submits_when_editing() {
+        let state = SharedState::new();
+        let q = create_free_text_questionnaire(true);
+        state.set_active_questionnaire(Some(q));
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Enter, KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd, Some(Command::QuestionSubmit));
+    }
+
+    /// Test: FreeText questionnaire - Escape stops editing when in edit mode
+    #[test]
+    fn test_freetext_escape_stops_editing() {
+        let state = SharedState::new();
+        let q = create_free_text_questionnaire(true);
+        state.set_active_questionnaire(Some(q));
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Esc, KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd, Some(Command::QuestionStopEdit));
+    }
+
+    /// Test: FreeText questionnaire - Escape cancels when not editing
+    #[test]
+    fn test_freetext_escape_cancels_when_not_editing() {
+        let state = SharedState::new();
+        let q = create_free_text_questionnaire(false);
+        state.set_active_questionnaire(Some(q));
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Esc, KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd, Some(Command::QuestionCancel));
+    }
+
+    /// Test: FreeText questionnaire - j/k are blocked when not editing
+    #[test]
+    fn test_freetext_jk_blocked_when_not_editing() {
+        let state = SharedState::new();
+        let q = create_free_text_questionnaire(false);
+        state.set_active_questionnaire(Some(q));
+
+        // j should return None (no navigation for FreeText)
+        let cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+        // k should return None (no navigation for FreeText)
+        let cmd_k = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('k'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_j, None);
+        assert_eq!(cmd_k, None);
+
+        // Verify no characters were inserted
+        let q = state.active_questionnaire().unwrap();
+        assert_eq!(q.free_text_answer, "");
+    }
+
+    /// Test: FreeText questionnaire - j/k insert characters when editing
+    #[test]
+    fn test_freetext_jk_insert_when_editing() {
+        let state = SharedState::new();
+        let q = create_free_text_questionnaire(true);
+        state.set_active_questionnaire(Some(q));
+
+        // j should insert 'j' via state.questionnaire_insert_char()
+        let _cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+        // k should insert 'k' via state.questionnaire_insert_char()
+        let _cmd_k = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('k'), KeyModifiers::NONE),
+            &state,
+        );
+
+        // Verify characters were inserted
+        let q = state.active_questionnaire().unwrap();
+        assert_eq!(q.free_text_answer, "jk");
+    }
+
+    /// Test: FreeText questionnaire - other vim keys (l, h) blocked when not editing
+    #[test]
+    fn test_freetext_other_keys_blocked_when_not_editing() {
+        let state = SharedState::new();
+        let q = create_free_text_questionnaire(false);
+        state.set_active_questionnaire(Some(q));
+
+        // These should return None (blocked)
+        let _cmd_l = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('l'), KeyModifiers::NONE),
+            &state,
+        );
+        let _cmd_h = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('h'), KeyModifiers::NONE),
+            &state,
+        );
+
+        // Verify no characters were inserted
+        let q = state.active_questionnaire().unwrap();
+        assert_eq!(q.free_text_answer, "");
+    }
+
+    /// Test: FreeText questionnaire - other vim keys (l, h) insert when editing
+    #[test]
+    fn test_freetext_other_keys_insert_when_editing() {
+        let state = SharedState::new();
+        let q = create_free_text_questionnaire(true);
+        state.set_active_questionnaire(Some(q));
+
+        // These should insert characters
+        let _cmd_l = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('l'), KeyModifiers::NONE),
+            &state,
+        );
+        let _cmd_h = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('h'), KeyModifiers::NONE),
+            &state,
+        );
+
+        // Verify characters were inserted
+        let q = state.active_questionnaire().unwrap();
+        assert_eq!(q.free_text_answer, "lh");
+    }
+
+    // ========== "Other" Option Edit Mode Tests ==========
+
+    /// Helper to create a MultipleChoice questionnaire with "Other" selected
+    fn create_other_questionnaire(is_editing: bool) -> QuestionnaireState {
+        let mut q = QuestionnaireState::new(
+            "test-id".to_string(),
+            "Select options".to_string(),
+            crate::ui_backend::questionnaire::QuestionType::MultipleChoice,
+            vec![crate::ui_backend::questionnaire::QuestionOption {
+                text: "Option A".to_string(),
+                value: "a".to_string(),
+            }],
+        );
+        // Focus on "Other" (index 1 for 1 option)
+        q.focused_index = 1;
+        q.other_selected = true;
+        if is_editing {
+            q.start_editing_other_text();
+        }
+        q
+    }
+
+    /// Test: "Other" option - Enter starts edit mode when not editing
+    #[test]
+    fn test_other_enter_starts_edit_mode() {
+        let state = SharedState::new();
+        let q = create_other_questionnaire(false);
+        state.set_active_questionnaire(Some(q));
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Enter, KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd, Some(Command::QuestionStartEdit));
+    }
+
+    /// Test: "Other" option - Enter submits when in edit mode
+    #[test]
+    fn test_other_enter_submits_when_editing() {
+        let state = SharedState::new();
+        let q = create_other_questionnaire(true);
+        state.set_active_questionnaire(Some(q));
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Enter, KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd, Some(Command::QuestionSubmit));
+    }
+
+    /// Test: "Other" option - Escape stops editing when in edit mode
+    #[test]
+    fn test_other_escape_stops_editing() {
+        let state = SharedState::new();
+        let q = create_other_questionnaire(true);
+        state.set_active_questionnaire(Some(q));
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Esc, KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd, Some(Command::QuestionStopEdit));
+    }
+
+    /// Test: "Other" option - Escape cancels questionnaire when not editing
+    #[test]
+    fn test_other_escape_cancels_when_not_editing() {
+        let state = SharedState::new();
+        let q = create_other_questionnaire(false);
+        state.set_active_questionnaire(Some(q));
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Esc, KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd, Some(Command::QuestionCancel));
     }
 }

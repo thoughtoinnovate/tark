@@ -19,6 +19,7 @@ pub struct ToolInfo {
     pub name: String,
     pub description: String,
     pub risk_level: RiskLevel,
+    pub category: crate::tools::ToolCategory,
     pub available_in_modes: Vec<AgentMode>,
 }
 
@@ -50,13 +51,19 @@ impl ToolExecutionService {
 
         definitions
             .into_iter()
-            .map(|def| ToolInfo {
-                name: def.name.clone(),
-                description: def.description.clone(),
-                risk_level: registry
-                    .tool_risk_level(&def.name)
-                    .unwrap_or(RiskLevel::ReadOnly),
-                available_in_modes: vec![mode], // Simplified - would check all modes
+            .map(|def| {
+                let tool = registry.get(&def.name);
+                ToolInfo {
+                    name: def.name.clone(),
+                    description: def.description.clone(),
+                    risk_level: registry
+                        .tool_risk_level(&def.name)
+                        .unwrap_or(RiskLevel::ReadOnly),
+                    category: tool
+                        .map(|t| t.category())
+                        .unwrap_or(crate::tools::ToolCategory::Core),
+                    available_in_modes: vec![mode], // Simplified - would check all modes
+                }
             })
             .collect()
     }

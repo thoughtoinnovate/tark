@@ -274,6 +274,13 @@ impl ConversationService {
             let _ = event_tx_thinking.send(AppEvent::LlmThinkingChunk(chunk));
         };
 
+        let event_tx_commit = self.event_tx.clone();
+        let on_commit_intermediate = move |content: String| {
+            if !content.is_empty() {
+                let _ = event_tx_commit.send(AppEvent::CommitIntermediateResponse(content));
+            }
+        };
+
         let correlation_id_tool_start = correlation_id.clone();
         let on_tool_call = move |tool_name: String, tool_args: String| {
             if let Ok(args_json) = serde_json::from_str::<serde_json::Value>(&tool_args) {
@@ -353,6 +360,7 @@ impl ConversationService {
                     on_thinking,
                     on_tool_call,
                     on_tool_complete,
+                    on_commit_intermediate,
                 )
                 .await
         };
@@ -393,6 +401,7 @@ impl ConversationService {
 
                     let _ = self.event_tx.send(AppEvent::LlmCompleted {
                         text: response.text,
+                        thinking: response.thinking,
                         input_tokens,
                         output_tokens,
                     });
@@ -435,7 +444,12 @@ impl ConversationService {
     }
 
     /// Update agent mode and tool registry
-    pub async fn update_mode(&self, working_dir: std::path::PathBuf, mode: AgentMode) {
+    pub async fn update_mode(
+        &self,
+        working_dir: std::path::PathBuf,
+        mode: AgentMode,
+        todo_tracker: Option<Arc<std::sync::Mutex<crate::tools::TodoTracker>>>,
+    ) {
         let approvals_path = { self.approvals_path.read().await.clone() };
         let tools = ToolRegistry::for_mode_with_services(
             working_dir,
@@ -444,6 +458,7 @@ impl ConversationService {
             self.interaction_tx.clone(),
             None,
             approvals_path,
+            todo_tracker,
         );
         let mut agent = self.chat_agent.write().await;
         agent.update_mode(tools, mode);

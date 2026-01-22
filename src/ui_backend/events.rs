@@ -22,9 +22,15 @@ pub enum AppEvent {
     /// Thinking/reasoning chunk received from LLM
     LlmThinkingChunk(String),
 
+    /// Commit intermediate text as a message bubble
+    /// Contains the text to commit (passed directly, no shared state race)
+    CommitIntermediateResponse(String),
+
     /// LLM completed processing
     LlmCompleted {
         text: String,
+        /// Accumulated intermediate reasoning from tool-calling iterations
+        thinking: Option<String>,
         input_tokens: usize,
         output_tokens: usize,
     },

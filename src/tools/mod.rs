@@ -53,9 +53,11 @@ pub use risk::{MatchType, RiskLevel, TrustLevel};
 pub use shell::ShellTool;
 
 // Built-in extra tools
+#[allow(unused_imports)]
+pub use builtin::TodoItem;
 pub use builtin::{
     MemoryDeleteTool, MemoryListTool, MemoryQueryTool, MemoryStoreTool, TarkMemory, ThinkTool,
-    ThinkingTracker,
+    ThinkingTracker, TodoTool, TodoTracker,
 };
 
 use crate::llm::ToolDefinition;
@@ -95,6 +97,18 @@ impl ToolResult {
     }
 }
 
+/// Tool category for UI organization
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolCategory {
+    /// Core tools: file_read, grep, shell, etc.
+    #[default]
+    Core,
+    /// Built-in extra tools: think, memory_*
+    Builtin,
+    /// External MCP server tools
+    External,
+}
+
 /// Trait for agent tools
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -113,6 +127,11 @@ pub trait Tool: Send + Sync {
     /// Get the risk level for this tool (default: ReadOnly)
     fn risk_level(&self) -> RiskLevel {
         RiskLevel::ReadOnly
+    }
+
+    /// Get the category for this tool (default: Core)
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Core
     }
 
     /// Get the command string for approval (used for pattern matching)
@@ -178,7 +197,15 @@ impl ToolRegistry {
         shell_enabled: bool,
         interaction_tx: Option<InteractionSender>,
     ) -> Self {
-        Self::for_mode_with_services(working_dir, mode, shell_enabled, interaction_tx, None, None)
+        Self::for_mode_with_services(
+            working_dir,
+            mode,
+            shell_enabled,
+            interaction_tx,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Create a registry with full service support including plan tools
@@ -186,6 +213,9 @@ impl ToolRegistry {
     /// When `plan_service` is provided, plan management tools are registered:
     /// - `save_plan`: Available in Plan mode only
     /// - `mark_task_done`: Available in Plan and Build modes
+    ///
+    /// When `todo_tracker` is provided, the todo tool will use that shared tracker.
+    /// Otherwise, a new tracker is created.
     pub fn for_mode_with_services(
         working_dir: PathBuf,
         mode: AgentMode,
@@ -193,6 +223,7 @@ impl ToolRegistry {
         interaction_tx: Option<InteractionSender>,
         plan_service: Option<Arc<PlanService>>,
         approvals_path: Option<PathBuf>,
+        todo_tracker: Option<Arc<Mutex<TodoTracker>>>,
     ) -> Self {
         // Create approval gate if we have an interaction channel
         let approval_gate = interaction_tx.as_ref().map(|tx| {
@@ -232,6 +263,11 @@ impl ToolRegistry {
                 tracing::warn!("Failed to initialize memory tools: {}", e);
             }
         }
+
+        // Todo tool - session-scoped task tracking
+        let todo_tracker = todo_tracker.unwrap_or_else(|| Arc::new(Mutex::new(TodoTracker::new())));
+        registry.register(Arc::new(TodoTool::new(todo_tracker)));
+        tracing::debug!("Registered todo tool");
 
         // ===== Read-only tools (available in ALL modes) =====
 

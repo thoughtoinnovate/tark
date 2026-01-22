@@ -275,6 +275,10 @@ impl Tool for MemoryStoreTool {
         RiskLevel::Write
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Builtin
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolResult> {
         let key = params
             .get("key")
@@ -376,6 +380,10 @@ impl Tool for MemoryQueryTool {
         RiskLevel::ReadOnly
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Builtin
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolResult> {
         let search = params.get("search").and_then(|v| v.as_str());
         let category = params.get("category").and_then(|v| v.as_str());
@@ -458,6 +466,10 @@ impl Tool for MemoryListTool {
 
     fn risk_level(&self) -> RiskLevel {
         RiskLevel::ReadOnly
+    }
+
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Builtin
     }
 
     async fn execute(&self, params: Value) -> Result<ToolResult> {
@@ -548,6 +560,10 @@ impl Tool for MemoryDeleteTool {
 
     fn risk_level(&self) -> RiskLevel {
         RiskLevel::Write
+    }
+
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Builtin
     }
 
     async fn execute(&self, params: Value) -> Result<ToolResult> {

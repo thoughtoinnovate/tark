@@ -1,4 +1,4 @@
-//! MCP client for connecting to external MCP servers.
+//! MCP client for connecting to external MCP servers (async).
 
 use super::transport::StdioTransport;
 use super::types::{ConnectionStatus, McpToolDef, McpToolResult, ServerCapabilities};
@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Information about a connected MCP server
 pub struct McpServerConnection {
@@ -16,7 +17,7 @@ pub struct McpServerConnection {
     /// Connection status
     pub status: ConnectionStatus,
     /// Transport (if connected)
-    transport: Option<StdioTransport>,
+    transport: Option<Arc<StdioTransport>>,
     /// Discovered tools
     pub tools: Vec<McpToolDef>,
     /// Server capabilities
@@ -36,7 +37,7 @@ impl McpServerConnection {
     }
 }
 
-/// Manages connections to multiple MCP servers
+/// Manages connections to multiple MCP servers (async)
 pub struct McpServerManager {
     /// Server connections by ID
     connections: RwLock<HashMap<String, McpServerConnection>>,
@@ -57,8 +58,8 @@ impl McpServerManager {
     }
 
     /// Load server configurations
-    pub fn load_config(&self, config: &McpConfig) {
-        let mut connections = self.connections.write().unwrap();
+    pub async fn load_config(&self, config: &McpConfig) {
+        let mut connections = self.connections.write().await;
         for (id, server_config) in &config.servers {
             if server_config.enabled {
                 connections.insert(id.clone(), McpServerConnection::new(server_config.clone()));
@@ -67,32 +68,32 @@ impl McpServerManager {
     }
 
     /// Get list of configured server IDs
-    pub fn server_ids(&self) -> Vec<String> {
-        self.connections.read().unwrap().keys().cloned().collect()
+    pub async fn server_ids(&self) -> Vec<String> {
+        self.connections.read().await.keys().cloned().collect()
     }
 
     /// Get connection status for a server
-    pub fn status(&self, server_id: &str) -> Option<ConnectionStatus> {
+    pub async fn status(&self, server_id: &str) -> Option<ConnectionStatus> {
         self.connections
             .read()
-            .unwrap()
+            .await
             .get(server_id)
             .map(|c| c.status.clone())
     }
 
     /// Get all tools from a connected server
-    pub fn tools(&self, server_id: &str) -> Vec<McpToolDef> {
+    pub async fn tools(&self, server_id: &str) -> Vec<McpToolDef> {
         self.connections
             .read()
-            .unwrap()
+            .await
             .get(server_id)
             .map(|c| c.tools.clone())
             .unwrap_or_default()
     }
 
     /// Get all tools from all connected servers
-    pub fn all_tools(&self) -> Vec<(String, McpToolDef)> {
-        let connections = self.connections.read().unwrap();
+    pub async fn all_tools(&self) -> Vec<(String, McpToolDef)> {
+        let connections = self.connections.read().await;
         let mut tools = Vec::new();
         for (server_id, conn) in connections.iter() {
             if conn.status.is_connected() {
@@ -104,10 +105,10 @@ impl McpServerManager {
         tools
     }
 
-    /// Connect to a server
-    pub fn connect(&self, server_id: &str) -> Result<()> {
+    /// Connect to a server (async)
+    pub async fn connect(&self, server_id: &str) -> Result<()> {
         let config = {
-            let connections = self.connections.read().unwrap();
+            let connections = self.connections.read().await;
             connections
                 .get(server_id)
                 .map(|c| c.config.clone())
@@ -116,22 +117,24 @@ impl McpServerManager {
 
         // Update status to connecting
         {
-            let mut connections = self.connections.write().unwrap();
+            let mut connections = self.connections.write().await;
             if let Some(conn) = connections.get_mut(server_id) {
                 conn.status = ConnectionStatus::Connecting;
             }
         }
 
-        // Spawn the transport
+        // Spawn the transport (async)
         let transport = match StdioTransport::spawn(
             &config.command,
             &config.args,
             &config.env,
             Some(&self.working_dir),
-        ) {
-            Ok(t) => t,
+        )
+        .await
+        {
+            Ok(t) => Arc::new(t),
             Err(e) => {
-                let mut connections = self.connections.write().unwrap();
+                let mut connections = self.connections.write().await;
                 if let Some(conn) = connections.get_mut(server_id) {
                     conn.status = ConnectionStatus::Failed(e.to_string());
                 }
@@ -139,23 +142,25 @@ impl McpServerManager {
             }
         };
 
-        // Initialize the connection
-        let init_result = transport.request(
-            "initialize",
-            Some(json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "tark",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            })),
-        );
+        // Initialize the connection (async)
+        let init_result = transport
+            .request(
+                "initialize",
+                Some(json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "tark",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                })),
+            )
+            .await;
 
         let capabilities: ServerCapabilities = match init_result {
             Ok(result) => {
-                // Send initialized notification
-                let _ = transport.notify("notifications/initialized", None);
+                // Send initialized notification (async)
+                let _ = transport.notify("notifications/initialized", None).await;
 
                 // Parse capabilities
                 result
@@ -165,7 +170,7 @@ impl McpServerManager {
                     .unwrap_or_default()
             }
             Err(e) => {
-                let mut connections = self.connections.write().unwrap();
+                let mut connections = self.connections.write().await;
                 if let Some(conn) = connections.get_mut(server_id) {
                     conn.status = ConnectionStatus::Failed(e.to_string());
                 }
@@ -173,9 +178,9 @@ impl McpServerManager {
             }
         };
 
-        // Discover tools
+        // Discover tools (async)
         let tools = if capabilities.tools.is_some() {
-            match transport.request("tools/list", None) {
+            match transport.request("tools/list", None).await {
                 Ok(result) => result
                     .get("tools")
                     .and_then(|t| serde_json::from_value(t.clone()).ok())
@@ -191,7 +196,7 @@ impl McpServerManager {
 
         // Update connection
         {
-            let mut connections = self.connections.write().unwrap();
+            let mut connections = self.connections.write().await;
             if let Some(conn) = connections.get_mut(server_id) {
                 conn.transport = Some(transport);
                 conn.capabilities = capabilities;
@@ -204,12 +209,12 @@ impl McpServerManager {
         Ok(())
     }
 
-    /// Disconnect from a server
-    pub fn disconnect(&self, server_id: &str) -> Result<()> {
-        let mut connections = self.connections.write().unwrap();
+    /// Disconnect from a server (async)
+    pub async fn disconnect(&self, server_id: &str) -> Result<()> {
+        let mut connections = self.connections.write().await;
         if let Some(conn) = connections.get_mut(server_id) {
             if let Some(transport) = conn.transport.take() {
-                let _ = transport.kill();
+                let _ = transport.kill().await;
             }
             conn.status = ConnectionStatus::Disconnected;
             conn.tools.clear();
@@ -218,27 +223,30 @@ impl McpServerManager {
         Ok(())
     }
 
-    /// Call a tool on a server
-    pub fn call_tool(
+    /// Call a tool on a server (async)
+    pub async fn call_tool(
         &self,
         server_id: &str,
         tool_name: &str,
         arguments: Value,
     ) -> Result<McpToolResult> {
-        let connections = self.connections.read().unwrap();
-        let conn = connections
-            .get(server_id)
-            .ok_or_else(|| anyhow::anyhow!("Unknown server: {}", server_id))?;
+        // Get transport reference while holding read lock briefly
+        let transport = {
+            let connections = self.connections.read().await;
+            let conn = connections
+                .get(server_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown server: {}", server_id))?;
 
-        if !conn.status.is_connected() {
-            return Err(anyhow::anyhow!("Server not connected: {}", server_id));
-        }
+            if !conn.status.is_connected() {
+                return Err(anyhow::anyhow!("Server not connected: {}", server_id));
+            }
 
-        let transport = conn
-            .transport
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No transport for server: {}", server_id))?;
+            conn.transport
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("No transport for server: {}", server_id))?
+        };
 
+        // Make the call without holding the lock
         let result = transport
             .request(
                 "tools/call",
@@ -247,16 +255,17 @@ impl McpServerManager {
                     "arguments": arguments
                 })),
             )
+            .await
             .with_context(|| format!("Failed to call tool: {}", tool_name))?;
 
         serde_json::from_value(result).context("Failed to parse tool result")
     }
 
     /// Check if a server is connected
-    pub fn is_connected(&self, server_id: &str) -> bool {
+    pub async fn is_connected(&self, server_id: &str) -> bool {
         self.connections
             .read()
-            .unwrap()
+            .await
             .get(server_id)
             .map(|c| c.status.is_connected())
             .unwrap_or(false)
@@ -266,14 +275,14 @@ impl McpServerManager {
     pub fn data_dir(&self) -> &PathBuf {
         &self.data_dir
     }
-}
 
-impl Drop for McpServerManager {
-    fn drop(&mut self) {
-        // Disconnect all servers
-        let server_ids: Vec<String> = self.server_ids();
+    /// Disconnect all servers (async) - for cleanup
+    pub async fn disconnect_all(&self) {
+        let server_ids: Vec<String> = self.server_ids().await;
         for id in server_ids {
-            let _ = self.disconnect(&id);
+            let _ = self.disconnect(&id).await;
         }
     }
 }
+
+// Note: No Drop impl needed - StdioTransport uses kill_on_drop(true)

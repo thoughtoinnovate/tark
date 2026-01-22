@@ -3,7 +3,7 @@
 //! Displays available tools for the current agent mode with risk levels
 
 use crate::core::types::AgentMode;
-use crate::tools::RiskLevel;
+use crate::tools::{RiskLevel, ToolCategory};
 use crate::tui_new::theme::Theme;
 use ratatui::{
     buffer::Buffer,
@@ -19,6 +19,18 @@ pub struct ToolDisplay {
     pub name: String,
     pub description: String,
     pub risk_level: RiskLevel,
+    pub category: ToolCategory,
+}
+
+impl From<crate::ui_backend::tool_execution::ToolInfo> for ToolDisplay {
+    fn from(info: crate::ui_backend::tool_execution::ToolInfo) -> Self {
+        Self {
+            name: info.name,
+            description: info.description,
+            risk_level: info.risk_level,
+            category: info.category,
+        }
+    }
 }
 
 /// Tools viewer modal
@@ -27,6 +39,8 @@ pub struct ToolsModal<'a> {
     tools: Vec<ToolDisplay>,
     agent_mode: AgentMode,
     selected: usize,
+    scroll_offset: usize,
+    is_external: bool,
 }
 
 impl<'a> ToolsModal<'a> {
@@ -36,16 +50,28 @@ impl<'a> ToolsModal<'a> {
             tools: Vec::new(),
             agent_mode,
             selected: 0,
+            scroll_offset: 0,
+            is_external: false,
         }
     }
 
-    pub fn tools(mut self, tools: Vec<ToolDisplay>) -> Self {
-        self.tools = tools;
+    pub fn tools(mut self, tools: Vec<crate::ui_backend::tool_execution::ToolInfo>) -> Self {
+        self.tools = tools.into_iter().map(ToolDisplay::from).collect();
         self
     }
 
     pub fn selected(mut self, index: usize) -> Self {
         self.selected = index;
+        self
+    }
+
+    pub fn scroll_offset(mut self, offset: usize) -> Self {
+        self.scroll_offset = offset;
+        self
+    }
+
+    pub fn external(mut self, external: bool) -> Self {
+        self.is_external = external;
         self
     }
 
@@ -83,11 +109,38 @@ impl Widget for ToolsModal<'_> {
         // Clear background
         Clear.render(modal_area, buf);
 
-        // Modal border
+        // Calculate viewport
+        let header_lines = 4; // nav hints + legend + blanks
+        let lines_per_tool = 3; // name + description + blank
+        let inner_height = modal_height.saturating_sub(2) as usize; // minus borders
+        let content_height = inner_height.saturating_sub(header_lines);
+        let max_visible_tools = content_height / lines_per_tool;
+
+        // Dynamic title based on tool type
+        let title_text = if self.tools.is_empty() {
+            if self.is_external {
+                "External Tools".to_string()
+            } else {
+                "Internal Tools".to_string()
+            }
+        } else if self.is_external {
+            format!(
+                "External Tools [{}/{}]",
+                self.selected + 1,
+                self.tools.len()
+            )
+        } else {
+            format!(
+                "Internal Tools [{}/{}]",
+                self.selected + 1,
+                self.tools.len()
+            )
+        };
+
         let title = Line::from(vec![
             Span::raw(" "),
             Span::styled(
-                format!("Available Tools - {:?} Mode", self.agent_mode),
+                title_text,
                 Style::default()
                     .fg(self.theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -133,11 +186,23 @@ impl Widget for ToolsModal<'_> {
 
         if self.tools.is_empty() {
             content.push(Line::from(Span::styled(
-                "  No tools available for this mode",
+                "  No tools available",
                 Style::default().fg(self.theme.text_muted),
             )));
         } else {
-            for (i, tool) in self.tools.iter().enumerate().take(15) {
+            // Scroll-up indicator
+            if self.scroll_offset > 0 {
+                content.push(Line::from(Span::styled(
+                    format!("  ▲ {} more above", self.scroll_offset),
+                    Style::default().fg(self.theme.text_muted),
+                )));
+                content.push(Line::from(""));
+            }
+
+            // Render visible tools
+            let visible_end = (self.scroll_offset + max_visible_tools).min(self.tools.len());
+            for i in self.scroll_offset..visible_end {
+                let tool = &self.tools[i];
                 let is_selected = i == self.selected;
                 let prefix = if is_selected { "▸ " } else { "  " };
 
@@ -172,14 +237,17 @@ impl Widget for ToolsModal<'_> {
                     ),
                 ]));
 
-                if i < self.tools.len().min(15) - 1 {
+                if i < visible_end - 1 {
                     content.push(Line::from(""));
                 }
             }
 
-            if self.tools.len() > 15 {
+            // Scroll-down indicator
+            let remaining = self.tools.len().saturating_sub(visible_end);
+            if remaining > 0 {
+                content.push(Line::from(""));
                 content.push(Line::from(Span::styled(
-                    format!("  ... {} more tools", self.tools.len() - 15),
+                    format!("  ▼ {} more below", remaining),
                     Style::default().fg(self.theme.text_muted),
                 )));
             }

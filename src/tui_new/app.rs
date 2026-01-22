@@ -96,7 +96,7 @@ pub struct AppState {
     /// Sidebar state
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
-    pub sidebar_expanded_panels: [bool; 4],
+    pub sidebar_expanded_panels: [bool; 5],
 }
 
 // Re-export from ui_backend
@@ -147,7 +147,7 @@ impl Default for AppState {
             context_files: Vec::new(),
             sidebar_selected_panel: 0,
             sidebar_selected_item: None,
-            sidebar_expanded_panels: [true, true, true, true],
+            sidebar_expanded_panels: [true, true, true, true, true],
         }
     }
 }
@@ -341,7 +341,7 @@ impl AppState {
 
     /// Toggle sidebar panel expansion
     pub fn sidebar_toggle_panel(&mut self, panel_idx: usize) {
-        if panel_idx < 4 {
+        if panel_idx < 5 {
             self.sidebar_expanded_panels[panel_idx] = !self.sidebar_expanded_panels[panel_idx];
             if !self.sidebar_expanded_panels[panel_idx] {
                 self.sidebar_selected_item = None;

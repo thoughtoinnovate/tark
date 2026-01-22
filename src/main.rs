@@ -227,6 +227,10 @@ enum PluginCommands {
         /// Branch or tag (default: main)
         #[arg(short, long, default_value = "main")]
         branch: String,
+
+        /// Subdirectory path within the repository (for monorepos)
+        #[arg(short, long)]
+        path: Option<String>,
     },
 
     /// Uninstall a plugin
@@ -366,8 +370,8 @@ async fn main() -> Result<()> {
             PluginCommands::Info { plugin_id } => {
                 transport::plugin_cli::run_plugin_info(&plugin_id).await?;
             }
-            PluginCommands::Add { url, branch } => {
-                transport::plugin_cli::run_plugin_add(&url, &branch).await?;
+            PluginCommands::Add { url, branch, path } => {
+                transport::plugin_cli::run_plugin_add(&url, &branch, path.as_deref()).await?;
             }
             PluginCommands::Remove { plugin_id } => {
                 transport::plugin_cli::run_plugin_remove(&plugin_id).await?;

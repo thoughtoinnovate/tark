@@ -1,4 +1,4 @@
-//! Wrapper that adapts MCP tools to tark's Tool trait.
+//! Wrapper that adapts MCP tools to tark's Tool trait (async with timeout).
 
 use super::client::McpServerManager;
 use super::types::McpToolDef;
@@ -7,6 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Default timeout for MCP tool calls (30 seconds)
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -21,11 +22,9 @@ pub struct McpToolWrapper {
     manager: Arc<McpServerManager>,
     /// Risk level for this tool
     risk_level: RiskLevel,
-    /// Timeout for tool calls
-    #[allow(dead_code)]
+    /// Timeout for tool calls in seconds
     timeout_secs: u64,
     /// Optional namespace prefix for tool name
-    #[allow(dead_code)]
     namespace: Option<String>,
 }
 
@@ -48,7 +47,7 @@ impl McpToolWrapper {
         self
     }
 
-    /// Set the timeout
+    /// Set the timeout in seconds
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
         self
@@ -58,6 +57,14 @@ impl McpToolWrapper {
     pub fn with_namespace(mut self, namespace: String) -> Self {
         self.namespace = Some(namespace);
         self
+    }
+
+    /// Get the full tool name (with namespace if set)
+    pub fn full_name(&self) -> String {
+        match &self.namespace {
+            Some(ns) => format!("{}:{}", ns, self.tool_def.name),
+            None => self.tool_def.name.clone(),
+        }
     }
 }
 
@@ -79,28 +86,45 @@ impl Tool for McpToolWrapper {
         self.risk_level
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::External
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolResult> {
         // Check if server is connected
-        if !self.manager.is_connected(&self.server_id) {
+        if !self.manager.is_connected(&self.server_id).await {
             return Ok(ToolResult::error(format!(
                 "MCP server '{}' is not connected. Use /mcp connect {} first.",
                 self.server_id, self.server_id
             )));
         }
 
-        // Call the tool
-        match self
-            .manager
-            .call_tool(&self.server_id, &self.tool_def.name, params)
+        // Call the tool with timeout
+        let timeout_duration = Duration::from_secs(self.timeout_secs);
+
+        match tokio::time::timeout(
+            timeout_duration,
+            self.manager
+                .call_tool(&self.server_id, &self.tool_def.name, params),
+        )
+        .await
         {
-            Ok(result) => {
+            // Success within timeout
+            Ok(Ok(result)) => {
                 if result.is_error {
                     Ok(ToolResult::error(result.to_text()))
                 } else {
                     Ok(ToolResult::success(result.to_text()))
                 }
             }
-            Err(e) => Ok(ToolResult::error(format!("MCP call failed: {}", e))),
+            // Error within timeout
+            Ok(Err(e)) => Ok(ToolResult::error(format!("MCP call failed: {}", e))),
+            // Timeout exceeded
+            Err(_) => Ok(ToolResult::error(format!(
+                "MCP call to '{}' on server '{}' timed out after {}s. \
+                 The external server may be unresponsive.",
+                self.tool_def.name, self.server_id, self.timeout_secs
+            ))),
         }
     }
 
@@ -110,14 +134,14 @@ impl Tool for McpToolWrapper {
 }
 
 /// Create tool wrappers for all tools from a connected server
-pub fn wrap_server_tools(
+pub async fn wrap_server_tools(
     server_id: &str,
     manager: Arc<McpServerManager>,
     risk_level: Option<RiskLevel>,
     timeout_secs: Option<u64>,
     namespace: Option<String>,
 ) -> Vec<Arc<dyn Tool>> {
-    let tools = manager.tools(server_id);
+    let tools = manager.tools(server_id).await;
 
     tools
         .into_iter()

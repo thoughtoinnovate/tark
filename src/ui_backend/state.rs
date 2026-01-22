@@ -155,7 +155,7 @@ pub struct UiState {
     // Sidebar state
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
-    pub sidebar_expanded_panels: [bool; 4],
+    pub sidebar_expanded_panels: [bool; 5],
 }
 
 impl Default for UiState {
@@ -177,7 +177,7 @@ impl Default for UiState {
             session_picker_filter: String::new(),
             sidebar_selected_panel: 0,
             sidebar_selected_item: None,
-            sidebar_expanded_panels: [false; 4],
+            sidebar_expanded_panels: [false; 5],
         }
     }
 }
@@ -218,6 +218,9 @@ struct StateInner {
     // ========== Messages ==========
     pub messages: Vec<Message>,
     pub focused_message: usize,
+    /// Sub-index for hierarchical navigation within tool groups
+    /// None = at message level, Some(n) = focused on tool n within a group
+    pub focused_sub_index: Option<usize>,
     pub messages_scroll_offset: usize,
     pub messages_total_lines: usize,
     pub messages_viewport_height: usize,
@@ -225,6 +228,15 @@ struct StateInner {
     // ========== Active Tools ==========
     /// Currently executing tools (for loading indicators)
     pub active_tools: Vec<crate::ui_backend::types::ActiveToolInfo>,
+
+    // ========== Tool Group Collapse State ==========
+    /// Collapsed tool groups by their starting message index
+    /// Each entry is the index of the first tool message in a collapsed group
+    pub collapsed_tool_groups: std::collections::HashSet<usize>,
+
+    // ========== Session Todo List ==========
+    /// Current session todo list (live-updating widget)
+    pub todo_tracker: Arc<std::sync::Mutex<crate::tools::TodoTracker>>,
 
     // ========== Streaming State (BFF owns this, renderer reads only) ==========
     pub streaming_content: Option<String>,
@@ -275,6 +287,8 @@ struct StateInner {
 
     // ========== Tools Modal State ==========
     pub tools_selected: usize,
+    pub tools_scroll_offset: usize,
+    pub tools_for_modal: Vec<crate::ui_backend::tool_execution::ToolInfo>,
 
     // ========== Plugin Modal State ==========
     pub plugin_selected: usize,
@@ -282,9 +296,9 @@ struct StateInner {
     // ========== Sidebar State ==========
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
-    pub sidebar_expanded_panels: [bool; 4],
+    pub sidebar_expanded_panels: [bool; 5],
     pub sidebar_scroll_offset: usize,
-    pub sidebar_panel_scrolls: [usize; 4],
+    pub sidebar_panel_scrolls: [usize; 5],
 
     // ========== Context ==========
     pub context_files: Vec<ContextFile>,
@@ -376,10 +390,13 @@ impl SharedState {
                 device_flow_session: None,
                 messages: Vec::new(),
                 focused_message: 0,
+                focused_sub_index: None,
                 messages_scroll_offset: 0,
                 messages_total_lines: 0,
                 messages_viewport_height: 0,
                 active_tools: Vec::new(),
+                collapsed_tool_groups: std::collections::HashSet::new(),
+                todo_tracker: Arc::new(std::sync::Mutex::new(crate::tools::TodoTracker::new())),
                 streaming_content: None,
                 streaming_thinking: None,
                 input_text: String::new(),
@@ -411,12 +428,14 @@ impl SharedState {
                 file_picker_filter: String::new(),
                 file_picker_selected: 0,
                 tools_selected: 0,
+                tools_scroll_offset: 0,
+                tools_for_modal: Vec::new(),
                 plugin_selected: 0,
                 sidebar_selected_panel: 0,
                 sidebar_selected_item: None,
-                sidebar_expanded_panels: [true, true, true, true],
+                sidebar_expanded_panels: [true, true, true, true, true],
                 sidebar_scroll_offset: 0,
-                sidebar_panel_scrolls: [0, 0, 0, 0],
+                sidebar_panel_scrolls: [0, 0, 0, 0, 0],
                 context_files: Vec::new(),
                 tokens_used: 0,
                 tokens_total: 1_000_000,
@@ -517,6 +536,11 @@ impl SharedState {
 
     pub fn current_correlation_id(&self) -> Option<String> {
         self.read_inner().current_correlation_id.clone()
+    }
+
+    /// Get the session todo tracker
+    pub fn todo_tracker(&self) -> Arc<std::sync::Mutex<crate::tools::TodoTracker>> {
+        self.read_inner().todo_tracker.clone()
     }
 
     pub fn generate_new_correlation_id(&self) -> String {
@@ -682,7 +706,7 @@ impl SharedState {
         self.read_inner().sidebar_selected_item
     }
 
-    pub fn sidebar_expanded_panels(&self) -> [bool; 4] {
+    pub fn sidebar_expanded_panels(&self) -> [bool; 5] {
         self.read_inner().sidebar_expanded_panels
     }
 
@@ -690,7 +714,7 @@ impl SharedState {
         self.read_inner().sidebar_scroll_offset
     }
 
-    pub fn sidebar_panel_scrolls(&self) -> [usize; 4] {
+    pub fn sidebar_panel_scrolls(&self) -> [usize; 5] {
         self.read_inner().sidebar_panel_scrolls
     }
 
@@ -752,6 +776,22 @@ impl SharedState {
 
     pub fn tools_selected(&self) -> usize {
         self.read_inner().tools_selected
+    }
+
+    pub fn tools_scroll_offset(&self) -> usize {
+        self.read_inner().tools_scroll_offset
+    }
+
+    pub fn set_tools_scroll_offset(&self, offset: usize) {
+        self.write_inner().tools_scroll_offset = offset;
+    }
+
+    pub fn tools_for_modal(&self) -> Vec<crate::ui_backend::tool_execution::ToolInfo> {
+        self.read_inner().tools_for_modal.clone()
+    }
+
+    pub fn set_tools_for_modal(&self, tools: Vec<crate::ui_backend::tool_execution::ToolInfo>) {
+        self.write_inner().tools_for_modal = tools;
     }
 
     pub fn plugin_selected(&self) -> usize {
@@ -1153,6 +1193,34 @@ impl SharedState {
         }
     }
 
+    /// Toggle collapse state of a tool group by its starting index
+    pub fn toggle_tool_group_collapse(&self, group_start_index: usize) {
+        let mut inner = self.write_inner();
+        if inner.collapsed_tool_groups.contains(&group_start_index) {
+            inner.collapsed_tool_groups.remove(&group_start_index);
+        } else {
+            inner.collapsed_tool_groups.insert(group_start_index);
+        }
+    }
+
+    /// Check if a tool group is collapsed
+    pub fn is_tool_group_collapsed(&self, group_start_index: usize) -> bool {
+        self.read_inner()
+            .collapsed_tool_groups
+            .contains(&group_start_index)
+    }
+
+    /// Expand a tool group (used for auto-expand when new tool starts)
+    pub fn expand_tool_group(&self, group_start_index: usize) {
+        let mut inner = self.write_inner();
+        inner.collapsed_tool_groups.remove(&group_start_index);
+    }
+
+    /// Get a clone of the collapsed tool groups set
+    pub fn collapsed_tool_groups(&self) -> std::collections::HashSet<usize> {
+        self.read_inner().collapsed_tool_groups.clone()
+    }
+
     /// Check if the focused message is a tool message
     pub fn is_focused_message_tool(&self) -> bool {
         let inner = self.read_inner();
@@ -1226,6 +1294,33 @@ impl SharedState {
     pub fn set_focused_message(&self, index: usize) {
         let mut inner = self.write_inner();
         inner.focused_message = index;
+        // Reset sub-index when moving to a new message
+        inner.focused_sub_index = None;
+    }
+
+    /// Get the sub-index for hierarchical navigation
+    pub fn focused_sub_index(&self) -> Option<usize> {
+        self.read_inner().focused_sub_index
+    }
+
+    /// Set the sub-index for hierarchical navigation (dive into a group)
+    pub fn set_focused_sub_index(&self, sub: Option<usize>) {
+        self.write_inner().focused_sub_index = sub;
+    }
+
+    /// Dive into a tool group (set sub-index to 0)
+    pub fn dive_into_group(&self) {
+        self.write_inner().focused_sub_index = Some(0);
+    }
+
+    /// Exit from a tool group (reset sub-index)
+    pub fn exit_group(&self) {
+        self.write_inner().focused_sub_index = None;
+    }
+
+    /// Check if currently navigating within a group
+    pub fn is_in_group(&self) -> bool {
+        self.read_inner().focused_sub_index.is_some()
     }
 
     /// Scroll to bottom (most recent message)
@@ -1234,6 +1329,58 @@ impl SharedState {
         if count > 0 {
             self.set_messages_scroll_offset(usize::MAX);
             self.set_focused_message(count.saturating_sub(1));
+        }
+    }
+
+    /// Ensure the focused message is visible in the viewport
+    /// Uses a heuristic: ~4 lines per message on average
+    pub fn ensure_focused_message_visible(&self) {
+        let inner = self.read_inner();
+        let focused = inner.focused_message;
+        let viewport_height = inner.messages_viewport_height;
+        let total_lines = inner.messages_total_lines;
+        let msg_count = inner.messages.len();
+
+        if msg_count == 0 || viewport_height == 0 {
+            return;
+        }
+
+        // Estimate lines per message
+        let lines_per_msg = if msg_count > 0 {
+            (total_lines as f32 / msg_count as f32).max(3.0)
+        } else {
+            4.0
+        };
+
+        // Estimate the line position of the focused message
+        let estimated_line = (focused as f32 * lines_per_msg) as usize;
+
+        // Current scroll offset (normalize usize::MAX)
+        let max_offset = total_lines.saturating_sub(viewport_height);
+        let current_offset = if inner.messages_scroll_offset == usize::MAX {
+            max_offset
+        } else {
+            inner.messages_scroll_offset.min(max_offset)
+        };
+
+        // Calculate visible range
+        let visible_start = current_offset;
+        let visible_end = current_offset + viewport_height;
+
+        // Add margin (keep cursor away from edges)
+        let margin = (viewport_height / 4).max(2);
+
+        drop(inner); // Release read lock before writing
+
+        // Scroll up if focused message is above visible area
+        if estimated_line < visible_start + margin {
+            let new_offset = estimated_line.saturating_sub(margin);
+            self.set_messages_scroll_offset(new_offset);
+        }
+        // Scroll down if focused message is below visible area
+        else if estimated_line > visible_end.saturating_sub(margin) {
+            let new_offset = (estimated_line + margin).saturating_sub(viewport_height);
+            self.set_messages_scroll_offset(new_offset.min(max_offset));
         }
     }
 
@@ -1354,7 +1501,7 @@ impl SharedState {
         self.write_inner().sidebar_selected_item = item;
     }
 
-    pub fn set_sidebar_expanded_panels(&self, panels: [bool; 4]) {
+    pub fn set_sidebar_expanded_panels(&self, panels: [bool; 5]) {
         self.write_inner().sidebar_expanded_panels = panels;
     }
 
@@ -1363,7 +1510,7 @@ impl SharedState {
     }
 
     pub fn set_sidebar_panel_scroll(&self, panel: usize, offset: usize) {
-        if panel < 4 {
+        if panel < 5 {
             self.write_inner().sidebar_panel_scrolls[panel] = offset;
         }
     }
@@ -1535,6 +1682,30 @@ impl SharedState {
     pub fn questionnaire_backspace(&self) {
         if let Some(ref mut q) = self.write_inner().active_questionnaire {
             q.backspace();
+        }
+    }
+
+    /// Start editing in questionnaire (called when user presses Enter)
+    /// For FreeText questions: starts free text edit mode
+    /// For choice questions with "Other" selected: starts "Other" text edit mode
+    pub fn questionnaire_start_edit(&self) {
+        if let Some(ref mut q) = self.write_inner().active_questionnaire {
+            use crate::ui_backend::questionnaire::QuestionType;
+            if q.question_type == QuestionType::FreeText {
+                q.start_editing_free_text();
+            } else if q.is_focused_on_other() && q.other_selected {
+                q.start_editing_other_text();
+            }
+        }
+    }
+
+    /// Stop editing in questionnaire (called when user presses Escape while editing)
+    /// For FreeText questions: stops free text edit mode
+    /// For choice questions: stops "Other" text edit mode
+    pub fn questionnaire_stop_edit(&self) {
+        if let Some(ref mut q) = self.write_inner().active_questionnaire {
+            q.stop_editing_free_text();
+            q.stop_editing_other_text();
         }
     }
 

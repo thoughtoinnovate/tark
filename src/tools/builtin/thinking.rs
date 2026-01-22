@@ -217,6 +217,10 @@ impl Tool for ThinkTool {
         RiskLevel::ReadOnly
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Builtin
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolResult> {
         // Parse required parameters
         let thought_str = params
