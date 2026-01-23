@@ -274,7 +274,7 @@ impl Widget for PolicyModalWidget<'_> {
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                "Note: Only session patterns shown. Persistent patterns in ~/.config/tark/policy/",
+                "Note: Session patterns from policy.db and .tark/sessions/. Persistent: ~/.config/tark/policy/",
                 Style::default()
                     .fg(self.theme.text_muted)
                     .add_modifier(Modifier::ITALIC),

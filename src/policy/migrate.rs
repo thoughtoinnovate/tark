@@ -134,6 +134,52 @@ fn is_internal_tool(tool: &str) -> bool {
     INTERNAL_TOOLS.contains(&tool)
 }
 
+/// Load legacy approval patterns from approvals.json for display
+/// Returns (approvals, denials) as tuples of (tool, pattern, match_type, description)
+#[allow(clippy::type_complexity)]
+pub fn load_legacy_approvals(
+    json_path: &Path,
+) -> Result<(
+    Vec<(String, String, String, Option<String>)>,
+    Vec<(String, String, String, Option<String>)>,
+)> {
+    if !json_path.exists() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let content = std::fs::read_to_string(json_path)?;
+    let old_approvals: OldApprovals = serde_json::from_str(&content).unwrap_or_default();
+
+    let mut approvals = Vec::new();
+    let mut denials = Vec::new();
+
+    // Load approved patterns
+    for (tool, patterns) in old_approvals.approved_commands {
+        for entry in patterns {
+            let description = if !entry.timestamp.is_empty() {
+                Some(format!("Legacy ({})", entry.timestamp))
+            } else {
+                Some("Legacy pattern".to_string())
+            };
+            approvals.push((tool.clone(), entry.pattern, entry.match_type, description));
+        }
+    }
+
+    // Load denied patterns
+    for (tool, patterns) in old_approvals.denied_commands {
+        for entry in patterns {
+            let description = if !entry.timestamp.is_empty() {
+                Some(format!("Legacy ({})", entry.timestamp))
+            } else {
+                Some("Legacy pattern".to_string())
+            };
+            denials.push((tool.clone(), entry.pattern, entry.match_type, description));
+        }
+    }
+
+    Ok((approvals, denials))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

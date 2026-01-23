@@ -14,7 +14,7 @@ use crate::policy::{
 /// Policy engine for approval decisions
 pub struct PolicyEngine {
     conn: Arc<Mutex<Connection>>,
-    _working_dir: PathBuf,
+    working_dir: PathBuf,
     classifier: CommandClassifier,
     path_sanitizer: PathSanitizer,
     pattern_validator: PatternValidator,
@@ -53,7 +53,7 @@ impl PolicyEngine {
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            _working_dir: working_dir.to_path_buf(),
+            working_dir: working_dir.to_path_buf(),
             classifier: CommandClassifier::new(working_dir.to_path_buf()),
             path_sanitizer: PathSanitizer::new(working_dir.to_path_buf()),
             pattern_validator: PatternValidator::new(working_dir.to_path_buf()),
@@ -412,13 +412,15 @@ impl PolicyEngine {
 
     /// List session approval patterns (approvals and denials)
     /// Returns (approvals, denials) tuples
+    /// Loads from both policy.db and legacy approvals.json
     pub fn list_session_patterns(
         &self,
         session_id: &str,
     ) -> Result<(Vec<ApprovalPatternEntry>, Vec<ApprovalPatternEntry>)> {
+        // Load from policy.db
         let conn = self.conn.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
 
-        // Query approval patterns (is_denial = 0)
+        // Query approval patterns from policy.db (is_denial = 0)
         let approval_query = r#"
             SELECT id, tool_type_id, pattern, match_type, description
             FROM approval_patterns
@@ -428,20 +430,34 @@ impl PolicyEngine {
         "#;
 
         let mut stmt = conn.prepare(approval_query)?;
-        let approvals = stmt
+        let approval_rows: Vec<_> = stmt
             .query_map([session_id], |row| {
-                Ok(ApprovalPatternEntry {
-                    id: row.get(0)?,
-                    tool: row.get(1)?,
-                    pattern: row.get(2)?,
-                    match_type: row.get(3)?,
-                    is_denial: false,
-                    description: row.get(4)?,
-                })
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
 
-        // Query denial patterns (is_denial = 1)
+        let mut approvals: Vec<ApprovalPatternEntry> = approval_rows
+            .into_iter()
+            .map(
+                |(id, tool, pattern, match_type, description)| ApprovalPatternEntry {
+                    id,
+                    tool,
+                    pattern,
+                    match_type,
+                    is_denial: false,
+                    description,
+                },
+            )
+            .collect();
+
+        // Query denial patterns from policy.db (is_denial = 1)
         let denial_query = r#"
             SELECT id, tool_type_id, pattern, match_type, description
             FROM approval_patterns
@@ -451,18 +467,71 @@ impl PolicyEngine {
         "#;
 
         let mut stmt = conn.prepare(denial_query)?;
-        let denials = stmt
+        let denial_rows: Vec<_> = stmt
             .query_map([session_id], |row| {
-                Ok(ApprovalPatternEntry {
-                    id: row.get(0)?,
-                    tool: row.get(1)?,
-                    pattern: row.get(2)?,
-                    match_type: row.get(3)?,
-                    is_denial: true,
-                    description: row.get(4)?,
-                })
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        drop(conn);
+
+        let mut denials: Vec<ApprovalPatternEntry> = denial_rows
+            .into_iter()
+            .map(
+                |(id, tool, pattern, match_type, description)| ApprovalPatternEntry {
+                    id,
+                    tool,
+                    pattern,
+                    match_type,
+                    is_denial: true,
+                    description,
+                },
+            )
+            .collect();
+
+        // Also load from legacy approvals.json if it exists
+        let legacy_path = self
+            .working_dir
+            .join(".tark")
+            .join("sessions")
+            .join(session_id)
+            .join("approvals.json");
+
+        if let Ok((legacy_approvals, legacy_denials)) =
+            crate::policy::migrate::load_legacy_approvals(&legacy_path)
+        {
+            // Add legacy patterns with negative IDs so they don't conflict
+            let mut next_id = -1i64;
+            for (tool, pattern, match_type, description) in legacy_approvals {
+                approvals.push(ApprovalPatternEntry {
+                    id: next_id,
+                    tool,
+                    pattern,
+                    match_type,
+                    is_denial: false,
+                    description,
+                });
+                next_id -= 1;
+            }
+
+            for (tool, pattern, match_type, description) in legacy_denials {
+                denials.push(ApprovalPatternEntry {
+                    id: next_id,
+                    tool,
+                    pattern,
+                    match_type,
+                    is_denial: true,
+                    description,
+                });
+                next_id -= 1;
+            }
+        }
 
         Ok((approvals, denials))
     }
