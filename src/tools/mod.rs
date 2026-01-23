@@ -680,6 +680,11 @@ impl ToolRegistry {
                     command.split_whitespace().next().unwrap_or(command)
                 ),
             },
+            SuggestedPattern {
+                pattern: "*".to_string(),
+                match_type: MatchType::Glob,
+                description: format!("{} (any file)", tool_name),
+            },
         ]
     }
 

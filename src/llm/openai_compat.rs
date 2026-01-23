@@ -621,6 +621,7 @@ impl OpenAiCompatProvider {
             tools: None,
             tool_choice: None,
             stream: if stream { Some(true) } else { None },
+            store: Some(false), // Codex API requires store: false
         };
 
         if let Some(tools) = tools {
