@@ -1102,6 +1102,14 @@ impl<B: Backend> TuiController<B> {
                         }
                         return Ok(());
                     }
+                    Some(crate::ui_backend::ModalType::Policy) => {
+                        // Navigate up in policy modal
+                        if let Some(mut modal) = state.policy_modal() {
+                            modal.move_up();
+                            state.set_policy_modal(Some(modal));
+                        }
+                        return Ok(());
+                    }
                     _ => {}
                 }
             }
@@ -1233,6 +1241,14 @@ impl<B: Backend> TuiController<B> {
                         let selected = state.plugin_selected();
                         // Note: The max limit will be checked by the plugin list itself
                         state.set_plugin_selected(selected + 1);
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::Policy) => {
+                        // Navigate down in policy modal
+                        if let Some(mut modal) = state.policy_modal() {
+                            modal.move_down();
+                            state.set_policy_modal(Some(modal));
+                        }
                         return Ok(());
                     }
                     _ => {}
@@ -2640,6 +2656,66 @@ impl<B: Backend> TuiController<B> {
                 state.set_tools_scroll_offset(0);
                 state.set_active_modal(Some(crate::ui_backend::ModalType::Tools));
                 state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+                state.clear_input();
+                return Ok(());
+            }
+            "/policy" => {
+                // Show approval/denial patterns for this session
+                let session_id = state
+                    .session()
+                    .map(|s| s.session_id.clone())
+                    .unwrap_or_else(|| "session".to_string());
+
+                match self.service.list_session_patterns(&session_id) {
+                    Ok((approvals, denials)) => {
+                        use crate::tui_new::modals::policy_modal::{
+                            PolicyModal, PolicyPatternEntry,
+                        };
+
+                        // Convert from policy types to modal types
+                        let approval_entries: Vec<PolicyPatternEntry> = approvals
+                            .into_iter()
+                            .map(|p| PolicyPatternEntry {
+                                id: p.id,
+                                tool: p.tool,
+                                pattern: p.pattern,
+                                match_type: p.match_type,
+                                is_denial: p.is_denial,
+                                description: p.description,
+                            })
+                            .collect();
+
+                        let denial_entries: Vec<PolicyPatternEntry> = denials
+                            .into_iter()
+                            .map(|p| PolicyPatternEntry {
+                                id: p.id,
+                                tool: p.tool,
+                                pattern: p.pattern,
+                                match_type: p.match_type,
+                                is_denial: p.is_denial,
+                                description: p.description,
+                            })
+                            .collect();
+
+                        let modal = PolicyModal::new(approval_entries, denial_entries);
+                        state.set_policy_modal(Some(modal));
+                        state.set_active_modal(Some(crate::ui_backend::ModalType::Policy));
+                        state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+                    }
+                    Err(e) => {
+                        use crate::ui_backend::{Message, MessageRole};
+                        let msg = Message {
+                            role: MessageRole::System,
+                            content: format!("⚠️ Failed to load policy patterns: {}", e),
+                            thinking: None,
+                            tool_calls: Vec::new(),
+                            segments: Vec::new(),
+                            collapsed: false,
+                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        };
+                        state.add_message(msg);
+                    }
+                }
                 state.clear_input();
                 return Ok(());
             }

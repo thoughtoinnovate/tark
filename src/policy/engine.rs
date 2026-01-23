@@ -409,6 +409,63 @@ impl PolicyEngine {
             .is_in_workdir(path.to_str().unwrap_or(""))
             .unwrap_or(false)
     }
+
+    /// List session approval patterns (approvals and denials)
+    /// Returns (approvals, denials) tuples
+    pub fn list_session_patterns(
+        &self,
+        session_id: &str,
+    ) -> Result<(Vec<ApprovalPatternEntry>, Vec<ApprovalPatternEntry>)> {
+        let conn = self.conn.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+
+        // Query approval patterns (is_denial = 0)
+        let approval_query = r#"
+            SELECT id, tool_type_id, pattern, match_type, description
+            FROM approval_patterns
+            WHERE is_denial = 0
+              AND (is_persistent = 0 AND session_id = ?1)
+            ORDER BY created_at DESC
+        "#;
+
+        let mut stmt = conn.prepare(approval_query)?;
+        let approvals = stmt
+            .query_map([session_id], |row| {
+                Ok(ApprovalPatternEntry {
+                    id: row.get(0)?,
+                    tool: row.get(1)?,
+                    pattern: row.get(2)?,
+                    match_type: row.get(3)?,
+                    is_denial: false,
+                    description: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Query denial patterns (is_denial = 1)
+        let denial_query = r#"
+            SELECT id, tool_type_id, pattern, match_type, description
+            FROM approval_patterns
+            WHERE is_denial = 1
+              AND (is_persistent = 0 AND session_id = ?1)
+            ORDER BY created_at DESC
+        "#;
+
+        let mut stmt = conn.prepare(denial_query)?;
+        let denials = stmt
+            .query_map([session_id], |row| {
+                Ok(ApprovalPatternEntry {
+                    id: row.get(0)?,
+                    tool: row.get(1)?,
+                    pattern: row.get(2)?,
+                    match_type: row.get(3)?,
+                    is_denial: true,
+                    description: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok((approvals, denials))
+    }
 }
 
 #[cfg(test)]

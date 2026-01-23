@@ -485,6 +485,14 @@ impl<B: Backend> TuiRenderer<B> {
             // Task queue management: 'd' or 'x' to delete selected task
             (KeyCode::Char('d'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
+                // Policy modal: delete selected pattern
+                if state.active_modal() == Some(ModalType::Policy) {
+                    if let Some(mut modal) = state.policy_modal() {
+                        modal.remove_selected();
+                        state.set_policy_modal(Some(modal));
+                    }
+                    return None;
+                }
                 // Pass through for pickers with text filter
                 if matches!(
                     state.active_modal(),
@@ -2173,6 +2181,13 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     ModalType::Plugin => {
                         let modal = PluginModal::new(theme);
                         frame.render_widget(modal, area);
+                    }
+                    ModalType::Policy => {
+                        if let Some(ref modal) = state.policy_modal() {
+                            use crate::tui_new::modals::policy_modal::PolicyModalWidget;
+                            let widget = PolicyModalWidget::new(modal, theme);
+                            frame.render_widget(widget, area);
+                        }
                     }
                     ModalType::DeviceFlow => {
                         if let Some(session) = state.device_flow_session() {

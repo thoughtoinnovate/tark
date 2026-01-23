@@ -724,4 +724,19 @@ impl ToolRegistry {
         }
         Ok(())
     }
+
+    /// List session approval patterns (for UI display)
+    pub fn list_session_patterns(
+        &self,
+        session_id: &str,
+    ) -> Result<(
+        Vec<crate::policy::ApprovalPatternEntry>,
+        Vec<crate::policy::ApprovalPatternEntry>,
+    )> {
+        if let Some(ref engine) = self.policy_engine {
+            engine.list_session_patterns(session_id)
+        } else {
+            Ok((Vec::new(), Vec::new()))
+        }
+    }
 }

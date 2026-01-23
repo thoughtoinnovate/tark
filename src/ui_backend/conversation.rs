@@ -629,6 +629,23 @@ impl ConversationService {
         let conv = self.conversation_mgr.read().await;
         conv.message_count()
     }
+
+    /// List session approval patterns (for policy modal)
+    pub fn list_session_patterns(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<(
+        Vec<crate::policy::ApprovalPatternEntry>,
+        Vec<crate::policy::ApprovalPatternEntry>,
+    )> {
+        // Try to get a read lock on the chat agent
+        if let Ok(agent) = self.chat_agent.try_read() {
+            agent.list_session_patterns(session_id)
+        } else {
+            // If we can't get the lock, return empty lists
+            Ok((Vec::new(), Vec::new()))
+        }
+    }
 }
 
 #[cfg(test)]

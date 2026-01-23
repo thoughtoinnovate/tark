@@ -1650,6 +1650,22 @@ impl AppService {
         self.tools.tool_risk_level(name)
     }
 
+    /// List session approval patterns (for policy modal)
+    pub fn list_session_patterns(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<(
+        Vec<crate::policy::ApprovalPatternEntry>,
+        Vec<crate::policy::ApprovalPatternEntry>,
+    )> {
+        if let Some(ref conv_svc) = self.conversation_svc {
+            conv_svc.list_session_patterns(session_id)
+        } else {
+            // No conversation service - return empty lists
+            Ok((Vec::new(), Vec::new()))
+        }
+    }
+
     /// Refresh file picker with workspace files
     pub fn refresh_file_picker(&self, filter: &str) {
         use crate::core::attachments::search_workspace_files;

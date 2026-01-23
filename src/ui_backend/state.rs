@@ -96,6 +96,8 @@ pub enum ModalType {
     TaskEdit,
     /// Confirmation dialog for deleting a queued task
     TaskDeleteConfirm,
+    /// Policy manager modal for viewing approval/denial patterns
+    Policy,
 }
 
 /// Active OAuth device flow session
@@ -293,6 +295,9 @@ struct StateInner {
     // ========== Plugin Modal State ==========
     pub plugin_selected: usize,
 
+    // ========== Policy Modal State ==========
+    pub policy_modal: Option<crate::tui_new::modals::policy_modal::PolicyModal>,
+
     // ========== Sidebar State ==========
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
@@ -435,6 +440,7 @@ impl SharedState {
                 tools_scroll_offset: 0,
                 tools_for_modal: Vec::new(),
                 plugin_selected: 0,
+                policy_modal: None,
                 sidebar_selected_panel: 0,
                 sidebar_selected_item: None,
                 sidebar_expanded_panels: [true, true, true, true, true],
@@ -801,6 +807,17 @@ impl SharedState {
 
     pub fn plugin_selected(&self) -> usize {
         self.read_inner().plugin_selected
+    }
+
+    pub fn policy_modal(&self) -> Option<crate::tui_new::modals::policy_modal::PolicyModal> {
+        self.read_inner().policy_modal.clone()
+    }
+
+    pub fn set_policy_modal(
+        &self,
+        modal: Option<crate::tui_new::modals::policy_modal::PolicyModal>,
+    ) {
+        self.write_inner().policy_modal = modal;
     }
 
     pub fn error_notification(&self) -> Option<ErrorNotification> {

@@ -949,6 +949,17 @@ impl ChatAgent {
         self.trust_level
     }
 
+    /// List session approval patterns (for policy modal)
+    pub fn list_session_patterns(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<(
+        Vec<crate::policy::ApprovalPatternEntry>,
+        Vec<crate::policy::ApprovalPatternEntry>,
+    )> {
+        self.tools.list_session_patterns(session_id)
+    }
+
     /// Update the max context tokens for the agent
     ///
     /// Call this when switching to a model with a different context window.

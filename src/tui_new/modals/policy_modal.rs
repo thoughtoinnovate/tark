@@ -23,6 +23,7 @@ pub struct PolicyPatternEntry {
 }
 
 /// Policy manager modal state
+#[derive(Debug, Clone)]
 pub struct PolicyModal {
     pub approvals: Vec<PolicyPatternEntry>,
     pub denials: Vec<PolicyPatternEntry>,
@@ -82,12 +83,10 @@ impl PolicyModal {
                     self.selected_index -= 1;
                 }
             }
-        } else {
-            if self.selected_index < self.denials.len() {
-                self.denials.remove(self.selected_index);
-                if self.selected_index >= self.denials.len() && self.selected_index > 0 {
-                    self.selected_index -= 1;
-                }
+        } else if self.selected_index < self.denials.len() {
+            self.denials.remove(self.selected_index);
+            if self.selected_index >= self.denials.len() && self.selected_index > 0 {
+                self.selected_index -= 1;
             }
         }
     }
@@ -122,8 +121,9 @@ impl Widget for PolicyModalWidget<'_> {
         // Clear background
         for y in modal_area.top()..modal_area.bottom() {
             for x in modal_area.left()..modal_area.right() {
-                buf.get_mut(x, y)
-                    .set_style(Style::default().bg(self.theme.modal_bg));
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_style(Style::default().bg(self.theme.bg_dark));
+                }
             }
         }
 
@@ -133,7 +133,7 @@ impl Widget for PolicyModalWidget<'_> {
             .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.border))
-            .style(Style::default().bg(self.theme.modal_bg));
+            .style(Style::default().bg(self.theme.bg_dark));
 
         let inner = block.inner(modal_area);
         block.render(modal_area, buf);
@@ -142,11 +142,11 @@ impl Widget for PolicyModalWidget<'_> {
         let chunks = Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Header
-                Constraint::Min(5),     // Approvals
-                Constraint::Length(1),  // Separator
-                Constraint::Min(5),     // Denials
-                Constraint::Length(3),  // Help text
+                Constraint::Length(1), // Header
+                Constraint::Min(5),    // Approvals
+                Constraint::Length(1), // Separator
+                Constraint::Min(5),    // Denials
+                Constraint::Length(3), // Help text
             ])
             .split(inner);
 
@@ -185,7 +185,10 @@ impl Widget for PolicyModalWidget<'_> {
                 };
 
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("[{}] ", i + 1), Style::default().fg(self.theme.accent)),
+                    Span::styled(
+                        format!("[{}] ", i + 1),
+                        Style::default().fg(self.theme.cyan),
+                    ),
                     Span::styled(content, style),
                 ]))
             })
@@ -198,12 +201,12 @@ impl Widget for PolicyModalWidget<'_> {
                     .title(approvals_title)
                     .borders(Borders::ALL)
                     .border_style(if self.modal.in_approvals {
-                        Style::default().fg(self.theme.accent)
+                        Style::default().fg(self.theme.cyan)
                     } else {
                         Style::default().fg(self.theme.border)
                     }),
             )
-            .style(Style::default().bg(self.theme.modal_bg));
+            .style(Style::default().bg(self.theme.bg_dark));
 
         approvals_list.render(chunks[1], buf);
 
@@ -237,7 +240,7 @@ impl Widget for PolicyModalWidget<'_> {
                 };
 
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("[{}] ", i + 1), Style::default().fg(self.theme.warning)),
+                    Span::styled(format!("[{}] ", i + 1), Style::default().fg(self.theme.red)),
                     Span::styled(content, style),
                 ]))
             })
@@ -250,34 +253,32 @@ impl Widget for PolicyModalWidget<'_> {
                     .title(denials_title)
                     .borders(Borders::ALL)
                     .border_style(if !self.modal.in_approvals {
-                        Style::default().fg(self.theme.warning)
+                        Style::default().fg(self.theme.red)
                     } else {
                         Style::default().fg(self.theme.border)
                     }),
             )
-            .style(Style::default().bg(self.theme.modal_bg));
+            .style(Style::default().bg(self.theme.bg_dark));
 
         denials_list.render(chunks[3], buf);
 
         // Help text
         let help_lines = vec![
             Line::from(vec![
-                Span::styled("↑/↓", Style::default().fg(self.theme.accent)),
+                Span::styled("↑/↓", Style::default().fg(self.theme.cyan)),
                 Span::raw(": Navigate  "),
-                Span::styled("d", Style::default().fg(self.theme.accent)),
+                Span::styled("d", Style::default().fg(self.theme.cyan)),
                 Span::raw(": Delete  "),
-                Span::styled("Esc", Style::default().fg(self.theme.accent)),
+                Span::styled("Esc", Style::default().fg(self.theme.cyan)),
                 Span::raw(": Close"),
             ]),
             Line::from(""),
-            Line::from(
-                Span::styled(
-                    "Note: Only session patterns shown. Persistent patterns in ~/.config/tark/policy/",
-                    Style::default()
-                        .fg(self.theme.text_dim)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ),
+            Line::from(Span::styled(
+                "Note: Only session patterns shown. Persistent patterns in ~/.config/tark/policy/",
+                Style::default()
+                    .fg(self.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC),
+            )),
         ];
 
         let help = Paragraph::new(help_lines)

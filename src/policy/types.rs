@@ -313,6 +313,17 @@ pub struct ApprovalPattern {
     pub description: Option<String>,
 }
 
+/// Approval pattern entry for display in UI
+#[derive(Debug, Clone)]
+pub struct ApprovalPatternEntry {
+    pub id: i64,
+    pub tool: String,
+    pub pattern: String,
+    pub match_type: String,
+    pub is_denial: bool,
+    pub description: Option<String>,
+}
+
 /// Source of a pattern
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

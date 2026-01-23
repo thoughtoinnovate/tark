@@ -13,7 +13,7 @@ pub use config::{ConfigLoader, PatternLoader};
 pub use engine::PolicyEngine;
 pub use resolver::{ApprovalBehavior, ApprovalDefaults, ResolvedDecision, RuleKey, RuleResolver};
 pub use types::{
-    ApprovalDecision, ApprovalDecisionType, ApprovalPattern, AuditEntry, ClassificationStrategy,
-    CommandClassification, MatchType, McpPolicy, ModeId, Operation, PatternMatch, PatternSource,
-    RiskLevel, ToolInfo, ToolPolicyMetadata, TrustId,
+    ApprovalDecision, ApprovalDecisionType, ApprovalPattern, ApprovalPatternEntry, AuditEntry,
+    ClassificationStrategy, CommandClassification, MatchType, McpPolicy, ModeId, Operation,
+    PatternMatch, PatternSource, RiskLevel, ToolInfo, ToolPolicyMetadata, TrustId,
 };

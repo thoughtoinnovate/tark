@@ -24,6 +24,7 @@ pub enum SlashCommand {
     Compact,
     Think,
     Tools,
+    Policy,
     Sessions,
     New,
     Quit,
@@ -44,6 +45,7 @@ impl SlashCommand {
             Self::Compact,
             Self::Think,
             Self::Tools,
+            Self::Policy,
             Self::Sessions,
             Self::New,
             Self::Quit,
@@ -64,6 +66,7 @@ impl SlashCommand {
             Self::Compact => "compact",
             Self::Think => "think",
             Self::Tools => "tools",
+            Self::Policy => "policy",
             Self::Sessions => "sessions",
             Self::New => "new",
             Self::Quit => "quit",
@@ -84,6 +87,7 @@ impl SlashCommand {
             Self::Compact => "Compact context to free up space",
             Self::Think => "Toggle thinking mode",
             Self::Tools => "Show available tools",
+            Self::Policy => "View approval/denial patterns",
             Self::Sessions => "Open sessions list",
             Self::New => "Create a new session",
             Self::Quit => "Quit the application",
@@ -104,6 +108,7 @@ impl SlashCommand {
             Self::Compact => "📦",
             Self::Think => "🧠",
             Self::Tools => "🔧",
+            Self::Policy => "🔒",
             Self::Sessions => "🗂️",
             Self::New => "🆕",
             Self::Quit => "🚪",
@@ -142,6 +147,8 @@ pub struct AutocompleteState {
     pub selected: usize,
     /// Filtered commands
     pub matches: Vec<SlashCommand>,
+    /// Scroll offset for viewport
+    pub scroll_offset: usize,
 }
 
 impl AutocompleteState {
@@ -156,6 +163,7 @@ impl AutocompleteState {
         self.filter = filter.to_string();
         self.matches = SlashCommand::find_matches(filter);
         self.selected = 0;
+        self.scroll_offset = 0;
     }
 
     /// Deactivate autocomplete
@@ -164,13 +172,15 @@ impl AutocompleteState {
         self.filter.clear();
         self.matches.clear();
         self.selected = 0;
+        self.scroll_offset = 0;
     }
 
     /// Update filter and refresh matches
     pub fn update_filter(&mut self, filter: &str) {
         self.filter = filter.to_string();
         self.matches = SlashCommand::find_matches(filter);
-        // Keep selected in bounds
+        self.scroll_offset = 0; // Reset scroll when filter changes
+                                // Keep selected in bounds
         if !self.matches.is_empty() && self.selected >= self.matches.len() {
             self.selected = self.matches.len() - 1;
         }
@@ -180,13 +190,23 @@ impl AutocompleteState {
     pub fn move_up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
+            // Auto-scroll up if selection goes above viewport
+            if self.selected < self.scroll_offset {
+                self.scroll_offset = self.selected;
+            }
         }
     }
 
     /// Move selection down
     pub fn move_down(&mut self) {
+        // Visible count: 8 items fit in the dropdown (10 height - 2 for borders)
+        let visible_count = 8;
         if !self.matches.is_empty() && self.selected < self.matches.len() - 1 {
             self.selected += 1;
+            // Auto-scroll down if selection goes below viewport
+            if self.selected >= self.scroll_offset + visible_count {
+                self.scroll_offset = self.selected - visible_count + 1;
+            }
         }
     }
 
@@ -254,15 +274,30 @@ impl Widget for CommandAutocomplete<'_> {
         let inner = block.inner(dropdown_area);
         block.render(dropdown_area, buf);
 
-        // Render command options
+        // Render command options with viewport scrolling
         let mut lines: Vec<Line> = Vec::new();
 
-        for (i, cmd) in self.state.matches.iter().enumerate() {
+        // Calculate visible range
+        let visible_height = inner.height as usize;
+        let visible_end = (self.state.scroll_offset + visible_height).min(self.state.matches.len());
+
+        // Scroll-up indicator
+        if self.state.scroll_offset > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ▲ {} more above", self.state.scroll_offset),
+                Style::default()
+                    .fg(self.theme.text_muted)
+                    .add_modifier(Modifier::DIM),
+            )));
+        }
+
+        // Render visible commands
+        for i in self.state.scroll_offset..visible_end {
+            let cmd = &self.state.matches[i];
             let is_selected = i == self.state.selected;
 
             let icon = cmd.icon();
             let name = format!("/{}", cmd.name());
-            let desc = cmd.description();
 
             let style = if is_selected {
                 Style::default()
@@ -283,16 +318,17 @@ impl Widget for CommandAutocomplete<'_> {
                 ),
                 Span::styled(name, style),
             ]));
+        }
 
-            // Show description for selected item
-            if is_selected && inner.height > self.state.matches.len() as u16 + 1 {
-                lines.push(Line::from(Span::styled(
-                    format!("    {}", desc),
-                    Style::default()
-                        .fg(self.theme.text_muted)
-                        .add_modifier(Modifier::DIM),
-                )));
-            }
+        // Scroll-down indicator
+        let remaining = self.state.matches.len().saturating_sub(visible_end);
+        if remaining > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ▼ {} more below", remaining),
+                Style::default()
+                    .fg(self.theme.text_muted)
+                    .add_modifier(Modifier::DIM),
+            )));
         }
 
         let paragraph = Paragraph::new(lines);
@@ -347,5 +383,86 @@ mod tests {
             "Compact context to free up space"
         );
         assert_eq!(SlashCommand::Compact.icon(), "📦");
+    }
+
+    #[test]
+    fn test_policy_command_properties() {
+        assert_eq!(SlashCommand::Policy.name(), "policy");
+        assert_eq!(
+            SlashCommand::Policy.description(),
+            "View approval/denial patterns"
+        );
+        assert_eq!(SlashCommand::Policy.icon(), "🔒");
+    }
+
+    #[test]
+    fn test_autocomplete_scroll_offset_on_activate() {
+        let mut state = AutocompleteState::new();
+        state.scroll_offset = 5; // Set a non-zero value
+        state.activate("h");
+        assert_eq!(state.scroll_offset, 0); // Should reset to 0
+    }
+
+    #[test]
+    fn test_autocomplete_scroll_offset_on_update_filter() {
+        let mut state = AutocompleteState::new();
+        state.activate("");
+        state.scroll_offset = 5;
+        state.update_filter("p");
+        assert_eq!(state.scroll_offset, 0); // Should reset to 0
+    }
+
+    #[test]
+    fn test_autocomplete_move_down_scrolls_viewport() {
+        let mut state = AutocompleteState::new();
+        state.activate(""); // Get all commands
+
+        // Move down 8 times (visible count)
+        for _ in 0..8 {
+            state.move_down();
+        }
+
+        // Should be at index 8, scroll_offset should still be 0
+        assert_eq!(state.selected, 8);
+        assert_eq!(state.scroll_offset, 0);
+
+        // Move down one more time - should trigger scroll
+        state.move_down();
+        assert_eq!(state.selected, 9);
+        assert_eq!(state.scroll_offset, 2); // selected (9) - visible_count (8) + 1 = 2
+    }
+
+    #[test]
+    fn test_autocomplete_move_up_scrolls_viewport() {
+        let mut state = AutocompleteState::new();
+        state.activate(""); // Get all commands
+
+        // Move to the end
+        while state.selected < state.matches.len() - 1 {
+            state.move_down();
+        }
+
+        let max_selected = state.selected;
+        let final_scroll = state.scroll_offset;
+
+        // Move up should maintain scroll until we go above viewport
+        state.move_up();
+        assert_eq!(state.selected, max_selected - 1);
+
+        // Keep moving up until scroll changes
+        while state.scroll_offset == final_scroll && state.selected > 0 {
+            state.move_up();
+        }
+
+        // Scroll should have decreased
+        assert!(state.scroll_offset < final_scroll);
+    }
+
+    #[test]
+    fn test_slash_command_find_matches_includes_policy() {
+        let matches = SlashCommand::find_matches("p");
+        assert!(matches.contains(&SlashCommand::Policy));
+        assert!(matches.contains(&SlashCommand::Provider));
+        assert!(matches.contains(&SlashCommand::Plan));
     }
 }
