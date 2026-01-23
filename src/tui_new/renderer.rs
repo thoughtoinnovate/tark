@@ -190,10 +190,13 @@ impl<B: Backend> TuiRenderer<B> {
                 if state.active_modal() == Some(ModalType::SessionSwitchConfirm) {
                     return Some(Command::ModalDown);
                 }
-                // Trust/Tools/Plugin modals: j/k for navigation (selection only, no text input)
+                // Trust/Tools/Plugin/Policy modals: j/k for navigation (selection only, no text input)
                 if matches!(
                     state.active_modal(),
-                    Some(ModalType::TrustLevel) | Some(ModalType::Tools) | Some(ModalType::Plugin)
+                    Some(ModalType::TrustLevel)
+                        | Some(ModalType::Tools)
+                        | Some(ModalType::Plugin)
+                        | Some(ModalType::Policy)
                 ) {
                     return Some(Command::ModalDown);
                 }
@@ -247,10 +250,13 @@ impl<B: Backend> TuiRenderer<B> {
                 if state.active_modal() == Some(ModalType::SessionSwitchConfirm) {
                     return Some(Command::ModalUp);
                 }
-                // Trust/Tools/Plugin modals: j/k for navigation (selection only, no text input)
+                // Trust/Tools/Plugin/Policy modals: j/k for navigation (selection only, no text input)
                 if matches!(
                     state.active_modal(),
-                    Some(ModalType::TrustLevel) | Some(ModalType::Tools) | Some(ModalType::Plugin)
+                    Some(ModalType::TrustLevel)
+                        | Some(ModalType::Tools)
+                        | Some(ModalType::Plugin)
+                        | Some(ModalType::Policy)
                 ) {
                     return Some(Command::ModalUp);
                 }
@@ -1238,7 +1244,8 @@ impl<B: Backend> TuiRenderer<B> {
                         | Some(ModalType::ProviderPicker)
                         | Some(ModalType::ModelPicker)
                         | Some(ModalType::SessionPicker)
-                        | Some(ModalType::SessionSwitchConfirm) => Some(Command::ModalUp),
+                        | Some(ModalType::SessionSwitchConfirm)
+                        | Some(ModalType::Policy) => Some(Command::ModalUp),
                         _ if matches!(state.focused_component(), FocusedComponent::Panel) => {
                             Some(Command::SidebarUp)
                         }
@@ -1282,7 +1289,8 @@ impl<B: Backend> TuiRenderer<B> {
                         | Some(ModalType::ProviderPicker)
                         | Some(ModalType::ModelPicker)
                         | Some(ModalType::SessionPicker)
-                        | Some(ModalType::SessionSwitchConfirm) => Some(Command::ModalDown),
+                        | Some(ModalType::SessionSwitchConfirm)
+                        | Some(ModalType::Policy) => Some(Command::ModalDown),
                         _ if matches!(state.focused_component(), FocusedComponent::Panel) => {
                             Some(Command::SidebarDown)
                         }
