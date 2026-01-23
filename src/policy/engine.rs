@@ -33,6 +33,18 @@ impl PolicyEngine {
         // Seed builtin policy
         seed::seed_builtin(&conn)?;
 
+        // Load user patterns from config files
+        let pattern_loader = crate::policy::config::PatternLoader::new(Some(working_dir));
+        if let Err(e) = pattern_loader.sync_to_db(&conn, "persistent") {
+            tracing::warn!("Failed to load patterns from config: {}", e);
+        }
+
+        // Load MCP policies from config files
+        let config_loader = crate::policy::config::ConfigLoader::new(Some(working_dir));
+        if let Err(e) = config_loader.sync_to_db(&conn) {
+            tracing::warn!("Failed to load MCP policies from config: {}", e);
+        }
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             _working_dir: working_dir.to_path_buf(),

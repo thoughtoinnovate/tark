@@ -8,6 +8,7 @@ pub mod security;
 pub mod seed;
 pub mod types;
 
+pub use config::{ConfigLoader, PatternLoader};
 pub use engine::PolicyEngine;
 pub use types::{
     ApprovalDecision, ApprovalDecisionType, ApprovalPattern, AuditEntry, CommandClassification,
