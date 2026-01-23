@@ -152,7 +152,7 @@ impl PluginRegistry {
 
             match InstalledPlugin::load(&path) {
                 Ok(plugin) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "Found plugin: {} v{} ({})",
                         plugin.manifest.plugin.name,
                         plugin.manifest.plugin.version,
@@ -166,7 +166,7 @@ impl PluginRegistry {
             }
         }
 
-        tracing::info!("Loaded {} plugins", self.plugins.len());
+        tracing::debug!("Loaded {} plugins", self.plugins.len());
         Ok(())
     }
 

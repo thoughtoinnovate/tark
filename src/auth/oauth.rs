@@ -137,6 +137,20 @@ impl OAuthHandler {
         Ok(format!("{}?{}", self.config.auth_url, query_string))
     }
 
+    /// Extract the path from redirect_uri (e.g., "/auth/callback" from "http://localhost:1455/auth/callback")
+    fn extract_path_from_redirect_uri(&self) -> String {
+        let uri = &self.config.redirect_uri;
+        // Find the path after the host:port
+        if let Some(scheme_end) = uri.find("://") {
+            let after_scheme = &uri[scheme_end + 3..];
+            if let Some(path_start) = after_scheme.find('/') {
+                return after_scheme[path_start..].to_string();
+            }
+        }
+        // Default fallback
+        "/callback".to_string()
+    }
+
     /// Start local HTTP server to receive OAuth callback
     async fn start_callback_server(
         &self,
@@ -150,8 +164,12 @@ impl OAuthHandler {
             error: Option<String>,
         }
 
+        // Extract callback path from redirect_uri
+        let callback_path = self.extract_path_from_redirect_uri();
+        tracing::debug!("OAuth callback path: {}", callback_path);
+
         let app = Router::new().route(
-            "/callback",
+            &callback_path,
             get(move |Query(query): Query<CallbackQuery>| async move {
                 let mut auth_code_lock = auth_code.lock().await;
                 let response = if let Some(code) = query.code {
