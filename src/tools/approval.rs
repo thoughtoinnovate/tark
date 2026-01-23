@@ -1,10 +1,19 @@
-//! Approval gate for risky tool operations.
+//! **DEPRECATED**: Approval gate for risky tool operations.
+//!
+//! This module is deprecated in favor of the Policy Engine (`src/policy/`).
+//! It is kept for backward compatibility but will be removed in a future version.
+//!
+//! **New code should use `PolicyEngine` instead.**
 //!
 //! This module manages approval patterns and modes for tool execution.
 //! It integrates with the TUI via the InteractionRequest channel to
 //! prompt users for approval when needed.
 
 #![allow(dead_code)]
+#![deprecated(
+    since = "0.8.0",
+    note = "Use PolicyEngine (src/policy/) instead. This module is kept for backward compatibility only."
+)]
 
 use anyhow::{Context, Result};
 use glob::Pattern;

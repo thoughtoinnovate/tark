@@ -163,7 +163,9 @@ pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     working_dir: PathBuf,
     mode: AgentMode,
-    /// Approval gate for risky operations (DEPRECATED - use policy_engine)
+    /// Approval gate for risky operations
+    /// **DEPRECATED**: Use `policy_engine` instead. Kept for backward compatibility.
+    #[allow(deprecated)]
     approval_gate: Option<tokio::sync::Mutex<approval::ApprovalGate>>,
     /// Policy engine for approval decisions (NEW)
     policy_engine: Option<Arc<PolicyEngine>>,
@@ -232,7 +234,9 @@ impl ToolRegistry {
         approvals_path: Option<PathBuf>,
         todo_tracker: Option<Arc<Mutex<TodoTracker>>>,
     ) -> Self {
-        // Create approval gate if we have an interaction channel (DEPRECATED)
+        // Create approval gate if we have an interaction channel
+        // DEPRECATED: ApprovalGate is deprecated in favor of PolicyEngine
+        #[allow(deprecated)]
         let approval_gate = interaction_tx.as_ref().map(|tx| {
             let storage_path = approvals_path
                 .clone()
@@ -459,7 +463,9 @@ impl ToolRegistry {
             }
         }
 
-        // FALLBACK: Check approval if we have an approval gate
+        // FALLBACK: Check approval if we have an approval gate (deprecated path)
+        // This fallback exists for backward compatibility only
+        #[allow(deprecated)]
         if let Some(ref gate_mutex) = self.approval_gate {
             let risk_level = tool.risk_level();
 
@@ -588,7 +594,10 @@ impl ToolRegistry {
     }
 
     /// Set the trust level for the registry's approval gate
+    /// **DEPRECATED**: Use PolicyEngine trust levels instead
+    #[deprecated(since = "0.8.0", note = "Use PolicyEngine trust levels instead")]
     pub async fn set_trust_level(&self, level: TrustLevel) {
+        #[allow(deprecated)]
         if let Some(ref gate_mutex) = self.approval_gate {
             let mut gate = gate_mutex.lock().await;
             gate.set_trust_level(level);
@@ -616,7 +625,10 @@ impl ToolRegistry {
     }
 
     /// Update approval storage path (per session)
+    /// **DEPRECATED**: Use PolicyEngine pattern storage instead
+    #[deprecated(since = "0.8.0", note = "Use PolicyEngine pattern storage instead")]
     pub async fn set_approval_storage_path(&self, storage_path: PathBuf) {
+        #[allow(deprecated)]
         if let Some(ref gate_mutex) = self.approval_gate {
             let mut gate = gate_mutex.lock().await;
             gate.set_storage_path(storage_path);
