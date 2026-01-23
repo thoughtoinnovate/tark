@@ -231,6 +231,9 @@ pub enum Command {
     /// Delete the selected session from the session picker
     DeleteSessionSelected,
 
+    /// Delete the selected policy pattern
+    DeletePolicyPattern,
+
     /// Navigate modal selection up
     ModalUp,
 

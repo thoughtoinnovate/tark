@@ -1704,6 +1704,16 @@ impl AppService {
         }
     }
 
+    /// Delete a policy pattern
+    pub async fn delete_policy_pattern(&self, pattern_id: i64) -> Result<()> {
+        let policy_engine = crate::policy::PolicyEngine::open(
+            &self.working_dir.join(".tark").join("policy.db"),
+            &self.working_dir,
+        )?;
+        policy_engine.delete_pattern(pattern_id)?;
+        Ok(())
+    }
+
     /// Export current session to file
     pub fn export_session(&self, _path: &std::path::Path) -> Result<()> {
         // TODO: Implement session export through SessionService

@@ -493,11 +493,7 @@ impl<B: Backend> TuiRenderer<B> {
                 use crate::ui_backend::VimMode;
                 // Policy modal: delete selected pattern
                 if state.active_modal() == Some(ModalType::Policy) {
-                    if let Some(mut modal) = state.policy_modal() {
-                        modal.remove_selected();
-                        state.set_policy_modal(Some(modal));
-                    }
-                    return None;
+                    return Some(Command::DeletePolicyPattern);
                 }
                 // Pass through for pickers with text filter
                 if matches!(

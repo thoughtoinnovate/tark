@@ -89,9 +89,15 @@ whoami = "1"
 tabled = "0.17"
 colored = "2"
 
-# Cryptography for integrity checking
+# Cryptography for integrity checking and OAuth
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
+
+# OAuth and browser integration
+urlencoding = "2"
+open = "5"
 
 # TUI (Terminal User Interface)
 ratatui = "0.28"

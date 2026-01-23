@@ -743,6 +743,30 @@ impl<B: Backend> TuiController<B> {
                 }
                 return Ok(());
             }
+            Command::DeletePolicyPattern => {
+                if state.active_modal() == Some(crate::ui_backend::ModalType::Policy) {
+                    if let Some(mut modal) = state.policy_modal() {
+                        // Get the pattern ID before removing from UI
+                        if let Some(pattern_id) = modal.get_selected_pattern_id() {
+                            // Delete from database
+                            if let Err(err) = self.service.delete_policy_pattern(pattern_id).await {
+                                state.set_error_notification(Some(
+                                    crate::ui_backend::ErrorNotification {
+                                        message: format!("Failed to delete pattern: {}", err),
+                                        level: crate::ui_backend::ErrorLevel::Error,
+                                        timestamp: chrono::Local::now(),
+                                    },
+                                ));
+                            } else {
+                                // Remove from local UI state
+                                modal.remove_selected();
+                                state.set_policy_modal(Some(modal));
+                            }
+                        }
+                    }
+                }
+                return Ok(());
+            }
             Command::ConfirmModal => {
                 match state.active_modal() {
                     Some(crate::ui_backend::ModalType::ThemePicker) => {

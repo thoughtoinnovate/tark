@@ -468,6 +468,15 @@ impl PolicyEngine {
             .unwrap_or(false)
     }
 
+    /// Delete an approval pattern by ID
+    pub fn delete_pattern(&self, pattern_id: i64) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+
+        conn.execute("DELETE FROM approval_patterns WHERE id = ?1", [pattern_id])?;
+
+        Ok(())
+    }
+
     /// List session approval patterns (approvals and denials)
     /// Returns (approvals, denials) tuples
     pub fn list_session_patterns(

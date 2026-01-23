@@ -486,6 +486,7 @@ pub async fn run_usage(
 
 /// Run authentication for LLM providers
 pub async fn run_auth(provider: Option<&str>) -> Result<()> {
+    use crate::plugins::PluginRegistry;
     use colored::Colorize;
     use std::io::{self, Write};
 
@@ -498,26 +499,50 @@ pub async fn run_auth(provider: Option<&str>) -> Result<()> {
         // Interactive provider selection
         println!("Select a provider to authenticate:");
         println!();
+
+        // Built-in providers
         println!("  1. {} - GitHub Copilot (Device Flow)", "copilot".green());
         println!("  2. {} - OpenAI GPT models", "openai".green());
         println!("  3. {} - Anthropic Claude", "claude".green());
         println!("  4. {} - Google Gemini", "gemini".green());
         println!("  5. {} - OpenRouter (200+ models)", "openrouter".green());
         println!("  6. {} - Local Ollama", "ollama".green());
+
+        // Plugin-based providers
+        let mut plugin_providers = Vec::new();
+        if let Ok(registry) = PluginRegistry::new() {
+            for plugin in registry.provider_plugins() {
+                for contrib in plugin.contributed_providers() {
+                    plugin_providers.push((contrib.id.clone(), contrib.name.clone()));
+                }
+            }
+        }
+
+        let mut next_idx = 7;
+        for (_, name) in &plugin_providers {
+            println!("  {}. {} (plugin)", next_idx, name.green());
+            next_idx += 1;
+        }
+
         println!();
-        print!("Enter choice (1-6): ");
+        let max_choice = 6 + plugin_providers.len();
+        print!("Enter choice (1-{}): ", max_choice);
         io::stdout().flush()?;
 
         let mut choice = String::new();
         io::stdin().read_line(&mut choice)?;
 
-        match choice.trim() {
-            "1" => "copilot".to_string(),
-            "2" => "openai".to_string(),
-            "3" => "claude".to_string(),
-            "4" => "gemini".to_string(),
-            "5" => "openrouter".to_string(),
-            "6" => "ollama".to_string(),
+        match choice.trim().parse::<usize>() {
+            Ok(1) => "copilot".to_string(),
+            Ok(2) => "openai".to_string(),
+            Ok(3) => "claude".to_string(),
+            Ok(4) => "gemini".to_string(),
+            Ok(5) => "openrouter".to_string(),
+            Ok(6) => "ollama".to_string(),
+            Ok(n) if n >= 7 && n <= max_choice => {
+                let plugin_idx = n - 7;
+                plugin_providers[plugin_idx].0.clone()
+            }
             _ => anyhow::bail!("Invalid choice"),
         }
     };
@@ -641,8 +666,66 @@ pub async fn run_auth(provider: Option<&str>) -> Result<()> {
             println!();
             println!("No API key needed!");
         }
+        "chatgpt-oauth" | "chatgpt" => {
+            println!("{}", "ChatGPT OAuth (Codex Models)".bold());
+            println!();
+            println!("Initiating OAuth flow for ChatGPT Pro/Plus...");
+            println!();
+
+            // Run OAuth flow
+            match run_chatgpt_oauth_flow().await {
+                Ok(()) => {
+                    println!();
+                    println!("✅ Successfully authenticated with ChatGPT!");
+                    println!("Credentials saved to: ~/.config/tark/chatgpt_oauth.json");
+                    println!();
+                    println!("You can now use ChatGPT Codex models:");
+                    println!("  tark chat --provider chatgpt-oauth");
+                    println!("  Or within TUI: /model → Select 'ChatGPT (OAuth)'");
+                }
+                Err(e) => {
+                    println!();
+                    println!("❌ Authentication failed: {}", e);
+                    println!();
+                    println!("Make sure you have ChatGPT Pro/Plus subscription.");
+                }
+            }
+        }
+        "gemini-oauth" => {
+            // gemini-oauth reads from ~/.gemini/oauth_creds.json (set by gemini CLI)
+            let oauth_creds_path = dirs::home_dir()
+                .map(|h| h.join(".gemini").join("oauth_creds.json"))
+                .unwrap_or_default();
+
+            if oauth_creds_path.exists() {
+                println!("✅ Gemini CLI OAuth credentials found");
+                println!();
+                println!("You can now use Gemini with OAuth:");
+                println!("  tark chat --provider gemini-oauth");
+            } else {
+                println!("{}", "Gemini OAuth Setup".bold());
+                println!();
+                println!("The gemini-oauth plugin uses credentials from Gemini CLI.");
+                println!();
+                println!("Setup steps:");
+                println!("  1. Install Gemini CLI:");
+                println!("     npm install -g @google/gemini-cli");
+                println!();
+                println!("  2. Authenticate:");
+                println!("     gemini auth login");
+                println!();
+                println!("  3. Use in tark:");
+                println!("     tark chat --provider gemini-oauth");
+                println!();
+                println!("Credentials will be stored at:");
+                println!("  {}", oauth_creds_path.display());
+            }
+        }
         _ => {
-            anyhow::bail!("Unknown provider: {}", provider);
+            anyhow::bail!(
+                "Unknown provider: {}. Try 'tark auth' for a list of providers.",
+                provider
+            );
         }
     }
 
@@ -658,6 +741,191 @@ fn format_number(n: u64) -> String {
     } else {
         format!("{}", n)
     }
+}
+
+/// Run ChatGPT OAuth PKCE flow
+async fn run_chatgpt_oauth_flow() -> Result<()> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use rand::Rng;
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    // OAuth constants (matching the plugin)
+    const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+    const AUTH_URL: &str = "https://auth.openai.com/authorize";
+    const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+    const REDIRECT_URI: &str = "http://localhost:8888/callback";
+
+    // Generate PKCE code_verifier and code_challenge
+    let code_verifier: String = rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(128)
+        .map(char::from)
+        .collect();
+
+    let mut hasher = Sha256::new();
+    hasher.update(code_verifier.as_bytes());
+    let code_challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
+
+    // Prepare authorization URL
+    let auth_params = [
+        ("client_id", CLIENT_ID),
+        ("response_type", "code"),
+        ("redirect_uri", REDIRECT_URI),
+        ("scope", "openid profile email offline_access"),
+        ("code_challenge", &code_challenge),
+        ("code_challenge_method", "S256"),
+    ];
+
+    let auth_url = format!(
+        "{}?{}",
+        AUTH_URL,
+        auth_params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
+            .collect::<Vec<_>>()
+            .join("&")
+    );
+
+    // Store authorization code
+    let auth_code = Arc::new(Mutex::new(None::<String>));
+    let auth_code_clone = auth_code.clone();
+
+    // Start local HTTP server to receive callback
+    use axum::{extract::Query, response::Html, routing::get, Router};
+
+    #[derive(serde::Deserialize)]
+    struct CallbackQuery {
+        code: Option<String>,
+        error: Option<String>,
+    }
+
+    let app = Router::new().route(
+        "/callback",
+        get(|Query(query): Query<CallbackQuery>| async move {
+            let mut auth_code_lock = auth_code_clone.lock().await;
+            if let Some(code) = query.code {
+                *auth_code_lock = Some(code);
+                Html(
+                    "<h1>Authentication successful!</h1><p>You can close this window.</p>"
+                        .to_string(),
+                )
+            } else {
+                let error = query.error.unwrap_or_else(|| "unknown".to_string());
+                Html(format!(
+                    "<h1>Authentication failed</h1><p>Error: {}</p>",
+                    error
+                ))
+            }
+        }),
+    );
+
+    // Start server in background
+    let server_handle = tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:8888")
+            .await
+            .unwrap();
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Open browser
+    println!("Opening browser for authentication...");
+    println!();
+    println!("If the browser doesn't open, visit:");
+    println!("{}", auth_url.bright_cyan());
+    println!();
+
+    if let Err(e) = open::that(&auth_url) {
+        tracing::warn!("Failed to open browser: {}", e);
+    }
+
+    // Wait for authorization code (with timeout)
+    let mut attempts = 0;
+    let max_attempts = 60; // 60 seconds
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let code_guard = auth_code.lock().await;
+        if code_guard.is_some() {
+            break;
+        }
+        drop(code_guard);
+
+        attempts += 1;
+        if attempts >= max_attempts {
+            server_handle.abort();
+            anyhow::bail!(
+                "Authentication timeout - no response after {} seconds",
+                max_attempts
+            );
+        }
+    }
+
+    // Get the authorization code
+    let authorization_code = auth_code
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("No authorization code received"))?;
+
+    // Abort server
+    server_handle.abort();
+
+    println!("Exchanging authorization code for tokens...");
+
+    // Exchange code for tokens
+    let client = reqwest::Client::new();
+    let token_params = [
+        ("client_id", CLIENT_ID),
+        ("grant_type", "authorization_code"),
+        ("code", &authorization_code),
+        ("redirect_uri", REDIRECT_URI),
+        ("code_verifier", &code_verifier),
+    ];
+
+    let token_response = client
+        .post(TOKEN_URL)
+        .form(&token_params)
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    // Save credentials
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
+        .join("tark");
+
+    std::fs::create_dir_all(&config_dir)?;
+
+    let credentials_path = config_dir.join("chatgpt_oauth.json");
+
+    // Add expires_at timestamp
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    let expires_in = token_response["expires_in"].as_u64().unwrap_or(3600);
+    let mut credentials = token_response.clone();
+    credentials["expires_at"] = serde_json::json!(now + expires_in);
+
+    std::fs::write(
+        &credentials_path,
+        serde_json::to_string_pretty(&credentials)?,
+    )?;
+
+    // Set secure permissions (Unix only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&credentials_path)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&credentials_path, perms)?;
+    }
+
+    Ok(())
 }
 
 /// Logout from an LLM provider (clear stored tokens)
