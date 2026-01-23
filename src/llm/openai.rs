@@ -249,6 +249,11 @@ impl OpenAiProvider {
             || self.model.starts_with("gpt-6") // Future-proof for GPT-6.x
     }
 
+    /// Check if the model is a Codex model (requires instructions field)
+    fn is_codex_model(&self) -> bool {
+        self.model.to_lowercase().contains("codex")
+    }
+
     /// Get reasoning effort for o1/o3/o4 models
     ///
     /// Only returns Some when:
@@ -800,6 +805,14 @@ impl LlmProvider for OpenAiProvider {
     ) -> Result<LlmResponse> {
         let (instructions, input) = self.convert_messages_to_responses(messages);
 
+        // Codex models require the instructions field to be present
+        // Provide a default if none was extracted from system messages
+        let instructions = if instructions.is_none() && self.is_codex_model() {
+            Some("You are a helpful coding assistant.".to_string())
+        } else {
+            instructions
+        };
+
         let reasoning = self
             .get_reasoning_effort(settings)
             .map(|effort| ReasoningConfig {
@@ -950,6 +963,14 @@ impl LlmProvider for OpenAiProvider {
         const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
         let (instructions, input) = self.convert_messages_to_responses(messages);
+
+        // Codex models require the instructions field to be present
+        // Provide a default if none was extracted from system messages
+        let instructions = if instructions.is_none() && self.is_codex_model() {
+            Some("You are a helpful coding assistant.".to_string())
+        } else {
+            instructions
+        };
 
         let reasoning = self
             .get_reasoning_effort(settings)

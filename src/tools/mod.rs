@@ -448,7 +448,7 @@ impl ToolRegistry {
                             );
 
                             // Build suggested patterns
-                            let suggested_patterns = self.build_suggested_patterns(&command);
+                            let suggested_patterns = self.build_suggested_patterns(name, &command);
 
                             // Create approval request
                             let (responder, receiver) = tokio::sync::oneshot::channel();
@@ -660,12 +660,12 @@ impl ToolRegistry {
     }
 
     /// Build suggested approval patterns for a command
-    fn build_suggested_patterns(&self, command: &str) -> Vec<SuggestedPattern> {
+    fn build_suggested_patterns(&self, tool_name: &str, command: &str) -> Vec<SuggestedPattern> {
         vec![
             SuggestedPattern {
                 pattern: command.to_string(),
                 match_type: MatchType::Exact,
-                description: format!("Exact: {}", command),
+                description: format!("{} on exact: {}", tool_name, command),
             },
             SuggestedPattern {
                 pattern: command
@@ -675,7 +675,8 @@ impl ToolRegistry {
                     .to_string(),
                 match_type: MatchType::Prefix,
                 description: format!(
-                    "Prefix: {}",
+                    "{} starting with: {}",
+                    tool_name,
                     command.split_whitespace().next().unwrap_or(command)
                 ),
             },

@@ -53,20 +53,28 @@ pub struct OpenAiCompatConfig {
     pub supports_streaming: bool,
     /// Whether the provider supports tool/function calling
     pub supports_tools: bool,
+    /// Whether to use Responses API format (for Codex endpoints)
+    pub use_responses_api: bool,
 }
 
 impl OpenAiCompatConfig {
     /// Create a new configuration with minimal required fields
     pub fn new(name: impl Into<String>, base_url: impl Into<String>, auth: AuthMethod) -> Self {
+        let base_url_str: String = base_url.into();
+        // Auto-detect Responses API format from endpoint URL
+        let use_responses_api = base_url_str.contains("/responses")
+            || base_url_str.contains("/codex/")
+            || base_url_str.contains("codex/responses");
         Self {
             name: name.into(),
-            base_url: base_url.into(),
+            base_url: base_url_str,
             auth,
             default_model: String::new(),
             max_tokens: 4096, // Fallback default; config overrides this
             custom_headers: Vec::new(),
             supports_streaming: true,
             supports_tools: true,
+            use_responses_api,
         }
     }
 
@@ -94,6 +102,152 @@ impl OpenAiCompatConfig {
         self.supports_tools = supported;
         self
     }
+
+    pub fn with_responses_api(mut self, use_responses_api: bool) -> Self {
+        self.use_responses_api = use_responses_api;
+        self
+    }
+}
+
+// ============================================================================
+// Responses API Types (for Codex endpoints)
+// ============================================================================
+
+/// Request for Responses API (Codex format)
+#[derive(Debug, Serialize)]
+struct ResponsesApiRequest {
+    model: String,
+    input: ResponsesInput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<ResponsesTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    /// Required by Codex API - must be false
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store: Option<bool>,
+}
+
+/// Input format for Responses API
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ResponsesInput {
+    Text(String),
+    Messages(Vec<ResponsesMessage>),
+}
+
+/// Message in Responses API format
+#[derive(Debug, Serialize, Deserialize)]
+struct ResponsesMessage {
+    role: String,
+    content: ResponsesContent,
+}
+
+/// Content of a Responses API message
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ResponsesContent {
+    Text(String),
+    Parts(Vec<ResponsesContentPart>),
+}
+
+/// Content part in a Responses API message
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum ResponsesContentPart {
+    #[serde(rename = "input_text")]
+    InputText { text: String },
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
+}
+
+/// Tool definition for Responses API
+#[derive(Debug, Serialize)]
+struct ResponsesTool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+/// Response from Responses API
+#[derive(Debug, Deserialize)]
+struct ResponsesApiResponse {
+    #[allow(dead_code)]
+    id: String,
+    output: Vec<ResponsesOutputItem>,
+    #[serde(default)]
+    usage: Option<ResponsesUsage>,
+}
+
+/// Output item from Responses API
+#[derive(Debug, Deserialize)]
+struct ResponsesOutputItem {
+    #[serde(rename = "type")]
+    output_type: String,
+    #[serde(default)]
+    content: Vec<ResponsesContentItem>,
+    #[serde(default)]
+    function_call: Option<ResponsesFunctionCall>,
+}
+
+/// Content item in message output
+#[derive(Debug, Deserialize)]
+struct ResponsesContentItem {
+    #[serde(rename = "type")]
+    content_type: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Function call in Responses API output
+#[derive(Debug, Deserialize)]
+struct ResponsesFunctionCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Usage statistics from Responses API
+#[derive(Debug, Deserialize)]
+struct ResponsesUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    total_tokens: u32,
+}
+
+/// Streaming event from Responses API
+#[derive(Debug, Deserialize)]
+struct ResponsesStreamEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    delta: Option<String>,
+    #[serde(default)]
+    response: Option<ResponsesApiResponse>,
+    #[serde(default)]
+    item_id: Option<String>,
+    #[serde(default)]
+    item: Option<StreamOutputItem>,
+}
+
+/// Output item in streaming (for function calls)
+#[derive(Debug, Deserialize)]
+struct StreamOutputItem {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(rename = "type")]
+    item_type: String,
+    #[serde(default)]
+    call_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 // ============================================================================
@@ -256,11 +410,174 @@ impl OpenAiCompatProvider {
             .collect()
     }
 
+    /// Convert internal tool definitions to Responses API format
+    fn convert_tools_to_responses(&self, tools: &[ToolDefinition]) -> Vec<ResponsesTool> {
+        tools
+            .iter()
+            .map(|t| ResponsesTool {
+                tool_type: "function".to_string(),
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: t.parameters.clone(),
+            })
+            .collect()
+    }
+
+    /// Check if the model is a Codex model (requires instructions field)
+    fn is_codex_model(&self) -> bool {
+        self.model.to_lowercase().contains("codex")
+    }
+
+    /// Convert messages to Responses API format
+    /// Returns (instructions, input)
+    fn convert_messages_to_responses(
+        &self,
+        messages: &[Message],
+    ) -> (Option<String>, ResponsesInput) {
+        // Extract system messages for instructions
+        let mut system_prompts = Vec::new();
+        let mut conversation_messages = Vec::new();
+
+        for msg in messages {
+            if msg.role == Role::System {
+                if let Some(text) = msg.content.as_text() {
+                    system_prompts.push(text.to_string());
+                }
+            } else {
+                conversation_messages.push(msg);
+            }
+        }
+
+        // Combine system prompts into instructions
+        let instructions = if system_prompts.is_empty() {
+            // Codex models require instructions - provide default
+            if self.is_codex_model() {
+                Some("You are a helpful coding assistant.".to_string())
+            } else {
+                None
+            }
+        } else {
+            Some(system_prompts.join("\n\n"))
+        };
+
+        // Convert conversation messages to Responses API format
+        let responses_messages: Vec<ResponsesMessage> = conversation_messages
+            .iter()
+            .filter_map(|msg| {
+                let role = match msg.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                    Role::Tool => {
+                        // Convert tool results to user messages with labeled text
+                        if let (Some(text), Some(call_id)) =
+                            (msg.content.as_text(), &msg.tool_call_id)
+                        {
+                            return Some(ResponsesMessage {
+                                role: "user".to_string(),
+                                content: ResponsesContent::Text(format!(
+                                    "[Tool result for call_id={}]:\n{}",
+                                    call_id, text
+                                )),
+                            });
+                        } else if let Some(text) = msg.content.as_text() {
+                            return Some(ResponsesMessage {
+                                role: "user".to_string(),
+                                content: ResponsesContent::Text(format!(
+                                    "[Tool result]:\n{}",
+                                    text
+                                )),
+                            });
+                        }
+                        return None;
+                    }
+                    Role::System => return None, // Already handled above
+                };
+
+                let content = match &msg.content {
+                    MessageContent::Text(text) => ResponsesContent::Text(text.clone()),
+                    MessageContent::Parts(parts) => {
+                        let mut content_parts = Vec::new();
+                        for part in parts {
+                            match part {
+                                ContentPart::Text { text } => {
+                                    if role == "assistant" {
+                                        content_parts.push(ResponsesContentPart::OutputText {
+                                            text: text.clone(),
+                                        });
+                                    } else {
+                                        content_parts.push(ResponsesContentPart::InputText {
+                                            text: text.clone(),
+                                        });
+                                    }
+                                }
+                                ContentPart::ToolUse {
+                                    id, name, input, ..
+                                } => {
+                                    // Serialize tool calls as text
+                                    let args_str = serde_json::to_string(input).unwrap_or_default();
+                                    let text = format!(
+                                        "[Previous tool call: {} (id={}) with args: {}]",
+                                        name, id, args_str
+                                    );
+                                    if role == "assistant" {
+                                        content_parts
+                                            .push(ResponsesContentPart::OutputText { text });
+                                    } else {
+                                        content_parts
+                                            .push(ResponsesContentPart::InputText { text });
+                                    }
+                                }
+                                ContentPart::ToolResult { content, .. } => {
+                                    if role == "assistant" {
+                                        content_parts.push(ResponsesContentPart::OutputText {
+                                            text: content.clone(),
+                                        });
+                                    } else {
+                                        content_parts.push(ResponsesContentPart::InputText {
+                                            text: content.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        if content_parts.is_empty() {
+                            if role == "assistant" {
+                                return None; // Skip empty assistant messages
+                            }
+                            ResponsesContent::Text(String::new())
+                        } else if content_parts.len() == 1 {
+                            // Single part - check if it's just text
+                            match &content_parts[0] {
+                                ResponsesContentPart::InputText { text }
+                                | ResponsesContentPart::OutputText { text } => {
+                                    ResponsesContent::Text(text.clone())
+                                }
+                            }
+                        } else {
+                            ResponsesContent::Parts(content_parts)
+                        }
+                    }
+                };
+
+                Some(ResponsesMessage {
+                    role: role.to_string(),
+                    content,
+                })
+            })
+            .collect();
+
+        // Codex API requires input to always be a messages array, not simplified text
+        let input = ResponsesInput::Messages(responses_messages);
+
+        (instructions, input)
+    }
+
     // ========================================================================
     // Request Building
     // ========================================================================
 
-    /// Build the request body
+    /// Build the request body (Chat Completions format)
     fn build_request(
         &self,
         messages: &[Message],
@@ -287,8 +604,62 @@ impl OpenAiCompatProvider {
         request
     }
 
-    /// Build request with authorization headers
+    /// Build the request body (Responses API format for Codex)
+    fn build_responses_request(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        stream: bool,
+    ) -> ResponsesApiRequest {
+        let (instructions, input) = self.convert_messages_to_responses(messages);
+
+        let mut request = ResponsesApiRequest {
+            model: self.model.clone(),
+            input,
+            instructions,
+            max_output_tokens: Some(self.max_tokens),
+            tools: None,
+            tool_choice: None,
+            stream: if stream { Some(true) } else { None },
+        };
+
+        if let Some(tools) = tools {
+            if !tools.is_empty() && self.config.supports_tools {
+                request.tools = Some(self.convert_tools_to_responses(tools));
+                request.tool_choice = Some("auto".to_string());
+            }
+        }
+
+        request
+    }
+
+    /// Build request with authorization headers (Chat Completions)
     fn build_http_request(&self, body: &OpenAiRequest) -> reqwest::RequestBuilder {
+        let mut req = self
+            .client
+            .post(&self.config.base_url)
+            .header("Content-Type", "application/json");
+
+        // Add auth
+        match &self.config.auth {
+            AuthMethod::BearerToken(token) => {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+            AuthMethod::ApiKeyHeader { header, key } => {
+                req = req.header(header, key);
+            }
+        }
+
+        // Add custom headers
+        for (name, value) in &self.config.custom_headers {
+            req = req.header(name, value);
+        }
+
+        req.json(body)
+    }
+
+    /// Build request with authorization headers (Responses API)
+    fn build_responses_http_request(&self, body: &ResponsesApiRequest) -> reqwest::RequestBuilder {
         let mut req = self
             .client
             .post(&self.config.base_url)
@@ -316,7 +687,7 @@ impl OpenAiCompatProvider {
     // Response Parsing
     // ========================================================================
 
-    /// Parse a non-streaming response
+    /// Parse a non-streaming response (Chat Completions format)
     fn parse_response(&self, response: OpenAiResponse) -> LlmResponse {
         let usage = response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
@@ -369,6 +740,70 @@ impl OpenAiCompatProvider {
         }
     }
 
+    /// Parse a non-streaming response (Responses API format)
+    fn parse_responses_response(&self, response: ResponsesApiResponse) -> LlmResponse {
+        let usage = response.usage.map(|u| TokenUsage {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            total_tokens: u.total_tokens,
+        });
+
+        let mut text_parts = Vec::new();
+        let mut tool_calls = Vec::new();
+
+        for output in response.output {
+            match output.output_type.as_str() {
+                "message" => {
+                    for item in &output.content {
+                        if item.content_type == "output_text" {
+                            if let Some(text) = &item.text {
+                                text_parts.push(text.clone());
+                            }
+                        }
+                    }
+                }
+                "function_call" => {
+                    if let Some(func_call) = output.function_call {
+                        tool_calls.push(ToolCall {
+                            id: func_call.id,
+                            name: func_call.name,
+                            arguments: serde_json::from_str(&func_call.arguments)
+                                .unwrap_or(serde_json::Value::Null),
+                            thought_signature: None,
+                        });
+                    }
+                }
+                _ => {
+                    tracing::debug!("Unknown output type: {}", output.output_type);
+                }
+            }
+        }
+
+        let text = if text_parts.is_empty() {
+            None
+        } else {
+            Some(text_parts.join("\n"))
+        };
+
+        if tool_calls.is_empty() {
+            LlmResponse::Text {
+                text: text.unwrap_or_default(),
+                usage,
+            }
+        } else if text.is_none() || text.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
+            LlmResponse::ToolCalls {
+                calls: tool_calls,
+                usage,
+            }
+        } else {
+            LlmResponse::Mixed {
+                text,
+                tool_calls,
+                usage,
+            }
+        }
+    }
+
     // ========================================================================
     // API Methods
     // ========================================================================
@@ -379,39 +814,99 @@ impl OpenAiCompatProvider {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse> {
-        let request = self.build_request(messages, tools, false);
-        let http_req = self.build_http_request(&request);
-
         // Log request in debug mode
         tracing::debug!(
             target: "llm",
             provider = self.config.name,
             model = self.model,
             messages = messages.len(),
+            use_responses_api = self.config.use_responses_api,
             "Sending chat request"
         );
 
-        let response = http_req
-            .send()
-            .await
-            .with_context(|| format!("Failed to send request to {} API", self.config.name))?;
+        if self.config.use_responses_api {
+            // Use Responses API format (for Codex endpoints)
+            let request = self.build_responses_request(messages, tools, false);
+            let http_req = self.build_responses_http_request(&request);
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(LlmError::from_http_status(status, error_text).into());
+            // Log the request payload for debugging
+            if let Ok(json) = serde_json::to_string_pretty(&request) {
+                tracing::debug!("Responses API request:\n{}", json);
+            }
+
+            let response = http_req
+                .send()
+                .await
+                .with_context(|| format!("Failed to send request to {} API", self.config.name))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_default();
+                return Err(LlmError::from_http_status(status, error_text).into());
+            }
+
+            let api_response: ResponsesApiResponse = response.json().await.with_context(|| {
+                format!(
+                    "Failed to parse {} Responses API response",
+                    self.config.name
+                )
+            })?;
+
+            Ok(self.parse_responses_response(api_response))
+        } else {
+            // Use Chat Completions API format
+            let request = self.build_request(messages, tools, false);
+            let http_req = self.build_http_request(&request);
+
+            let response = http_req
+                .send()
+                .await
+                .with_context(|| format!("Failed to send request to {} API", self.config.name))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_default();
+                return Err(LlmError::from_http_status(status, error_text).into());
+            }
+
+            let api_response: OpenAiResponse = response
+                .json()
+                .await
+                .with_context(|| format!("Failed to parse {} API response", self.config.name))?;
+
+            Ok(self.parse_response(api_response))
         }
-
-        let api_response: OpenAiResponse = response
-            .json()
-            .await
-            .with_context(|| format!("Failed to parse {} API response", self.config.name))?;
-
-        Ok(self.parse_response(api_response))
     }
 
     /// Send a streaming chat request
     async fn chat_streaming_impl(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<LlmResponse> {
+        // Log request in debug mode
+        tracing::debug!(
+            target: "llm",
+            provider = self.config.name,
+            model = self.model,
+            messages = messages.len(),
+            use_responses_api = self.config.use_responses_api,
+            "Sending streaming request"
+        );
+
+        if self.config.use_responses_api {
+            self.chat_streaming_responses_impl(messages, tools, callback, interrupt_check)
+                .await
+        } else {
+            self.chat_streaming_completions_impl(messages, tools, callback, interrupt_check)
+                .await
+        }
+    }
+
+    /// Send a streaming chat request using Chat Completions API
+    async fn chat_streaming_completions_impl(
         &self,
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
@@ -426,15 +921,6 @@ impl OpenAiCompatProvider {
 
         let request = self.build_request(messages, tools, true);
         let http_req = self.build_http_request(&request);
-
-        // Log request in debug mode
-        tracing::debug!(
-            target: "llm",
-            provider = self.config.name,
-            model = self.model,
-            messages = messages.len(),
-            "Sending streaming request"
-        );
 
         let response = http_req
             .send()
@@ -613,6 +1099,200 @@ impl OpenAiCompatProvider {
         }
 
         callback(StreamEvent::Done);
+        Ok(builder.build())
+    }
+
+    /// Send a streaming chat request using Responses API (for Codex endpoints)
+    async fn chat_streaming_responses_impl(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<LlmResponse> {
+        use futures::StreamExt;
+        use tokio::time::{timeout, Duration};
+
+        const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+        const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+        let request = self.build_responses_request(messages, tools, true);
+        let http_req = self.build_responses_http_request(&request);
+
+        // Log the request payload for debugging
+        if let Ok(json) = serde_json::to_string_pretty(&request) {
+            tracing::debug!("Responses API streaming request:\n{}", json);
+        }
+
+        let response = http_req
+            .send()
+            .await
+            .with_context(|| format!("Failed to send request to {} API", self.config.name))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            callback(StreamEvent::Error(format!(
+                "{} API error ({}): {}",
+                self.config.name, status, error_text
+            )));
+            return Err(LlmError::from_http_status(status, error_text).into());
+        }
+
+        let mut builder = StreamingResponseBuilder::new();
+        let mut stream = response.bytes_stream();
+        let mut decoder = SseDecoder::new();
+
+        // Track tool calls using shared tracker (handles ID mapping)
+        let mut tool_tracker = crate::llm::streaming::ToolCallTracker::new();
+
+        let mut last_activity_at = std::time::Instant::now();
+        loop {
+            // Check for user interrupt
+            if let Some(check) = interrupt_check {
+                if check() {
+                    for (id, (name, args)) in tool_tracker.into_calls() {
+                        builder.tool_calls.insert(id, (name, args, None));
+                    }
+                    return Ok(builder.build());
+                }
+            }
+
+            // Check for timeout
+            if last_activity_at.elapsed() >= STREAM_CHUNK_TIMEOUT {
+                return Err(LlmError::Network(format!(
+                    "Stream timeout - no response from {} for {} seconds",
+                    self.config.name,
+                    STREAM_CHUNK_TIMEOUT.as_secs()
+                ))
+                .into());
+            }
+
+            // Read next chunk
+            let chunk_result = match timeout(INTERRUPT_POLL_INTERVAL, stream.next()).await {
+                Ok(Some(res)) => res,
+                Ok(None) => break,
+                Err(_) => continue,
+            };
+
+            last_activity_at = std::time::Instant::now();
+            let chunk = chunk_result.context("Error reading stream chunk")?;
+
+            // Process SSE events
+            for payload_json in decoder.push(&chunk) {
+                crate::llm::append_llm_raw_line(&payload_json);
+
+                if payload_json == "[DONE]" {
+                    callback(StreamEvent::Done);
+                    continue;
+                }
+
+                if let Ok(event_data) = serde_json::from_str::<ResponsesStreamEvent>(&payload_json)
+                {
+                    match event_data.event_type.as_str() {
+                        "response.output_text.delta" => {
+                            if let Some(delta) = event_data.delta {
+                                if !delta.is_empty() {
+                                    let event = StreamEvent::TextDelta(delta);
+                                    builder.process(&event);
+                                    callback(event);
+                                }
+                            }
+                        }
+                        "response.output_item.added" => {
+                            if let Some(item) = &event_data.item {
+                                if item.item_type == "function_call" {
+                                    if let (Some(call_id), Some(name)) = (&item.call_id, &item.name)
+                                    {
+                                        let event = tool_tracker.start_call(
+                                            call_id,
+                                            name,
+                                            item.id.as_deref(),
+                                        );
+                                        builder.process(&event);
+                                        callback(event);
+                                    }
+                                }
+                            }
+                        }
+                        "response.function_call_arguments.delta" => {
+                            if let (Some(item_id), Some(delta)) =
+                                (event_data.item_id, event_data.delta)
+                            {
+                                if !delta.is_empty() {
+                                    if let Some(event) = tool_tracker.append_args(&item_id, &delta)
+                                    {
+                                        builder.process(&event);
+                                        callback(event);
+                                    }
+                                }
+                            }
+                        }
+                        "response.function_call_arguments.done" => {
+                            if let Some(item_id) = event_data.item_id {
+                                if let Some(event) = tool_tracker.complete_call(&item_id) {
+                                    callback(event);
+                                }
+                            }
+                        }
+                        "response.completed" => {
+                            if let Some(response) = event_data.response {
+                                if let Some(usage) = response.usage {
+                                    builder.usage = Some(TokenUsage {
+                                        input_tokens: usage.input_tokens,
+                                        output_tokens: usage.output_tokens,
+                                        total_tokens: usage.total_tokens,
+                                    });
+                                }
+                            }
+                            callback(StreamEvent::Done);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Flush remaining
+        for payload_json in decoder.finish() {
+            if payload_json == "[DONE]" {
+                callback(StreamEvent::Done);
+                continue;
+            }
+
+            if let Ok(event_data) = serde_json::from_str::<ResponsesStreamEvent>(&payload_json) {
+                match event_data.event_type.as_str() {
+                    "response.output_text.delta" => {
+                        if let Some(delta) = event_data.delta {
+                            if !delta.is_empty() {
+                                let event = StreamEvent::TextDelta(delta);
+                                builder.process(&event);
+                                callback(event);
+                            }
+                        }
+                    }
+                    "response.completed" => {
+                        if let Some(response) = event_data.response {
+                            if let Some(usage) = response.usage {
+                                builder.usage = Some(TokenUsage {
+                                    input_tokens: usage.input_tokens,
+                                    output_tokens: usage.output_tokens,
+                                    total_tokens: usage.total_tokens,
+                                });
+                            }
+                        }
+                        callback(StreamEvent::Done);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Add tracked tool calls
+        for (id, (name, args)) in tool_tracker.into_calls() {
+            builder.tool_calls.insert(id, (name, args, None));
+        }
+
         Ok(builder.build())
     }
 }
