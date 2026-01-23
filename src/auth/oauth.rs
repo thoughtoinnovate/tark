@@ -51,8 +51,15 @@ impl OAuthHandler {
         let code_verifier = self.generate_code_verifier();
         let code_challenge = self.generate_code_challenge(&code_verifier);
 
+        // Generate state for CSRF protection if enabled
+        let state = if self.config.use_state {
+            Some(self.generate_state())
+        } else {
+            None
+        };
+
         // Build authorization URL
-        let auth_url = self.build_authorization_url(&code_challenge)?;
+        let auth_url = self.build_authorization_url(&code_challenge, state.as_deref())?;
 
         // Start local HTTP server for callback
         let auth_code = Arc::new(Mutex::new(None::<String>));
@@ -88,23 +95,45 @@ impl OAuthHandler {
         URL_SAFE_NO_PAD.encode(hasher.finalize())
     }
 
+    /// Generate a random state parameter for CSRF protection
+    fn generate_state(&self) -> String {
+        let random_bytes: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+        URL_SAFE_NO_PAD.encode(&random_bytes)
+    }
+
     /// Build OAuth authorization URL with PKCE parameters
-    fn build_authorization_url(&self, code_challenge: &str) -> Result<String> {
-        let params = [
-            ("client_id", self.config.client_id.as_str()),
+    fn build_authorization_url(&self, code_challenge: &str, state: Option<&str>) -> Result<String> {
+        let scope_string = self.config.scopes.join(" ");
+
+        // Build base parameters
+        let mut params: Vec<(&str, &str)> = vec![
             ("response_type", "code"),
+            ("client_id", self.config.client_id.as_str()),
             ("redirect_uri", self.config.redirect_uri.as_str()),
-            ("scope", &self.config.scopes.join(" ")),
+            ("scope", &scope_string),
             ("code_challenge", code_challenge),
             ("code_challenge_method", "S256"),
         ];
 
-        let query_string = params
+        // Add state if provided
+        let state_owned: String;
+        if let Some(s) = state {
+            state_owned = s.to_string();
+            params.push(("state", &state_owned));
+        }
+
+        // Build query string from base params
+        let mut query_parts: Vec<String> = params
             .iter()
             .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
+            .collect();
 
+        // Add extra parameters from config (provider-specific)
+        for (key, value) in &self.config.extra_params {
+            query_parts.push(format!("{}={}", key, urlencoding::encode(value)));
+        }
+
+        let query_string = query_parts.join("&");
         Ok(format!("{}?{}", self.config.auth_url, query_string))
     }
 

@@ -508,12 +508,15 @@ pub async fn run_auth(provider: Option<&str>) -> Result<()> {
         println!("  5. {} - OpenRouter (200+ models)", "openrouter".green());
         println!("  6. {} - Local Ollama", "ollama".green());
 
-        // Plugin-based providers
+        // Plugin-based OAuth providers (only show plugins with OAuth configuration)
         let mut plugin_providers = Vec::new();
         if let Ok(registry) = PluginRegistry::new() {
             for plugin in registry.provider_plugins() {
-                for contrib in plugin.contributed_providers() {
-                    plugin_providers.push((contrib.id.clone(), contrib.name.clone()));
+                // Only include plugins that have OAuth configuration
+                if plugin.manifest.oauth.is_some() {
+                    for contrib in plugin.contributed_providers() {
+                        plugin_providers.push((contrib.id.clone(), contrib.name.clone()));
+                    }
                 }
             }
         }

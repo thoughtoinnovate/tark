@@ -263,6 +263,17 @@ pub struct OAuthConfig {
     /// and can return modified tokens (e.g., extract account_id, add metadata)
     #[serde(default)]
     pub process_tokens_callback: Option<String>,
+    /// Extra parameters to include in authorization URL (provider-specific)
+    /// Example: { originator = "opencode", id_token_add_organizations = "true" }
+    #[serde(default)]
+    pub extra_params: std::collections::HashMap<String, String>,
+    /// Whether to include a state parameter for CSRF protection (default: true)
+    #[serde(default = "default_use_state")]
+    pub use_state: bool,
+}
+
+fn default_use_state() -> bool {
+    true
 }
 
 /// Plugin manifest (plugin.toml)
