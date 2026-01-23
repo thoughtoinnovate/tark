@@ -338,6 +338,10 @@ struct StateInner {
     pub rate_limit_retry_at: Option<std::time::Instant>,
     pub rate_limit_pending_message: Option<String>,
 
+    // ========== Pending Mode Switch ==========
+    /// Mode switch requested during LLM streaming (applied when streaming completes)
+    pub pending_mode_switch: Option<AgentMode>,
+
     // ========== Message Queue ==========
     pub message_queue: Vec<String>,
     /// Index of task currently being edited (None = not editing)
@@ -453,6 +457,7 @@ impl SharedState {
                 pending_approval: None,
                 rate_limit_retry_at: None,
                 rate_limit_pending_message: None,
+                pending_mode_switch: None,
                 message_queue: Vec::new(),
                 editing_task_index: None,
                 editing_task_content: String::new(),
@@ -1777,6 +1782,21 @@ impl SharedState {
             }
         }
         None
+    }
+
+    /// Get pending mode switch (queued during LLM streaming)
+    pub fn pending_mode_switch(&self) -> Option<AgentMode> {
+        self.read_inner().pending_mode_switch
+    }
+
+    /// Set pending mode switch (to be applied after streaming completes)
+    pub fn set_pending_mode_switch(&self, mode: Option<AgentMode>) {
+        self.write_inner().pending_mode_switch = mode;
+    }
+
+    /// Take and clear pending mode switch (returns the mode if one was pending)
+    pub fn take_pending_mode_switch(&self) -> Option<AgentMode> {
+        self.write_inner().pending_mode_switch.take()
     }
 
     pub fn set_streaming_content(&self, content: Option<String>) {

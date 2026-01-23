@@ -108,22 +108,45 @@ impl PolicyEngine {
         }
 
         // Step 3: Lookup approval rule
-        let (needs_approval, allow_save_pattern, rationale): (bool, bool, Option<String>) = conn
-            .query_row(
-                "SELECT needs_approval, allow_save_pattern, rationale
-                 FROM approval_rules
-                 WHERE classification_id = ?1
-                   AND mode_id = ?2
-                   AND trust_id = ?3
-                   AND in_workdir = ?4",
+        let rule_result: Result<(bool, bool, Option<String>), rusqlite::Error> = conn.query_row(
+            "SELECT needs_approval, allow_save_pattern, rationale
+             FROM approval_rules
+             WHERE classification_id = ?1
+               AND mode_id = ?2
+               AND trust_id = ?3
+               AND in_workdir = ?4",
+            (
+                &classification.classification_id,
+                mode,
+                trust,
+                classification.in_workdir,
+            ),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+
+        // Handle unknown tools gracefully - auto-approve read-only tools
+        let (needs_approval, allow_save_pattern, rationale) = match rule_result {
+            Ok(rule) => rule,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // Unknown tool - use smart defaults based on operation
+                let is_read_only = matches!(classification.operation, Operation::Read);
+                tracing::debug!(
+                    "No policy rule for tool '{}' (classification: {}), using defaults: needs_approval={}",
+                    tool_id,
+                    classification.classification_id,
+                    !is_read_only
+                );
                 (
-                    &classification.classification_id,
-                    mode,
-                    trust,
-                    classification.in_workdir,
-                ),
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
+                    !is_read_only, // Read-only tools auto-approved, others need approval
+                    true,          // Allow saving patterns
+                    Some(format!(
+                        "Unknown tool '{}' - using default policy (read-only: {})",
+                        tool_id, is_read_only
+                    )),
+                )
+            }
+            Err(e) => return Err(anyhow!("Policy rule lookup failed: {}", e)),
+        };
 
         // Step 4: If needs approval, check for saved patterns
         let matched_pattern = if needs_approval && allow_save_pattern {

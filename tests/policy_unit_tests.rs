@@ -736,7 +736,7 @@ mod engine_logic_tests {
     }
 
     #[test]
-    fn test_invalid_trust_returns_error() {
+    fn test_invalid_trust_uses_fallback() {
         let (_temp, engine) = setup_engine().unwrap();
 
         let result = engine.check_approval(
@@ -747,8 +747,12 @@ mod engine_logic_tests {
             "test_session",
         );
 
-        // Should return error for invalid trust level
-        assert!(result.is_err());
+        // Should use fallback policy for unknown trust level (graceful handling)
+        // Read-only commands should be auto-approved via fallback
+        assert!(result.is_ok());
+        let decision = result.unwrap();
+        // Read-only command should be auto-approved even with invalid trust
+        assert!(!decision.needs_approval);
     }
 
     #[test]

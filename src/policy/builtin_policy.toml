@@ -76,6 +76,8 @@ name = "Dangerous"
 description = "Destructive operations"
 
 # ========== TOOL TYPES ==========
+
+# --- Power Tools (shell access) ---
 [[tools]]
 id = "shell"
 name = "Shell"
@@ -90,9 +92,17 @@ category = "readonly"
 permissions = "R"
 base_risk = "safe"
 
+# --- File Operations ---
 [[tools]]
 id = "read_file"
 name = "Read File"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "read_files"
+name = "Read Files (batch)"
 category = "readonly"
 permissions = "R"
 base_risk = "safe"
@@ -105,12 +115,55 @@ permissions = "W"
 base_risk = "moderate"
 
 [[tools]]
+id = "patch_file"
+name = "Patch File"
+category = "write"
+permissions = "W"
+base_risk = "moderate"
+
+[[tools]]
 id = "delete_file"
 name = "Delete File"
 category = "dangerous"
 permissions = "W"
 base_risk = "dangerous"
 
+[[tools]]
+id = "list_directory"
+name = "List Directory"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "file_search"
+name = "File Search"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "file_preview"
+name = "File Preview"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "codebase_overview"
+name = "Codebase Overview"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "propose_change"
+name = "Propose Change"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+# --- Search Tools ---
 [[tools]]
 id = "grep"
 name = "Grep"
@@ -119,13 +172,152 @@ permissions = "R"
 base_risk = "safe"
 
 [[tools]]
-id = "glob"
-name = "Glob"
+id = "ripgrep"
+name = "Ripgrep"
 category = "readonly"
 permissions = "R"
 base_risk = "safe"
 
+[[tools]]
+id = "find_references"
+name = "Find References"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+# --- LSP Tools ---
+[[tools]]
+id = "list_symbols"
+name = "List Symbols"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "go_to_definition"
+name = "Go to Definition"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "find_all_references"
+name = "Find All References"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "call_hierarchy"
+name = "Call Hierarchy"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "get_signature"
+name = "Get Signature"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+# --- Interaction Tools ---
+[[tools]]
+id = "ask_user"
+name = "Ask User"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "switch_mode"
+name = "Switch Mode"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+# --- Plan Tools ---
+[[tools]]
+id = "preview_plan"
+name = "Preview Plan"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "save_plan"
+name = "Save Plan"
+category = "write"
+permissions = "W"
+base_risk = "safe"
+
+[[tools]]
+id = "update_plan"
+name = "Update Plan"
+category = "write"
+permissions = "W"
+base_risk = "safe"
+
+[[tools]]
+id = "get_plan_status"
+name = "Get Plan Status"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "mark_task_done"
+name = "Mark Task Done"
+category = "write"
+permissions = "W"
+base_risk = "safe"
+
+# --- Built-in Tools ---
+[[tools]]
+id = "think"
+name = "Think"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "memory_store"
+name = "Memory Store"
+category = "write"
+permissions = "W"
+base_risk = "safe"
+
+[[tools]]
+id = "memory_query"
+name = "Memory Query"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "memory_list"
+name = "Memory List"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "memory_delete"
+name = "Memory Delete"
+category = "write"
+permissions = "W"
+base_risk = "safe"
+
+[[tools]]
+id = "todo"
+name = "Todo"
+category = "write"
+permissions = "W"
+base_risk = "safe"
+
 # ========== TOOL MODE AVAILABILITY ==========
+
+# --- Shell tools ---
 [[tool_availability]]
 tool = "shell"
 mode = "ask"
@@ -158,6 +350,7 @@ tool = "safe_shell"
 mode = "build"
 available = true
 
+# --- File operations ---
 [[tool_availability]]
 tool = "write_file"
 mode = "ask"
@@ -170,6 +363,21 @@ available = false
 
 [[tool_availability]]
 tool = "write_file"
+mode = "build"
+available = true
+
+[[tool_availability]]
+tool = "patch_file"
+mode = "ask"
+available = false
+
+[[tool_availability]]
+tool = "patch_file"
+mode = "plan"
+available = false
+
+[[tool_availability]]
+tool = "patch_file"
 mode = "build"
 available = true
 
@@ -188,10 +396,101 @@ tool = "delete_file"
 mode = "build"
 available = true
 
-# ========== SHELL CLASSIFICATIONS (Simplified) ==========
-# These are classifications of what a shell command does
-# NOT separate tools - they classify the "shell" tool's operations
+[[tool_availability]]
+tool = "propose_change"
+mode = "ask"
+available = false
 
+[[tool_availability]]
+tool = "propose_change"
+mode = "plan"
+available = true
+
+[[tool_availability]]
+tool = "propose_change"
+mode = "build"
+available = false
+
+# --- Plan tools ---
+[[tool_availability]]
+tool = "preview_plan"
+mode = "ask"
+available = false
+
+[[tool_availability]]
+tool = "preview_plan"
+mode = "plan"
+available = true
+
+[[tool_availability]]
+tool = "preview_plan"
+mode = "build"
+available = false
+
+[[tool_availability]]
+tool = "save_plan"
+mode = "ask"
+available = false
+
+[[tool_availability]]
+tool = "save_plan"
+mode = "plan"
+available = true
+
+[[tool_availability]]
+tool = "save_plan"
+mode = "build"
+available = false
+
+[[tool_availability]]
+tool = "update_plan"
+mode = "ask"
+available = false
+
+[[tool_availability]]
+tool = "update_plan"
+mode = "plan"
+available = true
+
+[[tool_availability]]
+tool = "update_plan"
+mode = "build"
+available = false
+
+[[tool_availability]]
+tool = "get_plan_status"
+mode = "ask"
+available = false
+
+[[tool_availability]]
+tool = "get_plan_status"
+mode = "plan"
+available = true
+
+[[tool_availability]]
+tool = "get_plan_status"
+mode = "build"
+available = true
+
+[[tool_availability]]
+tool = "mark_task_done"
+mode = "ask"
+available = false
+
+[[tool_availability]]
+tool = "mark_task_done"
+mode = "plan"
+available = true
+
+[[tool_availability]]
+tool = "mark_task_done"
+mode = "build"
+available = true
+
+# ========== TOOL CLASSIFICATIONS ==========
+# Classifications determine how tools are evaluated for approval
+
+# --- Shell Classifications (dynamic based on command) ---
 [[classifications]]
 id = "shell-read"
 tool = "shell"
@@ -215,6 +514,268 @@ name = "Shell Delete"
 operation = "delete"
 base_risk = "dangerous"
 description = "Shell commands that delete files"
+
+# --- Read-only Tools (always safe, no approval needed) ---
+[[classifications]]
+id = "readonly-safe"
+tool = "read_file"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe read-only operation"
+
+[[classifications]]
+id = "read_files-safe"
+tool = "read_files"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe read-only operation"
+
+[[classifications]]
+id = "list_directory-safe"
+tool = "list_directory"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe read-only operation"
+
+[[classifications]]
+id = "file_search-safe"
+tool = "file_search"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe read-only operation"
+
+[[classifications]]
+id = "file_preview-safe"
+tool = "file_preview"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe read-only operation"
+
+[[classifications]]
+id = "codebase_overview-safe"
+tool = "codebase_overview"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe read-only operation"
+
+[[classifications]]
+id = "grep-safe"
+tool = "grep"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe read-only operation"
+
+[[classifications]]
+id = "ripgrep-safe"
+tool = "ripgrep"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe read-only operation"
+
+[[classifications]]
+id = "find_references-safe"
+tool = "find_references"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe read-only operation"
+
+# --- LSP Tools (always safe) ---
+[[classifications]]
+id = "list_symbols-safe"
+tool = "list_symbols"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe LSP operation"
+
+[[classifications]]
+id = "go_to_definition-safe"
+tool = "go_to_definition"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe LSP operation"
+
+[[classifications]]
+id = "find_all_references-safe"
+tool = "find_all_references"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe LSP operation"
+
+[[classifications]]
+id = "call_hierarchy-safe"
+tool = "call_hierarchy"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe LSP operation"
+
+[[classifications]]
+id = "get_signature-safe"
+tool = "get_signature"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Safe LSP operation"
+
+# --- Interaction Tools (always safe) ---
+[[classifications]]
+id = "ask_user-safe"
+tool = "ask_user"
+name = "Safe Interaction"
+operation = "read"
+base_risk = "safe"
+description = "User interaction"
+
+[[classifications]]
+id = "switch_mode-safe"
+tool = "switch_mode"
+name = "Safe Interaction"
+operation = "read"
+base_risk = "safe"
+description = "Mode switch request"
+
+# --- Plan Tools ---
+[[classifications]]
+id = "preview_plan-safe"
+tool = "preview_plan"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Preview plan without saving"
+
+[[classifications]]
+id = "save_plan-write"
+tool = "save_plan"
+name = "Plan Write"
+operation = "write"
+base_risk = "safe"
+description = "Save plan to storage"
+
+[[classifications]]
+id = "update_plan-write"
+tool = "update_plan"
+name = "Plan Write"
+operation = "write"
+base_risk = "safe"
+description = "Update existing plan"
+
+[[classifications]]
+id = "get_plan_status-safe"
+tool = "get_plan_status"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Read plan status"
+
+[[classifications]]
+id = "mark_task_done-write"
+tool = "mark_task_done"
+name = "Plan Write"
+operation = "write"
+base_risk = "safe"
+description = "Mark task as complete"
+
+# --- Built-in Tools ---
+[[classifications]]
+id = "think-safe"
+tool = "think"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Thinking/reasoning"
+
+[[classifications]]
+id = "memory_store-write"
+tool = "memory_store"
+name = "Memory Write"
+operation = "write"
+base_risk = "safe"
+description = "Store to memory"
+
+[[classifications]]
+id = "memory_query-safe"
+tool = "memory_query"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Query memory"
+
+[[classifications]]
+id = "memory_list-safe"
+tool = "memory_list"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "List memories"
+
+[[classifications]]
+id = "memory_delete-write"
+tool = "memory_delete"
+name = "Memory Write"
+operation = "write"
+base_risk = "safe"
+description = "Delete from memory"
+
+[[classifications]]
+id = "todo-write"
+tool = "todo"
+name = "Todo Write"
+operation = "write"
+base_risk = "safe"
+description = "Update todo list"
+
+# --- Write Tools (need approval in Build mode) ---
+[[classifications]]
+id = "write_file-write"
+tool = "write_file"
+name = "File Write"
+operation = "write"
+base_risk = "moderate"
+description = "Write to file"
+
+[[classifications]]
+id = "patch_file-write"
+tool = "patch_file"
+name = "File Write"
+operation = "write"
+base_risk = "moderate"
+description = "Patch file contents"
+
+[[classifications]]
+id = "delete_file-delete"
+tool = "delete_file"
+name = "File Delete"
+operation = "delete"
+base_risk = "dangerous"
+description = "Delete file"
+
+[[classifications]]
+id = "propose_change-safe"
+tool = "propose_change"
+name = "Safe Read"
+operation = "read"
+base_risk = "safe"
+description = "Propose change without applying"
+
+[[classifications]]
+id = "safe_shell-safe"
+tool = "safe_shell"
+name = "Safe Shell"
+operation = "read"
+base_risk = "safe"
+description = "Safe allowlisted shell commands"
 
 # ========== APPROVAL RULES (Classification x Mode x Trust x Location) ==========
 
@@ -358,6 +919,1410 @@ trust = "manual"
 in_workdir = false
 needs_approval = true
 allow_save_pattern = false    # ALWAYS prompt - cannot save pattern
+
+# ========== SAFE READ-ONLY TOOLS (Auto-approve in Build mode) ==========
+# These tools are always safe, no approval needed regardless of trust level
+
+# --- File reading tools ---
+[[rules]]
+classification = "readonly-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "readonly-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "readonly-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "readonly-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "readonly-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "readonly-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- read_files (batch) ---
+[[rules]]
+classification = "read_files-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "read_files-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "read_files-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "read_files-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "read_files-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "read_files-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- list_directory ---
+[[rules]]
+classification = "list_directory-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "list_directory-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "list_directory-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "list_directory-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "list_directory-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "list_directory-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- file_search ---
+[[rules]]
+classification = "file_search-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "file_search-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "file_search-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "file_search-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "file_search-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "file_search-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- file_preview ---
+[[rules]]
+classification = "file_preview-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "file_preview-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "file_preview-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "file_preview-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "file_preview-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "file_preview-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- codebase_overview ---
+[[rules]]
+classification = "codebase_overview-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "codebase_overview-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "codebase_overview-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "codebase_overview-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "codebase_overview-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "codebase_overview-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- grep ---
+[[rules]]
+classification = "grep-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "grep-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "grep-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "grep-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "grep-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "grep-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- ripgrep ---
+[[rules]]
+classification = "ripgrep-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "ripgrep-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "ripgrep-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "ripgrep-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "ripgrep-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "ripgrep-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- find_references ---
+[[rules]]
+classification = "find_references-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "find_references-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "find_references-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "find_references-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "find_references-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "find_references-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# ========== LSP TOOLS (Auto-approve in Build mode) ==========
+
+# --- list_symbols ---
+[[rules]]
+classification = "list_symbols-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "list_symbols-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "list_symbols-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "list_symbols-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "list_symbols-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "list_symbols-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- go_to_definition ---
+[[rules]]
+classification = "go_to_definition-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "go_to_definition-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "go_to_definition-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "go_to_definition-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "go_to_definition-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "go_to_definition-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- find_all_references ---
+[[rules]]
+classification = "find_all_references-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "find_all_references-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "find_all_references-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "find_all_references-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "find_all_references-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "find_all_references-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- call_hierarchy ---
+[[rules]]
+classification = "call_hierarchy-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "call_hierarchy-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "call_hierarchy-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "call_hierarchy-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "call_hierarchy-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "call_hierarchy-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- get_signature ---
+[[rules]]
+classification = "get_signature-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "get_signature-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "get_signature-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "get_signature-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "get_signature-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "get_signature-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# ========== INTERACTION TOOLS (Auto-approve) ==========
+
+# --- ask_user ---
+[[rules]]
+classification = "ask_user-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "ask_user-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "ask_user-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "ask_user-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "ask_user-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "ask_user-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- switch_mode ---
+[[rules]]
+classification = "switch_mode-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "switch_mode-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "switch_mode-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "switch_mode-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "switch_mode-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "switch_mode-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# ========== PLAN TOOLS ==========
+
+# --- preview_plan (read-only, always safe) ---
+[[rules]]
+classification = "preview_plan-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "preview_plan-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "preview_plan-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "preview_plan-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "preview_plan-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "preview_plan-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- save_plan (internal write, always safe) ---
+[[rules]]
+classification = "save_plan-write"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "save_plan-write"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "save_plan-write"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "save_plan-write"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "save_plan-write"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "save_plan-write"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- update_plan ---
+[[rules]]
+classification = "update_plan-write"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "update_plan-write"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "update_plan-write"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "update_plan-write"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "update_plan-write"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "update_plan-write"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- get_plan_status (read-only) ---
+[[rules]]
+classification = "get_plan_status-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "get_plan_status-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "get_plan_status-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "get_plan_status-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "get_plan_status-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "get_plan_status-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- mark_task_done ---
+[[rules]]
+classification = "mark_task_done-write"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "mark_task_done-write"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "mark_task_done-write"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "mark_task_done-write"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "mark_task_done-write"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "mark_task_done-write"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# ========== BUILT-IN TOOLS ==========
+
+# --- think (always safe) ---
+[[rules]]
+classification = "think-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "think-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "think-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "think-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "think-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "think-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- memory_store (internal storage, always safe) ---
+[[rules]]
+classification = "memory_store-write"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_store-write"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "memory_store-write"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_store-write"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "memory_store-write"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_store-write"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- memory_query (read-only) ---
+[[rules]]
+classification = "memory_query-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_query-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "memory_query-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_query-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "memory_query-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_query-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- memory_list (read-only) ---
+[[rules]]
+classification = "memory_list-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_list-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "memory_list-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_list-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "memory_list-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_list-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- memory_delete (internal storage) ---
+[[rules]]
+classification = "memory_delete-write"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_delete-write"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "memory_delete-write"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_delete-write"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "memory_delete-write"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "memory_delete-write"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- todo (internal tracking) ---
+[[rules]]
+classification = "todo-write"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "todo-write"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "todo-write"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "todo-write"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "todo-write"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "todo-write"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# ========== WRITE TOOLS (Follow shell-write pattern) ==========
+
+# --- write_file ---
+[[rules]]
+classification = "write_file-write"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "write_file-write"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "write_file-write"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "write_file-write"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "write_file-write"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "write_file-write"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+# --- patch_file ---
+[[rules]]
+classification = "patch_file-write"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "patch_file-write"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "patch_file-write"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "patch_file-write"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "patch_file-write"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "patch_file-write"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+# --- delete_file (Follow shell-rm pattern) ---
+[[rules]]
+classification = "delete_file-delete"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "delete_file-delete"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "delete_file-delete"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "delete_file-delete"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = false    # ALWAYS prompt for delete outside workdir
+
+[[rules]]
+classification = "delete_file-delete"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "delete_file-delete"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = false    # ALWAYS prompt for delete outside workdir
+
+# --- propose_change (read-only preview) ---
+[[rules]]
+classification = "propose_change-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "propose_change-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "propose_change-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "propose_change-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "propose_change-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "propose_change-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
+
+# --- safe_shell (always safe) ---
+[[rules]]
+classification = "safe_shell-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "safe_shell-safe"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "safe_shell-safe"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "safe_shell-safe"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "safe_shell-safe"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "safe_shell-safe"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = false
 
 # ========== COMPOUND COMMAND RULES ==========
 [[compound_rules]]

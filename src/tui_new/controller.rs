@@ -1859,6 +1859,29 @@ impl<B: Backend> TuiController<B> {
                     // Clear streaming state
                     state.clear_streaming();
 
+                    // Apply any pending mode switch that was queued during streaming
+                    // This avoids a deadlock: handle_command(SetAgentMode) needs a write lock
+                    // on chat_agent, which would have been held by the streaming operation
+                    if let Some(pending_mode) = state.take_pending_mode_switch() {
+                        tracing::info!(
+                            "Applying queued mode switch to {:?} after streaming completed",
+                            pending_mode
+                        );
+                        if let Err(e) = self
+                            .service
+                            .handle_command(Command::SetAgentMode(pending_mode))
+                            .await
+                        {
+                            tracing::error!("Failed to apply queued mode switch: {}", e);
+                            state.set_status_message(Some(format!("Failed to switch mode: {}", e)));
+                        } else {
+                            state.set_status_message(Some(format!(
+                                "Switched to {} mode",
+                                pending_mode.display_name()
+                            )));
+                        }
+                    }
+
                     // Update session cost (models.dev pricing)
                     if let (Some(provider), Some(model_id)) =
                         (state.current_provider(), state.current_model())
@@ -2052,26 +2075,43 @@ impl<B: Backend> TuiController<B> {
                                     payload.get("target_mode").and_then(|v| v.as_str())
                                 {
                                     let mode: crate::core::types::AgentMode = target_mode.into();
-                                    if let Err(e) = self
-                                        .service
-                                        .handle_command(Command::SetAgentMode(mode))
-                                        .await
-                                    {
-                                        tracing::error!("Failed to apply mode switch: {}", e);
-                                        state.set_status_message(Some(format!(
-                                            "Failed to switch mode: {}",
-                                            e
-                                        )));
-                                    } else {
+
+                                    // IMPORTANT: Don't block on handle_command if LLM is still processing
+                                    // This would cause a deadlock because handle_command needs a write lock
+                                    // on chat_agent, which is already held by the streaming operation.
+                                    // Instead, queue the mode switch to be applied after streaming completes.
+                                    if state.llm_processing() {
                                         tracing::info!(
-                                            "Mode switched to {:?} via switch_mode tool",
+                                            "Queuing mode switch to {:?} (will apply after streaming completes)",
                                             mode
                                         );
-                                        // Provide visual feedback to user
+                                        state.set_pending_mode_switch(Some(mode));
                                         state.set_status_message(Some(format!(
-                                            "Switched to {} mode",
+                                            "Mode switch to {} queued",
                                             mode.display_name()
                                         )));
+                                    } else {
+                                        // Not streaming, apply immediately
+                                        if let Err(e) = self
+                                            .service
+                                            .handle_command(Command::SetAgentMode(mode))
+                                            .await
+                                        {
+                                            tracing::error!("Failed to apply mode switch: {}", e);
+                                            state.set_status_message(Some(format!(
+                                                "Failed to switch mode: {}",
+                                                e
+                                            )));
+                                        } else {
+                                            tracing::info!(
+                                                "Mode switched to {:?} via switch_mode tool",
+                                                mode
+                                            );
+                                            state.set_status_message(Some(format!(
+                                                "Switched to {} mode",
+                                                mode.display_name()
+                                            )));
+                                        }
                                     }
                                 }
                             }
