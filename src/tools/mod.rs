@@ -9,7 +9,6 @@
 #![allow(dead_code)]
 
 // Tool category modules
-pub mod approval;
 pub mod builtin;
 pub mod dangerous;
 pub mod plan;
@@ -163,11 +162,7 @@ pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     working_dir: PathBuf,
     mode: AgentMode,
-    /// Approval gate for risky operations
-    /// **DEPRECATED**: Use `policy_engine` instead. Kept for backward compatibility.
-    #[allow(deprecated)]
-    approval_gate: Option<tokio::sync::Mutex<approval::ApprovalGate>>,
-    /// Policy engine for approval decisions (NEW)
+    /// Policy engine for approval decisions
     policy_engine: Option<Arc<PolicyEngine>>,
     /// Current session ID for tracking patterns
     session_id: String,
@@ -179,7 +174,6 @@ impl ToolRegistry {
             tools: HashMap::new(),
             working_dir,
             mode: AgentMode::Build,
-            approval_gate: None,
             policy_engine: None,
             session_id: uuid::Uuid::new_v4().to_string(),
         }
@@ -231,20 +225,10 @@ impl ToolRegistry {
         shell_enabled: bool,
         interaction_tx: Option<InteractionSender>,
         plan_service: Option<Arc<PlanService>>,
-        approvals_path: Option<PathBuf>,
+        _approvals_path: Option<PathBuf>,
         todo_tracker: Option<Arc<Mutex<TodoTracker>>>,
     ) -> Self {
-        // Create approval gate if we have an interaction channel
-        // DEPRECATED: ApprovalGate is deprecated in favor of PolicyEngine
-        #[allow(deprecated)]
-        let approval_gate = interaction_tx.as_ref().map(|tx| {
-            let storage_path = approvals_path
-                .clone()
-                .unwrap_or_else(|| working_dir.join(".tark").join("approvals.json"));
-            tokio::sync::Mutex::new(approval::ApprovalGate::new(storage_path, Some(tx.clone())))
-        });
-
-        // Initialize PolicyEngine (NEW)
+        // Initialize PolicyEngine
         let policy_engine = {
             let db_path = working_dir.join(".tark").join("policy.db");
             match PolicyEngine::open(&db_path, &working_dir) {
@@ -253,10 +237,7 @@ impl ToolRegistry {
                     Some(Arc::new(engine))
                 }
                 Err(e) => {
-                    tracing::error!(
-                        "Failed to initialize PolicyEngine: {}, falling back to ApprovalGate",
-                        e
-                    );
+                    tracing::error!("Failed to initialize PolicyEngine: {}", e);
                     None
                 }
             }
@@ -266,7 +247,6 @@ impl ToolRegistry {
             tools: HashMap::new(),
             working_dir: working_dir.clone(),
             mode,
-            approval_gate,
             policy_engine,
             session_id: uuid::Uuid::new_v4().to_string(),
         };
@@ -425,7 +405,7 @@ impl ToolRegistry {
         // Build command string for display/pattern matching
         let command = self.build_command_string(name, &params);
 
-        // NEW: Try PolicyEngine first
+        // Check approval with PolicyEngine
         if let Some(ref engine) = self.policy_engine {
             let mode_id = match self.mode {
                 AgentMode::Ask => "ask",
@@ -449,76 +429,13 @@ impl ToolRegistry {
                         tracing::debug!("Tool '{}' auto-approved by PolicyEngine", name);
                     } else {
                         // Need approval - should be handled by caller via interaction channel
-                        // For now, we fall through to old approval gate
                         tracing::warn!("PolicyEngine requires approval but interaction flow not yet integrated for '{}'", name);
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "PolicyEngine check failed for '{}': {}, falling back to approval gate",
-                        name,
-                        e
-                    );
+                    tracing::warn!("PolicyEngine check failed for '{}': {}", name, e);
                 }
             }
-        }
-
-        // FALLBACK: Check approval if we have an approval gate (deprecated path)
-        // This fallback exists for backward compatibility only
-        #[allow(deprecated)]
-        if let Some(ref gate_mutex) = self.approval_gate {
-            let risk_level = tool.risk_level();
-
-            // Build a command string for display/pattern matching
-            let command = self.build_command_string(name, &params);
-
-            tracing::debug!(
-                "Checking approval for tool '{}' (risk: {:?}), command: {}",
-                name,
-                risk_level,
-                command
-            );
-
-            // Check with approval gate
-            let mut gate = gate_mutex.lock().await;
-            tracing::debug!(
-                "Trust level: {} {:?}",
-                gate.trust_level.icon(),
-                gate.trust_level
-            );
-
-            match gate.check_and_approve(name, &command, risk_level).await {
-                Ok(approval::ApprovalStatus::Approved) => {
-                    tracing::debug!("Tool '{}' approved", name);
-                    // Proceed with execution
-                }
-                Ok(approval::ApprovalStatus::Denied) => {
-                    tracing::info!("Tool '{}' denied by user", name);
-                    let request = gate.create_approval_request(name, &command, risk_level);
-                    let suggestions = serde_json::to_string_pretty(&request.suggested_patterns)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    return Ok(ToolResult::error(format!(
-                        "Operation denied by user: {} {}\nSuggested patterns: {}",
-                        name, command, suggestions
-                    )));
-                }
-                Ok(approval::ApprovalStatus::Blocked(reason)) => {
-                    tracing::info!("Tool '{}' blocked: {}", name, reason);
-                    let request = gate.create_approval_request(name, &command, risk_level);
-                    let suggestions = serde_json::to_string_pretty(&request.suggested_patterns)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    return Ok(ToolResult::error(format!(
-                        "Operation blocked: {}\nSuggested patterns: {}",
-                        reason, suggestions
-                    )));
-                }
-                Err(e) => {
-                    tracing::warn!("Approval check failed, auto-approving: {}", e);
-                    // Continue with execution on error (fail-open for usability)
-                }
-            }
-        } else {
-            tracing::debug!("No approval gate configured for tool '{}'", name);
         }
 
         // Wrap tool execution with panic recovery to prevent crashes
@@ -593,52 +510,10 @@ impl ToolRegistry {
         self.tools.get(name).map(|t| t.risk_level())
     }
 
-    /// Set the trust level for the registry's approval gate
-    /// **DEPRECATED**: Use PolicyEngine trust levels instead
-    #[deprecated(since = "0.8.0", note = "Use PolicyEngine trust levels instead")]
-    pub async fn set_trust_level(&self, level: TrustLevel) {
-        #[allow(deprecated)]
-        if let Some(ref gate_mutex) = self.approval_gate {
-            let mut gate = gate_mutex.lock().await;
-            gate.set_trust_level(level);
-            tracing::info!(
-                "Trust level set to: {} {} (gate present)",
-                level.icon(),
-                level.label()
-            );
-        } else {
-            tracing::warn!(
-                "Cannot set trust level to {} - no approval gate configured",
-                level.label()
-            );
-        }
-    }
-
-    /// Get the current trust level
-    pub async fn trust_level(&self) -> TrustLevel {
-        if let Some(ref gate_mutex) = self.approval_gate {
-            let gate = gate_mutex.lock().await;
-            gate.trust_level
-        } else {
-            TrustLevel::default()
-        }
-    }
-
-    /// Update approval storage path (per session)
-    /// **DEPRECATED**: Use PolicyEngine pattern storage instead
-    #[deprecated(since = "0.8.0", note = "Use PolicyEngine pattern storage instead")]
-    pub async fn set_approval_storage_path(&self, storage_path: PathBuf) {
-        #[allow(deprecated)]
-        if let Some(ref gate_mutex) = self.approval_gate {
-            let mut gate = gate_mutex.lock().await;
-            gate.set_storage_path(storage_path);
-        }
-    }
-
     /// Get trust level ID as string for PolicyEngine
     fn get_trust_level_id(&self) -> String {
-        // For now, default to "balanced" - will be properly managed via set_trust_level
-        // TODO: Store trust_level in ToolRegistry directly and sync with approval_gate
+        // For now, default to "balanced"
+        // TODO: Store trust_level in ToolRegistry directly for PolicyEngine
         "balanced".to_string()
     }
 }

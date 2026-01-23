@@ -928,18 +928,13 @@ impl ChatAgent {
         self.llm = llm;
     }
 
-    /// Update approval storage path (per session)
-    pub async fn set_approval_storage_path(&mut self, storage_path: std::path::PathBuf) {
-        self.tools.set_approval_storage_path(storage_path).await;
-    }
-
     /// Set the trust level for risky tool operations
     ///
-    /// This updates both the tool registry and the cached trust level,
-    /// and refreshes the system prompt so the agent knows the new level.
+    /// Updates the cached trust level and refreshes the system prompt.
+    /// Trust level approval logic is now handled by PolicyEngine.
     pub async fn set_trust_level(&mut self, level: crate::tools::TrustLevel) {
         self.trust_level = level;
-        self.tools.set_trust_level(level).await;
+        // Trust level is now managed by PolicyEngine, not ToolRegistry
         // Refresh system prompt so agent knows the new trust level
         self.refresh_system_prompt_async().await;
     }

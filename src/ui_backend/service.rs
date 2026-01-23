@@ -229,7 +229,7 @@ impl AppService {
 
         // Initialize BFF services
         let catalog = super::CatalogService::new();
-        let tools = super::ToolExecutionService::new(super::commands::AgentMode::default(), None);
+        let tools = super::ToolExecutionService::new(super::commands::AgentMode::default());
         let git = GitService::new(working_dir.clone());
 
         Ok(Self {
@@ -370,7 +370,7 @@ impl AppService {
                 };
                 self.state.set_build_mode(build_mode);
 
-                self.tools.set_trust_level(level).await;
+                // Trust level is now managed by PolicyEngine
                 if let Some(ref conv_svc) = self.conversation_svc {
                     let _ = conv_svc.set_trust_level(level).await;
                 }
@@ -1739,7 +1739,7 @@ impl AppService {
         };
         self.state.set_build_mode(build_mode);
 
-        self.tools.set_trust_level(level).await;
+        // Trust level is now managed by PolicyEngine
         if let Some(ref conv_svc) = self.conversation_svc {
             let _ = conv_svc.set_trust_level(level).await;
         }
@@ -2253,7 +2253,7 @@ impl AppService {
                             BuildMode::Careful => crate::tools::TrustLevel::Careful,
                         };
                         self.state.set_trust_level(trust_level);
-                        self.tools.set_trust_level(trust_level).await;
+                        // Trust level is now managed by PolicyEngine
 
                         // Apply theme (use session theme or global default)
                         let effective_theme = prefs.effective_theme(global_default_theme);

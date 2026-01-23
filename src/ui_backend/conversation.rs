@@ -175,8 +175,7 @@ impl ConversationService {
             let mut guard = self.approvals_path.write().await;
             *guard = Some(storage_path.clone());
         }
-        let mut agent = self.chat_agent.write().await;
-        agent.set_approval_storage_path(storage_path).await;
+        // Approval storage is now handled by PolicyEngine
         Ok(())
     }
 
