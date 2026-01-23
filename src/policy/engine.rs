@@ -14,6 +14,7 @@ use crate::policy::{
 /// Policy engine for approval decisions
 pub struct PolicyEngine {
     conn: Arc<Mutex<Connection>>,
+    #[allow(dead_code)]
     working_dir: PathBuf,
     classifier: CommandClassifier,
     path_sanitizer: PathSanitizer,
@@ -469,7 +470,6 @@ impl PolicyEngine {
 
     /// List session approval patterns (approvals and denials)
     /// Returns (approvals, denials) tuples
-    /// Loads from both policy.db and legacy approvals.json
     pub fn list_session_patterns(
         &self,
         session_id: &str,
@@ -502,7 +502,7 @@ impl PolicyEngine {
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
 
-        let mut approvals: Vec<ApprovalPatternEntry> = approval_rows
+        let approvals: Vec<ApprovalPatternEntry> = approval_rows
             .into_iter()
             .map(
                 |(id, tool, pattern, match_type, description, is_persistent)| {
@@ -561,7 +561,7 @@ impl PolicyEngine {
         drop(stmt);
         drop(conn);
 
-        let mut denials: Vec<ApprovalPatternEntry> = denial_rows
+        let denials: Vec<ApprovalPatternEntry> = denial_rows
             .into_iter()
             .map(
                 |(id, tool, pattern, match_type, description, is_persistent)| {
@@ -593,44 +593,6 @@ impl PolicyEngine {
                 },
             )
             .collect();
-
-        // Also load from legacy approvals.json if it exists
-        let legacy_path = self
-            .working_dir
-            .join(".tark")
-            .join("sessions")
-            .join(session_id)
-            .join("approvals.json");
-
-        if let Ok((legacy_approvals, legacy_denials)) =
-            crate::policy::migrate::load_legacy_approvals(&legacy_path)
-        {
-            // Add legacy patterns with negative IDs so they don't conflict
-            let mut next_id = -1i64;
-            for (tool, pattern, match_type, description) in legacy_approvals {
-                approvals.push(ApprovalPatternEntry {
-                    id: next_id,
-                    tool,
-                    pattern,
-                    match_type,
-                    is_denial: false,
-                    description,
-                });
-                next_id -= 1;
-            }
-
-            for (tool, pattern, match_type, description) in legacy_denials {
-                denials.push(ApprovalPatternEntry {
-                    id: next_id,
-                    tool,
-                    pattern,
-                    match_type,
-                    is_denial: true,
-                    description,
-                });
-                next_id -= 1;
-            }
-        }
 
         Ok((approvals, denials))
     }

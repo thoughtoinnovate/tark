@@ -3,7 +3,6 @@ pub mod config;
 pub mod engine;
 pub mod integrity;
 pub mod mcp;
-pub mod migrate;
 pub mod resolver;
 pub mod schema;
 pub mod security;
