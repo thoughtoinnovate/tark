@@ -8,18 +8,25 @@ SQLite-backed policy engine for tool approval and risk management.
 Policy Engine (this module)
 ├── Core
 │   ├── schema.rs         - 15 SQLite tables
-│   ├── types.rs          - Data structures
+│   ├── types.rs          - Data structures (ModeId, TrustId enums)
 │   ├── engine.rs         - PolicyEngine API
-│   └── seed.rs           - Load builtin policy
+│   ├── seed.rs           - Load builtin policy from split configs
+│   └── resolver.rs       - Dynamic rule resolution
 │
 ├── Classification
 │   ├── classifier.rs     - Command operation detection
 │   └── security.rs       - Pattern/path validation
 │
-├── Configuration
-│   ├── builtin_policy.toml - Immutable internal rules
-│   ├── config.rs          - Load user MCP configs
-│   └── migrate.rs         - Migrate from approvals.json
+├── Configuration (Split Config Files)
+│   └── configs/
+│       ├── modes.toml    - Agent modes (Ask, Plan, Build)
+│       ├── trust.toml    - Trust levels with defaults
+│       ├── tools.toml    - Tool declarations
+│       └── defaults.toml - Hierarchical approval defaults
+│
+├── User Configuration
+│   ├── config.rs         - Load user MCP configs
+│   └── migrate.rs        - Migrate from approvals.json
 │
 └── Integration
     └── mcp.rs            - MCP tool policies
@@ -160,7 +167,13 @@ cargo test --lib policy::engine::tests::test_check_approval_build_mode
 - ✅ Security validators (`src/policy/security.rs`)
 
 **Configuration:**
-- ✅ Builtin policy TOML (`src/policy/builtin_policy.toml`)
+- ✅ Split config files (`src/policy/configs/*.toml`)
+  - ✅ `modes.toml` - Agent modes (3 modes, ~30 lines)
+  - ✅ `trust.toml` - Trust levels with default behaviors (~50 lines)
+  - ✅ `tools.toml` - Tool declarations (~300 lines)
+  - ✅ `defaults.toml` - Hierarchical approval defaults (~50 lines)
+- ✅ Type-safe enums (`ModeId`, `TrustId` in `types.rs`)
+- ✅ Dynamic rule resolver (`src/policy/resolver.rs`)
 - ✅ TOML seeding logic (`src/policy/seed.rs`)
 - ✅ MCP config loader (`src/policy/config.rs`)
 - ✅ Migration utility (`src/policy/migrate.rs`)

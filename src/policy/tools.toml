@@ -1,0 +1,296 @@
+# Tool Definitions Configuration
+# Declares tools with their risk levels and mode availability
+
+version = 1
+
+# ========== TOOL CATEGORIES ==========
+[[categories]]
+id = "power"
+name = "Power Tools"
+description = "Full system access tools"
+
+[[categories]]
+id = "readonly"
+name = "Read-Only"
+description = "Read-only information tools"
+
+[[categories]]
+id = "write"
+name = "Write"
+description = "File modification tools"
+
+[[categories]]
+id = "dangerous"
+name = "Dangerous"
+description = "Destructive operations"
+
+# ========== POWER TOOLS ==========
+[[tools]]
+id = "shell"
+name = "Shell"
+category = "power"
+base_risk = "dangerous"
+classification = "dynamic"  # Classified at runtime based on command
+modes = ["build"]
+
+[[tools]]
+id = "safe_shell"
+name = "Safe Shell"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+# ========== FILE OPERATIONS ==========
+[[tools]]
+id = "read_file"
+name = "Read File"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "read_files"
+name = "Read Files (batch)"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "write_file"
+name = "Write File"
+category = "write"
+base_risk = "moderate"
+operation = "write"
+modes = ["build"]
+
+[[tools]]
+id = "patch_file"
+name = "Patch File"
+category = "write"
+base_risk = "moderate"
+operation = "write"
+modes = ["build"]
+
+[[tools]]
+id = "delete_file"
+name = "Delete File"
+category = "dangerous"
+base_risk = "dangerous"
+operation = "delete"
+modes = ["build"]
+
+[[tools]]
+id = "list_directory"
+name = "List Directory"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "file_search"
+name = "File Search"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "file_preview"
+name = "File Preview"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "codebase_overview"
+name = "Codebase Overview"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "propose_change"
+name = "Propose Change"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["plan"]
+
+# ========== SEARCH TOOLS ==========
+[[tools]]
+id = "grep"
+name = "Grep"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "ripgrep"
+name = "Ripgrep"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "find_references"
+name = "Find References"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+# ========== LSP TOOLS ==========
+[[tools]]
+id = "list_symbols"
+name = "List Symbols"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "go_to_definition"
+name = "Go to Definition"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "find_all_references"
+name = "Find All References"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "call_hierarchy"
+name = "Call Hierarchy"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "get_signature"
+name = "Get Signature"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+# ========== INTERACTION TOOLS ==========
+[[tools]]
+id = "ask_user"
+name = "Ask User"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "switch_mode"
+name = "Switch Mode"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+# ========== PLAN TOOLS ==========
+[[tools]]
+id = "preview_plan"
+name = "Preview Plan"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["plan", "build"]
+
+[[tools]]
+id = "save_plan"
+name = "Save Plan"
+category = "write"
+base_risk = "safe"
+operation = "write"
+modes = ["plan"]
+
+[[tools]]
+id = "update_plan"
+name = "Update Plan"
+category = "write"
+base_risk = "safe"
+operation = "write"
+modes = ["plan"]
+
+[[tools]]
+id = "get_plan_status"
+name = "Get Plan Status"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["plan", "build"]
+
+[[tools]]
+id = "mark_task_done"
+name = "Mark Task Done"
+category = "write"
+base_risk = "safe"
+operation = "write"
+modes = ["plan", "build"]
+
+# ========== BUILT-IN TOOLS ==========
+[[tools]]
+id = "think"
+name = "Think"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "memory_store"
+name = "Memory Store"
+category = "write"
+base_risk = "safe"
+operation = "write"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "memory_query"
+name = "Memory Query"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "memory_list"
+name = "Memory List"
+category = "readonly"
+base_risk = "safe"
+operation = "read"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "memory_delete"
+name = "Memory Delete"
+category = "write"
+base_risk = "safe"
+operation = "write"
+modes = ["ask", "plan", "build"]
+
+[[tools]]
+id = "todo"
+name = "Todo"
+category = "write"
+base_risk = "safe"
+operation = "write"
+modes = ["ask", "plan", "build"]

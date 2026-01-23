@@ -897,7 +897,11 @@ impl ChatAgent {
 
     /// Update the agent's mode and tools while preserving conversation history
     pub fn update_mode(&mut self, tools: ToolRegistry, mode: AgentMode) {
-        let tool_names: Vec<_> = tools.definitions().iter().map(|t| t.name.clone()).collect();
+        let tool_names: Vec<_> = tools
+            .definitions_for_mode()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
         tracing::info!(
             "Mode changed to {:?} - available tools: {:?}",
             mode,
@@ -934,7 +938,8 @@ impl ChatAgent {
     /// Trust level approval logic is now handled by PolicyEngine.
     pub async fn set_trust_level(&mut self, level: crate::tools::TrustLevel) {
         self.trust_level = level;
-        // Trust level is now managed by PolicyEngine, not ToolRegistry
+        // Forward trust level to ToolRegistry for PolicyEngine approval checks
+        self.tools.set_trust_level(level);
         // Refresh system prompt so agent knows the new trust level
         self.refresh_system_prompt_async().await;
     }
@@ -1016,7 +1021,7 @@ impl ChatAgent {
     pub fn tool_schema_tokens(&self) -> usize {
         // Average tool definition is approximately 100 tokens
         // (name ~5, description ~30, parameters ~65)
-        self.tools.definitions().len() * 100
+        self.tools.definitions_for_mode().len() * 100
     }
 
     /// Get conversation history token count (excludes system prompt)
@@ -1382,7 +1387,7 @@ impl ChatAgent {
 
         self.context.add_user(user_message);
 
-        let tool_definitions = self.tools.definitions();
+        let tool_definitions = self.tools.definitions_for_mode();
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
@@ -1854,7 +1859,7 @@ impl ChatAgent {
 
         self.context.add_user(user_message);
 
-        let tool_definitions = self.tools.definitions();
+        let tool_definitions = self.tools.definitions_for_mode();
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
@@ -2307,7 +2312,7 @@ impl ChatAgent {
 
         self.context.add_user(user_message);
 
-        let tool_definitions = self.tools.definitions();
+        let tool_definitions = self.tools.definitions_for_mode();
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut tool_call_log: Vec<ToolCallLog> = Vec::new();

@@ -3,6 +3,7 @@ pub mod config;
 pub mod engine;
 pub mod mcp;
 pub mod migrate;
+pub mod resolver;
 pub mod schema;
 pub mod security;
 pub mod seed;
@@ -10,7 +11,9 @@ pub mod types;
 
 pub use config::{ConfigLoader, PatternLoader};
 pub use engine::PolicyEngine;
+pub use resolver::{ApprovalBehavior, ApprovalDefaults, ResolvedDecision, RuleKey, RuleResolver};
 pub use types::{
-    ApprovalDecision, ApprovalDecisionType, ApprovalPattern, AuditEntry, CommandClassification,
-    MatchType, McpPolicy, Operation, PatternMatch, PatternSource, RiskLevel, ToolInfo,
+    ApprovalDecision, ApprovalDecisionType, ApprovalPattern, AuditEntry, ClassificationStrategy,
+    CommandClassification, MatchType, McpPolicy, ModeId, Operation, PatternMatch, PatternSource,
+    RiskLevel, ToolInfo, ToolPolicyMetadata, TrustId,
 };

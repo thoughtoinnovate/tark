@@ -439,9 +439,8 @@ mod security_tests {
         assert!(sanitizer.canonicalize("../../parent/file.txt").is_ok());
 
         // Path traversal is allowed but detected as outside workdir
-        let workdir_check = sanitizer.is_in_workdir("../outside/file.txt")?;
-        // This depends on actual filesystem structure, so we just verify it returns
-        assert!(workdir_check == true || workdir_check == false);
+        // This depends on actual filesystem structure, so we just verify it returns without error
+        let _workdir_check = sanitizer.is_in_workdir("../outside/file.txt")?;
 
         Ok(())
     }

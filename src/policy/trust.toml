@@ -1,0 +1,50 @@
+# Trust Levels Configuration
+# Defines trust levels for Build mode with default approval behaviors
+
+version = 1
+
+[[trust_levels]]
+id = "balanced"
+name = "Balanced"
+icon = "Y"
+description = "Auto-approve reads and local writes, prompt for risky"
+applies_to_mode = "build"
+display_order = 1
+
+# Default behaviors for each risk level
+[trust_levels.default_for_risk]
+safe = "auto_approve"
+moderate_in_workdir = "auto_approve"
+moderate_out_workdir = "prompt"
+dangerous_in_workdir = "auto_approve"
+dangerous_out_workdir = "prompt"
+
+[[trust_levels]]
+id = "careful"
+name = "Careful"
+icon = "B"
+description = "Auto-approve reads only, prompt for all writes"
+applies_to_mode = "build"
+display_order = 2
+
+[trust_levels.default_for_risk]
+safe = "auto_approve"
+moderate_in_workdir = "prompt"
+moderate_out_workdir = "prompt"
+dangerous_in_workdir = "prompt"
+dangerous_out_workdir = "prompt_no_save"
+
+[[trust_levels]]
+id = "manual"
+name = "Manual"
+icon = "R"
+description = "Prompt for everything except safe reads"
+applies_to_mode = "build"
+display_order = 3
+
+[trust_levels.default_for_risk]
+safe = "auto_approve"
+moderate_in_workdir = "prompt"
+moderate_out_workdir = "prompt"
+dangerous_in_workdir = "prompt"
+dangerous_out_workdir = "prompt_no_save"

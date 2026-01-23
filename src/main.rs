@@ -250,8 +250,9 @@ async fn main() -> Result<()> {
     let filter = if cli.verbose {
         "tark_cli=debug,tower_lsp=debug"
     } else if is_tui_mode {
-        // TUI mode: only show warnings and errors by default
-        "tark_cli=warn,tower_lsp=warn"
+        // TUI mode: suppress ALL stderr logging to avoid corrupting the display
+        // Use --verbose (-v) to enable debug logging, or --debug for file-based logging
+        "off"
     } else {
         // Non-TUI modes (LSP, Serve, etc.): keep info level
         "tark_cli=info,tower_lsp=warn"

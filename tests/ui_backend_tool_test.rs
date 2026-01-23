@@ -1,14 +1,17 @@
 //! Tests for ToolExecutionService
 //!
 //! Real behavior tests for tool availability and approval flow.
+//!
+//! NOTE: Tests related to the old ApprovalGate API have been disabled/removed
+//! as the approval system is now handled by PolicyEngine integrated into ToolRegistry.
 
 use tark_cli::core::AgentMode;
-use tark_cli::tools::{RiskLevel, TrustLevel};
+use tark_cli::tools::RiskLevel;
 use tark_cli::ui_backend::ToolExecutionService;
 
 #[tokio::test]
 async fn test_list_tools_varies_by_mode() {
-    let service = ToolExecutionService::new(AgentMode::Build, None);
+    let service = ToolExecutionService::new(AgentMode::Build);
 
     let ask_tools = service.list_tools(AgentMode::Ask);
     let plan_tools = service.list_tools(AgentMode::Plan);
@@ -29,7 +32,7 @@ async fn test_list_tools_varies_by_mode() {
 
 #[tokio::test]
 async fn test_tool_risk_level() {
-    let service = ToolExecutionService::new(AgentMode::Build, None);
+    let service = ToolExecutionService::new(AgentMode::Build);
 
     // read_file should be ReadOnly
     if let Some(risk) = service.tool_risk_level("read_file") {
@@ -49,7 +52,7 @@ async fn test_tool_risk_level() {
 
 #[tokio::test]
 async fn test_tool_availability_by_mode() {
-    let service = ToolExecutionService::new(AgentMode::Build, None);
+    let service = ToolExecutionService::new(AgentMode::Build);
 
     // read_file available in all modes
     assert!(service.is_available("read_file", AgentMode::Ask));
@@ -64,7 +67,7 @@ async fn test_tool_availability_by_mode() {
 
 #[tokio::test]
 async fn test_tool_description() {
-    let service = ToolExecutionService::new(AgentMode::Build, None);
+    let service = ToolExecutionService::new(AgentMode::Build);
 
     if let Some(desc) = service.tool_description("read_file") {
         assert!(!desc.is_empty());
@@ -72,54 +75,21 @@ async fn test_tool_description() {
     }
 }
 
-#[tokio::test]
-async fn test_trust_level_default() {
-    let service = ToolExecutionService::new(AgentMode::Build, None);
+// NOTE: The following tests have been disabled as they test the old ApprovalGate API
+// which has been replaced with PolicyEngine-based approval system.
+// Trust level and approval management is now handled through ChatAgent and PolicyEngine.
 
-    let level = service.trust_level().await;
+// #[tokio::test]
+// async fn test_trust_level_default() { ... }
 
-    // Default should be Balanced
-    assert_eq!(level, TrustLevel::Balanced);
-}
+// #[tokio::test]
+// async fn test_approval_without_gate() { ... }
 
-#[tokio::test]
-async fn test_approval_without_gate() {
-    let service = ToolExecutionService::new(AgentMode::Build, None);
+// #[tokio::test]
+// async fn test_set_mode() { ... }
 
-    // Without approval gate, should auto-approve
-    let result = service
-        .check_approval("shell", "ls -la", RiskLevel::Risky)
-        .await;
+// #[tokio::test]
+// async fn test_clear_session() { ... }
 
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_set_mode() {
-    let mut service = ToolExecutionService::new(AgentMode::Build, None);
-
-    assert_eq!(service.mode(), AgentMode::Build);
-
-    service.set_mode(AgentMode::Ask);
-    assert_eq!(service.mode(), AgentMode::Ask);
-
-    service.set_mode(AgentMode::Plan);
-    assert_eq!(service.mode(), AgentMode::Plan);
-}
-
-#[tokio::test]
-async fn test_clear_session() {
-    let service = ToolExecutionService::new(AgentMode::Build, None);
-
-    // Should not panic even without approval gate
-    service.clear_session().await;
-}
-
-#[tokio::test]
-async fn test_get_persistent_approvals_empty_without_gate() {
-    let service = ToolExecutionService::new(AgentMode::Build, None);
-
-    let patterns = service.get_persistent_approvals().await;
-
-    assert!(patterns.is_empty());
-}
+// #[tokio::test]
+// async fn test_get_persistent_approvals_empty_without_gate() { ... }

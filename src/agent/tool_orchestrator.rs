@@ -108,7 +108,7 @@ impl ToolOrchestrator {
         self.context.add_user(user_message);
 
         let mut state = LoopState::new();
-        let tool_definitions = self.tools.definitions();
+        let tool_definitions = self.tools.definitions_for_mode();
 
         // Wrap callbacks in Arc for sharing
         let on_text = Arc::new(on_text);

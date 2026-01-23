@@ -1,4 +1,105 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
+
+/// Type-safe mode identifiers
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModeId {
+    Ask,
+    Plan,
+    Build,
+}
+
+impl ModeId {
+    /// Convert to string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModeId::Ask => "ask",
+            ModeId::Plan => "plan",
+            ModeId::Build => "build",
+        }
+    }
+
+    /// Get all mode IDs
+    pub fn all() -> &'static [ModeId] {
+        &[ModeId::Ask, ModeId::Plan, ModeId::Build]
+    }
+}
+
+impl FromStr for ModeId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ask" => Ok(ModeId::Ask),
+            "plan" => Ok(ModeId::Plan),
+            "build" => Ok(ModeId::Build),
+            _ => Err(format!("Invalid mode: {}", s)),
+        }
+    }
+}
+
+impl fmt::Display for ModeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Type-safe trust level identifiers
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustId {
+    #[default]
+    Balanced,
+    Careful,
+    Manual,
+}
+
+impl TrustId {
+    /// Convert to string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TrustId::Balanced => "balanced",
+            TrustId::Careful => "careful",
+            TrustId::Manual => "manual",
+        }
+    }
+
+    /// Get all trust IDs
+    pub fn all() -> &'static [TrustId] {
+        &[TrustId::Balanced, TrustId::Careful, TrustId::Manual]
+    }
+}
+
+impl FromStr for TrustId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "balanced" => Ok(TrustId::Balanced),
+            "careful" => Ok(TrustId::Careful),
+            "manual" => Ok(TrustId::Manual),
+            _ => Err(format!("Invalid trust level: {}", s)),
+        }
+    }
+}
+
+impl fmt::Display for TrustId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl From<crate::tools::TrustLevel> for TrustId {
+    fn from(level: crate::tools::TrustLevel) -> Self {
+        match level {
+            crate::tools::TrustLevel::Balanced => TrustId::Balanced,
+            crate::tools::TrustLevel::Careful => TrustId::Careful,
+            crate::tools::TrustLevel::Manual => TrustId::Manual,
+        }
+    }
+}
 
 /// Operation type for command classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,7 +123,7 @@ impl std::fmt::Display for Operation {
 }
 
 /// Risk level for operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskLevel {
     Safe,
@@ -144,6 +245,42 @@ pub struct ToolInfo {
     pub category: String,
     pub permissions: String,
     pub base_risk: RiskLevel,
+}
+
+/// Classification strategy for tools
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassificationStrategy {
+    /// Tool has a static classification (most tools)
+    Static,
+    /// Tool classification depends on runtime command (e.g., shell)
+    Dynamic,
+}
+
+/// Policy metadata that tools can self-declare
+#[derive(Debug, Clone)]
+pub struct ToolPolicyMetadata {
+    /// Base risk level of the tool
+    pub risk_level: RiskLevel,
+    /// Primary operation type
+    pub operation: Operation,
+    /// Modes where this tool is available
+    pub available_in_modes: &'static [ModeId],
+    /// How the tool should be classified
+    pub classification_strategy: ClassificationStrategy,
+    /// Optional tool category
+    pub category: Option<&'static str>,
+}
+
+impl Default for ToolPolicyMetadata {
+    fn default() -> Self {
+        Self {
+            risk_level: RiskLevel::Safe,
+            operation: Operation::Read,
+            available_in_modes: &[ModeId::Ask, ModeId::Plan, ModeId::Build],
+            classification_strategy: ClassificationStrategy::Static,
+            category: None,
+        }
+    }
 }
 
 /// MCP tool policy
