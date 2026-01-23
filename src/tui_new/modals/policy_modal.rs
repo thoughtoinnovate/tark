@@ -5,10 +5,11 @@
 use crate::tui_new::theme::Theme;
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::Rect,
     style::{Modifier, Style},
+    symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 
 /// Pattern entry for display
@@ -105,186 +106,179 @@ impl<'a> PolicyModalWidget<'a> {
 
 impl Widget for PolicyModalWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Center the modal
-        let modal_width = area.width.min(80);
-        let modal_height = area.height.min(30);
-        let modal_x = (area.width.saturating_sub(modal_width)) / 2;
-        let modal_y = (area.height.saturating_sub(modal_height)) / 2;
+        // Calculate modal dimensions (70% height like SessionPicker)
+        let popup_width = area.width * 70 / 100;
+        let popup_height = area.height * 70 / 100;
 
-        let modal_area = Rect {
-            x: area.x + modal_x,
-            y: area.y + modal_y,
-            width: modal_width,
-            height: modal_height,
-        };
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
 
-        // Clear background
-        for y in modal_area.top()..modal_area.bottom() {
-            for x in modal_area.left()..modal_area.right() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_style(Style::default().bg(self.theme.bg_dark));
-                }
-            }
-        }
+        let modal_area = Rect::new(x, y, popup_width, popup_height);
 
-        // Create block
+        // Clear the modal area
+        Clear.render(modal_area, buf);
+
+        // Render modal with rounded corners (like SessionPicker)
         let block = Block::default()
-            .title(" Policy Manager ")
-            .title_alignment(Alignment::Center)
+            .title(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    "Policy",
+                    Style::default()
+                        .fg(self.theme.text_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+            ]))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border))
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(self.theme.cyan))
             .style(Style::default().bg(self.theme.bg_dark));
 
         let inner = block.inner(modal_area);
         block.render(modal_area, buf);
 
-        // Split into sections
-        let chunks = Layout::default()
-            .direction(ratatui::layout::Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // Header
-                Constraint::Min(5),    // Approvals
-                Constraint::Length(1), // Separator
-                Constraint::Min(5),    // Denials
-                Constraint::Length(3), // Help text
-            ])
-            .split(inner);
+        // Build content like SessionPicker
+        let mut content: Vec<Line> = vec![];
 
-        // Header
-        let header = Paragraph::new("Session Approval Patterns")
-            .style(
-                Style::default()
-                    .fg(self.theme.text_primary)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .alignment(Alignment::Center);
-        header.render(chunks[0], buf);
+        // Navigation hints
+        content.push(Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(self.theme.cyan)),
+            Span::styled(" Navigate  ", Style::default().fg(self.theme.text_muted)),
+            Span::styled("d", Style::default().fg(self.theme.red)),
+            Span::styled(" Delete  ", Style::default().fg(self.theme.text_muted)),
+            Span::styled("Esc", Style::default().fg(self.theme.yellow)),
+            Span::styled(" Close", Style::default().fg(self.theme.text_muted)),
+        ]));
+        content.push(Line::from(""));
 
-        // Approvals section
-        let approval_items: Vec<ListItem> = self
-            .modal
-            .approvals
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let content = format!(
-                    "{}: {} ({}) {}",
-                    entry.tool,
-                    entry.pattern,
-                    entry.match_type,
-                    entry.description.as_deref().unwrap_or("")
-                );
+        // Approvals section header
+        content.push(Line::from(vec![Span::styled(
+            format!("  Approvals ({})", self.modal.approvals.len()),
+            Style::default()
+                .fg(self.theme.green)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        content.push(Line::from(""));
 
-                let style = if self.modal.in_approvals && i == self.modal.selected_index {
-                    Style::default()
-                        .fg(self.theme.text_primary)
-                        .bg(self.theme.selection_bg)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(self.theme.text_secondary)
-                };
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("[{}] ", i + 1),
-                        Style::default().fg(self.theme.cyan),
-                    ),
-                    Span::styled(content, style),
-                ]))
-            })
-            .collect();
-
-        let approvals_title = format!(" Approvals ({}) ", self.modal.approvals.len());
-        let approvals_list = List::new(approval_items)
-            .block(
-                Block::default()
-                    .title(approvals_title)
-                    .borders(Borders::ALL)
-                    .border_style(if self.modal.in_approvals {
-                        Style::default().fg(self.theme.cyan)
-                    } else {
-                        Style::default().fg(self.theme.border)
-                    }),
-            )
-            .style(Style::default().bg(self.theme.bg_dark));
-
-        approvals_list.render(chunks[1], buf);
-
-        // Separator
-        let separator = Paragraph::new("─".repeat(inner.width as usize))
-            .style(Style::default().fg(self.theme.border));
-        separator.render(chunks[2], buf);
-
-        // Denials section
-        let denial_items: Vec<ListItem> = self
-            .modal
-            .denials
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let content = format!(
-                    "{}: {} ({}) {}",
-                    entry.tool,
-                    entry.pattern,
-                    entry.match_type,
-                    entry.description.as_deref().unwrap_or("")
-                );
-
-                let style = if !self.modal.in_approvals && i == self.modal.selected_index {
-                    Style::default()
-                        .fg(self.theme.text_primary)
-                        .bg(self.theme.selection_bg)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(self.theme.text_secondary)
-                };
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("[{}] ", i + 1), Style::default().fg(self.theme.red)),
-                    Span::styled(content, style),
-                ]))
-            })
-            .collect();
-
-        let denials_title = format!(" Denials ({}) ", self.modal.denials.len());
-        let denials_list = List::new(denial_items)
-            .block(
-                Block::default()
-                    .title(denials_title)
-                    .borders(Borders::ALL)
-                    .border_style(if !self.modal.in_approvals {
-                        Style::default().fg(self.theme.red)
-                    } else {
-                        Style::default().fg(self.theme.border)
-                    }),
-            )
-            .style(Style::default().bg(self.theme.bg_dark));
-
-        denials_list.render(chunks[3], buf);
-
-        // Help text
-        let help_lines = vec![
-            Line::from(vec![
-                Span::styled("↑/↓", Style::default().fg(self.theme.cyan)),
-                Span::raw(": Navigate  "),
-                Span::styled("d", Style::default().fg(self.theme.cyan)),
-                Span::raw(": Delete  "),
-                Span::styled("Esc", Style::default().fg(self.theme.cyan)),
-                Span::raw(": Close"),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Note: Session patterns from policy.db and .tark/sessions/. Persistent: ~/.config/tark/policy/",
+        // Approvals list
+        if self.modal.approvals.is_empty() {
+            content.push(Line::from(vec![Span::styled(
+                "    No approval patterns",
                 Style::default()
                     .fg(self.theme.text_muted)
-                    .add_modifier(Modifier::ITALIC),
-            )),
-        ];
+                    .add_modifier(Modifier::DIM),
+            )]));
+        } else {
+            for (i, entry) in self.modal.approvals.iter().enumerate() {
+                let is_selected = self.modal.in_approvals && i == self.modal.selected_index;
+                let prefix = if is_selected { "▸ " } else { "  " };
 
-        let help = Paragraph::new(help_lines)
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(self.theme.text_secondary));
+                let row_style = if is_selected {
+                    Style::default()
+                        .fg(self.theme.cyan)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(self.theme.selection_bg)
+                } else {
+                    Style::default().fg(self.theme.text_primary)
+                };
 
-        help.render(chunks[4], buf);
+                let mut spans = vec![Span::styled(prefix, row_style)];
+                spans.push(Span::styled("✓ ", Style::default().fg(self.theme.green)));
+                spans.push(Span::styled(
+                    format!("{}: {}", entry.tool, entry.pattern),
+                    row_style,
+                ));
+
+                content.push(Line::from(spans));
+
+                // Show details on selected item
+                if is_selected {
+                    let detail = format!(
+                        "    {} · {}",
+                        entry.match_type,
+                        entry.description.as_deref().unwrap_or("No description")
+                    );
+                    content.push(Line::from(vec![Span::styled(
+                        detail,
+                        Style::default()
+                            .fg(self.theme.text_muted)
+                            .add_modifier(Modifier::DIM),
+                    )]));
+                }
+            }
+        }
+
+        content.push(Line::from(""));
+
+        // Denials section header
+        content.push(Line::from(vec![Span::styled(
+            format!("  Denials ({})", self.modal.denials.len()),
+            Style::default()
+                .fg(self.theme.red)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        content.push(Line::from(""));
+
+        // Denials list
+        if self.modal.denials.is_empty() {
+            content.push(Line::from(vec![Span::styled(
+                "    No denial patterns",
+                Style::default()
+                    .fg(self.theme.text_muted)
+                    .add_modifier(Modifier::DIM),
+            )]));
+        } else {
+            for (i, entry) in self.modal.denials.iter().enumerate() {
+                let is_selected = !self.modal.in_approvals && i == self.modal.selected_index;
+                let prefix = if is_selected { "▸ " } else { "  " };
+
+                let row_style = if is_selected {
+                    Style::default()
+                        .fg(self.theme.cyan)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(self.theme.selection_bg)
+                } else {
+                    Style::default().fg(self.theme.text_primary)
+                };
+
+                let mut spans = vec![Span::styled(prefix, row_style)];
+                spans.push(Span::styled("✗ ", Style::default().fg(self.theme.red)));
+                spans.push(Span::styled(
+                    format!("{}: {}", entry.tool, entry.pattern),
+                    row_style,
+                ));
+
+                content.push(Line::from(spans));
+
+                // Show details on selected item
+                if is_selected {
+                    let detail = format!(
+                        "    {} · {}",
+                        entry.match_type,
+                        entry.description.as_deref().unwrap_or("No description")
+                    );
+                    content.push(Line::from(vec![Span::styled(
+                        detail,
+                        Style::default()
+                            .fg(self.theme.text_muted)
+                            .add_modifier(Modifier::DIM),
+                    )]));
+                }
+            }
+        }
+
+        // Footer note
+        content.push(Line::from(""));
+        content.push(Line::from(vec![Span::styled(
+            "  Session patterns from policy.db and .tark/sessions/",
+            Style::default()
+                .fg(self.theme.text_muted)
+                .add_modifier(Modifier::DIM),
+        )]));
+
+        // Render content
+        let paragraph = Paragraph::new(content).style(Style::default().fg(self.theme.text_primary));
+        paragraph.render(inner, buf);
     }
 }
