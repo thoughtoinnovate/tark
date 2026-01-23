@@ -25,8 +25,7 @@ Policy Engine (this module)
 │       └── defaults.toml - Hierarchical approval defaults
 │
 ├── User Configuration
-│   ├── config.rs         - Load user MCP configs
-│   └── migrate.rs        - Migrate from approvals.json
+│   └── config.rs         - Load user MCP configs
 │
 └── Integration
     └── mcp.rs            - MCP tool policies

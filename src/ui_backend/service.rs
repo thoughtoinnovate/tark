@@ -1488,7 +1488,6 @@ impl AppService {
                     let event_tx = self.event_tx.clone();
                     let state = self.state.clone();
                     let conv_svc = self.conversation_svc.clone();
-                    let approvals_base = self.working_dir.clone();
                     let catalog = self.catalog;
 
                     tokio::spawn(async move {
@@ -1569,16 +1568,6 @@ impl AppService {
                                         }
                                     }
                                 }
-
-                                if let Some(conv_svc) = conv_svc {
-                                    let approvals_path = approvals_base
-                                        .join(".tark")
-                                        .join("sessions")
-                                        .join(&info.session_id)
-                                        .join("approvals.json");
-                                    let _ =
-                                        conv_svc.update_approval_storage_path(approvals_path).await;
-                                }
                             }
                             Err(e) => {
                                 tracing::error!("Failed to create session: {}", e);
@@ -1591,8 +1580,6 @@ impl AppService {
                 if let Some(ref session_svc) = self.session_svc {
                     let session_svc = session_svc.clone();
                     let event_tx = self.event_tx.clone();
-                    let conv_svc = self.conversation_svc.clone();
-                    let approvals_base = self.working_dir.clone();
 
                     tokio::spawn(async move {
                         match session_svc.switch_to(&session_id).await {
@@ -1602,15 +1589,6 @@ impl AppService {
                                 let _ = event_tx.send(AppEvent::SessionSwitched {
                                     session_id: session_id.clone(),
                                 });
-                                if let Some(conv_svc) = conv_svc {
-                                    let approvals_path = approvals_base
-                                        .join(".tark")
-                                        .join("sessions")
-                                        .join(&session_id)
-                                        .join("approvals.json");
-                                    let _ =
-                                        conv_svc.update_approval_storage_path(approvals_path).await;
-                                }
                             }
                             Err(e) => {
                                 tracing::error!("Failed to switch session: {}", e);

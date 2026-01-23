@@ -166,19 +166,6 @@ impl ConversationService {
         Ok(())
     }
 
-    /// Update approval storage path for the tool registry
-    pub async fn update_approval_storage_path(
-        &self,
-        storage_path: std::path::PathBuf,
-    ) -> Result<(), ConversationError> {
-        {
-            let mut guard = self.approvals_path.write().await;
-            *guard = Some(storage_path.clone());
-        }
-        // Approval storage is now handled by PolicyEngine
-        Ok(())
-    }
-
     /// Send a message and stream the response
     pub async fn send_message(
         &self,
