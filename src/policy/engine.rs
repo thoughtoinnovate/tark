@@ -27,9 +27,10 @@ impl PolicyEngine {
         let conn = Connection::open(db_path)?;
 
         // Configure SQLite for better concurrency
-        conn.execute("PRAGMA journal_mode=WAL", [])?; // Enable Write-Ahead Logging
-        conn.execute("PRAGMA busy_timeout=5000", [])?; // Wait up to 5 seconds on locks
-        conn.execute("PRAGMA synchronous=NORMAL", [])?; // Balance safety and speed
+        // PRAGMA commands return results, so we use pragma_update or query_row
+        conn.pragma_update(None, "journal_mode", "WAL")?; // Enable Write-Ahead Logging
+        conn.pragma_update(None, "busy_timeout", 5000)?; // Wait up to 5 seconds on locks
+        conn.pragma_update(None, "synchronous", "NORMAL")?; // Balance safety and speed
 
         // Create tables
         schema::create_tables(&conn)?;

@@ -243,9 +243,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging
+    // For TUI/Chat modes, default to quieter logging to avoid cluttering the interface
+    // For other modes (LSP, Serve), use info level for debugging
+    let is_tui_mode = matches!(cli.command, Commands::Tui { .. } | Commands::Chat { .. });
+
     let filter = if cli.verbose {
         "tark_cli=debug,tower_lsp=debug"
+    } else if is_tui_mode {
+        // TUI mode: only show warnings and errors by default
+        "tark_cli=warn,tower_lsp=warn"
     } else {
+        // Non-TUI modes (LSP, Serve, etc.): keep info level
         "tark_cli=info,tower_lsp=warn"
     };
 
@@ -312,9 +320,9 @@ async fn main() -> Result<()> {
             let is_standalone = socket.is_none();
 
             if is_standalone {
-                tracing::info!("Starting TUI chat in standalone mode, cwd: {}", working_dir);
+                tracing::debug!("Starting TUI chat in standalone mode, cwd: {}", working_dir);
             } else {
-                tracing::info!(
+                tracing::debug!(
                     "Starting TUI chat with Neovim integration, socket: {:?}, cwd: {}",
                     socket,
                     working_dir
@@ -376,7 +384,7 @@ async fn main() -> Result<()> {
             debug,
         } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());
-            tracing::info!(
+            tracing::debug!(
                 "Starting NEW TUI (TDD implementation), cwd: {}",
                 working_dir
             );
