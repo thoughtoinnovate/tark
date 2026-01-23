@@ -126,10 +126,6 @@ impl AppService {
         let tark_storage = TarkStorage::new(&working_dir)?;
 
         let (interaction_tx, interaction_rx) = crate::tools::interaction_channel();
-        let approvals_path = tark_storage
-            .load_current_session()
-            .ok()
-            .map(|session| tark_storage.session_dir(&session.id).join("approvals.json"));
 
         // Initialize ChatAgent
         let chat_agent_result = (|| -> Result<crate::agent::ChatAgent> {
@@ -148,7 +144,7 @@ impl AppService {
                 true, // shell_enabled
                 Some(interaction_tx.clone()),
                 None,
-                approvals_path.clone(),
+                None,
                 Some(state.todo_tracker()),
             );
 
@@ -162,7 +158,7 @@ impl AppService {
                     chat_agent,
                     event_tx.clone(),
                     Some(interaction_tx.clone()),
-                    approvals_path.clone(),
+                    None,
                 ));
 
                 // Initialize SessionManager
