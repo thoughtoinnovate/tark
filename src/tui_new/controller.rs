@@ -2562,7 +2562,8 @@ impl<B: Backend> TuiController<B> {
             "/quit" | "/exit" | "/q" => {
                 state.set_should_quit(true);
             }
-            "/think" | "/thinking" => {
+            "/think" => {
+                // Toggle model-level thinking (API parameter)
                 let enabled = !state.thinking_enabled();
                 state.set_thinking_enabled(enabled);
 
@@ -2570,10 +2571,35 @@ impl<B: Backend> TuiController<B> {
                 let msg = Message {
                     role: MessageRole::System,
                     content: if enabled {
-                        "✓ Thinking mode enabled. The agent's reasoning will be displayed in real-time.".to_string()
+                        "✓ Model thinking enabled. Extended reasoning will be used.".to_string()
                     } else {
-                        "✗ Thinking mode disabled. The agent's reasoning will be hidden."
-                            .to_string()
+                        "✗ Model thinking disabled.".to_string()
+                    },
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
+                    collapsed: false,
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                };
+                state.add_message(msg);
+                state.clear_input();
+                return Ok(());
+            }
+            "/thinking" => {
+                // Toggle thinking tool + display
+                let enabled = !state.thinking_tool_enabled();
+                state.set_thinking_tool_enabled(enabled);
+
+                // Notify service to refresh agent system prompt
+                self.service.set_thinking_tool_enabled(enabled).await;
+
+                use crate::ui_backend::{Message, MessageRole};
+                let msg = Message {
+                    role: MessageRole::System,
+                    content: if enabled {
+                        "✓ Thinking tool enabled. Agent will use structured reasoning.".to_string()
+                    } else {
+                        "✗ Thinking tool disabled.".to_string()
                     },
                     thinking: None,
                     tool_calls: Vec::new(),

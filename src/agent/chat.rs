@@ -145,6 +145,7 @@ fn get_system_prompt(
     mode: AgentMode,
     supports_native_thinking: bool,
     thinking_enabled: bool,
+    thinking_tool_enabled: bool,
     trust_level: crate::tools::TrustLevel,
     plan_context: Option<&PlanContext>,
 ) -> String {
@@ -658,8 +659,35 @@ Example - User says "add authentication":
         base_prompt
     };
 
+    // Add think tool instructions when enabled
+    let prompt_with_tool_thinking = if thinking_tool_enabled {
+        format!(
+            "{}\n\n\
+            🧠 STRUCTURED REASONING:\n\
+            Use the `think` tool to record your reasoning process:\n\
+            - Call think() before complex decisions\n\
+            - Break problems into numbered steps\n\
+            - Track confidence levels (0.0 to 1.0)\n\
+            - Specify thought_type: hypothesis, analysis, plan, decision, reflection\n\
+            - Revise earlier thoughts if needed using revises_thought\n\n\
+            Example:\n\
+            think({{\n\
+              \"thought\": \"First I need to understand the authentication module structure\",\n\
+              \"thought_number\": 1,\n\
+              \"total_thoughts\": 3,\n\
+              \"next_thought_needed\": true,\n\
+              \"thought_type\": \"analysis\",\n\
+              \"confidence\": 0.9\n\
+            }})\n\n\
+            This creates a visible thinking trail for complex multi-step tasks.",
+            prompt_with_thinking
+        )
+    } else {
+        prompt_with_thinking
+    };
+
     // Prepend status header so agent always knows its current context
-    format!("{}{}", status_header, prompt_with_thinking)
+    format!("{}{}", status_header, prompt_with_tool_thinking)
 }
 
 /// A single tool call log entry
@@ -712,6 +740,8 @@ pub struct ChatAgent {
     think_level: String,
     /// Thinking configuration (levels and their settings)
     thinking_config: crate::config::ThinkingConfig,
+    /// Whether the think tool is enabled (system prompt injection)
+    thinking_tool_enabled: bool,
     /// Plan service for tracking execution plans (optional)
     plan_service: Option<Arc<PlanService>>,
     /// Cached plan context for Build mode system prompt injection
@@ -733,6 +763,7 @@ impl ChatAgent {
             mode,
             supports_thinking,
             false,
+            false, // thinking_tool_enabled off by default
             trust_level,
             None,
         ));
@@ -746,6 +777,7 @@ impl ChatAgent {
             trust_level,
             think_level: "off".to_string(), // Off by default, enabled via /think command
             thinking_config: crate::config::ThinkingConfig::default(),
+            thinking_tool_enabled: false, // Off by default, enabled via /thinking command
             plan_service: None,
             plan_context: None,
         }
@@ -831,6 +863,18 @@ impl ChatAgent {
         self.refresh_system_prompt();
     }
 
+    /// Set thinking tool enabled state
+    ///
+    /// This controls whether the think tool instructions are injected into the system prompt
+    pub fn set_thinking_tool_enabled(&mut self, enabled: bool) {
+        self.thinking_tool_enabled = enabled;
+    }
+
+    /// Get thinking tool enabled state
+    pub fn is_thinking_tool_enabled(&self) -> bool {
+        self.thinking_tool_enabled
+    }
+
     /// Refresh system prompt based on current thinking state (async version)
     ///
     /// This queries models.dev for accurate capability detection
@@ -844,6 +888,7 @@ impl ChatAgent {
             self.mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             self.plan_context.as_ref(),
         );
@@ -869,6 +914,7 @@ impl ChatAgent {
             self.mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             self.plan_context.as_ref(),
         );
@@ -922,6 +968,7 @@ impl ChatAgent {
             mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             self.plan_context.as_ref(),
         ));
@@ -1083,6 +1130,7 @@ impl ChatAgent {
             self.mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             None, // No plan context after clear
         );
@@ -1103,6 +1151,7 @@ impl ChatAgent {
             self.mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             self.plan_context.as_ref(),
         );
@@ -1829,6 +1878,7 @@ impl ChatAgent {
             self.mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             self.plan_context.as_ref(),
         ));

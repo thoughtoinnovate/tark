@@ -215,7 +215,15 @@ impl ToolRegistry {
         shell_enabled: bool,
         interaction_tx: Option<InteractionSender>,
     ) -> Self {
-        Self::for_mode_with_services(working_dir, mode, shell_enabled, interaction_tx, None, None)
+        Self::for_mode_with_services(
+            working_dir,
+            mode,
+            shell_enabled,
+            interaction_tx,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Create a registry with full service support including plan tools
@@ -226,6 +234,9 @@ impl ToolRegistry {
     ///
     /// When `todo_tracker` is provided, the todo tool will use that shared tracker.
     /// Otherwise, a new tracker is created.
+    ///
+    /// When `thinking_tracker` is provided, the think tool will use that shared tracker.
+    /// Otherwise, a new tracker is created.
     pub fn for_mode_with_services(
         working_dir: PathBuf,
         mode: AgentMode,
@@ -233,6 +244,7 @@ impl ToolRegistry {
         interaction_tx: Option<InteractionSender>,
         plan_service: Option<Arc<PlanService>>,
         todo_tracker: Option<Arc<Mutex<TodoTracker>>>,
+        thinking_tracker: Option<Arc<Mutex<ThinkingTracker>>>,
     ) -> Self {
         // Initialize PolicyEngine
         let policy_engine = {
@@ -264,7 +276,9 @@ impl ToolRegistry {
         // ===== Built-in extra tools (available in ALL modes) =====
 
         // Thinking tool - always available, helps with reasoning
-        let thinking_tracker = Arc::new(Mutex::new(ThinkingTracker::new()));
+        // Use the provided tracker or create a new one
+        let thinking_tracker =
+            thinking_tracker.unwrap_or_else(|| Arc::new(Mutex::new(ThinkingTracker::new())));
         registry.register(Arc::new(ThinkTool::new(thinking_tracker)));
 
         // Memory tools - persistent storage across sessions

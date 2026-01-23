@@ -137,7 +137,7 @@ impl AppService {
                 model.as_deref(),
             )?;
 
-            // Create tool registry with shared todo_tracker from state
+            // Create tool registry with shared todo_tracker and thinking_tracker from state
             let tools = crate::tools::ToolRegistry::for_mode_with_services(
                 working_dir.clone(),
                 crate::core::types::AgentMode::Build,
@@ -145,6 +145,7 @@ impl AppService {
                 Some(interaction_tx.clone()),
                 None,
                 Some(state.todo_tracker()),
+                Some(state.thinking_tracker()),
             );
 
             Ok(crate::agent::ChatAgent::new(Arc::from(llm_provider), tools))
@@ -276,6 +277,7 @@ impl AppService {
                             self.working_dir.clone(),
                             next,
                             Some(self.state.todo_tracker()),
+                            Some(self.state.thinking_tracker()),
                         )
                         .await;
                 }
@@ -304,6 +306,7 @@ impl AppService {
                             self.working_dir.clone(),
                             mode,
                             Some(self.state.todo_tracker()),
+                            Some(self.state.thinking_tracker()),
                         )
                         .await;
                 }
@@ -1740,6 +1743,17 @@ impl AppService {
         // Trust level is now managed by PolicyEngine
         if let Some(ref conv_svc) = self.conversation_svc {
             let _ = conv_svc.set_trust_level(level).await;
+        }
+    }
+
+    /// Set thinking tool enablement
+    /// This refreshes the agent's system prompt to add/remove think tool instructions
+    pub async fn set_thinking_tool_enabled(&self, enabled: bool) {
+        self.state.set_thinking_tool_enabled(enabled);
+
+        // Update agent and refresh system prompt
+        if let Some(ref conv_svc) = self.conversation_svc {
+            let _ = conv_svc.set_thinking_tool_enabled(enabled).await;
         }
     }
 

@@ -1879,6 +1879,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
             };
 
             let collapsed_groups = state.collapsed_tool_groups();
+            let thinking_history = state.get_thinking_history();
             let message_area = MessageArea::new(&message_widgets, theme)
                 .agent_name(&config.agent_name_short)
                 .focused(matches!(focused_component, FocusedComponent::Messages))
@@ -1891,7 +1892,8 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .streaming_lines(streaming_lines)
                 .thinking_lines(thinking_lines)
                 .processing(state.llm_processing())
-                .collapsed_tool_groups(&collapsed_groups);
+                .collapsed_tool_groups(&collapsed_groups)
+                .thinking_history(&thinking_history);
             let (total_lines, viewport_height) = message_area.metrics(chunks[1]);
             state.set_messages_metrics(total_lines, viewport_height);
             frame.render_widget(message_area, chunks[1]);
@@ -1921,11 +1923,13 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
             let queued_count = state.queued_message_count();
             // LLM is considered connected if we have a provider configured
             let llm_connected = current_provider.is_some() && state.llm_connected();
+            let thinking_tool_enabled = state.thinking_tool_enabled();
 
             let mut status = StatusBar::new(theme)
                 .agent_mode(agent_mode)
                 .build_mode(build_mode)
                 .thinking(thinking_enabled)
+                .thinking_tool(thinking_tool_enabled)
                 .queue(queued_count) // Show actual queue count
                 .processing(llm_processing)
                 .connected(llm_connected);

@@ -430,6 +430,7 @@ impl ConversationService {
         working_dir: std::path::PathBuf,
         mode: AgentMode,
         todo_tracker: Option<Arc<std::sync::Mutex<crate::tools::TodoTracker>>>,
+        thinking_tracker: Option<Arc<std::sync::Mutex<crate::tools::ThinkingTracker>>>,
     ) {
         let tools = ToolRegistry::for_mode_with_services(
             working_dir,
@@ -438,9 +439,24 @@ impl ConversationService {
             self.interaction_tx.clone(),
             None,
             todo_tracker,
+            thinking_tracker,
         );
         let mut agent = self.chat_agent.write().await;
         agent.update_mode(tools, mode);
+    }
+
+    /// Refresh the agent's system prompt
+    /// Used when thinking_tool_enabled changes to inject/remove tool instructions
+    pub async fn refresh_system_prompt(&self) {
+        let mut agent = self.chat_agent.write().await;
+        agent.refresh_system_prompt_async().await;
+    }
+
+    /// Set thinking tool enabled and refresh system prompt
+    pub async fn set_thinking_tool_enabled(&self, enabled: bool) {
+        let mut agent = self.chat_agent.write().await;
+        agent.set_thinking_tool_enabled(enabled);
+        agent.refresh_system_prompt_async().await;
     }
 
     /// Interrupt the current operation

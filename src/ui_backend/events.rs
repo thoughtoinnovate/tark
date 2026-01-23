@@ -164,4 +164,12 @@ pub enum AppEvent {
         messages_removed: usize,
         summary: Option<String>,
     },
+
+    // ========== Thinking Events ==========
+    /// Thinking tool was updated with a new thought
+    ThinkingUpdated {
+        thought_number: u32,
+        total_thoughts: u32,
+        content: String,
+    },
 }

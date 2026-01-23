@@ -240,6 +240,12 @@ struct StateInner {
     /// Current session todo list (live-updating widget)
     pub todo_tracker: Arc<std::sync::Mutex<crate::tools::TodoTracker>>,
 
+    // ========== Thinking Tool ==========
+    /// Thinking tracker for structured reasoning
+    pub thinking_tracker: Arc<std::sync::Mutex<crate::tools::ThinkingTracker>>,
+    /// Whether the think tool is enabled (system prompt injection)
+    pub thinking_tool_enabled: bool,
+
     // ========== Streaming State (BFF owns this, renderer reads only) ==========
     pub streaming_content: Option<String>,
     pub streaming_thinking: Option<String>,
@@ -406,6 +412,10 @@ impl SharedState {
                 active_tools: Vec::new(),
                 collapsed_tool_groups: std::collections::HashSet::new(),
                 todo_tracker: Arc::new(std::sync::Mutex::new(crate::tools::TodoTracker::new())),
+                thinking_tracker: Arc::new(std::sync::Mutex::new(
+                    crate::tools::ThinkingTracker::new(),
+                )),
+                thinking_tool_enabled: false,
                 streaming_content: None,
                 streaming_thinking: None,
                 input_text: String::new(),
@@ -552,6 +562,29 @@ impl SharedState {
     /// Get the session todo tracker
     pub fn todo_tracker(&self) -> Arc<std::sync::Mutex<crate::tools::TodoTracker>> {
         self.read_inner().todo_tracker.clone()
+    }
+
+    /// Get the thinking tracker
+    pub fn thinking_tracker(&self) -> Arc<std::sync::Mutex<crate::tools::ThinkingTracker>> {
+        self.read_inner().thinking_tracker.clone()
+    }
+
+    /// Get whether the thinking tool is enabled
+    pub fn thinking_tool_enabled(&self) -> bool {
+        self.read_inner().thinking_tool_enabled
+    }
+
+    /// Set whether the thinking tool is enabled
+    pub fn set_thinking_tool_enabled(&self, enabled: bool) {
+        self.write_inner().thinking_tool_enabled = enabled;
+    }
+
+    /// Get the current thinking history for UI display
+    pub fn get_thinking_history(&self) -> Vec<crate::tools::builtin::Thought> {
+        self.thinking_tracker()
+            .lock()
+            .map(|t| t.history().to_vec())
+            .unwrap_or_default()
     }
 
     pub fn generate_new_correlation_id(&self) -> String {
