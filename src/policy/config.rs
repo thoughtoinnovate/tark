@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// User-defined pattern configuration
 #[derive(Debug, Deserialize, Default)]
@@ -151,8 +151,7 @@ impl ConfigLoader {
     pub fn sync_to_db(&self, conn: &Connection) -> Result<()> {
         let config = self.load()?;
 
-        conn.execute("BEGIN IMMEDIATE", [])?;
-
+        // Note: No transaction here - operations are fast and atomic enough
         // Clear existing user/workspace policies (keep session patterns)
         conn.execute(
             "DELETE FROM mcp_tool_policies WHERE source IN ('user', 'workspace')",
@@ -223,7 +222,7 @@ impl ConfigLoader {
         }
         tracing::debug!("Synced {} MCP patterns", config.patterns.len());
 
-        conn.execute("COMMIT", [])?;
+        // Note: No COMMIT here - no transaction was started
         Ok(())
     }
 }
@@ -247,7 +246,7 @@ impl PatternLoader {
     /// Load user patterns config
     fn load_user_patterns(&self) -> Result<Option<PatternsConfig>> {
         if !self.user_patterns_path.exists() {
-            info!(
+            debug!(
                 "No user patterns config found at {:?}",
                 self.user_patterns_path
             );
@@ -310,12 +309,11 @@ impl PatternLoader {
         let config = self.load()?;
         let now = Utc::now().to_rfc3339();
 
-        conn.execute("BEGIN IMMEDIATE", [])?;
-
-        // Clear existing user/workspace patterns (keep session patterns)
+        // Note: No BEGIN/COMMIT here - caller manages transactions
+        // Clear existing persistent patterns (keep session-only patterns)
         conn.execute(
-            "DELETE FROM approval_patterns WHERE source IN ('user', 'workspace')",
-            [],
+            "DELETE FROM approval_patterns WHERE is_persistent = 1 AND session_id = ?1",
+            [session_id],
         )?;
 
         // Insert approval patterns
@@ -419,7 +417,7 @@ impl PatternLoader {
         }
         info!("Synced {} MCP denial patterns", config.mcp_denials.len());
 
-        conn.execute("COMMIT", [])?;
+        // Note: No COMMIT here - caller manages transactions
         Ok(())
     }
 }
