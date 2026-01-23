@@ -151,7 +151,9 @@ impl ConfigLoader {
     pub fn sync_to_db(&self, conn: &Connection) -> Result<()> {
         let config = self.load()?;
 
-        // Note: No transaction here - operations are fast and atomic enough
+        // Use a transaction to ensure atomicity and avoid "database is locked" errors
+        conn.execute("BEGIN IMMEDIATE", [])?;
+
         // Clear existing user/workspace policies (keep session patterns)
         conn.execute(
             "DELETE FROM mcp_tool_policies WHERE source IN ('user', 'workspace')",
@@ -222,7 +224,7 @@ impl ConfigLoader {
         }
         tracing::debug!("Synced {} MCP patterns", config.patterns.len());
 
-        // Note: No COMMIT here - no transaction was started
+        conn.execute("COMMIT", [])?;
         Ok(())
     }
 }
@@ -309,7 +311,9 @@ impl PatternLoader {
         let config = self.load()?;
         let now = Utc::now().to_rfc3339();
 
-        // Note: No BEGIN/COMMIT here - caller manages transactions
+        // Use a transaction to ensure atomicity and avoid "database is locked" errors
+        conn.execute("BEGIN IMMEDIATE", [])?;
+
         // Clear existing persistent patterns (keep session-only patterns)
         conn.execute(
             "DELETE FROM approval_patterns WHERE is_persistent = 1 AND session_id = ?1",
@@ -417,7 +421,7 @@ impl PatternLoader {
         }
         info!("Synced {} MCP denial patterns", config.mcp_denials.len());
 
-        // Note: No COMMIT here - caller manages transactions
+        conn.execute("COMMIT", [])?;
         Ok(())
     }
 }

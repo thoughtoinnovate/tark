@@ -26,6 +26,11 @@ impl PolicyEngine {
     pub fn open(db_path: &Path, working_dir: &Path) -> Result<Self> {
         let conn = Connection::open(db_path)?;
 
+        // Configure SQLite for better concurrency
+        conn.execute("PRAGMA journal_mode=WAL", [])?; // Enable Write-Ahead Logging
+        conn.execute("PRAGMA busy_timeout=5000", [])?; // Wait up to 5 seconds on locks
+        conn.execute("PRAGMA synchronous=NORMAL", [])?; // Balance safety and speed
+
         // Create tables
         schema::create_tables(&conn)?;
         schema::init_schema_version(&conn)?;
