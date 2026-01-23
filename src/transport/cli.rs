@@ -666,31 +666,21 @@ pub async fn run_auth(provider: Option<&str>) -> Result<()> {
             println!();
             println!("No API key needed!");
         }
-        "chatgpt-oauth" | "chatgpt" => {
-            println!("{}", "ChatGPT OAuth (Codex Models)".bold());
-            println!();
-            println!("Initiating OAuth flow for ChatGPT Pro/Plus...");
-            println!();
-
-            // Run OAuth flow
-            match run_chatgpt_oauth_flow().await {
-                Ok(()) => {
-                    println!();
-                    println!("✅ Successfully authenticated with ChatGPT!");
-                    println!("Credentials saved to: ~/.config/tark/chatgpt_oauth.json");
-                    println!();
-                    println!("You can now use ChatGPT Codex models:");
-                    println!("  tark chat --provider chatgpt-oauth");
-                    println!("  Or within TUI: /model → Select 'ChatGPT (OAuth)'");
-                }
-                Err(e) => {
-                    println!();
-                    println!("❌ Authentication failed: {}", e);
-                    println!();
-                    println!("Make sure you have ChatGPT Pro/Plus subscription.");
-                }
+        // Check if this is a plugin-based OAuth provider
+        _ if provider_is_plugin_oauth(&provider) => match run_plugin_oauth_flow(&provider).await {
+            Ok(creds_path) => {
+                println!();
+                println!("✅ Successfully authenticated!");
+                println!("Credentials saved to: {}", creds_path.display());
+                println!();
+                println!("You can now use this provider:");
+                println!("  tark chat --provider {}", provider);
             }
-        }
+            Err(e) => {
+                println!();
+                println!("❌ Authentication failed: {}", e);
+            }
+        },
         "gemini-oauth" => {
             // gemini-oauth reads from ~/.gemini/oauth_creds.json (set by gemini CLI)
             let oauth_creds_path = dirs::home_dir()
@@ -743,201 +733,188 @@ fn format_number(n: u64) -> String {
     }
 }
 
-/// Run ChatGPT OAuth PKCE flow
-async fn run_chatgpt_oauth_flow() -> Result<()> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine;
-    use rand::Rng;
-    use sha2::{Digest, Sha256};
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
-
-    // OAuth constants (matching the plugin)
-    const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-    const AUTH_URL: &str = "https://auth.openai.com/authorize";
-    const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-    const REDIRECT_URI: &str = "http://localhost:8888/callback";
-
-    // Generate PKCE code_verifier and code_challenge
-    let code_verifier: String = rand::thread_rng()
-        .sample_iter(&rand::distributions::Alphanumeric)
-        .take(128)
-        .map(char::from)
-        .collect();
-
-    let mut hasher = Sha256::new();
-    hasher.update(code_verifier.as_bytes());
-    let code_challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
-
-    // Prepare authorization URL
-    let auth_params = [
-        ("client_id", CLIENT_ID),
-        ("response_type", "code"),
-        ("redirect_uri", REDIRECT_URI),
-        ("scope", "openid profile email offline_access"),
-        ("code_challenge", &code_challenge),
-        ("code_challenge_method", "S256"),
-    ];
-
-    let auth_url = format!(
-        "{}?{}",
-        AUTH_URL,
-        auth_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&")
-    );
-
-    // Store authorization code
-    let auth_code = Arc::new(Mutex::new(None::<String>));
-    let auth_code_clone = auth_code.clone();
-
-    // Start local HTTP server to receive callback
-    use axum::{extract::Query, response::Html, routing::get, Router};
-
-    #[derive(serde::Deserialize)]
-    struct CallbackQuery {
-        code: Option<String>,
-        error: Option<String>,
-    }
-
-    let app = Router::new().route(
-        "/callback",
-        get(|Query(query): Query<CallbackQuery>| async move {
-            let mut auth_code_lock = auth_code_clone.lock().await;
-            if let Some(code) = query.code {
-                *auth_code_lock = Some(code);
-                Html(
-                    "<h1>Authentication successful!</h1><p>You can close this window.</p>"
-                        .to_string(),
-                )
-            } else {
-                let error = query.error.unwrap_or_else(|| "unknown".to_string());
-                Html(format!(
-                    "<h1>Authentication failed</h1><p>Error: {}</p>",
-                    error
-                ))
+/// Check if a provider is a plugin with OAuth configuration
+fn provider_is_plugin_oauth(provider_id: &str) -> bool {
+    if let Ok(registry) = crate::plugins::PluginRegistry::new() {
+        for plugin in registry.enabled() {
+            if plugin.manifest.oauth.is_some() {
+                for contrib in plugin.contributed_providers() {
+                    if contrib.id == provider_id {
+                        return true;
+                    }
+                }
             }
-        }),
-    );
-
-    // Start server in background
-    let server_handle = tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:8888")
-            .await
-            .unwrap();
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    // Open browser
-    println!("Opening browser for authentication...");
-    println!();
-    println!("If the browser doesn't open, visit:");
-    println!("{}", auth_url.bright_cyan());
-    println!();
-
-    if let Err(e) = open::that(&auth_url) {
-        tracing::warn!("Failed to open browser: {}", e);
-    }
-
-    // Wait for authorization code (with timeout)
-    let mut attempts = 0;
-    let max_attempts = 60; // 60 seconds
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        let code_guard = auth_code.lock().await;
-        if code_guard.is_some() {
-            break;
         }
-        drop(code_guard);
+    }
+    false
+}
 
-        attempts += 1;
-        if attempts >= max_attempts {
-            server_handle.abort();
-            anyhow::bail!(
-                "Authentication timeout - no response after {} seconds",
-                max_attempts
-            );
+/// Run generic OAuth flow for a plugin-based provider
+async fn run_plugin_oauth_flow(provider_id: &str) -> Result<PathBuf> {
+    use crate::auth::OAuthHandler;
+    use crate::plugins::{PluginHost, PluginRegistry};
+
+    // Find the plugin with OAuth config
+    let registry = PluginRegistry::new()?;
+
+    let mut plugin_info = None;
+    for plugin in registry.enabled() {
+        if let Some(oauth_config) = &plugin.manifest.oauth {
+            for contrib in plugin.contributed_providers() {
+                if contrib.id == provider_id {
+                    plugin_info =
+                        Some((plugin.clone(), oauth_config.clone(), contrib.name.clone()));
+                    break;
+                }
+            }
+            if plugin_info.is_some() {
+                break;
+            }
         }
     }
 
-    // Get the authorization code
-    let authorization_code = auth_code
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("No authorization code received"))?;
+    let (plugin, oauth_config, provider_name) = plugin_info.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Provider {} not found or has no OAuth configuration",
+            provider_id
+        )
+    })?;
 
-    // Abort server
-    server_handle.abort();
+    println!("Authenticating with {}...", provider_name.bold());
+    println!();
 
-    println!("Exchanging authorization code for tokens...");
+    // Create OAuth handler
+    let handler = OAuthHandler::new(oauth_config.clone());
 
-    // Exchange code for tokens
-    let client = reqwest::Client::new();
-    let token_params = [
-        ("client_id", CLIENT_ID),
-        ("grant_type", "authorization_code"),
-        ("code", &authorization_code),
-        ("redirect_uri", REDIRECT_URI),
-        ("code_verifier", &code_verifier),
-    ];
+    // Execute OAuth flow
+    let tokens = handler.execute_pkce_flow().await?;
 
-    let token_response = client
-        .post(TOKEN_URL)
-        .form(&token_params)
-        .send()
-        .await?
-        .json::<serde_json::Value>()
-        .await?;
+    // Call plugin's token processor if defined
+    let final_tokens = if oauth_config.process_tokens_callback.is_some() {
+        println!("Processing tokens with plugin callback...");
 
-    // Save credentials
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
-        .join("tark");
+        // Load plugin instance
+        let mut plugin_host = PluginHost::new()?;
+        plugin_host.load(&plugin)?;
 
-    std::fs::create_dir_all(&config_dir)?;
+        // Convert tokens to JSON
+        let tokens_json = serde_json::to_string(&tokens)?;
 
-    let credentials_path = config_dir.join("chatgpt_oauth.json");
+        // Get mutable instance and call processor
+        if let Some(instance) = plugin_host.get_mut(plugin.id()) {
+            if let Some(processed_json) = instance.auth_process_tokens(&tokens_json)? {
+                tracing::debug!("Plugin processed tokens");
+                processed_json
+            } else {
+                // Plugin doesn't actually have the callback, use original
+                tokens_json
+            }
+        } else {
+            tokens_json
+        }
+    } else {
+        // No processor, serialize tokens with expires_at
+        let mut token_value = serde_json::to_value(&tokens)?;
+        if let Some(expires_in) = tokens.expires_in {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            token_value["expires_at"] = serde_json::json!(now + expires_in);
+        }
+        serde_json::to_string_pretty(&token_value)?
+    };
 
-    // Add expires_at timestamp
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
+    // Save credentials (either processed or original)
+    let creds_path = if let Some(path_str) = &oauth_config.credentials_path {
+        expand_path(path_str)
+    } else {
+        let config_dir = dirs::config_dir()
+            .context("Could not determine config directory")?
+            .join("tark");
+        config_dir.join(format!("{}_oauth.json", provider_id))
+    };
 
-    let expires_in = token_response["expires_in"].as_u64().unwrap_or(3600);
-    let mut credentials = token_response.clone();
-    credentials["expires_at"] = serde_json::json!(now + expires_in);
+    // Ensure parent directory exists
+    if let Some(parent) = creds_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
-    std::fs::write(
-        &credentials_path,
-        serde_json::to_string_pretty(&credentials)?,
-    )?;
+    // Write credentials
+    std::fs::write(&creds_path, final_tokens)?;
 
     // Set secure permissions (Unix only)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&credentials_path)?.permissions();
+        let mut perms = std::fs::metadata(&creds_path)?.permissions();
         perms.set_mode(0o600);
-        std::fs::set_permissions(&credentials_path, perms)?;
+        std::fs::set_permissions(&creds_path, perms)?;
     }
 
-    Ok(())
+    Ok(creds_path)
+}
+
+/// Expand ~ in path to home directory
+fn expand_path(path: &str) -> PathBuf {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    } else if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
+    PathBuf::from(path)
 }
 
 /// Logout from an LLM provider (clear stored tokens)
 pub async fn run_auth_logout(provider: &str) -> Result<()> {
+    use crate::plugins::PluginRegistry;
     use colored::Colorize;
 
     println!("{}", "=== Tark Logout ===".bold().cyan());
     println!();
 
+    // Check if provider is a plugin with OAuth configuration
+    if let Ok(registry) = PluginRegistry::new() {
+        for plugin in registry.enabled() {
+            if let Some(oauth_config) = &plugin.manifest.oauth {
+                for contrib in plugin.contributed_providers() {
+                    if contrib.id == provider
+                        || provider.to_lowercase() == contrib.id.to_lowercase()
+                    {
+                        // Delete credentials file
+                        if let Some(creds_path_str) = &oauth_config.credentials_path {
+                            let creds_path = expand_path(creds_path_str);
+                            if creds_path.exists() {
+                                std::fs::remove_file(&creds_path)?;
+                                println!("✅ Cleared {} OAuth credentials", contrib.name);
+                                println!("   Deleted: {}", creds_path.display());
+                                return Ok(());
+                            } else {
+                                println!("No credentials found for {}", contrib.name);
+                                return Ok(());
+                            }
+                        }
+
+                        // Also clear plugin storage
+                        let plugin_storage = plugin.data_dir().join("storage.json");
+                        if plugin_storage.exists() {
+                            std::fs::remove_file(&plugin_storage)?;
+                            println!("✅ Cleared {} plugin storage", contrib.name);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall through to built-in providers
     match provider.to_lowercase().as_str() {
         "gemini" | "google" => {
-            // Clear plugin storage if exists
+            // Clear plugin storage if exists (fallback)
             let plugin_storage = dirs::data_local_dir()
                 .map(|d| {
                     d.join("tark")

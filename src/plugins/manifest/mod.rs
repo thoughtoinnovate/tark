@@ -227,6 +227,44 @@ pub struct PluginActivation {
     pub events: Vec<String>,
 }
 
+/// OAuth2 flow type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthFlowType {
+    /// Authorization Code with PKCE (Proof Key for Code Exchange)
+    Pkce,
+    /// Device Flow (for devices without browsers)
+    DeviceFlow,
+}
+
+/// OAuth2 authentication configuration for plugins
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthConfig {
+    /// OAuth flow type
+    pub flow: OAuthFlowType,
+    /// Authorization endpoint URL
+    pub auth_url: String,
+    /// Token endpoint URL
+    pub token_url: String,
+    /// OAuth client ID
+    pub client_id: String,
+    /// Optional client secret (for confidential clients, not recommended for CLI tools)
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// OAuth scopes to request
+    pub scopes: Vec<String>,
+    /// Redirect URI for PKCE flow (e.g., "http://localhost:8888/callback")
+    pub redirect_uri: String,
+    /// Where to save credentials (supports ~ expansion, e.g., "~/.config/tark/provider_oauth.json")
+    #[serde(default)]
+    pub credentials_path: Option<String>,
+    /// Optional: WASM function name to call for token post-processing
+    /// If specified, the plugin's exported function will be called with tokens JSON
+    /// and can return modified tokens (e.g., extract account_id, add metadata)
+    #[serde(default)]
+    pub process_tokens_callback: Option<String>,
+}
+
 /// Plugin manifest (plugin.toml)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
@@ -244,6 +282,10 @@ pub struct PluginManifest {
     /// Activation events (when to load)
     #[serde(default)]
     pub activation: PluginActivation,
+
+    /// OAuth configuration (if plugin needs authentication via OAuth)
+    #[serde(default)]
+    pub oauth: Option<OAuthConfig>,
 
     /// Plugin-specific configuration schema (optional)
     #[serde(default)]

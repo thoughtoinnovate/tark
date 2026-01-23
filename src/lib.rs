@@ -9,6 +9,7 @@
 //! - Plugin system for extensibility
 
 pub mod agent;
+pub mod auth;
 pub mod completion;
 pub mod config;
 pub mod core;

@@ -336,6 +336,76 @@ impl PluginInstance {
             .is_ok()
     }
 
+    /// Process OAuth tokens through plugin callback (optional)
+    ///
+    /// If the plugin exports `auth_process_tokens`, this calls it with the tokens JSON
+    /// and returns the processed result. This allows plugins to:
+    /// - Extract additional data (e.g., account_id from JWT)
+    /// - Add metadata or computed fields
+    /// - Validate tokens before storage
+    ///
+    /// Returns None if plugin doesn't export auth_process_tokens function.
+    pub fn auth_process_tokens(&mut self, tokens_json: &str) -> Result<Option<String>> {
+        // Check if function exists
+        if self
+            .instance
+            .get_typed_func::<(i32, i32, i32), i32>(&mut self.store, "auth_process_tokens")
+            .is_err()
+        {
+            return Ok(None);
+        }
+
+        self.safe_call("auth_process_tokens", |this| {
+            // Allocate buffer for input tokens
+            let alloc_fn = this
+                .instance
+                .get_typed_func::<i32, i32>(&mut this.store, "alloc")
+                .context("Plugin does not export 'alloc' function")?;
+
+            let tokens_bytes = tokens_json.as_bytes();
+            let tokens_ptr = alloc_fn.call(&mut this.store, tokens_bytes.len() as i32)?;
+
+            // Write tokens to WASM memory
+            let memory = this
+                .instance
+                .get_memory(&mut this.store, "memory")
+                .context("Plugin has no memory export")?;
+
+            let data = memory.data_mut(&mut this.store);
+            let dest = &mut data[tokens_ptr as usize..(tokens_ptr as usize + tokens_bytes.len())];
+            dest.copy_from_slice(tokens_bytes);
+
+            // Allocate buffer for output
+            let output_ptr = alloc_fn.call(&mut this.store, 8192)?; // 8KB buffer
+
+            // Call auth_process_tokens(tokens_ptr, tokens_len, output_ptr) -> output_len
+            let process_fn = this
+                .instance
+                .get_typed_func::<(i32, i32, i32), i32>(&mut this.store, "auth_process_tokens")?;
+
+            let output_len = process_fn.call(
+                &mut this.store,
+                (tokens_ptr, tokens_bytes.len() as i32, output_ptr),
+            )?;
+
+            if output_len < 0 {
+                anyhow::bail!("Plugin auth_process_tokens returned error");
+            }
+
+            // Read processed tokens from WASM memory
+            let memory = this
+                .instance
+                .get_memory(&mut this.store, "memory")
+                .context("Plugin has no memory export")?;
+
+            let data = memory.data(&this.store);
+            let processed_bytes = &data[output_ptr as usize..(output_ptr + output_len) as usize];
+            let processed_json = String::from_utf8(processed_bytes.to_vec())?;
+
+            Ok(Some(processed_json))
+        })
+    }
+
     /// Send chat completion request (non-streaming)
     /// messages_json: JSON array of {role, content} objects
     /// Returns: JSON response with {text, usage}

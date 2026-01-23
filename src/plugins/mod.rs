@@ -31,7 +31,8 @@ pub use host::{
     ProviderAuthStatus, ProviderInfo,
 };
 pub use manifest::{
-    PluginCapabilities, PluginContributions, PluginManifest, PluginType, ProviderContribution,
+    OAuthConfig, OAuthFlowType, PluginCapabilities, PluginContributions, PluginManifest,
+    PluginType, ProviderContribution,
 };
 pub use registry::{InstalledPlugin, PluginRegistry};
 
