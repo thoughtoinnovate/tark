@@ -196,7 +196,6 @@ impl McpPolicyHandler {
 mod tests {
     use super::*;
     use crate::policy::schema;
-    use tempfile::TempDir;
 
     #[test]
     fn test_mcp_defaults() {

@@ -6,6 +6,10 @@ description = "AI-powered CLI agent with LSP server for code completion, hover, 
 authors = ["tark contributors"]
 license = "MIT"
 
+[lib]
+name = "tark_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tark"
 path = "src/main.rs"

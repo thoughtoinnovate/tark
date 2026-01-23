@@ -2,27 +2,13 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod agent;
-mod completion;
-mod config;
-mod core;
-mod debug_logger;
-mod diagnostics;
-mod llm;
-mod lsp;
-mod plugins;
-mod services;
-mod storage;
-mod tools;
-mod transport;
-// Old TUI removed - using tui_new architecture
-mod tui_new;
-mod ui_backend;
+// Import from library crate
+use tark_cli::*;
 
 // Re-export debug logging utilities for use within the binary
-use debug_logger::{DebugLogEntry, DebugLogger, DebugLoggerConfig, LogCategory};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use tark_cli::debug_logger::{DebugLogEntry, DebugLogger, DebugLoggerConfig};
 
 /// Global debug logger instance
 static TARK_DEBUG_LOGGER: OnceLock<DebugLogger> = OnceLock::new();
