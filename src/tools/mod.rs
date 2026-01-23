@@ -61,6 +61,7 @@ pub use builtin::{
 };
 
 use crate::llm::ToolDefinition;
+use crate::policy::PolicyEngine;
 use crate::services::PlanService;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -162,8 +163,12 @@ pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     working_dir: PathBuf,
     mode: AgentMode,
-    /// Approval gate for risky operations
+    /// Approval gate for risky operations (DEPRECATED - use policy_engine)
     approval_gate: Option<tokio::sync::Mutex<approval::ApprovalGate>>,
+    /// Policy engine for approval decisions (NEW)
+    policy_engine: Option<Arc<PolicyEngine>>,
+    /// Current session ID for tracking patterns
+    session_id: String,
 }
 
 impl ToolRegistry {
@@ -173,6 +178,8 @@ impl ToolRegistry {
             working_dir,
             mode: AgentMode::Build,
             approval_gate: None,
+            policy_engine: None,
+            session_id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -225,7 +232,7 @@ impl ToolRegistry {
         approvals_path: Option<PathBuf>,
         todo_tracker: Option<Arc<Mutex<TodoTracker>>>,
     ) -> Self {
-        // Create approval gate if we have an interaction channel
+        // Create approval gate if we have an interaction channel (DEPRECATED)
         let approval_gate = interaction_tx.as_ref().map(|tx| {
             let storage_path = approvals_path
                 .clone()
@@ -233,11 +240,31 @@ impl ToolRegistry {
             tokio::sync::Mutex::new(approval::ApprovalGate::new(storage_path, Some(tx.clone())))
         });
 
+        // Initialize PolicyEngine (NEW)
+        let policy_engine = {
+            let db_path = working_dir.join(".tark").join("policy.db");
+            match PolicyEngine::open(&db_path, &working_dir) {
+                Ok(engine) => {
+                    tracing::info!("PolicyEngine initialized at {:?}", db_path);
+                    Some(Arc::new(engine))
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to initialize PolicyEngine: {}, falling back to ApprovalGate",
+                        e
+                    );
+                    None
+                }
+            }
+        };
+
         let mut registry = Self {
             tools: HashMap::new(),
             working_dir: working_dir.clone(),
             mode,
             approval_gate,
+            policy_engine,
+            session_id: uuid::Uuid::new_v4().to_string(),
         };
 
         tracing::debug!("Creating tool registry for mode: {:?}", mode);
@@ -384,14 +411,55 @@ impl ToolRegistry {
 
     /// Execute a tool by name with given parameters
     ///
-    /// If an approval gate is configured and the tool's risk level requires approval,
+    /// If an approval gate or policy engine is configured and the tool's risk level requires approval,
     /// the user will be prompted before execution.
     pub async fn execute(&self, name: &str, params: Value) -> Result<ToolResult> {
         let Some(tool) = self.tools.get(name) else {
             return Ok(ToolResult::error(format!("Unknown tool: {}", name)));
         };
 
-        // Check approval if we have an approval gate
+        // Build command string for display/pattern matching
+        let command = self.build_command_string(name, &params);
+
+        // NEW: Try PolicyEngine first
+        if let Some(ref engine) = self.policy_engine {
+            let mode_id = match self.mode {
+                AgentMode::Ask => "ask",
+                AgentMode::Plan => "plan",
+                AgentMode::Build => "build",
+            };
+
+            let trust_id = self.get_trust_level_id();
+
+            match engine.check_approval(name, &command, mode_id, &trust_id, &self.session_id) {
+                Ok(decision) => {
+                    tracing::debug!(
+                        "PolicyEngine decision for '{}': needs_approval={}, allow_save={}",
+                        name,
+                        decision.needs_approval,
+                        decision.allow_save_pattern
+                    );
+
+                    if !decision.needs_approval {
+                        // Auto-approved - proceed with execution
+                        tracing::debug!("Tool '{}' auto-approved by PolicyEngine", name);
+                    } else {
+                        // Need approval - should be handled by caller via interaction channel
+                        // For now, we fall through to old approval gate
+                        tracing::warn!("PolicyEngine requires approval but interaction flow not yet integrated for '{}'", name);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "PolicyEngine check failed for '{}': {}, falling back to approval gate",
+                        name,
+                        e
+                    );
+                }
+            }
+        }
+
+        // FALLBACK: Check approval if we have an approval gate
         if let Some(ref gate_mutex) = self.approval_gate {
             let risk_level = tool.risk_level();
 
@@ -553,5 +621,12 @@ impl ToolRegistry {
             let mut gate = gate_mutex.lock().await;
             gate.set_storage_path(storage_path);
         }
+    }
+
+    /// Get trust level ID as string for PolicyEngine
+    fn get_trust_level_id(&self) -> String {
+        // For now, default to "balanced" - will be properly managed via set_trust_level
+        // TODO: Store trust_level in ToolRegistry directly and sync with approval_gate
+        "balanced".to_string()
     }
 }
