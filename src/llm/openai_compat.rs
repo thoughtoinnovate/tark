@@ -428,6 +428,11 @@ impl OpenAiCompatProvider {
         self.model.to_lowercase().contains("codex")
     }
 
+    /// Check if this is the ChatGPT Codex endpoint (has specific parameter requirements)
+    fn is_chatgpt_codex_endpoint(&self) -> bool {
+        self.config.base_url.contains("chatgpt.com") && self.config.base_url.contains("codex")
+    }
+
     /// Convert messages to Responses API format
     /// Returns (instructions, input)
     fn convert_messages_to_responses(
@@ -613,11 +618,18 @@ impl OpenAiCompatProvider {
     ) -> ResponsesApiRequest {
         let (instructions, input) = self.convert_messages_to_responses(messages);
 
+        // ChatGPT Codex endpoint doesn't support max_output_tokens
+        let max_output_tokens = if self.is_chatgpt_codex_endpoint() {
+            None
+        } else {
+            Some(self.max_tokens)
+        };
+
         let mut request = ResponsesApiRequest {
             model: self.model.clone(),
             input,
             instructions,
-            max_output_tokens: Some(self.max_tokens),
+            max_output_tokens,
             tools: None,
             tool_choice: None,
             stream: if stream { Some(true) } else { None },
