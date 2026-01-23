@@ -178,6 +178,12 @@ enum Commands {
         #[command(subcommand)]
         command: PluginCommands,
     },
+
+    /// Policy database management
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
+    },
 }
 
 /// Auth subcommands
@@ -191,6 +197,21 @@ enum AuthCommands {
 
     /// Show authentication status for all providers
     Status,
+}
+
+/// Policy subcommands
+#[derive(Subcommand)]
+enum PolicyCommands {
+    /// Verify policy database integrity
+    Verify {
+        /// Force reseed builtin policy from embedded configs
+        #[arg(long)]
+        fix: bool,
+
+        /// Working directory (default: current directory)
+        #[arg(long)]
+        cwd: Option<String>,
+    },
 }
 
 /// Plugin subcommands
@@ -376,6 +397,15 @@ async fn main() -> Result<()> {
             }
             PluginCommands::Disable { plugin_id } => {
                 transport::plugin_cli::run_plugin_disable(&plugin_id).await?;
+            }
+        },
+        Commands::Policy { command } => match command {
+            PolicyCommands::Verify { fix, cwd } => {
+                let working_dir = cwd
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+                transport::cli::run_policy_verify(&working_dir, fix).await?;
             }
         },
         Commands::Tui {

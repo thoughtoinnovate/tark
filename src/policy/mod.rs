@@ -1,6 +1,7 @@
 pub mod classifier;
 pub mod config;
 pub mod engine;
+pub mod integrity;
 pub mod mcp;
 pub mod migrate;
 pub mod resolver;
@@ -11,6 +12,7 @@ pub mod types;
 
 pub use config::{ConfigLoader, PatternLoader};
 pub use engine::PolicyEngine;
+pub use integrity::{IntegrityVerifier, VerificationResult};
 pub use resolver::{ApprovalBehavior, ApprovalDefaults, ResolvedDecision, RuleKey, RuleResolver};
 pub use types::{
     ApprovalDecision, ApprovalDecisionType, ApprovalPattern, ApprovalPatternEntry, AuditEntry,

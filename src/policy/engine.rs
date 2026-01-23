@@ -24,6 +24,11 @@ pub struct PolicyEngine {
 impl PolicyEngine {
     /// Open or create policy database
     pub fn open(db_path: &Path, working_dir: &Path) -> Result<Self> {
+        // Ensure parent directory exists
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
         let conn = Connection::open(db_path)?;
 
         // Configure SQLite for better concurrency
@@ -32,12 +37,64 @@ impl PolicyEngine {
         conn.pragma_update(None, "busy_timeout", 5000)?; // Wait up to 5 seconds on locks
         conn.pragma_update(None, "synchronous", "NORMAL")?; // Balance safety and speed
 
-        // Create tables
+        // Create tables (includes integrity_metadata)
         schema::create_tables(&conn)?;
         schema::init_schema_version(&conn)?;
 
-        // Seed builtin policy
-        seed::seed_builtin(&conn)?;
+        // Seed builtin policy (idempotent)
+        let was_seeded = {
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM agent_modes", [], |r| r.get(0))?;
+            count > 0
+        };
+
+        if !was_seeded {
+            seed::seed_builtin(&conn)?;
+            tracing::info!("Seeded builtin policy tables");
+
+            // Calculate and store initial hash
+            let verifier = crate::policy::integrity::IntegrityVerifier::new(&conn);
+            let hash = verifier.calculate_builtin_hash()?;
+            verifier.store_hash(&hash)?;
+            tracing::debug!("Stored initial integrity hash: {}", &hash[..16]);
+        }
+
+        // Verify integrity (auto-repair if tampering detected)
+        let verifier = crate::policy::integrity::IntegrityVerifier::new(&conn);
+        match verifier.verify_integrity()? {
+            crate::policy::integrity::VerificationResult::Valid => {
+                tracing::debug!("Policy integrity verified");
+            }
+            crate::policy::integrity::VerificationResult::Invalid { expected, actual } => {
+                tracing::error!(
+                    "⚠️  SECURITY WARNING: Tampering detected in policy.db!\n\
+                     Expected hash: {}...\n\
+                     Actual hash:   {}...\n\
+                     Auto-repairing: clearing builtin tables and reseeding from embedded configs.\n\
+                     User approval patterns will be preserved.",
+                    &expected[..16],
+                    &actual[..16]
+                );
+
+                // Auto-repair
+                verifier.clear_builtin_tables()?;
+                seed::seed_builtin(&conn)?;
+                let new_hash = verifier.calculate_builtin_hash()?;
+                verifier.store_hash(&new_hash)?;
+
+                tracing::info!(
+                    "✓ Policy database repaired successfully (new hash: {})",
+                    &new_hash[..16]
+                );
+            }
+            crate::policy::integrity::VerificationResult::NoHash => {
+                // First run after upgrade, calculate and store hash
+                tracing::debug!("No stored hash found, calculating initial hash");
+                let hash = verifier.calculate_builtin_hash()?;
+                verifier.store_hash(&hash)?;
+                tracing::debug!("Stored integrity hash: {}", &hash[..16]);
+            }
+        }
 
         // Load user patterns from config files
         let pattern_loader = crate::policy::config::PatternLoader::new(Some(working_dir));

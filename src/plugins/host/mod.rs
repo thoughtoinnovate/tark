@@ -547,9 +547,15 @@ pub struct AuthCredentials {
     /// Google Cloud project ID (for Cloud Code Assist API)
     #[serde(default)]
     pub project_id: Option<String>,
-    /// API mode: "standard" or "cloud_code_assist"
+    /// API mode: "standard", "cloud_code_assist", or "openai_compat"
     #[serde(default = "default_api_mode")]
     pub api_mode: String,
+    /// Custom API endpoint (for openai_compat mode)
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Custom headers to send with requests (for openai_compat mode)
+    #[serde(default)]
+    pub custom_headers: Option<std::collections::HashMap<String, String>>,
 }
 
 fn default_api_mode() -> String {

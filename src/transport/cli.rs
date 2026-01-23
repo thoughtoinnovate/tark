@@ -7,6 +7,7 @@ use crate::agent::ChatAgent;
 use crate::completion::{CompletionEngine, CompletionRequest};
 use crate::config::Config;
 use crate::llm;
+use crate::policy::{IntegrityVerifier, VerificationResult};
 use crate::storage::usage::{CleanupRequest, UsageTracker};
 use crate::storage::TarkStorage;
 use crate::tools::ToolRegistry;
@@ -14,6 +15,7 @@ use crate::tools::ToolRegistry;
 use crate::tui_new::app::TuiApp;
 use anyhow::{Context, Result};
 use colored::Colorize;
+use rusqlite::Connection;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -915,6 +917,90 @@ pub async fn run_auth_status() -> Result<()> {
     println!();
     println!("Authenticate with: tark auth <provider>");
     println!("Logout with: tark auth logout <provider>");
+
+    Ok(())
+}
+
+/// Verify policy database integrity
+pub async fn run_policy_verify(working_dir: &std::path::Path, fix: bool) -> Result<()> {
+    let db_path = working_dir.join(".tark").join("policy.db");
+
+    if !db_path.exists() {
+        println!("{}", "Policy database not found.".red());
+        println!("Location: {}", db_path.display());
+        println!("\nThe database will be created automatically when you run tark tui.");
+        return Ok(());
+    }
+
+    println!("{}", "Policy Database Integrity Check".bold());
+    println!("Location: {}", db_path.display());
+    println!();
+
+    if fix {
+        println!("{}", "Forcing reseed from embedded configs...".yellow());
+
+        // Open database and force repair
+        let conn = Connection::open(&db_path)?;
+        let verifier = IntegrityVerifier::new(&conn);
+
+        verifier.clear_builtin_tables()?;
+        crate::policy::seed::seed_builtin(&conn)?;
+        let hash = verifier.calculate_builtin_hash()?;
+        verifier.store_hash(&hash)?;
+
+        println!("{}", "✓ Policy database repaired successfully".green());
+        println!("New hash: {}", &hash[..16]);
+        println!();
+        println!("User approval patterns were preserved.");
+
+        return Ok(());
+    }
+
+    // Verify integrity
+    let conn = Connection::open(&db_path)?;
+    let verifier = IntegrityVerifier::new(&conn);
+
+    match verifier.verify_integrity()? {
+        VerificationResult::Valid => {
+            let hash = verifier.get_stored_hash()?.unwrap_or_default();
+            println!("{}", "✓ Integrity check passed".green());
+            println!("Hash: {}", &hash[..32]);
+            println!();
+            println!("No tampering detected. Builtin policy tables are intact.");
+        }
+        VerificationResult::Invalid { expected, actual } => {
+            println!("{}", "✗ Integrity check failed".red().bold());
+            println!();
+            println!("Expected hash: {}", &expected[..32]);
+            println!("Actual hash:   {}", &actual[..32]);
+            println!();
+            println!(
+                "{}",
+                "⚠️  WARNING: Builtin policy tables have been modified!"
+                    .yellow()
+                    .bold()
+            );
+            println!();
+            println!("This could indicate:");
+            println!("  • Tampering with the database");
+            println!("  • Database corruption");
+            println!("  • Manual modification of builtin tables");
+            println!();
+            println!("To repair:");
+            println!("  {}", "tark policy verify --fix".cyan());
+            println!();
+            println!("Note: User approval patterns will be preserved during repair.");
+        }
+        VerificationResult::NoHash => {
+            println!("{}", "⚠️  No integrity hash found".yellow());
+            println!();
+            println!("Calculating initial hash...");
+            let hash = verifier.calculate_builtin_hash()?;
+            verifier.store_hash(&hash)?;
+            println!("{}", "✓ Integrity hash stored".green());
+            println!("Hash: {}", &hash[..32]);
+        }
+    }
 
     Ok(())
 }

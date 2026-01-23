@@ -162,6 +162,13 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
             working_directory TEXT
         );
 
+        -- 15. Integrity metadata (for tamper detection)
+        CREATE TABLE IF NOT EXISTS integrity_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         -- Indexes
         CREATE INDEX IF NOT EXISTS idx_classifications_tool ON tool_classifications(tool_type_id);
         CREATE INDEX IF NOT EXISTS idx_classifications_priority ON tool_classifications(tool_type_id, base_risk);
