@@ -51,8 +51,6 @@ pub struct ConversationService {
     event_tx: mpsc::UnboundedSender<AppEvent>,
     /// Interaction channel (ask_user / approval)
     interaction_tx: Option<InteractionSender>,
-    /// Approval storage path (per session)
-    approvals_path: tokio::sync::RwLock<Option<std::path::PathBuf>>,
     /// Interrupt flag
     interrupt_flag: Arc<AtomicBool>,
     /// Processing flag
@@ -70,7 +68,6 @@ impl ConversationService {
             chat_agent,
             event_tx,
             interaction_tx: None,
-            approvals_path: tokio::sync::RwLock::new(None),
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             is_processing: Arc::new(AtomicBool::new(false)),
         }
@@ -81,12 +78,10 @@ impl ConversationService {
         chat_agent: ChatAgent,
         event_tx: mpsc::UnboundedSender<AppEvent>,
         interaction_tx: Option<InteractionSender>,
-        approvals_path: Option<std::path::PathBuf>,
     ) -> Self {
         let service = Self::new(chat_agent, event_tx);
         Self {
             interaction_tx,
-            approvals_path: tokio::sync::RwLock::new(approvals_path),
             ..service
         }
     }
@@ -436,14 +431,12 @@ impl ConversationService {
         mode: AgentMode,
         todo_tracker: Option<Arc<std::sync::Mutex<crate::tools::TodoTracker>>>,
     ) {
-        let approvals_path = { self.approvals_path.read().await.clone() };
         let tools = ToolRegistry::for_mode_with_services(
             working_dir,
             mode,
             true,
             self.interaction_tx.clone(),
             None,
-            approvals_path,
             todo_tracker,
         );
         let mut agent = self.chat_agent.write().await;

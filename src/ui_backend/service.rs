@@ -144,7 +144,6 @@ impl AppService {
                 true, // shell_enabled
                 Some(interaction_tx.clone()),
                 None,
-                None,
                 Some(state.todo_tracker()),
             );
 
@@ -158,7 +157,6 @@ impl AppService {
                     chat_agent,
                     event_tx.clone(),
                     Some(interaction_tx.clone()),
-                    None,
                 ));
 
                 // Initialize SessionManager

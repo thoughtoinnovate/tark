@@ -215,15 +215,7 @@ impl ToolRegistry {
         shell_enabled: bool,
         interaction_tx: Option<InteractionSender>,
     ) -> Self {
-        Self::for_mode_with_services(
-            working_dir,
-            mode,
-            shell_enabled,
-            interaction_tx,
-            None,
-            None,
-            None,
-        )
+        Self::for_mode_with_services(working_dir, mode, shell_enabled, interaction_tx, None, None)
     }
 
     /// Create a registry with full service support including plan tools
@@ -240,7 +232,6 @@ impl ToolRegistry {
         shell_enabled: bool,
         interaction_tx: Option<InteractionSender>,
         plan_service: Option<Arc<PlanService>>,
-        _approvals_path: Option<PathBuf>,
         todo_tracker: Option<Arc<Mutex<TodoTracker>>>,
     ) -> Self {
         // Initialize PolicyEngine
