@@ -17,6 +17,7 @@ pub mod diagnostics;
 pub mod llm;
 pub mod lsp;
 pub mod plugins;
+pub mod policy;
 pub mod services;
 pub mod storage;
 pub mod tools;

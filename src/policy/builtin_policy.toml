@@ -1,0 +1,381 @@
+# Builtin Policy - Compiled into binary
+# Defines internal modes, tools, and default approval rules
+# Users CANNOT modify these - they are immutable
+
+version = 1
+
+# ========== AGENT MODES ==========
+[[modes]]
+id = "ask"
+name = "Ask"
+icon = "?"
+description = "Read-only exploration and Q&A"
+has_approval_gate = false
+display_order = 1
+
+[[modes]]
+id = "plan"
+name = "Plan"
+icon = "P"
+description = "Read + propose changes (no execution)"
+has_approval_gate = false
+display_order = 2
+
+[[modes]]
+id = "build"
+name = "Build"
+icon = "B"
+description = "Full access to read, write, and execute"
+has_approval_gate = true
+display_order = 3
+
+# ========== TRUST LEVELS (Build Mode Only) ==========
+[[trust_levels]]
+id = "balanced"
+name = "Balanced"
+icon = "Y"
+description = "Auto-approve reads and local writes, prompt for risky"
+applies_to_mode = "build"
+display_order = 1
+
+[[trust_levels]]
+id = "careful"
+name = "Careful"
+icon = "B"
+description = "Auto-approve reads only, prompt for all writes"
+applies_to_mode = "build"
+display_order = 2
+
+[[trust_levels]]
+id = "manual"
+name = "Manual"
+icon = "R"
+description = "Prompt for everything except safe reads"
+applies_to_mode = "build"
+display_order = 3
+
+# ========== TOOL CATEGORIES ==========
+[[categories]]
+id = "power"
+name = "Power Tools"
+description = "Full system access tools"
+
+[[categories]]
+id = "readonly"
+name = "Read-Only"
+description = "Read-only information tools"
+
+[[categories]]
+id = "write"
+name = "Write"
+description = "File modification tools"
+
+[[categories]]
+id = "dangerous"
+name = "Dangerous"
+description = "Destructive operations"
+
+# ========== TOOL TYPES ==========
+[[tools]]
+id = "shell"
+name = "Shell"
+category = "power"
+permissions = "RWX"
+base_risk = "dangerous"
+
+[[tools]]
+id = "safe_shell"
+name = "Safe Shell"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "read_file"
+name = "Read File"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "write_file"
+name = "Write File"
+category = "write"
+permissions = "W"
+base_risk = "moderate"
+
+[[tools]]
+id = "delete_file"
+name = "Delete File"
+category = "dangerous"
+permissions = "W"
+base_risk = "dangerous"
+
+[[tools]]
+id = "grep"
+name = "Grep"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+[[tools]]
+id = "glob"
+name = "Glob"
+category = "readonly"
+permissions = "R"
+base_risk = "safe"
+
+# ========== TOOL MODE AVAILABILITY ==========
+[[tool_availability]]
+tool = "shell"
+mode = "ask"
+available = false
+alternative = "safe_shell"
+
+[[tool_availability]]
+tool = "shell"
+mode = "plan"
+available = false
+alternative = "safe_shell"
+
+[[tool_availability]]
+tool = "shell"
+mode = "build"
+available = true
+
+[[tool_availability]]
+tool = "safe_shell"
+mode = "ask"
+available = true
+
+[[tool_availability]]
+tool = "safe_shell"
+mode = "plan"
+available = true
+
+[[tool_availability]]
+tool = "safe_shell"
+mode = "build"
+available = true
+
+[[tool_availability]]
+tool = "write_file"
+mode = "ask"
+available = false
+
+[[tool_availability]]
+tool = "write_file"
+mode = "plan"
+available = false
+
+[[tool_availability]]
+tool = "write_file"
+mode = "build"
+available = true
+
+[[tool_availability]]
+tool = "delete_file"
+mode = "ask"
+available = false
+
+[[tool_availability]]
+tool = "delete_file"
+mode = "plan"
+available = false
+
+[[tool_availability]]
+tool = "delete_file"
+mode = "build"
+available = true
+
+# ========== SHELL CLASSIFICATIONS (Simplified) ==========
+# These are classifications of what a shell command does
+# NOT separate tools - they classify the "shell" tool's operations
+
+[[classifications]]
+id = "shell-read"
+tool = "shell"
+name = "Shell Read"
+operation = "read"
+base_risk = "safe"
+description = "Read-only shell commands"
+
+[[classifications]]
+id = "shell-write"
+tool = "shell"
+name = "Shell Write"
+operation = "write"
+base_risk = "moderate"
+description = "Shell commands that write/modify files"
+
+[[classifications]]
+id = "shell-rm"
+tool = "shell"
+name = "Shell Delete"
+operation = "delete"
+base_risk = "dangerous"
+description = "Shell commands that delete files"
+
+# ========== APPROVAL RULES (Classification x Mode x Trust x Location) ==========
+
+# --- shell-read ---
+[[rules]]
+classification = "shell-read"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "shell-read"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = false
+
+[[rules]]
+classification = "shell-read"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "shell-read"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "shell-read"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "shell-read"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+# --- shell-write ---
+[[rules]]
+classification = "shell-write"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "shell-write"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "shell-write"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "shell-write"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "shell-write"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "shell-write"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+# --- shell-rm ---
+[[rules]]
+classification = "shell-rm"
+mode = "build"
+trust = "balanced"
+in_workdir = true
+needs_approval = false
+
+[[rules]]
+classification = "shell-rm"
+mode = "build"
+trust = "balanced"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "shell-rm"
+mode = "build"
+trust = "careful"
+in_workdir = true
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "shell-rm"
+mode = "build"
+trust = "careful"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = false    # ALWAYS prompt - cannot save pattern
+
+[[rules]]
+classification = "shell-rm"
+mode = "build"
+trust = "manual"
+in_workdir = true
+needs_approval = true
+allow_save_pattern = true
+
+[[rules]]
+classification = "shell-rm"
+mode = "build"
+trust = "manual"
+in_workdir = false
+needs_approval = true
+allow_save_pattern = false    # ALWAYS prompt - cannot save pattern
+
+# ========== COMPOUND COMMAND RULES ==========
+[[compound_rules]]
+separator = "&&"
+strategy = "highest_risk"
+description = "AND - use highest risk classification"
+
+[[compound_rules]]
+separator = "||"
+strategy = "highest_risk"
+description = "OR - use highest risk classification"
+
+[[compound_rules]]
+separator = ";"
+strategy = "highest_risk"
+description = "Sequential - use highest risk classification"
+
+[[compound_rules]]
+separator = "|"
+strategy = "first"
+description = "Pipe - classify by first command"
