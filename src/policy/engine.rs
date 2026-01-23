@@ -421,12 +421,13 @@ impl PolicyEngine {
         let conn = self.conn.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
 
         // Query approval patterns from policy.db (is_denial = 0)
+        // Include both persistent patterns (is_persistent = 1) and session patterns (is_persistent = 0)
         let approval_query = r#"
-            SELECT id, tool_type_id, pattern, match_type, description
+            SELECT id, tool_type_id, pattern, match_type, description, is_persistent
             FROM approval_patterns
             WHERE is_denial = 0
-              AND (is_persistent = 0 AND session_id = ?1)
-            ORDER BY created_at DESC
+              AND (is_persistent = 1 OR (is_persistent = 0 AND session_id = ?1))
+            ORDER BY is_persistent DESC, created_at DESC
         "#;
 
         let mut stmt = conn.prepare(approval_query)?;
@@ -438,6 +439,7 @@ impl PolicyEngine {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, bool>(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -446,24 +448,44 @@ impl PolicyEngine {
         let mut approvals: Vec<ApprovalPatternEntry> = approval_rows
             .into_iter()
             .map(
-                |(id, tool, pattern, match_type, description)| ApprovalPatternEntry {
-                    id,
-                    tool,
-                    pattern,
-                    match_type,
-                    is_denial: false,
-                    description,
+                |(id, tool, pattern, match_type, description, is_persistent)| {
+                    let desc = if is_persistent {
+                        Some(format!(
+                            "Persistent{}",
+                            description
+                                .as_ref()
+                                .map(|d| format!(" · {}", d))
+                                .unwrap_or_default()
+                        ))
+                    } else {
+                        Some(format!(
+                            "Session-only{}",
+                            description
+                                .as_ref()
+                                .map(|d| format!(" · {}", d))
+                                .unwrap_or_default()
+                        ))
+                    };
+                    ApprovalPatternEntry {
+                        id,
+                        tool,
+                        pattern,
+                        match_type,
+                        is_denial: false,
+                        description: desc,
+                    }
                 },
             )
             .collect();
 
         // Query denial patterns from policy.db (is_denial = 1)
+        // Include both persistent patterns (is_persistent = 1) and session patterns (is_persistent = 0)
         let denial_query = r#"
-            SELECT id, tool_type_id, pattern, match_type, description
+            SELECT id, tool_type_id, pattern, match_type, description, is_persistent
             FROM approval_patterns
             WHERE is_denial = 1
-              AND (is_persistent = 0 AND session_id = ?1)
-            ORDER BY created_at DESC
+              AND (is_persistent = 1 OR (is_persistent = 0 AND session_id = ?1))
+            ORDER BY is_persistent DESC, created_at DESC
         "#;
 
         let mut stmt = conn.prepare(denial_query)?;
@@ -475,6 +497,7 @@ impl PolicyEngine {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, bool>(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -484,13 +507,32 @@ impl PolicyEngine {
         let mut denials: Vec<ApprovalPatternEntry> = denial_rows
             .into_iter()
             .map(
-                |(id, tool, pattern, match_type, description)| ApprovalPatternEntry {
-                    id,
-                    tool,
-                    pattern,
-                    match_type,
-                    is_denial: true,
-                    description,
+                |(id, tool, pattern, match_type, description, is_persistent)| {
+                    let desc = if is_persistent {
+                        Some(format!(
+                            "Persistent{}",
+                            description
+                                .as_ref()
+                                .map(|d| format!(" · {}", d))
+                                .unwrap_or_default()
+                        ))
+                    } else {
+                        Some(format!(
+                            "Session-only{}",
+                            description
+                                .as_ref()
+                                .map(|d| format!(" · {}", d))
+                                .unwrap_or_default()
+                        ))
+                    };
+                    ApprovalPatternEntry {
+                        id,
+                        tool,
+                        pattern,
+                        match_type,
+                        is_denial: true,
+                        description: desc,
+                    }
                 },
             )
             .collect();
