@@ -397,7 +397,7 @@ impl PolicyEngine {
                 &pattern.match_type.to_string(),
                 pattern.is_denial,
                 matches!(pattern.source, PatternSource::User | PatternSource::Workspace),
-                if matches!(pattern.source, PatternSource::Session) { Some("session") } else { None },
+                pattern.session_id.as_deref(),
                 &pattern.description,
             ),
         )?;

@@ -148,6 +148,32 @@ impl<'a> IntegrityVerifier<'a> {
     pub fn clear_builtin_tables(&self) -> Result<()> {
         // Delete from builtin tables in reverse dependency order
         // Note: We don't use CASCADE because we want explicit control
+        // Temporarily disable foreign keys and drop protection triggers
+        self.conn.execute("PRAGMA foreign_keys = OFF", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_availability_delete", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_availability_update", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_rules_delete", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_rules_update", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_classifications_delete", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_classifications_update", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_tools_delete", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_tools_update", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_trust_delete", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_trust_update", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_modes_delete", [])?;
+        self.conn
+            .execute("DROP TRIGGER IF EXISTS protect_modes_update", [])?;
 
         // Start with tables that have no dependencies
         self.conn
@@ -168,6 +194,10 @@ impl<'a> IntegrityVerifier<'a> {
         self.conn.execute("DELETE FROM tool_categories", [])?;
         self.conn.execute("DELETE FROM trust_levels", [])?;
         self.conn.execute("DELETE FROM agent_modes", [])?;
+
+        // Re-enable foreign keys and recreate protection triggers
+        self.conn.execute("PRAGMA foreign_keys = ON", [])?;
+        crate::policy::schema::create_protection_triggers(&self.conn)?;
 
         tracing::debug!("Cleared all builtin tables");
         Ok(())

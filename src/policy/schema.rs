@@ -187,7 +187,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
 }
 
 /// Create triggers to protect builtin tables from modification
-fn create_protection_triggers(conn: &Connection) -> Result<()> {
+pub fn create_protection_triggers(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         -- Protect agent_modes

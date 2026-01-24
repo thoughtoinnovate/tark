@@ -550,21 +550,26 @@ impl<B: Backend> TuiController<B> {
             Command::ApproveOperation => {
                 self.send_approval_response(ApprovalChoice::ApproveOnce)
                     .await;
+                return Ok(());
             }
             Command::ApproveSession => {
                 self.send_approval_response(ApprovalChoice::ApproveSession)
                     .await;
+                return Ok(());
             }
             Command::ApproveAlways => {
                 self.send_approval_response(ApprovalChoice::ApproveAlways)
                     .await;
+                return Ok(());
             }
             Command::DenyOperation => {
                 self.send_approval_response(ApprovalChoice::Deny).await;
+                return Ok(());
             }
             Command::DenyAlways => {
                 self.send_approval_response(ApprovalChoice::DenyAlways)
                     .await;
+                return Ok(());
             }
             Command::CloseModal => {
                 if self.service.state().active_modal()

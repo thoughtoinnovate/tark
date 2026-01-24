@@ -742,6 +742,11 @@ impl ToolRegistry {
                     crate::policy::types::PatternSource::Session
                 },
                 description: pattern.description.clone(),
+                session_id: if is_persistent {
+                    None
+                } else {
+                    Some(self.session_id.clone())
+                },
             };
             engine.save_pattern(policy_pattern)?;
         }

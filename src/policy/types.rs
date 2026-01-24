@@ -311,6 +311,7 @@ pub struct ApprovalPattern {
     pub is_denial: bool,
     pub source: PatternSource,
     pub description: Option<String>,
+    pub session_id: Option<String>,
 }
 
 /// Approval pattern entry for display in UI

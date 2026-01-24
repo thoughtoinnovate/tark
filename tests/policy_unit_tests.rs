@@ -831,6 +831,7 @@ mod engine_logic_tests {
             is_denial: false,
             source: PatternSource::Session,
             description: Some("Allow all cat txt files".to_string()),
+            session_id: Some("test-session-1".to_string()),
         };
 
         // Save the pattern
@@ -855,6 +856,7 @@ mod engine_logic_tests {
             is_denial: true,
             source: PatternSource::Session,
             description: Some("Block dangerous rm".to_string()),
+            session_id: Some("test-session-2".to_string()),
         };
 
         // Save the pattern

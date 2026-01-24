@@ -1376,7 +1376,7 @@ impl AppService {
             Command::ApproveOperation => {
                 if let Some(mut approval) = self.state.pending_approval() {
                     approval.approve();
-                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_pending_approval(None);
                     self.state.set_active_modal(None);
                     self.event_tx
                         .send(AppEvent::StatusChanged("Operation approved".to_string()))
@@ -1386,7 +1386,7 @@ impl AppService {
             Command::ApproveSession => {
                 if let Some(mut approval) = self.state.pending_approval() {
                     approval.approve();
-                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_pending_approval(None);
                     self.state.set_active_modal(None);
                     self.event_tx
                         .send(AppEvent::StatusChanged("Approved for session".to_string()))
@@ -1396,7 +1396,7 @@ impl AppService {
             Command::ApproveAlways => {
                 if let Some(mut approval) = self.state.pending_approval() {
                     approval.approve();
-                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_pending_approval(None);
                     self.state.set_active_modal(None);
                     self.event_tx
                         .send(AppEvent::StatusChanged("Approved always".to_string()))
@@ -1406,7 +1406,7 @@ impl AppService {
             Command::DenyOperation => {
                 if let Some(mut approval) = self.state.pending_approval() {
                     approval.reject();
-                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_pending_approval(None);
                     self.state.set_active_modal(None);
                     self.event_tx
                         .send(AppEvent::StatusChanged("Operation denied".to_string()))
@@ -1416,7 +1416,7 @@ impl AppService {
             Command::DenyAlways => {
                 if let Some(mut approval) = self.state.pending_approval() {
                     approval.reject();
-                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_pending_approval(None);
                     self.state.set_active_modal(None);
                     self.event_tx
                         .send(AppEvent::StatusChanged("Denied always".to_string()))
