@@ -138,7 +138,7 @@ impl AppService {
             )?;
 
             // Create tool registry with shared todo_tracker and thinking_tracker from state
-            let tools = crate::tools::ToolRegistry::for_mode_with_services(
+            let mut tools = crate::tools::ToolRegistry::for_mode_with_services(
                 working_dir.clone(),
                 crate::core::types::AgentMode::Build,
                 true, // shell_enabled
@@ -148,8 +148,18 @@ impl AppService {
                 Some(state.thinking_tracker()),
             );
 
-            Ok(crate::agent::ChatAgent::new(Arc::from(llm_provider), tools)
-                .with_max_iterations(global_config.agent.max_iterations))
+            // Set initial trust level from state (defense in depth)
+            let initial_trust = state.trust_level();
+            tools.set_trust_level(initial_trust);
+
+            let agent = crate::agent::ChatAgent::new(Arc::from(llm_provider), tools)
+                .with_max_iterations(global_config.agent.max_iterations);
+
+            // Note: Can't set trust_level synchronously during init.
+            // It will be set via conv_svc.set_trust_level() after ConversationService creation.
+            // The ToolRegistry already has the correct trust level set above.
+
+            Ok(agent)
         })();
 
         let (conversation_svc, session_svc) = match chat_agent_result {
@@ -160,6 +170,10 @@ impl AppService {
                     event_tx.clone(),
                     Some(interaction_tx.clone()),
                 ));
+
+                // Note: Trust level was already set on ToolRegistry above (line 153).
+                // ToolRegistry is what PolicyEngine uses for approval checks.
+                // The ChatAgent's cached trust_level will be synced later via set_trust_level().
 
                 // Initialize SessionManager
                 let session_mgr = SessionManager::new(tark_storage);
@@ -278,6 +292,7 @@ impl AppService {
                         .update_mode(
                             self.working_dir.clone(),
                             next,
+                            self.state.trust_level(),
                             Some(self.state.todo_tracker()),
                             Some(self.state.thinking_tracker()),
                         )
@@ -307,6 +322,7 @@ impl AppService {
                         .update_mode(
                             self.working_dir.clone(),
                             mode,
+                            self.state.trust_level(),
                             Some(self.state.todo_tracker()),
                             Some(self.state.thinking_tracker()),
                         )
@@ -379,6 +395,12 @@ impl AppService {
                     .send(AppEvent::StatusChanged(format!("Trust level: {:?}", level)))
                     .ok();
                 self.save_preferences();
+            }
+            Command::CycleTrustLevel => {
+                let current = self.state.trust_level();
+                let next = current.cycle_next();
+                // Recursively handle using existing SetTrustLevel logic
+                Box::pin(self.handle_command(Command::SetTrustLevel(next))).await?;
             }
 
             // UI toggles
@@ -2322,16 +2344,29 @@ impl AppService {
                             BuildMode::Careful => crate::tools::TrustLevel::Careful,
                         };
                         self.state.set_trust_level(trust_level);
-                        // Trust level is now managed by PolicyEngine
+                        // Propagate trust level to ChatAgent/ToolRegistry
+                        if let Some(ref conv_svc) = self.conversation_svc {
+                            let _ = conv_svc.set_trust_level(trust_level).await;
+                        }
+
+                        // Apply thinking tool setting
+                        self.state
+                            .set_thinking_tool_enabled(prefs.thinking_tool_enabled);
+                        if let Some(ref conv_svc) = self.conversation_svc {
+                            let _ = conv_svc
+                                .set_thinking_tool_enabled(prefs.thinking_tool_enabled)
+                                .await;
+                        }
 
                         // Apply theme (use session theme or global default)
                         let effective_theme = prefs.effective_theme(global_default_theme);
                         self.state.set_theme(effective_theme);
 
                         tracing::info!(
-                            "Restored preferences: agent_mode={:?}, build_mode={:?}, theme={:?}",
+                            "Restored preferences: agent_mode={:?}, build_mode={:?}, thinking_tool={}, theme={:?}",
                             prefs.agent_mode,
                             prefs.build_mode,
+                            prefs.thinking_tool_enabled,
                             effective_theme
                         );
                     } else {
@@ -2362,6 +2397,7 @@ impl AppService {
                 agent_mode: self.state.agent_mode(),
                 build_mode: self.state.build_mode(),
                 thinking_enabled: self.state.thinking_enabled(),
+                thinking_tool_enabled: self.state.thinking_tool_enabled(),
                 selected_provider: self.state.current_provider(),
                 selected_model: self.state.current_model(),
                 selected_model_name: None,

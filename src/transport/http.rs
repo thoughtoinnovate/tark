@@ -915,8 +915,10 @@ async fn handle_chat(
 
         // Update mode if changed (preserves conversation)
         if mode_changed {
-            let tools =
+            let mut tools =
                 ToolRegistry::for_mode(working_dir.clone(), mode, state.config.tools.shell_enabled);
+            // CRITICAL: Preserve trust level to prevent security bypass
+            tools.set_trust_level(agent.trust_level());
             agent.update_mode(tools, mode);
             tracing::info!(
                 "Updated agent mode to: {} (conversation preserved)",

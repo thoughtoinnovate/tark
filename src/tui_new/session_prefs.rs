@@ -18,6 +18,8 @@ pub struct TuiPreferences {
     pub agent_mode: AgentMode,
     /// Whether thinking mode is enabled
     pub thinking_enabled: bool,
+    /// Whether thinking tool is enabled
+    pub thinking_tool_enabled: bool,
     /// Selected LLM provider ID
     pub selected_provider: Option<String>,
     /// Selected model ID
@@ -35,6 +37,7 @@ impl Default for TuiPreferences {
             build_mode: BuildMode::default(),
             agent_mode: AgentMode::default(),
             thinking_enabled: true,
+            thinking_tool_enabled: false,
             selected_provider: None,
             selected_model: None,
             selected_model_name: None,

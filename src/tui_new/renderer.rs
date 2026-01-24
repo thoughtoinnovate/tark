@@ -129,15 +129,8 @@ impl<B: Backend> TuiRenderer<B> {
             // Mode cycling
             (KeyCode::Char('M'), KeyModifiers::CONTROL) => Some(Command::CycleBuildMode),
 
-            // Approval mode (Ctrl+Shift+B) - only in Build mode
-            // Changed from Shift+A to avoid conflict with text input
-            (KeyCode::Char('B'), KeyModifiers::CONTROL) => {
-                if state.agent_mode() == crate::ui_backend::AgentMode::Build {
-                    Some(Command::OpenTrustLevelSelector)
-                } else {
-                    None
-                }
-            }
+            // Trust level cycling (Ctrl+Y) - works in all modes
+            (KeyCode::Char('y'), KeyModifiers::CONTROL) => Some(Command::CycleTrustLevel),
 
             // UI toggles
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(Command::ToggleSidebar),

@@ -429,10 +429,11 @@ impl ConversationService {
         &self,
         working_dir: std::path::PathBuf,
         mode: AgentMode,
+        trust_level: crate::tools::TrustLevel,
         todo_tracker: Option<Arc<std::sync::Mutex<crate::tools::TodoTracker>>>,
         thinking_tracker: Option<Arc<std::sync::Mutex<crate::tools::ThinkingTracker>>>,
     ) {
-        let tools = ToolRegistry::for_mode_with_services(
+        let mut tools = ToolRegistry::for_mode_with_services(
             working_dir,
             mode,
             true,
@@ -441,6 +442,9 @@ impl ConversationService {
             todo_tracker,
             thinking_tracker,
         );
+        // CRITICAL: Preserve trust level across mode changes to prevent security bypass
+        tools.set_trust_level(trust_level);
+
         let mut agent = self.chat_agent.write().await;
         agent.update_mode(tools, mode);
     }

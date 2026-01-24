@@ -56,6 +56,9 @@ pub enum Command {
     /// Set trust level
     SetTrustLevel(crate::tools::TrustLevel),
 
+    /// Cycle trust level (Balanced -> Careful -> Manual -> Balanced)
+    CycleTrustLevel,
+
     // ========== UI Toggles ==========
     /// Toggle sidebar visibility
     ToggleSidebar,

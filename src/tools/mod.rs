@@ -438,6 +438,14 @@ impl ToolRegistry {
 
             let trust_id = self.get_trust_level_id();
 
+            #[cfg(debug_assertions)]
+            tracing::debug!(
+                "ToolRegistry.execute: tool={}, trust_level={:?}, trust_id={}",
+                name,
+                self.trust_level,
+                trust_id
+            );
+
             match engine.check_approval(
                 name,
                 &command,
@@ -446,11 +454,15 @@ impl ToolRegistry {
                 &self.session_id,
             ) {
                 Ok(decision) => {
-                    tracing::debug!(
-                        "PolicyEngine decision for '{}': needs_approval={}, allow_save={}",
-                        name,
-                        decision.needs_approval,
-                        decision.allow_save_pattern
+                    // Log approval decision at info level for security audit
+                    tracing::info!(
+                        tool = %name,
+                        trust = %trust_id.as_str(),
+                        needs_approval = %decision.needs_approval,
+                        classification = %decision.classification.classification_id,
+                        in_workdir = %decision.classification.in_workdir,
+                        operation = %decision.classification.operation,
+                        "PolicyEngine approval decision"
                     );
 
                     if decision.needs_approval {
