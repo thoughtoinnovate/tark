@@ -178,6 +178,13 @@ impl AppService {
                 // Initialize SessionManager
                 let session_mgr = SessionManager::new(tark_storage);
 
+                // Get current session ID and sync to agent for pattern tracking
+                let current_session_id = session_mgr.current().id.clone();
+                let conv_for_session = conv_svc.clone();
+                tokio::spawn(async move {
+                    let _ = conv_for_session.set_session_id(current_session_id).await;
+                });
+
                 // Initialize SessionService
                 let sess_svc = Arc::new(SessionService::new(session_mgr, conv_svc.clone()));
 
@@ -1613,11 +1620,17 @@ impl AppService {
             Command::SwitchSession(session_id) => {
                 if let Some(ref session_svc) = self.session_svc {
                     let session_svc = session_svc.clone();
+                    let conv_svc = self.conversation_svc.clone();
                     let event_tx = self.event_tx.clone();
 
                     tokio::spawn(async move {
                         match session_svc.switch_to(&session_id).await {
                             Ok(_info) => {
+                                // Sync session ID to conversation service for pattern tracking
+                                if let Some(ref conv) = conv_svc {
+                                    let _ = conv.set_session_id(session_id.clone()).await;
+                                }
+
                                 // Messages are restored via restore_from_session in session_svc
                                 // UI will need to be synced separately via event
                                 let _ = event_tx.send(AppEvent::SessionSwitched {

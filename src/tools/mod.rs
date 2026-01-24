@@ -675,6 +675,20 @@ impl ToolRegistry {
         );
     }
 
+    /// Set the session ID for pattern tracking
+    ///
+    /// This should be called when switching sessions to ensure patterns
+    /// are saved and retrieved using the correct session identifier.
+    pub fn set_session_id(&mut self, session_id: String) {
+        self.session_id = session_id;
+        tracing::debug!("ToolRegistry session_id updated to: {}", self.session_id);
+    }
+
+    /// Get the current session ID
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
     /// Check if a tool requires approval based on its risk level
     pub fn tool_risk_level(&self, name: &str) -> Option<RiskLevel> {
         self.tools.get(name).map(|t| t.risk_level())

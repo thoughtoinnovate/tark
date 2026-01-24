@@ -1026,6 +1026,13 @@ impl ChatAgent {
         self.trust_level
     }
 
+    /// Set the session ID for the agent's tool registry
+    ///
+    /// This ensures approval patterns are associated with the correct session.
+    pub fn set_session_id(&mut self, session_id: String) {
+        self.tools.set_session_id(session_id);
+    }
+
     /// List session approval patterns (for policy modal)
     pub fn list_session_patterns(
         &self,

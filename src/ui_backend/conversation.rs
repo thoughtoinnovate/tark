@@ -602,6 +602,16 @@ impl ConversationService {
     pub async fn restore_from_session(&self, session: &ChatSession) {
         let mut conv = self.conversation_mgr.write().await;
         conv.restore_from_session(session);
+
+        // Sync session ID to ToolRegistry for pattern tracking
+        let mut agent = self.chat_agent.write().await;
+        agent.set_session_id(session.id.clone());
+    }
+
+    /// Set the session ID for tool pattern tracking
+    pub async fn set_session_id(&self, session_id: String) {
+        let mut agent = self.chat_agent.write().await;
+        agent.set_session_id(session_id);
     }
 
     /// Clear conversation history
