@@ -1,0 +1,28 @@
+# Agent Modes Configuration
+# Defines the three operating modes for tark
+
+version = 1
+
+[[modes]]
+id = "ask"
+name = "Ask"
+icon = "?"
+description = "Read-only exploration and Q&A"
+has_approval_gate = false
+display_order = 1
+
+[[modes]]
+id = "plan"
+name = "Plan"
+icon = "P"
+description = "Read + propose changes (no execution)"
+has_approval_gate = false
+display_order = 2
+
+[[modes]]
+id = "build"
+name = "Build"
+icon = "B"
+description = "Full access to read, write, and execute"
+has_approval_gate = true
+display_order = 3

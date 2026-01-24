@@ -9,7 +9,6 @@
 #![allow(dead_code)]
 
 // Tool category modules
-pub mod approval;
 pub mod builtin;
 pub mod dangerous;
 pub mod plan;
@@ -61,12 +60,13 @@ pub use builtin::{
 };
 
 use crate::llm::ToolDefinition;
+use crate::policy::{ModeId, PolicyEngine, ToolPolicyMetadata, TrustId};
 use crate::services::PlanService;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::FutureExt;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -134,6 +134,15 @@ pub trait Tool: Send + Sync {
         ToolCategory::Core
     }
 
+    /// Get policy metadata for this tool (self-declaration pattern)
+    /// Tools can override this to declare their own risk level, operations, and mode availability.
+    /// This provides a more declarative approach to policy configuration.
+    fn policy_metadata(&self) -> Option<ToolPolicyMetadata> {
+        // Default: tools don't declare metadata, rely on external config
+        // Individual tools can override this to self-declare their policies
+        None
+    }
+
     /// Get the command string for approval (used for pattern matching)
     /// Default implementation returns the first string parameter value.
     fn get_command_string(&self, params: &Value) -> String {
@@ -162,8 +171,14 @@ pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     working_dir: PathBuf,
     mode: AgentMode,
-    /// Approval gate for risky operations
-    approval_gate: Option<tokio::sync::Mutex<approval::ApprovalGate>>,
+    /// Policy engine for approval decisions
+    policy_engine: Option<Arc<PolicyEngine>>,
+    /// Current session ID for tracking patterns
+    session_id: String,
+    /// Current trust level for approval decisions
+    trust_level: crate::policy::types::TrustId,
+    /// Interaction channel for approval requests
+    interaction_tx: Option<InteractionSender>,
 }
 
 impl ToolRegistry {
@@ -172,7 +187,10 @@ impl ToolRegistry {
             tools: HashMap::new(),
             working_dir,
             mode: AgentMode::Build,
-            approval_gate: None,
+            policy_engine: None,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            trust_level: crate::policy::types::TrustId::default(),
+            interaction_tx: None,
         }
     }
 
@@ -216,28 +234,41 @@ impl ToolRegistry {
     ///
     /// When `todo_tracker` is provided, the todo tool will use that shared tracker.
     /// Otherwise, a new tracker is created.
+    ///
+    /// When `thinking_tracker` is provided, the think tool will use that shared tracker.
+    /// Otherwise, a new tracker is created.
     pub fn for_mode_with_services(
         working_dir: PathBuf,
         mode: AgentMode,
         shell_enabled: bool,
         interaction_tx: Option<InteractionSender>,
         plan_service: Option<Arc<PlanService>>,
-        approvals_path: Option<PathBuf>,
         todo_tracker: Option<Arc<Mutex<TodoTracker>>>,
+        thinking_tracker: Option<Arc<Mutex<ThinkingTracker>>>,
     ) -> Self {
-        // Create approval gate if we have an interaction channel
-        let approval_gate = interaction_tx.as_ref().map(|tx| {
-            let storage_path = approvals_path
-                .clone()
-                .unwrap_or_else(|| working_dir.join(".tark").join("approvals.json"));
-            tokio::sync::Mutex::new(approval::ApprovalGate::new(storage_path, Some(tx.clone())))
-        });
+        // Initialize PolicyEngine
+        let policy_engine = {
+            let db_path = working_dir.join(".tark").join("policy.db");
+            match PolicyEngine::open(&db_path, &working_dir) {
+                Ok(engine) => {
+                    tracing::info!("PolicyEngine initialized at {:?}", db_path);
+                    Some(Arc::new(engine))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to initialize PolicyEngine: {}", e);
+                    None
+                }
+            }
+        };
 
         let mut registry = Self {
             tools: HashMap::new(),
             working_dir: working_dir.clone(),
             mode,
-            approval_gate,
+            policy_engine,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            trust_level: crate::policy::types::TrustId::default(),
+            interaction_tx: interaction_tx.clone(),
         };
 
         tracing::debug!("Creating tool registry for mode: {:?}", mode);
@@ -245,7 +276,9 @@ impl ToolRegistry {
         // ===== Built-in extra tools (available in ALL modes) =====
 
         // Thinking tool - always available, helps with reasoning
-        let thinking_tracker = Arc::new(Mutex::new(ThinkingTracker::new()));
+        // Use the provided tracker or create a new one
+        let thinking_tracker =
+            thinking_tracker.unwrap_or_else(|| Arc::new(Mutex::new(ThinkingTracker::new())));
         registry.register(Arc::new(ThinkTool::new(thinking_tracker)));
 
         // Memory tools - persistent storage across sessions
@@ -301,9 +334,10 @@ impl ToolRegistry {
         // ===== Mode-specific tools =====
         match mode {
             AgentMode::Ask => {
-                // Ask mode: only safe shell (allowlisted commands)
-                registry.register(Arc::new(SafeShellTool::new(working_dir)));
-                tracing::debug!("Ask mode: registered safe_shell only");
+                // Ask mode: safe shell + propose_change (read-only preview)
+                registry.register(Arc::new(SafeShellTool::new(working_dir.clone())));
+                registry.register(Arc::new(ProposeChangeTool::new(working_dir)));
+                tracing::debug!("Ask mode: registered safe_shell, propose_change");
             }
             AgentMode::Plan => {
                 // Plan mode: safe shell + propose_change + all plan tools
@@ -384,67 +418,155 @@ impl ToolRegistry {
 
     /// Execute a tool by name with given parameters
     ///
-    /// If an approval gate is configured and the tool's risk level requires approval,
+    /// If an approval gate or policy engine is configured and the tool's risk level requires approval,
     /// the user will be prompted before execution.
     pub async fn execute(&self, name: &str, params: Value) -> Result<ToolResult> {
         let Some(tool) = self.tools.get(name) else {
             return Ok(ToolResult::error(format!("Unknown tool: {}", name)));
         };
 
-        // Check approval if we have an approval gate
-        if let Some(ref gate_mutex) = self.approval_gate {
-            let risk_level = tool.risk_level();
+        // Build command string for display/pattern matching
+        let command = self.build_command_string(name, &params);
 
-            // Build a command string for display/pattern matching
-            let command = self.build_command_string(name, &params);
+        // Check approval with PolicyEngine
+        if let Some(ref engine) = self.policy_engine {
+            let mode_id = match self.mode {
+                AgentMode::Ask => ModeId::Ask,
+                AgentMode::Plan => ModeId::Plan,
+                AgentMode::Build => ModeId::Build,
+            };
 
+            let trust_id = self.get_trust_level_id();
+
+            #[cfg(debug_assertions)]
             tracing::debug!(
-                "Checking approval for tool '{}' (risk: {:?}), command: {}",
+                "ToolRegistry.execute: tool={}, trust_level={:?}, trust_id={}",
                 name,
-                risk_level,
-                command
+                self.trust_level,
+                trust_id
             );
 
-            // Check with approval gate
-            let mut gate = gate_mutex.lock().await;
-            tracing::debug!(
-                "Trust level: {} {:?}",
-                gate.trust_level.icon(),
-                gate.trust_level
-            );
+            match engine.check_approval(
+                name,
+                &command,
+                mode_id.as_str(),
+                trust_id.as_str(),
+                &self.session_id,
+            ) {
+                Ok(decision) => {
+                    // Log approval decision at info level for security audit
+                    tracing::info!(
+                        tool = %name,
+                        trust = %trust_id.as_str(),
+                        needs_approval = %decision.needs_approval,
+                        classification = %decision.classification.classification_id,
+                        in_workdir = %decision.classification.in_workdir,
+                        operation = %decision.classification.operation,
+                        "PolicyEngine approval decision"
+                    );
 
-            match gate.check_and_approve(name, &command, risk_level).await {
-                Ok(approval::ApprovalStatus::Approved) => {
-                    tracing::debug!("Tool '{}' approved", name);
-                    // Proceed with execution
-                }
-                Ok(approval::ApprovalStatus::Denied) => {
-                    tracing::info!("Tool '{}' denied by user", name);
-                    let request = gate.create_approval_request(name, &command, risk_level);
-                    let suggestions = serde_json::to_string_pretty(&request.suggested_patterns)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    return Ok(ToolResult::error(format!(
-                        "Operation denied by user: {} {}\nSuggested patterns: {}",
-                        name, command, suggestions
-                    )));
-                }
-                Ok(approval::ApprovalStatus::Blocked(reason)) => {
-                    tracing::info!("Tool '{}' blocked: {}", name, reason);
-                    let request = gate.create_approval_request(name, &command, risk_level);
-                    let suggestions = serde_json::to_string_pretty(&request.suggested_patterns)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    return Ok(ToolResult::error(format!(
-                        "Operation blocked: {}\nSuggested patterns: {}",
-                        reason, suggestions
-                    )));
+                    if decision.needs_approval {
+                        // Approval required - block and wait for user response
+                        if let Some(ref tx) = self.interaction_tx {
+                            tracing::info!(
+                                "Tool '{}' requires approval, sending request to user",
+                                name
+                            );
+
+                            // Build suggested patterns
+                            let suggested_patterns = self.build_suggested_patterns(name, &command);
+
+                            // Create approval request
+                            let (responder, receiver) = tokio::sync::oneshot::channel();
+                            let request = ApprovalRequest {
+                                tool: name.to_string(),
+                                command: command.clone(),
+                                risk_level: tool.risk_level(),
+                                suggested_patterns,
+                            };
+
+                            // Send request to UI
+                            if let Err(e) = tx
+                                .send(InteractionRequest::Approval { request, responder })
+                                .await
+                            {
+                                tracing::error!("Failed to send approval request: {}", e);
+                                return Ok(ToolResult::error(
+                                    "Failed to request approval from user",
+                                ));
+                            }
+
+                            // Wait for user response
+                            match receiver.await {
+                                Ok(response) => {
+                                    tracing::debug!(
+                                        "Received approval response: {:?}",
+                                        response.choice
+                                    );
+
+                                    // Handle denial
+                                    if matches!(
+                                        response.choice,
+                                        ApprovalChoice::Deny | ApprovalChoice::DenyAlways
+                                    ) {
+                                        tracing::info!("Tool '{}' denied by user", name);
+                                        return Ok(ToolResult::error("Operation denied by user"));
+                                    }
+
+                                    // Handle pattern saving for session/always
+                                    if let Some(pattern) = response.selected_pattern {
+                                        if matches!(
+                                            response.choice,
+                                            ApprovalChoice::ApproveSession
+                                                | ApprovalChoice::ApproveAlways
+                                        ) {
+                                            let is_persistent = matches!(
+                                                response.choice,
+                                                ApprovalChoice::ApproveAlways
+                                            );
+                                            if let Err(e) = self.save_approval_pattern(
+                                                name,
+                                                &pattern,
+                                                is_persistent,
+                                            ) {
+                                                tracing::warn!(
+                                                    "Failed to save approval pattern: {}",
+                                                    e
+                                                );
+                                            } else {
+                                                tracing::info!("Saved approval pattern for '{}': {} (persistent: {})", 
+                                                    name, pattern.pattern, is_persistent);
+                                            }
+                                        }
+                                    }
+
+                                    tracing::info!("Tool '{}' approved by user", name);
+                                    // Continue to execution below
+                                }
+                                Err(_) => {
+                                    tracing::warn!("Approval request cancelled for '{}'", name);
+                                    return Ok(ToolResult::error("Approval request cancelled"));
+                                }
+                            }
+                        } else {
+                            // No interaction channel - fail safe
+                            tracing::error!(
+                                "Approval required for '{}' but no interaction channel available",
+                                name
+                            );
+                            return Ok(ToolResult::error(
+                                "Approval required but no interaction channel available",
+                            ));
+                        }
+                    } else {
+                        // Auto-approved - proceed with execution
+                        tracing::debug!("Tool '{}' auto-approved by PolicyEngine", name);
+                    }
                 }
                 Err(e) => {
-                    tracing::warn!("Approval check failed, auto-approving: {}", e);
-                    // Continue with execution on error (fail-open for usability)
+                    tracing::warn!("PolicyEngine check failed for '{}': {}", name, e);
                 }
             }
-        } else {
-            tracing::debug!("No approval gate configured for tool '{}'", name);
         }
 
         // Wrap tool execution with panic recovery to prevent crashes
@@ -504,6 +626,36 @@ impl ToolRegistry {
         self.tools.values().map(|t| t.to_definition()).collect()
     }
 
+    /// Get tool definitions filtered by current mode using PolicyEngine
+    ///
+    /// This queries the PolicyEngine's tool_mode_availability table to determine
+    /// which tools are available in the current mode, ensuring the TOML config
+    /// is the single source of truth for tool availability.
+    pub fn definitions_for_mode(&self) -> Vec<ToolDefinition> {
+        let available_tool_ids: HashSet<String> = if let Some(ref engine) = self.policy_engine {
+            match engine.get_available_tools(&self.mode.to_string()) {
+                Ok(tools) => tools.into_iter().map(|t| t.id).collect(),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to get available tools from PolicyEngine: {}. Falling back to all tools.",
+                        e
+                    );
+                    return self.definitions();
+                }
+            }
+        } else {
+            // Fallback: return all tools if no policy engine
+            tracing::debug!("No PolicyEngine available, returning all tool definitions");
+            return self.definitions();
+        };
+
+        self.tools
+            .values()
+            .filter(|t| available_tool_ids.contains(t.name()))
+            .map(|t| t.to_definition())
+            .collect()
+    }
+
     /// Get working directory
     pub fn working_dir(&self) -> &PathBuf {
         &self.working_dir
@@ -514,44 +666,105 @@ impl ToolRegistry {
         self.mode
     }
 
+    /// Set the trust level for approval decisions
+    pub fn set_trust_level(&mut self, level: TrustLevel) {
+        self.trust_level = crate::policy::types::TrustId::from(level);
+        tracing::debug!(
+            "ToolRegistry trust level updated to: {:?}",
+            self.trust_level
+        );
+    }
+
     /// Check if a tool requires approval based on its risk level
     pub fn tool_risk_level(&self, name: &str) -> Option<RiskLevel> {
         self.tools.get(name).map(|t| t.risk_level())
     }
 
-    /// Set the trust level for the registry's approval gate
-    pub async fn set_trust_level(&self, level: TrustLevel) {
-        if let Some(ref gate_mutex) = self.approval_gate {
-            let mut gate = gate_mutex.lock().await;
-            gate.set_trust_level(level);
-            tracing::info!(
-                "Trust level set to: {} {} (gate present)",
-                level.icon(),
-                level.label()
-            );
-        } else {
-            tracing::warn!(
-                "Cannot set trust level to {} - no approval gate configured",
-                level.label()
-            );
-        }
+    /// Get trust level ID for PolicyEngine
+    fn get_trust_level_id(&self) -> TrustId {
+        self.trust_level
     }
 
-    /// Get the current trust level
-    pub async fn trust_level(&self) -> TrustLevel {
-        if let Some(ref gate_mutex) = self.approval_gate {
-            let gate = gate_mutex.lock().await;
-            gate.trust_level
-        } else {
-            TrustLevel::default()
-        }
+    /// Build suggested approval patterns for a command
+    fn build_suggested_patterns(&self, tool_name: &str, command: &str) -> Vec<SuggestedPattern> {
+        vec![
+            SuggestedPattern {
+                pattern: command.to_string(),
+                match_type: MatchType::Exact,
+                description: format!("{} on exact: {}", tool_name, command),
+            },
+            SuggestedPattern {
+                pattern: command
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(command)
+                    .to_string(),
+                match_type: MatchType::Prefix,
+                description: format!(
+                    "{} starting with: {}",
+                    tool_name,
+                    command.split_whitespace().next().unwrap_or(command)
+                ),
+            },
+            SuggestedPattern {
+                pattern: "*".to_string(),
+                match_type: MatchType::Glob,
+                description: format!("{} (any file)", tool_name),
+            },
+        ]
     }
 
-    /// Update approval storage path (per session)
-    pub async fn set_approval_storage_path(&self, storage_path: PathBuf) {
-        if let Some(ref gate_mutex) = self.approval_gate {
-            let mut gate = gate_mutex.lock().await;
-            gate.set_storage_path(storage_path);
+    /// Save an approval pattern to the policy database
+    fn save_approval_pattern(
+        &self,
+        tool: &str,
+        pattern: &ApprovalPattern,
+        is_persistent: bool,
+    ) -> Result<()> {
+        if let Some(ref engine) = self.policy_engine {
+            // Convert MatchType from tools::risk to policy::types
+            let policy_match_type = match pattern.match_type {
+                MatchType::Exact => crate::policy::types::MatchType::Exact,
+                MatchType::Prefix => crate::policy::types::MatchType::Prefix,
+                MatchType::Glob => crate::policy::types::MatchType::Glob,
+            };
+
+            // Convert tools::ApprovalPattern to policy::ApprovalPattern
+            let policy_pattern = crate::policy::types::ApprovalPattern {
+                id: None,
+                tool: tool.to_string(),
+                pattern: pattern.pattern.clone(),
+                match_type: policy_match_type,
+                is_denial: false,
+                source: if is_persistent {
+                    crate::policy::types::PatternSource::User
+                } else {
+                    crate::policy::types::PatternSource::Session
+                },
+                description: pattern.description.clone(),
+                session_id: if is_persistent {
+                    None
+                } else {
+                    Some(self.session_id.clone())
+                },
+            };
+            engine.save_pattern(policy_pattern)?;
+        }
+        Ok(())
+    }
+
+    /// List session approval patterns (for UI display)
+    pub fn list_session_patterns(
+        &self,
+        session_id: &str,
+    ) -> Result<(
+        Vec<crate::policy::ApprovalPatternEntry>,
+        Vec<crate::policy::ApprovalPatternEntry>,
+    )> {
+        if let Some(ref engine) = self.policy_engine {
+            engine.list_session_patterns(session_id)
+        } else {
+            Ok((Vec::new(), Vec::new()))
         }
     }
 }

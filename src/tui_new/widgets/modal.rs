@@ -123,10 +123,10 @@ impl<'a> HelpModal<'a> {
             ("Escape", "Clear input / Close modal / Normal mode"),
             ("Tab", "Next focus / Autocomplete"),
             ("Shift+Tab", "Cycle agent mode"),
-            ("Ctrl+T", "Toggle thinking mode"),
+            ("Ctrl+T", "Toggle extended thinking (model-level)"),
+            ("Ctrl+R", "Toggle think tool (structured reasoning)"),
             ("Ctrl+B", "Toggle sidebar"),
-            ("Ctrl+Shift+M", "Cycle build mode"),
-            ("Ctrl+Shift+B", "Trust level selector (Build mode)"),
+            ("Ctrl+Y", "Cycle trust level (Balanced/Careful/Manual)"),
             ("Ctrl+?", "Open this help"),
             ("@filename", "Add file to context"),
             ("/command", "Slash commands (try /help)"),
@@ -206,6 +206,15 @@ impl<'a> ProviderPickerModal<'a> {
 
 impl Widget for ProviderPickerModal<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // Calculate viewport dimensions
+        let popup_height = area.height * 70 / 100;
+        let inner_height = popup_height.saturating_sub(2);
+        let header_lines = 4usize;
+        let footer_lines = if self.filter.is_empty() { 0 } else { 2 };
+        let available_rows = inner_height
+            .saturating_sub((header_lines + footer_lines) as u16)
+            .max(1) as usize;
+
         let mut content: Vec<Line> = vec![
             // Search bar header
             Line::from(vec![
@@ -255,72 +264,99 @@ impl Widget for ProviderPickerModal<'_> {
                 "  No providers match your search",
                 Style::default().fg(self.theme.text_muted),
             )]));
-        }
+        } else {
+            // Calculate viewport window for scrolling
+            let total = filtered_providers.len();
+            let selected = self.selected.min(total.saturating_sub(1));
 
-        for (i, (name, icon, description, configured, is_plugin)) in
-            filtered_providers.iter().enumerate()
-        {
-            let is_selected = i == self.selected;
-            let prefix = if is_selected { "▸ " } else { "  " };
+            // Estimate lines per item (1 for name, potentially 2 more for description)
+            let max_lines_per_item = 3;
+            let items_visible = available_rows / max_lines_per_item;
 
-            let name_style = if is_selected {
-                Style::default()
-                    .fg(self.theme.cyan)
-                    .add_modifier(Modifier::BOLD)
-                    .bg(self.theme.selection_bg)
-            } else {
-                Style::default().fg(self.theme.text_primary)
-            };
+            let window_start = selected.saturating_sub(items_visible / 2);
+            let window_end = (window_start + items_visible).min(total);
 
-            let icon_style = if is_selected {
-                Style::default().fg(self.theme.cyan)
-            } else {
-                Style::default().fg(self.theme.text_secondary)
-            };
+            for (i, (name, icon, description, configured, is_plugin)) in filtered_providers
+                .iter()
+                .enumerate()
+                .skip(window_start)
+                .take(window_end.saturating_sub(window_start))
+            {
+                let is_selected = i == selected;
+                let prefix = if is_selected { "▸ " } else { "  " };
 
-            let status_icon = if *configured { "✓" } else { "⚠" };
-            let status_color = if *configured {
-                self.theme.green
-            } else {
-                self.theme.yellow
-            };
-
-            // Build the provider line with optional plugin indicator
-            let mut spans = vec![
-                Span::styled(prefix, name_style),
-                Span::styled(format!("{} ", icon), icon_style),
-                Span::styled(name.clone(), name_style),
-            ];
-
-            // Add plugin indicator in muted/ghost color
-            if *is_plugin {
-                spans.push(Span::styled(
-                    " [plugin]",
+                let name_style = if is_selected {
                     Style::default()
-                        .fg(self.theme.text_muted)
-                        .add_modifier(Modifier::DIM),
-                ));
+                        .fg(self.theme.cyan)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(self.theme.selection_bg)
+                } else {
+                    Style::default().fg(self.theme.text_primary)
+                };
+
+                let icon_style = if is_selected {
+                    Style::default().fg(self.theme.cyan)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                };
+
+                let status_icon = if *configured { "✓" } else { "⚠" };
+                let status_color = if *configured {
+                    self.theme.green
+                } else {
+                    self.theme.yellow
+                };
+
+                // Build the provider line with optional plugin indicator
+                let mut spans = vec![
+                    Span::styled(prefix, name_style),
+                    Span::styled(format!("{} ", icon), icon_style),
+                    Span::styled(name.clone(), name_style),
+                ];
+
+                // Add plugin indicator in muted/ghost color
+                if *is_plugin {
+                    spans.push(Span::styled(
+                        " [plugin]",
+                        Style::default()
+                            .fg(self.theme.text_muted)
+                            .add_modifier(Modifier::DIM),
+                    ));
+                }
+
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(status_icon, Style::default().fg(status_color)));
+
+                content.push(Line::from(spans));
+
+                // Add description line if selected
+                if is_selected && !description.is_empty() {
+                    content.push(Line::from(vec![Span::styled(
+                        format!("    {}", description),
+                        Style::default()
+                            .fg(self.theme.text_muted)
+                            .add_modifier(Modifier::DIM),
+                    )]));
+                    if !*configured {
+                        content.push(Line::from(vec![Span::styled(
+                            "    Not configured - run 'tark auth <provider>'",
+                            Style::default().fg(self.theme.yellow),
+                        )]));
+                    }
+                }
             }
 
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(status_icon, Style::default().fg(status_color)));
-
-            content.push(Line::from(spans));
-
-            // Add description line if selected
-            if is_selected && !description.is_empty() {
+            // Show scroll indicator if needed
+            if total > items_visible {
+                content.push(Line::from(""));
                 content.push(Line::from(vec![Span::styled(
-                    format!("    {}", description),
-                    Style::default()
-                        .fg(self.theme.text_muted)
-                        .add_modifier(Modifier::DIM),
+                    format!(
+                        "  Showing {} of {} providers",
+                        window_end.saturating_sub(window_start),
+                        total
+                    ),
+                    Style::default().fg(self.theme.text_muted),
                 )]));
-                if !*configured {
-                    content.push(Line::from(vec![Span::styled(
-                        "    Not configured - run 'tark auth <provider>'",
-                        Style::default().fg(self.theme.yellow),
-                    )]));
-                }
             }
         }
 
@@ -509,6 +545,15 @@ impl<'a> ModelPickerModal<'a> {
 
 impl Widget for ModelPickerModal<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // Calculate viewport dimensions
+        let popup_height = area.height * 70 / 100;
+        let inner_height = popup_height.saturating_sub(2);
+        let header_lines = 4usize;
+        let footer_lines = if self.filter.is_empty() { 0 } else { 2 };
+        let available_rows = inner_height
+            .saturating_sub((header_lines + footer_lines) as u16)
+            .max(1) as usize;
+
         let mut content: Vec<Line> = vec![
             // Search bar header
             Line::from(vec![
@@ -558,56 +603,72 @@ impl Widget for ModelPickerModal<'_> {
                 "  No models match your search",
                 Style::default().fg(self.theme.text_muted),
             )));
-        }
+        } else {
+            // Calculate viewport window for scrolling
+            let total = filtered_models.len();
+            let selected = self.selected.min(total.saturating_sub(1));
 
-        for (i, (name, description, is_current)) in filtered_models.iter().enumerate() {
-            let is_selected = i == self.selected;
-            let prefix = if is_selected { "▸ " } else { "  " };
+            // Estimate lines per item (1 for name, potentially 1 more for description)
+            let max_lines_per_item = 2;
+            let items_visible = available_rows / max_lines_per_item;
 
-            let name_style = if is_selected {
-                Style::default()
-                    .fg(self.theme.cyan)
-                    .add_modifier(Modifier::BOLD)
-                    .bg(self.theme.selection_bg)
-            } else {
-                Style::default().fg(self.theme.text_primary)
-            };
+            let window_start = selected.saturating_sub(items_visible / 2);
+            let window_end = (window_start + items_visible).min(total);
 
-            let mut spans = vec![Span::styled(prefix, name_style)];
+            for (i, (name, description, is_current)) in filtered_models
+                .iter()
+                .enumerate()
+                .skip(window_start)
+                .take(window_end.saturating_sub(window_start))
+            {
+                let is_selected = i == selected;
+                let prefix = if is_selected { "▸ " } else { "  " };
 
-            // Add current indicator
-            if *is_current {
-                spans.push(Span::styled("● ", Style::default().fg(self.theme.green)));
-            } else {
-                spans.push(Span::raw("  "));
+                let name_style = if is_selected {
+                    Style::default()
+                        .fg(self.theme.cyan)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(self.theme.selection_bg)
+                } else {
+                    Style::default().fg(self.theme.text_primary)
+                };
+
+                let mut spans = vec![Span::styled(prefix, name_style)];
+
+                // Add current indicator
+                if *is_current {
+                    spans.push(Span::styled("● ", Style::default().fg(self.theme.green)));
+                } else {
+                    spans.push(Span::raw("  "));
+                }
+
+                spans.push(Span::styled(name.clone(), name_style));
+
+                content.push(Line::from(spans));
+
+                // Add description on next line if selected
+                if is_selected && !description.is_empty() {
+                    content.push(Line::from(vec![Span::styled(
+                        format!("    {}", description),
+                        Style::default()
+                            .fg(self.theme.text_muted)
+                            .add_modifier(Modifier::DIM),
+                    )]));
+                }
             }
 
-            spans.push(Span::styled(name.clone(), name_style));
-
-            content.push(Line::from(spans));
-
-            // Add description on next line if selected
-            if is_selected && !description.is_empty() {
+            // Show scroll indicator if needed
+            if total > items_visible {
+                content.push(Line::from(""));
                 content.push(Line::from(vec![Span::styled(
-                    format!("    {}", description),
-                    Style::default()
-                        .fg(self.theme.text_muted)
-                        .add_modifier(Modifier::DIM),
+                    format!(
+                        "  Showing {} of {} models",
+                        window_end.saturating_sub(window_start),
+                        total
+                    ),
+                    Style::default().fg(self.theme.text_muted),
                 )]));
             }
-        }
-
-        // Show count at bottom
-        if !self.filter.is_empty() {
-            content.push(Line::from(""));
-            content.push(Line::from(vec![Span::styled(
-                format!(
-                    "  Showing {} of {} models",
-                    filtered_models.len(),
-                    self.models.len()
-                ),
-                Style::default().fg(self.theme.text_muted),
-            )]));
         }
 
         let modal = Modal::new("Select Model", self.theme)

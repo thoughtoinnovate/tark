@@ -4,7 +4,6 @@
 
 use std::path::PathBuf;
 use tark_cli::core::types::AgentMode;
-use tark_cli::tools::risk::TrustLevel;
 use tark_cli::ui_backend::{
     AuthStatus, CatalogService, SharedState, StorageFacade, ToolExecutionService,
 };
@@ -157,7 +156,7 @@ mod error_tests {
 
     #[tokio::test]
     async fn test_tool_availability_by_mode() {
-        let tools = ToolExecutionService::new(AgentMode::Ask, None);
+        let tools = ToolExecutionService::new(AgentMode::Ask);
 
         // Read-only tools should be available in Ask mode
         assert!(tools.is_available("grep", AgentMode::Ask));
@@ -171,30 +170,13 @@ mod error_tests {
         assert!(build_available || ask_available);
     }
 
-    #[tokio::test]
-    async fn test_tool_trust_level() {
-        use std::sync::Arc;
-        use tark_cli::tools::approval::ApprovalGate;
-        use tokio::sync::Mutex;
-
-        let gate = Arc::new(Mutex::new(ApprovalGate::new(
-            std::env::current_dir().unwrap(),
-            None,
-        )));
-        let tools = ToolExecutionService::new(AgentMode::Build, Some(gate.clone()));
-
-        // Set manual trust level
-        tools.set_trust_level(TrustLevel::Manual).await;
-
-        // Verify trust level was set
-        let level = tools.trust_level().await;
-        assert_eq!(level, TrustLevel::Manual);
-
-        // Set back to balanced
-        tools.set_trust_level(TrustLevel::Balanced).await;
-        let level = tools.trust_level().await;
-        assert_eq!(level, TrustLevel::Balanced);
-    }
+    // NOTE: This test is disabled because it tests the old ApprovalGate API
+    // which has been replaced with the PolicyEngine-based approval system.
+    // Trust level is now managed through ChatAgent and PolicyEngine.
+    // #[tokio::test]
+    // async fn test_tool_trust_level() {
+    //     // Old test for ApprovalGate - now handled by PolicyEngine
+    // }
 
     #[tokio::test]
     async fn test_session_not_found_error() {

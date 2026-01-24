@@ -281,11 +281,33 @@ impl Tool for ThinkTool {
         // Record the thought
         let summary = {
             let mut tracker = self.tracker.lock().unwrap();
-            tracker.record(thought)
+            tracker.record(thought.clone())
         };
 
-        // Format response
-        let response = serde_json::to_string_pretty(&summary)?;
+        // Return context-aware response with hints to guide model behavior
+        let response = if summary.history_length > 1 {
+            json!({
+                "recorded": true,
+                "step": summary.thought_number,
+                "total_recorded": summary.history_length,
+                "hint": if thought.next_thought_needed {
+                    "Continue with next thought (increment thought_number)"
+                } else {
+                    "Thinking complete - now take action or respond"
+                }
+            })
+        } else {
+            json!({
+                "recorded": true,
+                "step": summary.thought_number,
+                "hint": if thought.next_thought_needed {
+                    "Continue with thought_number: 2"
+                } else {
+                    "Thinking complete - now take action or respond"
+                }
+            })
+        }
+        .to_string();
         Ok(ToolResult::success(response))
     }
 }

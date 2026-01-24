@@ -1,6 +1,7 @@
 //! File operation tools: read, write, patch
 
 use super::{Tool, ToolResult};
+use crate::policy::{ClassificationStrategy, ModeId, Operation, RiskLevel, ToolPolicyMetadata};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -197,6 +198,16 @@ impl Tool for ReadFileTool {
             }
             Err(e) => Ok(ToolResult::error(format!("Failed to read file: {}", e))),
         }
+    }
+
+    fn policy_metadata(&self) -> Option<ToolPolicyMetadata> {
+        Some(ToolPolicyMetadata {
+            risk_level: RiskLevel::Safe,
+            operation: Operation::Read,
+            available_in_modes: &[ModeId::Ask, ModeId::Plan, ModeId::Build],
+            classification_strategy: ClassificationStrategy::Static,
+            category: Some("readonly"),
+        })
     }
 }
 

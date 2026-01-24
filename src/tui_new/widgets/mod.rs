@@ -12,6 +12,7 @@ pub mod question;
 mod sidebar;
 mod status_bar;
 mod terminal_frame;
+pub mod thinking_block;
 pub mod todo;
 
 pub use command_autocomplete::{AutocompleteState, CommandAutocomplete, SlashCommand};
@@ -30,5 +31,7 @@ pub use question::{QuestionOption, QuestionType, QuestionWidget, ThemedQuestion}
 pub use sidebar::{GitChange, GitStatus, SessionInfo, Sidebar, SidebarPanel, Task, TaskStatus};
 pub use status_bar::StatusBar;
 pub use terminal_frame::TerminalFrame;
+#[allow(unused_imports)]
+pub use thinking_block::ThinkingBlockWidget;
 #[allow(unused_imports)]
 pub use todo::TodoWidget;

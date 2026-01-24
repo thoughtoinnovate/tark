@@ -26,8 +26,10 @@ pub struct StatusBar<'a> {
     model_name: &'a str,
     /// Current provider name
     provider_name: &'a str,
-    /// Whether thinking mode is enabled
+    /// Whether thinking mode is enabled (model-level extended thinking)
     thinking_enabled: bool,
+    /// Whether thinking tool is enabled (structured reasoning)
+    thinking_tool_enabled: bool,
     /// Task queue count
     queue_count: usize,
     /// Whether agent is processing
@@ -47,6 +49,7 @@ impl<'a> StatusBar<'a> {
             model_name: "tark_llm",
             provider_name: "tark_sim",
             thinking_enabled: true,
+            thinking_tool_enabled: false,
             queue_count: 0,
             is_processing: false,
             llm_connected: false,
@@ -78,9 +81,15 @@ impl<'a> StatusBar<'a> {
         self
     }
 
-    /// Set thinking mode
+    /// Set thinking mode (model-level extended thinking)
     pub fn thinking(mut self, enabled: bool) -> Self {
         self.thinking_enabled = enabled;
+        self
+    }
+
+    /// Set thinking tool (structured reasoning)
+    pub fn thinking_tool(mut self, enabled: bool) -> Self {
+        self.thinking_tool_enabled = enabled;
         self
     }
 
@@ -137,7 +146,7 @@ impl Widget for StatusBar<'_> {
         }
 
         // Build the complete status bar as a single line (left to right):
-        // agent • Build ▼  🟢 Balanced ▼  🧠  ≡ 7    ● Working...    • Model Provider  ⊙
+        // agent • Build ▼  🟢 Balanced ▼  [🧠] [💭]  ≡ 7    ● Working...    • Model Provider  [?]
         let mut spans = vec![];
 
         // 1. Agent label (small, muted)
@@ -171,8 +180,10 @@ impl Widget for StatusBar<'_> {
             ));
         }
 
-        // 4. Indicators section (thinking brain with border styling + queue)
+        // 4. Indicators section (thinking brain + thinking tool + queue)
         spans.push(Span::raw("  "));
+
+        // Model-level thinking (brain)
         if self.thinking_enabled {
             // Thinking enabled: brain with golden/yellow border styling
             spans.push(Span::styled("[", Style::default().fg(self.theme.yellow)));
@@ -189,6 +200,32 @@ impl Widget for StatusBar<'_> {
             ));
             spans.push(Span::styled(
                 "🧠",
+                Style::default().fg(self.theme.text_muted),
+            ));
+            spans.push(Span::styled(
+                "]",
+                Style::default().fg(self.theme.text_muted),
+            ));
+        }
+
+        // Thinking tool (thought bubble)
+        spans.push(Span::raw(" "));
+        if self.thinking_tool_enabled {
+            // Thinking tool enabled: thought bubble with cyan border
+            spans.push(Span::styled("[", Style::default().fg(self.theme.cyan)));
+            spans.push(Span::styled(
+                "💭",
+                Style::default().fg(self.theme.text_primary),
+            ));
+            spans.push(Span::styled("]", Style::default().fg(self.theme.cyan)));
+        } else {
+            // Thinking tool disabled: thought bubble with muted border
+            spans.push(Span::styled(
+                "[",
+                Style::default().fg(self.theme.text_muted),
+            ));
+            spans.push(Span::styled(
+                "💭",
                 Style::default().fg(self.theme.text_muted),
             ));
             spans.push(Span::styled(

@@ -7,6 +7,7 @@ use crate::agent::ChatAgent;
 use crate::completion::{CompletionEngine, CompletionRequest};
 use crate::config::Config;
 use crate::llm;
+use crate::policy::{IntegrityVerifier, VerificationResult};
 use crate::storage::usage::{CleanupRequest, UsageTracker};
 use crate::storage::TarkStorage;
 use crate::tools::ToolRegistry;
@@ -14,6 +15,7 @@ use crate::tools::ToolRegistry;
 use crate::tui_new::app::TuiApp;
 use anyhow::{Context, Result};
 use colored::Colorize;
+use rusqlite::Connection;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -484,6 +486,7 @@ pub async fn run_usage(
 
 /// Run authentication for LLM providers
 pub async fn run_auth(provider: Option<&str>) -> Result<()> {
+    use crate::plugins::PluginRegistry;
     use colored::Colorize;
     use std::io::{self, Write};
 
@@ -496,26 +499,53 @@ pub async fn run_auth(provider: Option<&str>) -> Result<()> {
         // Interactive provider selection
         println!("Select a provider to authenticate:");
         println!();
+
+        // Built-in providers
         println!("  1. {} - GitHub Copilot (Device Flow)", "copilot".green());
         println!("  2. {} - OpenAI GPT models", "openai".green());
         println!("  3. {} - Anthropic Claude", "claude".green());
         println!("  4. {} - Google Gemini", "gemini".green());
         println!("  5. {} - OpenRouter (200+ models)", "openrouter".green());
         println!("  6. {} - Local Ollama", "ollama".green());
+
+        // Plugin-based OAuth providers (only show plugins with OAuth configuration)
+        let mut plugin_providers = Vec::new();
+        if let Ok(registry) = PluginRegistry::new() {
+            for plugin in registry.provider_plugins() {
+                // Only include plugins that have OAuth configuration
+                if plugin.manifest.oauth.is_some() {
+                    for contrib in plugin.contributed_providers() {
+                        plugin_providers.push((contrib.id.clone(), contrib.name.clone()));
+                    }
+                }
+            }
+        }
+
+        let mut next_idx = 7;
+        for (_, name) in &plugin_providers {
+            println!("  {}. {} (plugin)", next_idx, name.green());
+            next_idx += 1;
+        }
+
         println!();
-        print!("Enter choice (1-6): ");
+        let max_choice = 6 + plugin_providers.len();
+        print!("Enter choice (1-{}): ", max_choice);
         io::stdout().flush()?;
 
         let mut choice = String::new();
         io::stdin().read_line(&mut choice)?;
 
-        match choice.trim() {
-            "1" => "copilot".to_string(),
-            "2" => "openai".to_string(),
-            "3" => "claude".to_string(),
-            "4" => "gemini".to_string(),
-            "5" => "openrouter".to_string(),
-            "6" => "ollama".to_string(),
+        match choice.trim().parse::<usize>() {
+            Ok(1) => "copilot".to_string(),
+            Ok(2) => "openai".to_string(),
+            Ok(3) => "claude".to_string(),
+            Ok(4) => "gemini".to_string(),
+            Ok(5) => "openrouter".to_string(),
+            Ok(6) => "ollama".to_string(),
+            Ok(n) if n >= 7 && n <= max_choice => {
+                let plugin_idx = n - 7;
+                plugin_providers[plugin_idx].0.clone()
+            }
             _ => anyhow::bail!("Invalid choice"),
         }
     };
@@ -639,8 +669,56 @@ pub async fn run_auth(provider: Option<&str>) -> Result<()> {
             println!();
             println!("No API key needed!");
         }
+        // Check if this is a plugin-based OAuth provider
+        _ if provider_is_plugin_oauth(&provider) => match run_plugin_oauth_flow(&provider).await {
+            Ok(creds_path) => {
+                println!();
+                println!("✅ Successfully authenticated!");
+                println!("Credentials saved to: {}", creds_path.display());
+                println!();
+                println!("You can now use this provider:");
+                println!("  tark chat --provider {}", provider);
+            }
+            Err(e) => {
+                println!();
+                println!("❌ Authentication failed: {}", e);
+            }
+        },
+        "gemini-oauth" => {
+            // gemini-oauth reads from ~/.gemini/oauth_creds.json (set by gemini CLI)
+            let oauth_creds_path = dirs::home_dir()
+                .map(|h| h.join(".gemini").join("oauth_creds.json"))
+                .unwrap_or_default();
+
+            if oauth_creds_path.exists() {
+                println!("✅ Gemini CLI OAuth credentials found");
+                println!();
+                println!("You can now use Gemini with OAuth:");
+                println!("  tark chat --provider gemini-oauth");
+            } else {
+                println!("{}", "Gemini OAuth Setup".bold());
+                println!();
+                println!("The gemini-oauth plugin uses credentials from Gemini CLI.");
+                println!();
+                println!("Setup steps:");
+                println!("  1. Install Gemini CLI:");
+                println!("     npm install -g @google/gemini-cli");
+                println!();
+                println!("  2. Authenticate:");
+                println!("     gemini auth login");
+                println!();
+                println!("  3. Use in tark:");
+                println!("     tark chat --provider gemini-oauth");
+                println!();
+                println!("Credentials will be stored at:");
+                println!("  {}", oauth_creds_path.display());
+            }
+        }
         _ => {
-            anyhow::bail!("Unknown provider: {}", provider);
+            anyhow::bail!(
+                "Unknown provider: {}. Try 'tark auth' for a list of providers.",
+                provider
+            );
         }
     }
 
@@ -658,16 +736,188 @@ fn format_number(n: u64) -> String {
     }
 }
 
+/// Check if a provider is a plugin with OAuth configuration
+fn provider_is_plugin_oauth(provider_id: &str) -> bool {
+    if let Ok(registry) = crate::plugins::PluginRegistry::new() {
+        for plugin in registry.enabled() {
+            if plugin.manifest.oauth.is_some() {
+                for contrib in plugin.contributed_providers() {
+                    if contrib.id == provider_id {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Run generic OAuth flow for a plugin-based provider
+async fn run_plugin_oauth_flow(provider_id: &str) -> Result<PathBuf> {
+    use crate::auth::OAuthHandler;
+    use crate::plugins::{PluginHost, PluginRegistry};
+
+    // Find the plugin with OAuth config
+    let registry = PluginRegistry::new()?;
+
+    let mut plugin_info = None;
+    for plugin in registry.enabled() {
+        if let Some(oauth_config) = &plugin.manifest.oauth {
+            for contrib in plugin.contributed_providers() {
+                if contrib.id == provider_id {
+                    plugin_info =
+                        Some((plugin.clone(), oauth_config.clone(), contrib.name.clone()));
+                    break;
+                }
+            }
+            if plugin_info.is_some() {
+                break;
+            }
+        }
+    }
+
+    let (plugin, oauth_config, provider_name) = plugin_info.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Provider {} not found or has no OAuth configuration",
+            provider_id
+        )
+    })?;
+
+    println!("Authenticating with {}...", provider_name.bold());
+    println!();
+
+    // Create OAuth handler
+    let handler = OAuthHandler::new(oauth_config.clone());
+
+    // Execute OAuth flow
+    let tokens = handler.execute_pkce_flow().await?;
+
+    // Call plugin's token processor if defined
+    let final_tokens = if oauth_config.process_tokens_callback.is_some() {
+        println!("Processing tokens with plugin callback...");
+
+        // Load plugin instance
+        let mut plugin_host = PluginHost::new()?;
+        plugin_host.load(&plugin)?;
+
+        // Convert tokens to JSON
+        let tokens_json = serde_json::to_string(&tokens)?;
+
+        // Get mutable instance and call processor
+        if let Some(instance) = plugin_host.get_mut(plugin.id()) {
+            if let Some(processed_json) = instance.auth_process_tokens(&tokens_json)? {
+                tracing::debug!("Plugin processed tokens");
+                processed_json
+            } else {
+                // Plugin doesn't actually have the callback, use original
+                tokens_json
+            }
+        } else {
+            tokens_json
+        }
+    } else {
+        // No processor, serialize tokens with expires_at
+        let mut token_value = serde_json::to_value(&tokens)?;
+        if let Some(expires_in) = tokens.expires_in {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            token_value["expires_at"] = serde_json::json!(now + expires_in);
+        }
+        serde_json::to_string_pretty(&token_value)?
+    };
+
+    // Save credentials (either processed or original)
+    let creds_path = if let Some(path_str) = &oauth_config.credentials_path {
+        expand_path(path_str)
+    } else {
+        let config_dir = dirs::config_dir()
+            .context("Could not determine config directory")?
+            .join("tark");
+        config_dir.join(format!("{}_oauth.json", provider_id))
+    };
+
+    // Ensure parent directory exists
+    if let Some(parent) = creds_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Write credentials
+    std::fs::write(&creds_path, final_tokens)?;
+
+    // Set secure permissions (Unix only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&creds_path)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&creds_path, perms)?;
+    }
+
+    Ok(creds_path)
+}
+
+/// Expand ~ in path to home directory
+fn expand_path(path: &str) -> PathBuf {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    } else if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
+    PathBuf::from(path)
+}
+
 /// Logout from an LLM provider (clear stored tokens)
 pub async fn run_auth_logout(provider: &str) -> Result<()> {
+    use crate::plugins::PluginRegistry;
     use colored::Colorize;
 
     println!("{}", "=== Tark Logout ===".bold().cyan());
     println!();
 
+    // Check if provider is a plugin with OAuth configuration
+    if let Ok(registry) = PluginRegistry::new() {
+        for plugin in registry.enabled() {
+            if let Some(oauth_config) = &plugin.manifest.oauth {
+                for contrib in plugin.contributed_providers() {
+                    if contrib.id == provider
+                        || provider.to_lowercase() == contrib.id.to_lowercase()
+                    {
+                        // Delete credentials file
+                        if let Some(creds_path_str) = &oauth_config.credentials_path {
+                            let creds_path = expand_path(creds_path_str);
+                            if creds_path.exists() {
+                                std::fs::remove_file(&creds_path)?;
+                                println!("✅ Cleared {} OAuth credentials", contrib.name);
+                                println!("   Deleted: {}", creds_path.display());
+                                return Ok(());
+                            } else {
+                                println!("No credentials found for {}", contrib.name);
+                                return Ok(());
+                            }
+                        }
+
+                        // Also clear plugin storage
+                        let plugin_storage = plugin.data_dir().join("storage.json");
+                        if plugin_storage.exists() {
+                            std::fs::remove_file(&plugin_storage)?;
+                            println!("✅ Cleared {} plugin storage", contrib.name);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall through to built-in providers
     match provider.to_lowercase().as_str() {
         "gemini" | "google" => {
-            // Clear plugin storage if exists
+            // Clear plugin storage if exists (fallback)
             let plugin_storage = dirs::data_local_dir()
                 .map(|d| {
                     d.join("tark")
@@ -915,6 +1165,90 @@ pub async fn run_auth_status() -> Result<()> {
     println!();
     println!("Authenticate with: tark auth <provider>");
     println!("Logout with: tark auth logout <provider>");
+
+    Ok(())
+}
+
+/// Verify policy database integrity
+pub async fn run_policy_verify(working_dir: &std::path::Path, fix: bool) -> Result<()> {
+    let db_path = working_dir.join(".tark").join("policy.db");
+
+    if !db_path.exists() {
+        println!("{}", "Policy database not found.".red());
+        println!("Location: {}", db_path.display());
+        println!("\nThe database will be created automatically when you run tark tui.");
+        return Ok(());
+    }
+
+    println!("{}", "Policy Database Integrity Check".bold());
+    println!("Location: {}", db_path.display());
+    println!();
+
+    if fix {
+        println!("{}", "Forcing reseed from embedded configs...".yellow());
+
+        // Open database and force repair
+        let conn = Connection::open(&db_path)?;
+        let verifier = IntegrityVerifier::new(&conn);
+
+        verifier.clear_builtin_tables()?;
+        crate::policy::seed::seed_builtin(&conn)?;
+        let hash = verifier.calculate_builtin_hash()?;
+        verifier.store_hash(&hash)?;
+
+        println!("{}", "✓ Policy database repaired successfully".green());
+        println!("New hash: {}", &hash[..16]);
+        println!();
+        println!("User approval patterns were preserved.");
+
+        return Ok(());
+    }
+
+    // Verify integrity
+    let conn = Connection::open(&db_path)?;
+    let verifier = IntegrityVerifier::new(&conn);
+
+    match verifier.verify_integrity()? {
+        VerificationResult::Valid => {
+            let hash = verifier.get_stored_hash()?.unwrap_or_default();
+            println!("{}", "✓ Integrity check passed".green());
+            println!("Hash: {}", &hash[..32]);
+            println!();
+            println!("No tampering detected. Builtin policy tables are intact.");
+        }
+        VerificationResult::Invalid { expected, actual } => {
+            println!("{}", "✗ Integrity check failed".red().bold());
+            println!();
+            println!("Expected hash: {}", &expected[..32]);
+            println!("Actual hash:   {}", &actual[..32]);
+            println!();
+            println!(
+                "{}",
+                "⚠️  WARNING: Builtin policy tables have been modified!"
+                    .yellow()
+                    .bold()
+            );
+            println!();
+            println!("This could indicate:");
+            println!("  • Tampering with the database");
+            println!("  • Database corruption");
+            println!("  • Manual modification of builtin tables");
+            println!();
+            println!("To repair:");
+            println!("  {}", "tark policy verify --fix".cyan());
+            println!();
+            println!("Note: User approval patterns will be preserved during repair.");
+        }
+        VerificationResult::NoHash => {
+            println!("{}", "⚠️  No integrity hash found".yellow());
+            println!();
+            println!("Calculating initial hash...");
+            let hash = verifier.calculate_builtin_hash()?;
+            verifier.store_hash(&hash)?;
+            println!("{}", "✓ Integrity hash stored".green());
+            println!("Hash: {}", &hash[..32]);
+        }
+    }
 
     Ok(())
 }

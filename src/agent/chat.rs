@@ -145,6 +145,7 @@ fn get_system_prompt(
     mode: AgentMode,
     supports_native_thinking: bool,
     thinking_enabled: bool,
+    thinking_tool_enabled: bool,
     trust_level: crate::tools::TrustLevel,
     plan_context: Option<&PlanContext>,
 ) -> String {
@@ -658,8 +659,32 @@ Example - User says "add authentication":
         base_prompt
     };
 
+    // Add think tool instructions when enabled
+    let prompt_with_tool_thinking = if thinking_tool_enabled {
+        format!(
+            "{}\n\n\
+            🧠 STRUCTURED REASONING:\n\
+            Use the `think` tool to reason through problems:\n\
+            - Call think() at the START of your response to plan your approach\n\
+            - INCREMENT thought_number (1, 2, 3...) for sequential thoughts in a chain\n\
+            - Set next_thought_needed=true to continue, false when reasoning is complete\n\
+            - After thinking is complete (next_thought_needed=false), take action or respond\n\n\
+            IMPORTANT: Do NOT call think() repeatedly with the same thought_number.\n\
+            If you set next_thought_needed=false, you are DONE thinking - proceed to action.\n\n\
+            Example chain:\n\
+            think({{\"thought_number\": 1, \"next_thought_needed\": true, \"thought_type\": \"analysis\"}})  // Analyze\n\
+            think({{\"thought_number\": 2, \"next_thought_needed\": true, \"thought_type\": \"plan\"}})      // Plan\n\
+            think({{\"thought_number\": 3, \"next_thought_needed\": false, \"thought_type\": \"decision\"}}) // Decide\n\
+            // Now take action - do NOT call think() again\n\n\
+            Track confidence levels (0.0-1.0) and use thought_type: hypothesis, analysis, plan, decision, reflection",
+            prompt_with_thinking
+        )
+    } else {
+        prompt_with_thinking
+    };
+
     // Prepend status header so agent always knows its current context
-    format!("{}{}", status_header, prompt_with_thinking)
+    format!("{}{}", status_header, prompt_with_tool_thinking)
 }
 
 /// A single tool call log entry
@@ -698,6 +723,39 @@ pub struct CompactResult {
     pub new_messages: usize,
 }
 
+/// Detects think tool loops where model gets stuck at step 1
+#[derive(Debug, Default)]
+struct ThinkLoopDetector {
+    consecutive_step_one_calls: usize,
+}
+
+impl ThinkLoopDetector {
+    const MAX_CONSECUTIVE_STEP_ONE: usize = 3;
+
+    /// Check if a think call would trigger the loop detector
+    /// Returns true if loop is detected (3+ consecutive step-1 calls)
+    fn check_and_record(&mut self, args: &serde_json::Value) -> bool {
+        let thought_number = args
+            .get("thought_number")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        if thought_number == 1 {
+            self.consecutive_step_one_calls += 1;
+            if self.consecutive_step_one_calls >= Self::MAX_CONSECUTIVE_STEP_ONE {
+                return true; // Loop detected
+            }
+        } else {
+            self.consecutive_step_one_calls = 0; // Reset on progression
+        }
+        false
+    }
+
+    fn reset(&mut self) {
+        self.consecutive_step_one_calls = 0;
+    }
+}
+
 /// Chat agent that can use tools to accomplish tasks
 pub struct ChatAgent {
     llm: Arc<dyn LlmProvider>,
@@ -712,6 +770,8 @@ pub struct ChatAgent {
     think_level: String,
     /// Thinking configuration (levels and their settings)
     thinking_config: crate::config::ThinkingConfig,
+    /// Whether the think tool is enabled (system prompt injection)
+    thinking_tool_enabled: bool,
     /// Plan service for tracking execution plans (optional)
     plan_service: Option<Arc<PlanService>>,
     /// Cached plan context for Build mode system prompt injection
@@ -733,6 +793,7 @@ impl ChatAgent {
             mode,
             supports_thinking,
             false,
+            false, // thinking_tool_enabled off by default
             trust_level,
             None,
         ));
@@ -746,6 +807,7 @@ impl ChatAgent {
             trust_level,
             think_level: "off".to_string(), // Off by default, enabled via /think command
             thinking_config: crate::config::ThinkingConfig::default(),
+            thinking_tool_enabled: false, // Off by default, enabled via /thinking command
             plan_service: None,
             plan_context: None,
         }
@@ -831,6 +893,18 @@ impl ChatAgent {
         self.refresh_system_prompt();
     }
 
+    /// Set thinking tool enabled state
+    ///
+    /// This controls whether the think tool instructions are injected into the system prompt
+    pub fn set_thinking_tool_enabled(&mut self, enabled: bool) {
+        self.thinking_tool_enabled = enabled;
+    }
+
+    /// Get thinking tool enabled state
+    pub fn is_thinking_tool_enabled(&self) -> bool {
+        self.thinking_tool_enabled
+    }
+
     /// Refresh system prompt based on current thinking state (async version)
     ///
     /// This queries models.dev for accurate capability detection
@@ -844,6 +918,7 @@ impl ChatAgent {
             self.mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             self.plan_context.as_ref(),
         );
@@ -869,6 +944,7 @@ impl ChatAgent {
             self.mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             self.plan_context.as_ref(),
         );
@@ -897,7 +973,11 @@ impl ChatAgent {
 
     /// Update the agent's mode and tools while preserving conversation history
     pub fn update_mode(&mut self, tools: ToolRegistry, mode: AgentMode) {
-        let tool_names: Vec<_> = tools.definitions().iter().map(|t| t.name.clone()).collect();
+        let tool_names: Vec<_> = tools
+            .definitions_for_mode()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
         tracing::info!(
             "Mode changed to {:?} - available tools: {:?}",
             mode,
@@ -918,6 +998,7 @@ impl ChatAgent {
             mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             self.plan_context.as_ref(),
         ));
@@ -928,18 +1009,14 @@ impl ChatAgent {
         self.llm = llm;
     }
 
-    /// Update approval storage path (per session)
-    pub async fn set_approval_storage_path(&mut self, storage_path: std::path::PathBuf) {
-        self.tools.set_approval_storage_path(storage_path).await;
-    }
-
     /// Set the trust level for risky tool operations
     ///
-    /// This updates both the tool registry and the cached trust level,
-    /// and refreshes the system prompt so the agent knows the new level.
+    /// Updates the cached trust level and refreshes the system prompt.
+    /// Trust level approval logic is now handled by PolicyEngine.
     pub async fn set_trust_level(&mut self, level: crate::tools::TrustLevel) {
         self.trust_level = level;
-        self.tools.set_trust_level(level).await;
+        // Forward trust level to ToolRegistry for PolicyEngine approval checks
+        self.tools.set_trust_level(level);
         // Refresh system prompt so agent knows the new trust level
         self.refresh_system_prompt_async().await;
     }
@@ -947,6 +1024,17 @@ impl ChatAgent {
     /// Get the current trust level
     pub fn trust_level(&self) -> crate::tools::TrustLevel {
         self.trust_level
+    }
+
+    /// List session approval patterns (for policy modal)
+    pub fn list_session_patterns(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<(
+        Vec<crate::policy::ApprovalPatternEntry>,
+        Vec<crate::policy::ApprovalPatternEntry>,
+    )> {
+        self.tools.list_session_patterns(session_id)
     }
 
     /// Update the max context tokens for the agent
@@ -1021,7 +1109,7 @@ impl ChatAgent {
     pub fn tool_schema_tokens(&self) -> usize {
         // Average tool definition is approximately 100 tokens
         // (name ~5, description ~30, parameters ~65)
-        self.tools.definitions().len() * 100
+        self.tools.definitions_for_mode().len() * 100
     }
 
     /// Get conversation history token count (excludes system prompt)
@@ -1072,6 +1160,7 @@ impl ChatAgent {
             self.mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             None, // No plan context after clear
         );
@@ -1092,6 +1181,7 @@ impl ChatAgent {
             self.mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             self.plan_context.as_ref(),
         );
@@ -1387,7 +1477,7 @@ impl ChatAgent {
 
         self.context.add_user(user_message);
 
-        let tool_definitions = self.tools.definitions();
+        let tool_definitions = self.tools.definitions_for_mode();
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
@@ -1818,6 +1908,7 @@ impl ChatAgent {
             self.mode,
             supports_thinking,
             thinking_enabled,
+            self.thinking_tool_enabled,
             self.trust_level,
             self.plan_context.as_ref(),
         ));
@@ -1859,7 +1950,7 @@ impl ChatAgent {
 
         self.context.add_user(user_message);
 
-        let tool_definitions = self.tools.definitions();
+        let tool_definitions = self.tools.definitions_for_mode();
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
@@ -2312,7 +2403,7 @@ impl ChatAgent {
 
         self.context.add_user(user_message);
 
-        let tool_definitions = self.tools.definitions();
+        let tool_definitions = self.tools.definitions_for_mode();
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut tool_call_log: Vec<ToolCallLog> = Vec::new();
@@ -2325,6 +2416,9 @@ impl ChatAgent {
         let mut consecutive_duplicate_calls = 0;
         const MAX_CONSECUTIVE_DUPLICATES: usize = 2;
         const MAX_TOOL_CALLS_PER_TURN: usize = 5;
+
+        // Track think tool loops
+        let mut think_detector = ThinkLoopDetector::default();
 
         loop {
             // Check for interrupt at start of each iteration
@@ -2505,6 +2599,26 @@ impl ChatAgent {
 
                         // Yield to allow the UI to render the "tool started" state
                         tokio::task::yield_now().await;
+
+                        // Check for think tool loops (step-1 repetition)
+                        if call.name == "think" && think_detector.check_and_record(&call.arguments)
+                        {
+                            tracing::warn!(
+                                "Think loop detected: {} consecutive thought_number=1 calls",
+                                think_detector.consecutive_step_one_calls
+                            );
+                            // Skip this think call and force the model to act
+                            let loop_warning = "Loop detected: You've called think() with thought_number=1 three times. \
+                                Stop thinking and take action or provide your response now.";
+                            on_tool_complete(call.name.clone(), loop_warning.to_string(), false);
+                            self.context.add_tool_result(&call.id, loop_warning);
+                            tool_call_log.push(ToolCallLog {
+                                tool: call.name.clone(),
+                                args: call.arguments.clone(),
+                                result_preview: loop_warning.to_string(),
+                            });
+                            continue;
+                        }
 
                         tracing::info!(
                             "Executing tool: {} with args: {} (mode: {:?})",

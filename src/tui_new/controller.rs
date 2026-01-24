@@ -441,6 +441,7 @@ impl<B: Backend> TuiController<B> {
                 thinking: None,
                 tool_calls: Vec::new(),
                 segments: Vec::new(),
+                tool_args: None,
             });
 
             // Build response with all answers
@@ -549,21 +550,26 @@ impl<B: Backend> TuiController<B> {
             Command::ApproveOperation => {
                 self.send_approval_response(ApprovalChoice::ApproveOnce)
                     .await;
+                return Ok(());
             }
             Command::ApproveSession => {
                 self.send_approval_response(ApprovalChoice::ApproveSession)
                     .await;
+                return Ok(());
             }
             Command::ApproveAlways => {
                 self.send_approval_response(ApprovalChoice::ApproveAlways)
                     .await;
+                return Ok(());
             }
             Command::DenyOperation => {
                 self.send_approval_response(ApprovalChoice::Deny).await;
+                return Ok(());
             }
             Command::DenyAlways => {
                 self.send_approval_response(ApprovalChoice::DenyAlways)
                     .await;
+                return Ok(());
             }
             Command::CloseModal => {
                 if self.service.state().active_modal()
@@ -582,6 +588,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                         });
                 }
             }
@@ -679,6 +686,32 @@ impl<B: Backend> TuiController<B> {
                 }
                 return Ok(());
             }
+            Command::ToggleThinkingTool => {
+                // Toggle thinking tool + display
+                let enabled = !state.thinking_tool_enabled();
+                state.set_thinking_tool_enabled(enabled);
+
+                // Notify service to refresh agent system prompt
+                self.service.set_thinking_tool_enabled(enabled).await;
+
+                use crate::ui_backend::{Message, MessageRole};
+                let msg = Message {
+                    role: MessageRole::System,
+                    content: if enabled {
+                        "✓ Thinking tool enabled. Agent will use structured reasoning.".to_string()
+                    } else {
+                        "✗ Thinking tool disabled.".to_string()
+                    },
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
+                    tool_args: None,
+                    collapsed: false,
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                };
+                state.add_message(msg);
+                return Ok(());
+            }
             Command::CloseModal => {
                 // Restore original theme if canceling theme picker
                 if state.active_modal() == Some(crate::ui_backend::ModalType::ThemePicker) {
@@ -739,6 +772,30 @@ impl<B: Backend> TuiController<B> {
 
                         let new_selected = selected.saturating_sub(1);
                         state.set_session_picker_selected(new_selected);
+                    }
+                }
+                return Ok(());
+            }
+            Command::DeletePolicyPattern => {
+                if state.active_modal() == Some(crate::ui_backend::ModalType::Policy) {
+                    if let Some(mut modal) = state.policy_modal() {
+                        // Get the pattern ID before removing from UI
+                        if let Some(pattern_id) = modal.get_selected_pattern_id() {
+                            // Delete from database
+                            if let Err(err) = self.service.delete_policy_pattern(pattern_id).await {
+                                state.set_error_notification(Some(
+                                    crate::ui_backend::ErrorNotification {
+                                        message: format!("Failed to delete pattern: {}", err),
+                                        level: crate::ui_backend::ErrorLevel::Error,
+                                        timestamp: chrono::Local::now(),
+                                    },
+                                ));
+                            } else {
+                                // Remove from local UI state
+                                modal.remove_selected();
+                                state.set_policy_modal(Some(modal));
+                            }
+                        }
                     }
                 }
                 return Ok(());
@@ -1102,6 +1159,14 @@ impl<B: Backend> TuiController<B> {
                         }
                         return Ok(());
                     }
+                    Some(crate::ui_backend::ModalType::Policy) => {
+                        // Navigate up in policy modal
+                        if let Some(mut modal) = state.policy_modal() {
+                            modal.move_up();
+                            state.set_policy_modal(Some(modal));
+                        }
+                        return Ok(());
+                    }
                     _ => {}
                 }
             }
@@ -1233,6 +1298,14 @@ impl<B: Backend> TuiController<B> {
                         let selected = state.plugin_selected();
                         // Note: The max limit will be checked by the plugin list itself
                         state.set_plugin_selected(selected + 1);
+                        return Ok(());
+                    }
+                    Some(crate::ui_backend::ModalType::Policy) => {
+                        // Navigate down in policy modal
+                        if let Some(mut modal) = state.policy_modal() {
+                            modal.move_down();
+                            state.set_policy_modal(Some(modal));
+                        }
                         return Ok(());
                     }
                     _ => {}
@@ -1555,6 +1628,7 @@ impl<B: Backend> TuiController<B> {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     });
                 }
                 return Ok(());
@@ -1762,6 +1836,7 @@ impl<B: Backend> TuiController<B> {
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     };
                     // Clear streaming_content to avoid duplication in live display
                     state.set_streaming_content(None);
@@ -1834,6 +1909,7 @@ impl<B: Backend> TuiController<B> {
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     };
                     state.add_message(msg.clone());
                     self.service.record_session_message(&msg).await;
@@ -1849,6 +1925,7 @@ impl<B: Backend> TuiController<B> {
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                             };
                             state.add_message(thinking_msg.clone());
                             self.service.record_session_message(&thinking_msg).await;
@@ -1858,6 +1935,29 @@ impl<B: Backend> TuiController<B> {
 
                     // Clear streaming state
                     state.clear_streaming();
+
+                    // Apply any pending mode switch that was queued during streaming
+                    // This avoids a deadlock: handle_command(SetAgentMode) needs a write lock
+                    // on chat_agent, which would have been held by the streaming operation
+                    if let Some(pending_mode) = state.take_pending_mode_switch() {
+                        tracing::info!(
+                            "Applying queued mode switch to {:?} after streaming completed",
+                            pending_mode
+                        );
+                        if let Err(e) = self
+                            .service
+                            .handle_command(Command::SetAgentMode(pending_mode))
+                            .await
+                        {
+                            tracing::error!("Failed to apply queued mode switch: {}", e);
+                            state.set_status_message(Some(format!("Failed to switch mode: {}", e)));
+                        } else {
+                            state.set_status_message(Some(format!(
+                                "Switched to {} mode",
+                                pending_mode.display_name()
+                            )));
+                        }
+                    }
 
                     // Update session cost (models.dev pricing)
                     if let (Some(provider), Some(model_id)) =
@@ -1909,6 +2009,7 @@ impl<B: Backend> TuiController<B> {
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     };
                     state.add_message(msg.clone());
                     self.service.record_session_message(&msg).await;
@@ -1966,6 +2067,7 @@ impl<B: Backend> TuiController<B> {
                         segments: Vec::new(),
                         collapsed: false, // Running tools are expanded (renderer also forces this)
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        tool_args: Some(args.clone()), // Store original args for rich rendering
                     };
 
                     // Debug log before adding message
@@ -2052,26 +2154,43 @@ impl<B: Backend> TuiController<B> {
                                     payload.get("target_mode").and_then(|v| v.as_str())
                                 {
                                     let mode: crate::core::types::AgentMode = target_mode.into();
-                                    if let Err(e) = self
-                                        .service
-                                        .handle_command(Command::SetAgentMode(mode))
-                                        .await
-                                    {
-                                        tracing::error!("Failed to apply mode switch: {}", e);
-                                        state.set_status_message(Some(format!(
-                                            "Failed to switch mode: {}",
-                                            e
-                                        )));
-                                    } else {
+
+                                    // IMPORTANT: Don't block on handle_command if LLM is still processing
+                                    // This would cause a deadlock because handle_command needs a write lock
+                                    // on chat_agent, which is already held by the streaming operation.
+                                    // Instead, queue the mode switch to be applied after streaming completes.
+                                    if state.llm_processing() {
                                         tracing::info!(
-                                            "Mode switched to {:?} via switch_mode tool",
+                                            "Queuing mode switch to {:?} (will apply after streaming completes)",
                                             mode
                                         );
-                                        // Provide visual feedback to user
+                                        state.set_pending_mode_switch(Some(mode));
                                         state.set_status_message(Some(format!(
-                                            "Switched to {} mode",
+                                            "Mode switch to {} queued",
                                             mode.display_name()
                                         )));
+                                    } else {
+                                        // Not streaming, apply immediately
+                                        if let Err(e) = self
+                                            .service
+                                            .handle_command(Command::SetAgentMode(mode))
+                                            .await
+                                        {
+                                            tracing::error!("Failed to apply mode switch: {}", e);
+                                            state.set_status_message(Some(format!(
+                                                "Failed to switch mode: {}",
+                                                e
+                                            )));
+                                        } else {
+                                            tracing::info!(
+                                                "Mode switched to {:?} via switch_mode tool",
+                                                mode
+                                            );
+                                            state.set_status_message(Some(format!(
+                                                "Switched to {} mode",
+                                                mode.display_name()
+                                            )));
+                                        }
                                     }
                                 }
                             }
@@ -2154,6 +2273,7 @@ impl<B: Backend> TuiController<B> {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -2402,6 +2522,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2415,6 +2536,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2441,6 +2563,7 @@ impl<B: Backend> TuiController<B> {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -2473,6 +2596,7 @@ impl<B: Backend> TuiController<B> {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -2482,7 +2606,8 @@ impl<B: Backend> TuiController<B> {
             "/quit" | "/exit" | "/q" => {
                 state.set_should_quit(true);
             }
-            "/think" | "/thinking" => {
+            "/think" => {
+                // Toggle model-level thinking (API parameter)
                 let enabled = !state.thinking_enabled();
                 state.set_thinking_enabled(enabled);
 
@@ -2490,14 +2615,41 @@ impl<B: Backend> TuiController<B> {
                 let msg = Message {
                     role: MessageRole::System,
                     content: if enabled {
-                        "✓ Thinking mode enabled. The agent's reasoning will be displayed in real-time.".to_string()
+                        "✓ Model thinking enabled. Extended reasoning will be used.".to_string()
                     } else {
-                        "✗ Thinking mode disabled. The agent's reasoning will be hidden."
-                            .to_string()
+                        "✗ Model thinking disabled.".to_string()
                     },
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
+                    collapsed: false,
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                };
+                state.add_message(msg);
+                state.clear_input();
+                return Ok(());
+            }
+            "/thinking" => {
+                // Toggle thinking tool + display
+                let enabled = !state.thinking_tool_enabled();
+                state.set_thinking_tool_enabled(enabled);
+
+                // Notify service to refresh agent system prompt
+                self.service.set_thinking_tool_enabled(enabled).await;
+
+                use crate::ui_backend::{Message, MessageRole};
+                let msg = Message {
+                    role: MessageRole::System,
+                    content: if enabled {
+                        "✓ Thinking tool enabled. Agent will use structured reasoning.".to_string()
+                    } else {
+                        "✗ Thinking tool disabled.".to_string()
+                    },
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -2528,6 +2680,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2542,6 +2695,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2572,6 +2726,7 @@ impl<B: Backend> TuiController<B> {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -2600,6 +2755,67 @@ impl<B: Backend> TuiController<B> {
                 state.set_tools_scroll_offset(0);
                 state.set_active_modal(Some(crate::ui_backend::ModalType::Tools));
                 state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+                state.clear_input();
+                return Ok(());
+            }
+            "/policy" => {
+                // Show approval/denial patterns for this session
+                let session_id = state
+                    .session()
+                    .map(|s| s.session_id.clone())
+                    .unwrap_or_else(|| "session".to_string());
+
+                match self.service.list_session_patterns(&session_id) {
+                    Ok((approvals, denials)) => {
+                        use crate::tui_new::modals::policy_modal::{
+                            PolicyModal, PolicyPatternEntry,
+                        };
+
+                        // Convert from policy types to modal types
+                        let approval_entries: Vec<PolicyPatternEntry> = approvals
+                            .into_iter()
+                            .map(|p| PolicyPatternEntry {
+                                id: p.id,
+                                tool: p.tool,
+                                pattern: p.pattern,
+                                match_type: p.match_type,
+                                is_denial: p.is_denial,
+                                description: p.description,
+                            })
+                            .collect();
+
+                        let denial_entries: Vec<PolicyPatternEntry> = denials
+                            .into_iter()
+                            .map(|p| PolicyPatternEntry {
+                                id: p.id,
+                                tool: p.tool,
+                                pattern: p.pattern,
+                                match_type: p.match_type,
+                                is_denial: p.is_denial,
+                                description: p.description,
+                            })
+                            .collect();
+
+                        let modal = PolicyModal::new(approval_entries, denial_entries);
+                        state.set_policy_modal(Some(modal));
+                        state.set_active_modal(Some(crate::ui_backend::ModalType::Policy));
+                        state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+                    }
+                    Err(e) => {
+                        use crate::ui_backend::{Message, MessageRole};
+                        let msg = Message {
+                            role: MessageRole::System,
+                            content: format!("⚠️ Failed to load policy patterns: {}", e),
+                            thinking: None,
+                            tool_calls: Vec::new(),
+                            segments: Vec::new(),
+                            tool_args: None,
+                            collapsed: false,
+                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        };
+                        state.add_message(msg);
+                    }
+                }
                 state.clear_input();
                 return Ok(());
             }
@@ -2635,6 +2851,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2669,6 +2886,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2682,6 +2900,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2712,6 +2931,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2725,6 +2945,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2757,6 +2978,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2770,6 +2992,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2792,6 +3015,7 @@ impl<B: Backend> TuiController<B> {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };

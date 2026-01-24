@@ -10,8 +10,9 @@
 //! instead of `provider_chat()`, enabling streaming, tools, and all native features.
 
 use super::{
-    CodeIssue, CompletionResult, GeminiProvider, LlmProvider, LlmResponse, Message,
-    RefactoringSuggestion, Role, TokenUsage, ToolDefinition,
+    AuthMethod, CodeIssue, CompletionResult, GeminiProvider, LlmProvider, LlmResponse, Message,
+    OpenAiCompatConfig, OpenAiCompatProvider, RefactoringSuggestion, Role, TokenUsage,
+    ToolDefinition,
 };
 use crate::plugins::{
     ChatResponse, ModelInfo, PluginHost, PluginRegistry, PluginType, ProviderAuthStatus,
@@ -468,6 +469,40 @@ fn try_create_native_provider_from_auth_plugin(
             tracing::info!(
                 "Created GeminiProvider with Cloud Code Assist mode, model={}",
                 model.unwrap_or("gemini-2.0-flash")
+            );
+
+            Some(Box::new(provider))
+        }
+        "openai_compat" => {
+            // Generic OpenAI-compatible provider (works for Codex, Azure OpenAI, LocalAI, etc.)
+            let endpoint = match creds.endpoint {
+                Some(ep) => ep,
+                None => {
+                    tracing::error!("openai_compat mode requires endpoint but none provided");
+                    return None;
+                }
+            };
+
+            let mut config = OpenAiCompatConfig::new(
+                "openai-compat",
+                endpoint.clone(),
+                AuthMethod::BearerToken(creds.access_token),
+            )
+            .with_model(model.unwrap_or("gpt-4"));
+
+            // Add custom headers if plugin provides them
+            if let Some(headers) = creds.custom_headers {
+                for (name, value) in headers {
+                    config = config.with_header(name, value);
+                }
+            }
+
+            let provider = OpenAiCompatProvider::new(config);
+
+            tracing::info!(
+                "Created OpenAI-compatible provider for {}, model={}",
+                endpoint,
+                model.unwrap_or("gpt-4")
             );
 
             Some(Box::new(provider))

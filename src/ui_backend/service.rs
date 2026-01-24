@@ -126,10 +126,6 @@ impl AppService {
         let tark_storage = TarkStorage::new(&working_dir)?;
 
         let (interaction_tx, interaction_rx) = crate::tools::interaction_channel();
-        let approvals_path = tark_storage
-            .load_current_session()
-            .ok()
-            .map(|session| tark_storage.session_dir(&session.id).join("approvals.json"));
 
         // Initialize ChatAgent
         let chat_agent_result = (|| -> Result<crate::agent::ChatAgent> {
@@ -141,18 +137,29 @@ impl AppService {
                 model.as_deref(),
             )?;
 
-            // Create tool registry with shared todo_tracker from state
-            let tools = crate::tools::ToolRegistry::for_mode_with_services(
+            // Create tool registry with shared todo_tracker and thinking_tracker from state
+            let mut tools = crate::tools::ToolRegistry::for_mode_with_services(
                 working_dir.clone(),
                 crate::core::types::AgentMode::Build,
                 true, // shell_enabled
                 Some(interaction_tx.clone()),
                 None,
-                approvals_path.clone(),
                 Some(state.todo_tracker()),
+                Some(state.thinking_tracker()),
             );
 
-            Ok(crate::agent::ChatAgent::new(Arc::from(llm_provider), tools))
+            // Set initial trust level from state (defense in depth)
+            let initial_trust = state.trust_level();
+            tools.set_trust_level(initial_trust);
+
+            let agent = crate::agent::ChatAgent::new(Arc::from(llm_provider), tools)
+                .with_max_iterations(global_config.agent.max_iterations);
+
+            // Note: Can't set trust_level synchronously during init.
+            // It will be set via conv_svc.set_trust_level() after ConversationService creation.
+            // The ToolRegistry already has the correct trust level set above.
+
+            Ok(agent)
         })();
 
         let (conversation_svc, session_svc) = match chat_agent_result {
@@ -162,8 +169,11 @@ impl AppService {
                     chat_agent,
                     event_tx.clone(),
                     Some(interaction_tx.clone()),
-                    approvals_path.clone(),
                 ));
+
+                // Note: Trust level was already set on ToolRegistry above (line 153).
+                // ToolRegistry is what PolicyEngine uses for approval checks.
+                // The ChatAgent's cached trust_level will be synced later via set_trust_level().
 
                 // Initialize SessionManager
                 let session_mgr = SessionManager::new(tark_storage);
@@ -215,6 +225,7 @@ impl AppService {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -229,7 +240,7 @@ impl AppService {
 
         // Initialize BFF services
         let catalog = super::CatalogService::new();
-        let tools = super::ToolExecutionService::new(super::commands::AgentMode::default(), None);
+        let tools = super::ToolExecutionService::new(super::commands::AgentMode::default());
         let git = GitService::new(working_dir.clone());
 
         Ok(Self {
@@ -281,7 +292,9 @@ impl AppService {
                         .update_mode(
                             self.working_dir.clone(),
                             next,
+                            self.state.trust_level(),
                             Some(self.state.todo_tracker()),
+                            Some(self.state.thinking_tracker()),
                         )
                         .await;
                 }
@@ -309,7 +322,9 @@ impl AppService {
                         .update_mode(
                             self.working_dir.clone(),
                             mode,
+                            self.state.trust_level(),
                             Some(self.state.todo_tracker()),
+                            Some(self.state.thinking_tracker()),
                         )
                         .await;
                 }
@@ -370,7 +385,7 @@ impl AppService {
                 };
                 self.state.set_build_mode(build_mode);
 
-                self.tools.set_trust_level(level).await;
+                // Trust level is now managed by PolicyEngine
                 if let Some(ref conv_svc) = self.conversation_svc {
                     let _ = conv_svc.set_trust_level(level).await;
                 }
@@ -380,6 +395,12 @@ impl AppService {
                     .send(AppEvent::StatusChanged(format!("Trust level: {:?}", level)))
                     .ok();
                 self.save_preferences();
+            }
+            Command::CycleTrustLevel => {
+                let current = self.state.trust_level();
+                let next = current.cycle_next();
+                // Recursively handle using existing SetTrustLevel logic
+                Box::pin(self.handle_command(Command::SetTrustLevel(next))).await?;
             }
 
             // UI toggles
@@ -899,6 +920,11 @@ impl AppService {
                     return Ok(());
                 }
 
+                // Clear thinking tracker for fresh conversation turn
+                if let Ok(mut tracker) = self.state.thinking_tracker().lock() {
+                    tracker.clear();
+                }
+
                 // If already processing, queue the message
                 let is_processing = self.state.llm_processing();
 
@@ -957,6 +983,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -974,6 +1001,7 @@ impl AppService {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -1085,6 +1113,7 @@ impl AppService {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -1150,6 +1179,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -1189,6 +1219,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -1223,6 +1254,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -1331,6 +1363,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     });
 
                     self.event_tx
@@ -1343,7 +1376,7 @@ impl AppService {
             Command::ApproveOperation => {
                 if let Some(mut approval) = self.state.pending_approval() {
                     approval.approve();
-                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_pending_approval(None);
                     self.state.set_active_modal(None);
                     self.event_tx
                         .send(AppEvent::StatusChanged("Operation approved".to_string()))
@@ -1353,7 +1386,7 @@ impl AppService {
             Command::ApproveSession => {
                 if let Some(mut approval) = self.state.pending_approval() {
                     approval.approve();
-                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_pending_approval(None);
                     self.state.set_active_modal(None);
                     self.event_tx
                         .send(AppEvent::StatusChanged("Approved for session".to_string()))
@@ -1363,7 +1396,7 @@ impl AppService {
             Command::ApproveAlways => {
                 if let Some(mut approval) = self.state.pending_approval() {
                     approval.approve();
-                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_pending_approval(None);
                     self.state.set_active_modal(None);
                     self.event_tx
                         .send(AppEvent::StatusChanged("Approved always".to_string()))
@@ -1373,7 +1406,7 @@ impl AppService {
             Command::DenyOperation => {
                 if let Some(mut approval) = self.state.pending_approval() {
                     approval.reject();
-                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_pending_approval(None);
                     self.state.set_active_modal(None);
                     self.event_tx
                         .send(AppEvent::StatusChanged("Operation denied".to_string()))
@@ -1383,7 +1416,7 @@ impl AppService {
             Command::DenyAlways => {
                 if let Some(mut approval) = self.state.pending_approval() {
                     approval.reject();
-                    self.state.set_pending_approval(Some(approval));
+                    self.state.set_pending_approval(None);
                     self.state.set_active_modal(None);
                     self.event_tx
                         .send(AppEvent::StatusChanged("Denied always".to_string()))
@@ -1464,6 +1497,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     });
 
                     // Also update status bar
@@ -1488,7 +1522,6 @@ impl AppService {
                     let event_tx = self.event_tx.clone();
                     let state = self.state.clone();
                     let conv_svc = self.conversation_svc.clone();
-                    let approvals_base = self.working_dir.clone();
                     let catalog = self.catalog;
 
                     tokio::spawn(async move {
@@ -1569,16 +1602,6 @@ impl AppService {
                                         }
                                     }
                                 }
-
-                                if let Some(conv_svc) = conv_svc {
-                                    let approvals_path = approvals_base
-                                        .join(".tark")
-                                        .join("sessions")
-                                        .join(&info.session_id)
-                                        .join("approvals.json");
-                                    let _ =
-                                        conv_svc.update_approval_storage_path(approvals_path).await;
-                                }
                             }
                             Err(e) => {
                                 tracing::error!("Failed to create session: {}", e);
@@ -1591,8 +1614,6 @@ impl AppService {
                 if let Some(ref session_svc) = self.session_svc {
                     let session_svc = session_svc.clone();
                     let event_tx = self.event_tx.clone();
-                    let conv_svc = self.conversation_svc.clone();
-                    let approvals_base = self.working_dir.clone();
 
                     tokio::spawn(async move {
                         match session_svc.switch_to(&session_id).await {
@@ -1602,15 +1623,6 @@ impl AppService {
                                 let _ = event_tx.send(AppEvent::SessionSwitched {
                                     session_id: session_id.clone(),
                                 });
-                                if let Some(conv_svc) = conv_svc {
-                                    let approvals_path = approvals_base
-                                        .join(".tark")
-                                        .join("sessions")
-                                        .join(&session_id)
-                                        .join("approvals.json");
-                                    let _ =
-                                        conv_svc.update_approval_storage_path(approvals_path).await;
-                                }
                             }
                             Err(e) => {
                                 tracing::error!("Failed to switch session: {}", e);
@@ -1648,6 +1660,22 @@ impl AppService {
     /// Get risk level for a tool by name
     pub fn tool_risk_level(&self, name: &str) -> Option<crate::tools::RiskLevel> {
         self.tools.tool_risk_level(name)
+    }
+
+    /// List session approval patterns (for policy modal)
+    pub fn list_session_patterns(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<(
+        Vec<crate::policy::ApprovalPatternEntry>,
+        Vec<crate::policy::ApprovalPatternEntry>,
+    )> {
+        if let Some(ref conv_svc) = self.conversation_svc {
+            conv_svc.list_session_patterns(session_id)
+        } else {
+            // No conversation service - return empty lists
+            Ok((Vec::new(), Vec::new()))
+        }
     }
 
     /// Refresh file picker with workspace files
@@ -1716,6 +1744,16 @@ impl AppService {
         }
     }
 
+    /// Delete a policy pattern
+    pub async fn delete_policy_pattern(&self, pattern_id: i64) -> Result<()> {
+        let policy_engine = crate::policy::PolicyEngine::open(
+            &self.working_dir.join(".tark").join("policy.db"),
+            &self.working_dir,
+        )?;
+        policy_engine.delete_pattern(pattern_id)?;
+        Ok(())
+    }
+
     /// Export current session to file
     pub fn export_session(&self, _path: &std::path::Path) -> Result<()> {
         // TODO: Implement session export through SessionService
@@ -1739,9 +1777,20 @@ impl AppService {
         };
         self.state.set_build_mode(build_mode);
 
-        self.tools.set_trust_level(level).await;
+        // Trust level is now managed by PolicyEngine
         if let Some(ref conv_svc) = self.conversation_svc {
             let _ = conv_svc.set_trust_level(level).await;
+        }
+    }
+
+    /// Set thinking tool enablement
+    /// This refreshes the agent's system prompt to add/remove think tool instructions
+    pub async fn set_thinking_tool_enabled(&self, enabled: bool) {
+        self.state.set_thinking_tool_enabled(enabled);
+
+        // Update agent and refresh system prompt
+        if let Some(ref conv_svc) = self.conversation_svc {
+            let _ = conv_svc.set_thinking_tool_enabled(enabled).await;
         }
     }
 
@@ -1750,33 +1799,6 @@ impl AppService {
         let previous_provider = self.state.current_provider();
         let current_model = self.state.current_model();
         self.state.set_provider(Some(provider.to_string()));
-
-        // Persist to session metadata
-        if let Some(ref session_svc) = self.session_svc {
-            if let Some(model) = self.state.current_model() {
-                let mode = self.state.agent_mode();
-                session_svc
-                    .update_metadata(provider.to_string(), model.clone(), mode)
-                    .await;
-                if let Some(logger) = crate::debug_logger() {
-                    let correlation_id = self
-                        .state
-                        .current_correlation_id()
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                        correlation_id,
-                        crate::LogCategory::Service,
-                        "provider_model_metadata_saved",
-                    )
-                    .with_data(serde_json::json!({
-                        "provider": provider,
-                        "model": model,
-                        "agent_mode": format!("{:?}", mode)
-                    }));
-                    logger.log(entry);
-                }
-            }
-        }
 
         if let Some(ref conv_svc) = self.conversation_svc {
             match crate::llm::create_provider_with_options(
@@ -1787,14 +1809,65 @@ impl AppService {
                 Ok(llm_provider) => {
                     if let Err(e) = conv_svc.update_llm_provider(Arc::from(llm_provider)).await {
                         self.state.set_llm_connected(false);
-                        let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                        // Revert to previous provider and model on update failure
+                        if let Some(prev) = previous_provider.clone() {
+                            self.state.set_provider(Some(prev.clone()));
+                            if let Some(prev_model) = current_model.clone() {
+                                self.state.set_model(Some(prev_model));
+                            }
+                            let _ = self.event_tx.send(AppEvent::LlmError(format!(
+                                "{}\n\nFalling back to: {}",
+                                e, prev
+                            )));
+                        } else {
+                            let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                        }
                     } else {
                         self.state.set_llm_connected(true);
+
+                        // Persist to session metadata AFTER successful switch
+                        if let Some(ref session_svc) = self.session_svc {
+                            if let Some(model) = self.state.current_model() {
+                                let mode = self.state.agent_mode();
+                                session_svc
+                                    .update_metadata(provider.to_string(), model.clone(), mode)
+                                    .await;
+                                if let Some(logger) = crate::debug_logger() {
+                                    let correlation_id = self
+                                        .state
+                                        .current_correlation_id()
+                                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                        correlation_id,
+                                        crate::LogCategory::Service,
+                                        "provider_model_metadata_saved",
+                                    )
+                                    .with_data(serde_json::json!({
+                                        "provider": provider,
+                                        "model": model,
+                                        "agent_mode": format!("{:?}", mode)
+                                    }));
+                                    logger.log(entry);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
                     self.state.set_llm_connected(false);
-                    let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                    // Revert to previous provider and model on creation failure
+                    if let Some(prev) = previous_provider.clone() {
+                        self.state.set_provider(Some(prev.clone()));
+                        if let Some(prev_model) = current_model.clone() {
+                            self.state.set_model(Some(prev_model));
+                        }
+                        let _ = self.event_tx.send(AppEvent::LlmError(format!(
+                            "{}\n\nFalling back to: {}",
+                            e, prev
+                        )));
+                    } else {
+                        let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                    }
                 }
             }
         }
@@ -1832,33 +1905,6 @@ impl AppService {
         let current_provider = self.state.current_provider();
         self.state.set_model(Some(model.to_string()));
 
-        // Persist to session metadata
-        if let Some(ref session_svc) = self.session_svc {
-            if let Some(provider) = self.state.current_provider() {
-                let mode = self.state.agent_mode();
-                session_svc
-                    .update_metadata(provider, model.to_string(), mode)
-                    .await;
-                if let Some(logger) = crate::debug_logger() {
-                    let correlation_id = self
-                        .state
-                        .current_correlation_id()
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                        correlation_id,
-                        crate::LogCategory::Service,
-                        "provider_model_metadata_saved",
-                    )
-                    .with_data(serde_json::json!({
-                        "provider": self.state.current_provider(),
-                        "model": model,
-                        "agent_mode": format!("{:?}", mode)
-                    }));
-                    logger.log(entry);
-                }
-            }
-        }
-
         if let (Some(conv_svc), Some(provider)) = (
             self.conversation_svc.as_ref(),
             self.state.current_provider(),
@@ -1883,16 +1929,61 @@ impl AppService {
                         .await
                     {
                         self.state.set_llm_connected(false);
-                        let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                        // Revert to previous model on update failure
+                        if let Some(prev) = previous_model.clone() {
+                            self.state.set_model(Some(prev.clone()));
+                            let _ = self.event_tx.send(AppEvent::LlmError(format!(
+                                "{}\n\nFalling back to: {}",
+                                e, prev
+                            )));
+                        } else {
+                            let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                        }
                     } else {
                         self.state.set_llm_connected(true);
                         // Refresh sidebar to update context progress bar with new model's limit
                         self.refresh_sidebar_data().await;
+
+                        // Persist to session metadata AFTER successful switch
+                        if let Some(ref session_svc) = self.session_svc {
+                            if let Some(provider) = self.state.current_provider() {
+                                let mode = self.state.agent_mode();
+                                session_svc
+                                    .update_metadata(provider, model.to_string(), mode)
+                                    .await;
+                                if let Some(logger) = crate::debug_logger() {
+                                    let correlation_id = self
+                                        .state
+                                        .current_correlation_id()
+                                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                        correlation_id,
+                                        crate::LogCategory::Service,
+                                        "provider_model_metadata_saved",
+                                    )
+                                    .with_data(serde_json::json!({
+                                        "provider": self.state.current_provider(),
+                                        "model": model,
+                                        "agent_mode": format!("{:?}", mode)
+                                    }));
+                                    logger.log(entry);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
                     self.state.set_llm_connected(false);
-                    let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                    // Revert to previous model on creation failure
+                    if let Some(prev) = previous_model.clone() {
+                        self.state.set_model(Some(prev.clone()));
+                        let _ = self.event_tx.send(AppEvent::LlmError(format!(
+                            "{}\n\nFalling back to: {}",
+                            e, prev
+                        )));
+                    } else {
+                        let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                    }
                 }
             }
         }
@@ -2253,16 +2344,29 @@ impl AppService {
                             BuildMode::Careful => crate::tools::TrustLevel::Careful,
                         };
                         self.state.set_trust_level(trust_level);
-                        self.tools.set_trust_level(trust_level).await;
+                        // Propagate trust level to ChatAgent/ToolRegistry
+                        if let Some(ref conv_svc) = self.conversation_svc {
+                            let _ = conv_svc.set_trust_level(trust_level).await;
+                        }
+
+                        // Apply thinking tool setting
+                        self.state
+                            .set_thinking_tool_enabled(prefs.thinking_tool_enabled);
+                        if let Some(ref conv_svc) = self.conversation_svc {
+                            let _ = conv_svc
+                                .set_thinking_tool_enabled(prefs.thinking_tool_enabled)
+                                .await;
+                        }
 
                         // Apply theme (use session theme or global default)
                         let effective_theme = prefs.effective_theme(global_default_theme);
                         self.state.set_theme(effective_theme);
 
                         tracing::info!(
-                            "Restored preferences: agent_mode={:?}, build_mode={:?}, theme={:?}",
+                            "Restored preferences: agent_mode={:?}, build_mode={:?}, thinking_tool={}, theme={:?}",
                             prefs.agent_mode,
                             prefs.build_mode,
+                            prefs.thinking_tool_enabled,
                             effective_theme
                         );
                     } else {
@@ -2293,6 +2397,7 @@ impl AppService {
                 agent_mode: self.state.agent_mode(),
                 build_mode: self.state.build_mode(),
                 thinking_enabled: self.state.thinking_enabled(),
+                thinking_tool_enabled: self.state.thinking_tool_enabled(),
                 selected_provider: self.state.current_provider(),
                 selected_model: self.state.current_model(),
                 selected_model_name: None,

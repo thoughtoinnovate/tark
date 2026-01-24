@@ -899,6 +899,9 @@ impl<B: Backend> TuiApp<B> {
                     ModalType::Plugin => {
                         // Plugin modal not implemented in old app.rs (using tui_new)
                     }
+                    ModalType::Policy => {
+                        // Policy modal not implemented in old app.rs (using tui_new)
+                    }
                     ModalType::DeviceFlow => {
                         // DeviceFlow modal not implemented in old app.rs (using tui_new)
                     }
@@ -1093,6 +1096,7 @@ impl<B: Backend> TuiApp<B> {
                                             // TrustLevel handled via Up/Down/Enter keys
                                         }
                                         Some(ModalType::Tools)
+                                        | Some(ModalType::Policy)
                                         | Some(ModalType::Plugin)
                                         | Some(ModalType::DeviceFlow) => {
                                             // Close these modals

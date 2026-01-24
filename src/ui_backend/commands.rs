@@ -56,12 +56,18 @@ pub enum Command {
     /// Set trust level
     SetTrustLevel(crate::tools::TrustLevel),
 
+    /// Cycle trust level (Balanced -> Careful -> Manual -> Balanced)
+    CycleTrustLevel,
+
     // ========== UI Toggles ==========
     /// Toggle sidebar visibility
     ToggleSidebar,
 
-    /// Toggle thinking block display
+    /// Toggle thinking block display (model-level extended thinking)
     ToggleThinking,
+
+    /// Toggle think tool for structured reasoning
+    ToggleThinkingTool,
 
     /// Toggle theme picker modal
     ToggleThemePicker,
@@ -230,6 +236,9 @@ pub enum Command {
 
     /// Delete the selected session from the session picker
     DeleteSessionSelected,
+
+    /// Delete the selected policy pattern
+    DeletePolicyPattern,
 
     /// Navigate modal selection up
     ModalUp,

@@ -129,19 +129,13 @@ impl<B: Backend> TuiRenderer<B> {
             // Mode cycling
             (KeyCode::Char('M'), KeyModifiers::CONTROL) => Some(Command::CycleBuildMode),
 
-            // Approval mode (Ctrl+Shift+B) - only in Build mode
-            // Changed from Shift+A to avoid conflict with text input
-            (KeyCode::Char('B'), KeyModifiers::CONTROL) => {
-                if state.agent_mode() == crate::ui_backend::AgentMode::Build {
-                    Some(Command::OpenTrustLevelSelector)
-                } else {
-                    None
-                }
-            }
+            // Trust level cycling (Ctrl+Y) - works in all modes
+            (KeyCode::Char('y'), KeyModifiers::CONTROL) => Some(Command::CycleTrustLevel),
 
             // UI toggles
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(Command::ToggleSidebar),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(Command::ToggleThinking),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Command::ToggleThinkingTool),
 
             // Vim keybindings for messages panel and sidebar
             // These should only consume the key if actually used, otherwise fall through to insert
@@ -190,10 +184,13 @@ impl<B: Backend> TuiRenderer<B> {
                 if state.active_modal() == Some(ModalType::SessionSwitchConfirm) {
                     return Some(Command::ModalDown);
                 }
-                // Trust/Tools/Plugin modals: j/k for navigation (selection only, no text input)
+                // Trust/Tools/Plugin/Policy modals: j/k for navigation (selection only, no text input)
                 if matches!(
                     state.active_modal(),
-                    Some(ModalType::TrustLevel) | Some(ModalType::Tools) | Some(ModalType::Plugin)
+                    Some(ModalType::TrustLevel)
+                        | Some(ModalType::Tools)
+                        | Some(ModalType::Plugin)
+                        | Some(ModalType::Policy)
                 ) {
                     return Some(Command::ModalDown);
                 }
@@ -247,10 +244,13 @@ impl<B: Backend> TuiRenderer<B> {
                 if state.active_modal() == Some(ModalType::SessionSwitchConfirm) {
                     return Some(Command::ModalUp);
                 }
-                // Trust/Tools/Plugin modals: j/k for navigation (selection only, no text input)
+                // Trust/Tools/Plugin/Policy modals: j/k for navigation (selection only, no text input)
                 if matches!(
                     state.active_modal(),
-                    Some(ModalType::TrustLevel) | Some(ModalType::Tools) | Some(ModalType::Plugin)
+                    Some(ModalType::TrustLevel)
+                        | Some(ModalType::Tools)
+                        | Some(ModalType::Plugin)
+                        | Some(ModalType::Policy)
                 ) {
                     return Some(Command::ModalUp);
                 }
@@ -485,6 +485,10 @@ impl<B: Backend> TuiRenderer<B> {
             // Task queue management: 'd' or 'x' to delete selected task
             (KeyCode::Char('d'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
+                // Policy modal: delete selected pattern
+                if state.active_modal() == Some(ModalType::Policy) {
+                    return Some(Command::DeletePolicyPattern);
+                }
                 // Pass through for pickers with text filter
                 if matches!(
                     state.active_modal(),
@@ -1230,7 +1234,8 @@ impl<B: Backend> TuiRenderer<B> {
                         | Some(ModalType::ProviderPicker)
                         | Some(ModalType::ModelPicker)
                         | Some(ModalType::SessionPicker)
-                        | Some(ModalType::SessionSwitchConfirm) => Some(Command::ModalUp),
+                        | Some(ModalType::SessionSwitchConfirm)
+                        | Some(ModalType::Policy) => Some(Command::ModalUp),
                         _ if matches!(state.focused_component(), FocusedComponent::Panel) => {
                             Some(Command::SidebarUp)
                         }
@@ -1274,7 +1279,8 @@ impl<B: Backend> TuiRenderer<B> {
                         | Some(ModalType::ProviderPicker)
                         | Some(ModalType::ModelPicker)
                         | Some(ModalType::SessionPicker)
-                        | Some(ModalType::SessionSwitchConfirm) => Some(Command::ModalDown),
+                        | Some(ModalType::SessionSwitchConfirm)
+                        | Some(ModalType::Policy) => Some(Command::ModalDown),
                         _ if matches!(state.focused_component(), FocusedComponent::Panel) => {
                             Some(Command::SidebarDown)
                         }
@@ -1818,6 +1824,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     collapsed: m.collapsed,
                     timestamp: m.timestamp.clone(),
                     question: None, // TODO: map questions if needed
+                    tool_args: m.tool_args.clone(),
                 })
                 .collect();
 
@@ -1909,11 +1916,13 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
             let queued_count = state.queued_message_count();
             // LLM is considered connected if we have a provider configured
             let llm_connected = current_provider.is_some() && state.llm_connected();
+            let thinking_tool_enabled = state.thinking_tool_enabled();
 
             let mut status = StatusBar::new(theme)
                 .agent_mode(agent_mode)
                 .build_mode(build_mode)
                 .thinking(thinking_enabled)
+                .thinking_tool(thinking_tool_enabled)
                 .queue(queued_count) // Show actual queue count
                 .processing(llm_processing)
                 .connected(llm_connected);
@@ -2173,6 +2182,13 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     ModalType::Plugin => {
                         let modal = PluginModal::new(theme);
                         frame.render_widget(modal, area);
+                    }
+                    ModalType::Policy => {
+                        if let Some(ref modal) = state.policy_modal() {
+                            use crate::tui_new::modals::policy_modal::PolicyModalWidget;
+                            let widget = PolicyModalWidget::new(modal, theme);
+                            frame.render_widget(widget, area);
+                        }
                     }
                     ModalType::DeviceFlow => {
                         if let Some(session) = state.device_flow_session() {

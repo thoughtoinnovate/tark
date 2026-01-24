@@ -9,6 +9,7 @@
 //! - Plugin system for extensibility
 
 pub mod agent;
+pub mod auth;
 pub mod completion;
 pub mod config;
 pub mod core;
@@ -17,6 +18,7 @@ pub mod diagnostics;
 pub mod llm;
 pub mod lsp;
 pub mod plugins;
+pub mod policy;
 pub mod services;
 pub mod storage;
 pub mod tools;

@@ -249,6 +249,11 @@ impl OpenAiProvider {
             || self.model.starts_with("gpt-6") // Future-proof for GPT-6.x
     }
 
+    /// Check if the model is a Codex model (requires instructions field)
+    fn is_codex_model(&self) -> bool {
+        self.model.to_lowercase().contains("codex")
+    }
+
     /// Get reasoning effort for o1/o3/o4 models
     ///
     /// Only returns Some when:
@@ -800,6 +805,14 @@ impl LlmProvider for OpenAiProvider {
     ) -> Result<LlmResponse> {
         let (instructions, input) = self.convert_messages_to_responses(messages);
 
+        // Codex models require the instructions field to be present
+        // Provide a default if none was extracted from system messages
+        let instructions = if instructions.is_none() && self.is_codex_model() {
+            Some("You are a helpful coding assistant.".to_string())
+        } else {
+            instructions
+        };
+
         let reasoning = self
             .get_reasoning_effort(settings)
             .map(|effort| ReasoningConfig {
@@ -850,7 +863,20 @@ impl LlmProvider for OpenAiProvider {
                         match item.content_type.as_str() {
                             "output_text" => {
                                 if let Some(text) = &item.text {
-                                    text_parts.push(text.clone());
+                                    // Filter out echoed tool call markers from complete text
+                                    let filtered_text = text
+                                        .lines()
+                                        .filter(|line| {
+                                            !line.starts_with("[Previous tool call:")
+                                                && !line.starts_with("[Tool result for call_id=")
+                                                && !line.starts_with("[Tool result]:")
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+
+                                    if !filtered_text.is_empty() {
+                                        text_parts.push(filtered_text);
+                                    }
                                 }
                             }
                             // Thinking/reasoning content for o1/o3/gpt-5 models.
@@ -950,6 +976,14 @@ impl LlmProvider for OpenAiProvider {
         const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
         let (instructions, input) = self.convert_messages_to_responses(messages);
+
+        // Codex models require the instructions field to be present
+        // Provide a default if none was extracted from system messages
+        let instructions = if instructions.is_none() && self.is_codex_model() {
+            Some("You are a helpful coding assistant.".to_string())
+        } else {
+            instructions
+        };
 
         let reasoning = self
             .get_reasoning_effort(settings)
@@ -1059,9 +1093,16 @@ impl LlmProvider for OpenAiProvider {
                             // Text delta
                             if let Some(delta) = event_data.delta {
                                 if !delta.is_empty() {
-                                    let event = StreamEvent::TextDelta(delta);
-                                    builder.process(&event);
-                                    callback(event);
+                                    // Filter out echoed tool call markers
+                                    let should_skip = delta.contains("[Previous tool call:")
+                                        || delta.contains("[Tool result for call_id=")
+                                        || delta.contains("[Tool result]:");
+
+                                    if !should_skip {
+                                        let event = StreamEvent::TextDelta(delta);
+                                        builder.process(&event);
+                                        callback(event);
+                                    }
                                 }
                             }
                         }
@@ -1154,9 +1195,16 @@ impl LlmProvider for OpenAiProvider {
                     "response.output_text.delta" => {
                         if let Some(delta) = event_data.delta {
                             if !delta.is_empty() {
-                                let event = StreamEvent::TextDelta(delta);
-                                builder.process(&event);
-                                callback(event);
+                                // Filter out echoed tool call markers
+                                let should_skip = delta.contains("[Previous tool call:")
+                                    || delta.contains("[Tool result for call_id=")
+                                    || delta.contains("[Tool result]:");
+
+                                if !should_skip {
+                                    let event = StreamEvent::TextDelta(delta);
+                                    builder.process(&event);
+                                    callback(event);
+                                }
                             }
                         }
                     }

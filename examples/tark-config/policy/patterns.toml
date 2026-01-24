@@ -1,0 +1,51 @@
+# Policy Engine Approval Patterns
+#
+# This file allows you to pre-define approval and denial patterns for commands.
+# Patterns are synced to the policy database on startup.
+
+# Internal tool approval patterns (for builtin tools like shell)
+[[approvals]]
+tool = "shell"
+pattern = "cargo*"
+match_type = "glob"  # exact, prefix, or glob
+description = "Auto-approve all cargo commands"
+
+[[approvals]]
+tool = "shell"
+pattern = "npm test"
+match_type = "exact"
+description = "Auto-approve npm test"
+
+[[approvals]]
+tool = "shell"
+pattern = "git status"
+match_type = "exact"
+description = "Auto-approve git status"
+
+# Denial patterns (always block these commands)
+[[denials]]
+tool = "shell"
+pattern = "rm -rf /*"
+match_type = "exact"
+description = "Always deny system-wide deletion"
+
+[[denials]]
+tool = "shell"
+pattern = "dd if=/dev/*"
+match_type = "prefix"
+description = "Always deny dangerous dd commands"
+
+# MCP tool approval patterns
+[[mcp_approvals]]
+server = "github"
+tool = "create_pull_request"
+pattern = "*"
+match_type = "glob"
+description = "Auto-approve all PR creations"
+
+[[mcp_denials]]
+server = "filesystem"
+tool = "delete_directory"
+pattern = "/*"
+match_type = "prefix"
+description = "Deny root directory deletions"

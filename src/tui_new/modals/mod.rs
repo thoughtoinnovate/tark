@@ -8,6 +8,7 @@ pub mod common;
 pub mod device_flow_modal;
 pub mod model_picker;
 pub mod plugin_modal;
+pub mod policy_modal;
 pub mod provider_picker;
 pub mod session_picker;
 pub mod session_switch_confirm;
@@ -21,6 +22,7 @@ pub use common::{ModalHandler, ModalResult};
 pub use device_flow_modal::DeviceFlowModal;
 pub use model_picker::ModelPickerHandler;
 pub use plugin_modal::PluginModal;
+pub use policy_modal::{PolicyModal, PolicyModalWidget, PolicyPatternEntry};
 pub use provider_picker::ProviderPickerHandler;
 pub use session_picker::SessionPickerHandler;
 pub use session_switch_confirm::SessionSwitchConfirmModal;
@@ -65,6 +67,7 @@ impl ModalManager {
             | Some(ModalType::Approval)
             | Some(ModalType::TrustLevel)
             | Some(ModalType::Tools)
+            | Some(ModalType::Policy)
             | Some(ModalType::Plugin)
             | Some(ModalType::DeviceFlow)
             | Some(ModalType::SessionSwitchConfirm)

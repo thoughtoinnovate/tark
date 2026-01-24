@@ -2,6 +2,7 @@
 
 use super::client::McpServerManager;
 use super::types::McpToolDef;
+use crate::policy::PolicyEngine;
 use crate::tools::{RiskLevel, Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -161,4 +162,64 @@ pub async fn wrap_server_tools(
             Arc::new(wrapper) as Arc<dyn Tool>
         })
         .collect()
+}
+
+/// Create tool wrappers with PolicyEngine-driven risk levels (NEW)
+///
+/// Queries the PolicyEngine for each tool's risk level. Falls back to
+/// provided defaults or Risky if no policy is defined.
+pub async fn wrap_server_tools_with_policy(
+    server_id: &str,
+    manager: Arc<McpServerManager>,
+    policy_engine: Option<Arc<PolicyEngine>>,
+    default_risk: Option<RiskLevel>,
+    default_timeout: Option<u64>,
+    namespace: Option<String>,
+) -> Vec<Arc<dyn Tool>> {
+    let tools = manager.tools(server_id).await;
+
+    tools
+        .into_iter()
+        .map(|tool_def| {
+            let mut wrapper =
+                McpToolWrapper::new(server_id.to_string(), tool_def.clone(), manager.clone());
+
+            // Query PolicyEngine for risk level
+            let risk_level = if let Some(ref engine) = policy_engine {
+                query_mcp_risk_level(engine, server_id, &tool_def.name)
+                    .unwrap_or_else(|_| default_risk.unwrap_or(RiskLevel::Risky))
+            } else {
+                default_risk.unwrap_or(RiskLevel::Risky)
+            };
+
+            wrapper = wrapper.with_risk_level(risk_level);
+
+            if let Some(secs) = default_timeout {
+                wrapper = wrapper.with_timeout(secs);
+            }
+            if let Some(ref ns) = namespace {
+                wrapper = wrapper.with_namespace(ns.clone());
+            }
+
+            Arc::new(wrapper) as Arc<dyn Tool>
+        })
+        .collect()
+}
+
+/// Query PolicyEngine for MCP tool risk level
+fn query_mcp_risk_level(
+    _engine: &PolicyEngine,
+    server_id: &str,
+    tool_name: &str,
+) -> Result<RiskLevel> {
+    // The PolicyEngine's mcp module checks approval, but we just need the risk level here
+    // For now, we'll use a simple query - this could be extended to query the DB directly
+    // TODO: Query mcp_tool_policies table to get actual risk level
+    // Default to Risky for external MCP tools as a safe default
+    tracing::debug!(
+        "Querying PolicyEngine for MCP tool {}:{} - using Risky default",
+        server_id,
+        tool_name
+    );
+    Ok(RiskLevel::Risky)
 }

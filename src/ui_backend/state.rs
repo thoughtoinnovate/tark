@@ -96,6 +96,8 @@ pub enum ModalType {
     TaskEdit,
     /// Confirmation dialog for deleting a queued task
     TaskDeleteConfirm,
+    /// Policy manager modal for viewing approval/denial patterns
+    Policy,
 }
 
 /// Active OAuth device flow session
@@ -238,6 +240,12 @@ struct StateInner {
     /// Current session todo list (live-updating widget)
     pub todo_tracker: Arc<std::sync::Mutex<crate::tools::TodoTracker>>,
 
+    // ========== Thinking Tool ==========
+    /// Thinking tracker for structured reasoning
+    pub thinking_tracker: Arc<std::sync::Mutex<crate::tools::ThinkingTracker>>,
+    /// Whether the think tool is enabled (system prompt injection)
+    pub thinking_tool_enabled: bool,
+
     // ========== Streaming State (BFF owns this, renderer reads only) ==========
     pub streaming_content: Option<String>,
     pub streaming_thinking: Option<String>,
@@ -293,6 +301,9 @@ struct StateInner {
     // ========== Plugin Modal State ==========
     pub plugin_selected: usize,
 
+    // ========== Policy Modal State ==========
+    pub policy_modal: Option<crate::tui_new::modals::policy_modal::PolicyModal>,
+
     // ========== Sidebar State ==========
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
@@ -337,6 +348,10 @@ struct StateInner {
     // ========== Rate Limiting ==========
     pub rate_limit_retry_at: Option<std::time::Instant>,
     pub rate_limit_pending_message: Option<String>,
+
+    // ========== Pending Mode Switch ==========
+    /// Mode switch requested during LLM streaming (applied when streaming completes)
+    pub pending_mode_switch: Option<AgentMode>,
 
     // ========== Message Queue ==========
     pub message_queue: Vec<String>,
@@ -397,6 +412,10 @@ impl SharedState {
                 active_tools: Vec::new(),
                 collapsed_tool_groups: std::collections::HashSet::new(),
                 todo_tracker: Arc::new(std::sync::Mutex::new(crate::tools::TodoTracker::new())),
+                thinking_tracker: Arc::new(std::sync::Mutex::new(
+                    crate::tools::ThinkingTracker::new(),
+                )),
+                thinking_tool_enabled: false,
                 streaming_content: None,
                 streaming_thinking: None,
                 input_text: String::new(),
@@ -431,6 +450,7 @@ impl SharedState {
                 tools_scroll_offset: 0,
                 tools_for_modal: Vec::new(),
                 plugin_selected: 0,
+                policy_modal: None,
                 sidebar_selected_panel: 0,
                 sidebar_selected_item: None,
                 sidebar_expanded_panels: [true, true, true, true, true],
@@ -453,6 +473,7 @@ impl SharedState {
                 pending_approval: None,
                 rate_limit_retry_at: None,
                 rate_limit_pending_message: None,
+                pending_mode_switch: None,
                 message_queue: Vec::new(),
                 editing_task_index: None,
                 editing_task_content: String::new(),
@@ -541,6 +562,21 @@ impl SharedState {
     /// Get the session todo tracker
     pub fn todo_tracker(&self) -> Arc<std::sync::Mutex<crate::tools::TodoTracker>> {
         self.read_inner().todo_tracker.clone()
+    }
+
+    /// Get the thinking tracker
+    pub fn thinking_tracker(&self) -> Arc<std::sync::Mutex<crate::tools::ThinkingTracker>> {
+        self.read_inner().thinking_tracker.clone()
+    }
+
+    /// Get whether the thinking tool is enabled
+    pub fn thinking_tool_enabled(&self) -> bool {
+        self.read_inner().thinking_tool_enabled
+    }
+
+    /// Set whether the thinking tool is enabled
+    pub fn set_thinking_tool_enabled(&self, enabled: bool) {
+        self.write_inner().thinking_tool_enabled = enabled;
     }
 
     pub fn generate_new_correlation_id(&self) -> String {
@@ -796,6 +832,17 @@ impl SharedState {
 
     pub fn plugin_selected(&self) -> usize {
         self.read_inner().plugin_selected
+    }
+
+    pub fn policy_modal(&self) -> Option<crate::tui_new::modals::policy_modal::PolicyModal> {
+        self.read_inner().policy_modal.clone()
+    }
+
+    pub fn set_policy_modal(
+        &self,
+        modal: Option<crate::tui_new::modals::policy_modal::PolicyModal>,
+    ) {
+        self.write_inner().policy_modal = modal;
     }
 
     pub fn error_notification(&self) -> Option<ErrorNotification> {
@@ -1779,6 +1826,21 @@ impl SharedState {
         None
     }
 
+    /// Get pending mode switch (queued during LLM streaming)
+    pub fn pending_mode_switch(&self) -> Option<AgentMode> {
+        self.read_inner().pending_mode_switch
+    }
+
+    /// Set pending mode switch (to be applied after streaming completes)
+    pub fn set_pending_mode_switch(&self, mode: Option<AgentMode>) {
+        self.write_inner().pending_mode_switch = mode;
+    }
+
+    /// Take and clear pending mode switch (returns the mode if one was pending)
+    pub fn take_pending_mode_switch(&self) -> Option<AgentMode> {
+        self.write_inner().pending_mode_switch.take()
+    }
+
     pub fn set_streaming_content(&self, content: Option<String>) {
         self.write_inner().streaming_content = content;
     }
@@ -2404,6 +2466,7 @@ mod tests {
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:00".to_string(),
+            tool_args: None,
         });
         state.add_message(Message {
             role: MessageRole::System,
@@ -2413,6 +2476,7 @@ mod tests {
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:01".to_string(),
+            tool_args: None,
         });
         state.add_message(Message {
             role: MessageRole::System,
@@ -2422,6 +2486,7 @@ mod tests {
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:02".to_string(),
+            tool_args: None,
         });
         state.add_message(Message {
             role: MessageRole::Assistant,
@@ -2431,6 +2496,7 @@ mod tests {
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:03".to_string(),
+            tool_args: None,
         });
 
         assert_eq!(state.messages().len(), 4);

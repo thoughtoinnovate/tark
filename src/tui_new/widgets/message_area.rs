@@ -143,6 +143,8 @@ pub struct Message {
     pub timestamp: String,
     /// Optional question widget for interactive questions
     pub question: Option<QuestionWidget>,
+    /// Original tool arguments (for rich rendering of tools like think)
+    pub tool_args: Option<serde_json::Value>,
 }
 
 impl Message {
@@ -154,6 +156,7 @@ impl Message {
             collapsed: false,
             timestamp: String::new(),
             question: None,
+            tool_args: None,
         }
     }
 
@@ -181,6 +184,7 @@ impl Message {
             collapsed: false,
             timestamp: String::new(),
             question: Some(question),
+            tool_args: None,
         }
     }
 }
@@ -1309,15 +1313,126 @@ impl Widget for MessageArea<'_> {
 
                     // Show content only if not collapsed
                     if !effective_collapsed {
-                        // Add indented content with nice formatting and border continuation
-                        let content_lines =
-                            wrap_text(&display_content, available_width.saturating_sub(6));
-                        for line in content_lines {
-                            lines.push(Line::from(vec![
-                                Span::styled("│ ", Style::default().fg(self.theme.text_muted)), // Border continuation
-                                Span::raw("   "), // Indent
-                                Span::styled(line, Style::default().fg(self.theme.text_secondary)),
-                            ]));
+                        // Special handling for "think" tool - render from tool_args
+                        if tool_name == "think" {
+                            // Parse THIS message's thought from its own args
+                            if let Some(ref args) = msg.tool_args {
+                                if let Ok(thought) = serde_json::from_value::<
+                                    crate::tools::builtin::Thought,
+                                >(args.clone())
+                                {
+                                    // Thought number and content
+                                    lines.push(Line::from(vec![
+                                        Span::styled(
+                                            "│ ",
+                                            Style::default().fg(self.theme.text_muted),
+                                        ),
+                                        Span::raw("   "),
+                                        Span::styled(
+                                            format!("{}. ", thought.thought_number),
+                                            Style::default()
+                                                .fg(self.theme.thinking_fg)
+                                                .add_modifier(ratatui::style::Modifier::BOLD),
+                                        ),
+                                        Span::styled(
+                                            thought.thought.clone(),
+                                            Style::default().fg(ratatui::style::Color::Gray),
+                                        ),
+                                    ]));
+
+                                    // Metadata line (thought_type and confidence)
+                                    let mut has_metadata = false;
+                                    let mut metadata_spans = vec![
+                                        Span::styled(
+                                            "│ ",
+                                            Style::default().fg(self.theme.text_muted),
+                                        ),
+                                        Span::raw("      "),
+                                    ];
+
+                                    if let Some(ref thought_type) = thought.thought_type {
+                                        has_metadata = true;
+                                        let type_color = match thought_type.as_str() {
+                                            "hypothesis" => ratatui::style::Color::Cyan,
+                                            "analysis" => ratatui::style::Color::Blue,
+                                            "plan" => ratatui::style::Color::Green,
+                                            "decision" => ratatui::style::Color::Yellow,
+                                            "reflection" => ratatui::style::Color::Magenta,
+                                            _ => ratatui::style::Color::Gray,
+                                        };
+                                        metadata_spans.push(Span::styled(
+                                            format!("[{}]", thought_type),
+                                            Style::default()
+                                                .fg(type_color)
+                                                .add_modifier(ratatui::style::Modifier::ITALIC),
+                                        ));
+                                    }
+
+                                    if let Some(confidence) = thought.confidence {
+                                        has_metadata = true;
+                                        let confidence_pct = (confidence * 100.0) as u8;
+                                        let confidence_style = if confidence >= 0.8 {
+                                            Style::default().fg(ratatui::style::Color::Green)
+                                        } else if confidence >= 0.5 {
+                                            Style::default().fg(ratatui::style::Color::Yellow)
+                                        } else {
+                                            Style::default().fg(ratatui::style::Color::Red)
+                                        };
+                                        if thought.thought_type.is_some() {
+                                            metadata_spans.push(Span::raw(" "));
+                                        }
+                                        metadata_spans.push(Span::styled(
+                                            format!("confidence: {}%", confidence_pct),
+                                            confidence_style
+                                                .add_modifier(ratatui::style::Modifier::DIM),
+                                        ));
+                                    }
+
+                                    if has_metadata {
+                                        lines.push(Line::from(metadata_spans));
+                                    }
+
+                                    // Add spacing after thought
+                                    lines.push(Line::from(vec![Span::styled(
+                                        "│ ",
+                                        Style::default().fg(self.theme.text_muted),
+                                    )]));
+
+                                    // Show "thinking..." indicator if more thoughts are coming
+                                    if thought.next_thought_needed {
+                                        lines.push(Line::from(vec![
+                                            Span::styled(
+                                                "│ ",
+                                                Style::default().fg(self.theme.text_muted),
+                                            ),
+                                            Span::raw("      "),
+                                            Span::styled(
+                                                "⋯ Thinking...",
+                                                Style::default()
+                                                    .fg(self.theme.thinking_fg)
+                                                    .add_modifier(
+                                                        ratatui::style::Modifier::DIM
+                                                            | ratatui::style::Modifier::ITALIC,
+                                                    ),
+                                            ),
+                                        ]));
+                                    }
+                                }
+                            }
+                        } else {
+                            // Regular tool content rendering
+                            let content_lines =
+                                wrap_text(&display_content, available_width.saturating_sub(6));
+                            for line in content_lines {
+                                lines.push(Line::from(vec![
+                                    Span::styled("│ ", Style::default().fg(self.theme.text_muted)), // Border continuation
+                                    Span::raw("   "), // Indent
+                                    Span::styled(
+                                        line,
+                                        Style::default().fg(self.theme.text_secondary),
+                                    ),
+                                ]));
+                            }
                         }
                     }
                 } else {

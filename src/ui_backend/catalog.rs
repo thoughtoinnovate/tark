@@ -193,24 +193,58 @@ impl CatalogService {
 
     /// List models for a provider
     pub async fn list_models(&self, provider: &str) -> Vec<ModelInfo> {
+        // Check if this is a plugin provider with base_provider delegation
+        let lookup_provider = self.resolve_base_provider(provider);
+
         let models_db_manager = models_db();
-        match models_db_manager.list_models(provider).await {
+        match models_db_manager.list_models(&lookup_provider).await {
             Ok(models) if !models.is_empty() => models
                 .into_iter()
                 .map(|m| ModelInfo {
                     id: m.id.clone(),
                     name: m.name.clone(),
                     description: m.capability_summary(),
-                    provider: provider.to_string(),
+                    provider: provider.to_string(), // Keep original provider for display
                     context_window: m.limit.context as usize,
                     max_tokens: m.limit.output as usize,
                 })
                 .collect(),
             _ => {
-                tracing::warn!("Failed to load models for provider {}", provider);
+                tracing::warn!(
+                    "Failed to load models for provider {} (lookup: {})",
+                    provider,
+                    lookup_provider
+                );
                 vec![]
             }
         }
+    }
+
+    /// Resolve base_provider for plugin providers
+    ///
+    /// If the provider is a plugin with base_provider set, return the base_provider
+    /// for models.dev lookup. Otherwise return the provider as-is.
+    fn resolve_base_provider(&self, provider: &str) -> String {
+        // Check if this is a plugin provider
+        if let Ok(registry) = crate::plugins::PluginRegistry::new() {
+            for plugin in registry.provider_plugins() {
+                for contrib in plugin.contributed_providers() {
+                    if contrib.id == provider {
+                        // Found the plugin provider - check for base_provider
+                        if let Some(ref base) = contrib.base_provider {
+                            tracing::debug!(
+                                "Provider {} delegates to base_provider: {}",
+                                provider,
+                                base
+                            );
+                            return base.clone();
+                        }
+                    }
+                }
+            }
+        }
+        // Not a plugin or no base_provider - use as-is
+        provider.to_string()
     }
 
     /// Get model capabilities

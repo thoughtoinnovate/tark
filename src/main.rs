@@ -2,27 +2,13 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod agent;
-mod completion;
-mod config;
-mod core;
-mod debug_logger;
-mod diagnostics;
-mod llm;
-mod lsp;
-mod plugins;
-mod services;
-mod storage;
-mod tools;
-mod transport;
-// Old TUI removed - using tui_new architecture
-mod tui_new;
-mod ui_backend;
+// Import from library crate
+use tark_cli::*;
 
 // Re-export debug logging utilities for use within the binary
-use debug_logger::{DebugLogEntry, DebugLogger, DebugLoggerConfig, LogCategory};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use tark_cli::debug_logger::{DebugLogEntry, DebugLogger, DebugLoggerConfig};
 
 /// Global debug logger instance
 static TARK_DEBUG_LOGGER: OnceLock<DebugLogger> = OnceLock::new();
@@ -192,6 +178,12 @@ enum Commands {
         #[command(subcommand)]
         command: PluginCommands,
     },
+
+    /// Policy database management
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
+    },
 }
 
 /// Auth subcommands
@@ -205,6 +197,21 @@ enum AuthCommands {
 
     /// Show authentication status for all providers
     Status,
+}
+
+/// Policy subcommands
+#[derive(Subcommand)]
+enum PolicyCommands {
+    /// Verify policy database integrity
+    Verify {
+        /// Force reseed builtin policy from embedded configs
+        #[arg(long)]
+        fix: bool,
+
+        /// Working directory (default: current directory)
+        #[arg(long)]
+        cwd: Option<String>,
+    },
 }
 
 /// Plugin subcommands
@@ -257,9 +264,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging
+    // For TUI/Chat modes, default to quieter logging to avoid cluttering the interface
+    // For other modes (LSP, Serve), use info level for debugging
+    let is_tui_mode = matches!(cli.command, Commands::Tui { .. } | Commands::Chat { .. });
+
     let filter = if cli.verbose {
         "tark_cli=debug,tower_lsp=debug"
+    } else if is_tui_mode {
+        // TUI mode: suppress ALL stderr logging to avoid corrupting the display
+        // Use --verbose (-v) to enable debug logging, or --debug for file-based logging
+        "off"
     } else {
+        // Non-TUI modes (LSP, Serve, etc.): keep info level
         "tark_cli=info,tower_lsp=warn"
     };
 
@@ -326,9 +342,9 @@ async fn main() -> Result<()> {
             let is_standalone = socket.is_none();
 
             if is_standalone {
-                tracing::info!("Starting TUI chat in standalone mode, cwd: {}", working_dir);
+                tracing::debug!("Starting TUI chat in standalone mode, cwd: {}", working_dir);
             } else {
-                tracing::info!(
+                tracing::debug!(
                     "Starting TUI chat with Neovim integration, socket: {:?}, cwd: {}",
                     socket,
                     working_dir
@@ -383,6 +399,15 @@ async fn main() -> Result<()> {
                 transport::plugin_cli::run_plugin_disable(&plugin_id).await?;
             }
         },
+        Commands::Policy { command } => match command {
+            PolicyCommands::Verify { fix, cwd } => {
+                let working_dir = cwd
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+                transport::cli::run_policy_verify(&working_dir, fix).await?;
+            }
+        },
         Commands::Tui {
             cwd,
             provider,
@@ -390,7 +415,7 @@ async fn main() -> Result<()> {
             debug,
         } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());
-            tracing::info!(
+            tracing::debug!(
                 "Starting NEW TUI (TDD implementation), cwd: {}",
                 working_dir
             );

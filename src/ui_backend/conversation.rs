@@ -51,8 +51,6 @@ pub struct ConversationService {
     event_tx: mpsc::UnboundedSender<AppEvent>,
     /// Interaction channel (ask_user / approval)
     interaction_tx: Option<InteractionSender>,
-    /// Approval storage path (per session)
-    approvals_path: tokio::sync::RwLock<Option<std::path::PathBuf>>,
     /// Interrupt flag
     interrupt_flag: Arc<AtomicBool>,
     /// Processing flag
@@ -70,7 +68,6 @@ impl ConversationService {
             chat_agent,
             event_tx,
             interaction_tx: None,
-            approvals_path: tokio::sync::RwLock::new(None),
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             is_processing: Arc::new(AtomicBool::new(false)),
         }
@@ -81,12 +78,10 @@ impl ConversationService {
         chat_agent: ChatAgent,
         event_tx: mpsc::UnboundedSender<AppEvent>,
         interaction_tx: Option<InteractionSender>,
-        approvals_path: Option<std::path::PathBuf>,
     ) -> Self {
         let service = Self::new(chat_agent, event_tx);
         Self {
             interaction_tx,
-            approvals_path: tokio::sync::RwLock::new(approvals_path),
             ..service
         }
     }
@@ -163,20 +158,6 @@ impl ConversationService {
     ) -> Result<(), ConversationError> {
         let mut agent = self.chat_agent.write().await;
         agent.set_trust_level(level).await;
-        Ok(())
-    }
-
-    /// Update approval storage path for the tool registry
-    pub async fn update_approval_storage_path(
-        &self,
-        storage_path: std::path::PathBuf,
-    ) -> Result<(), ConversationError> {
-        {
-            let mut guard = self.approvals_path.write().await;
-            *guard = Some(storage_path.clone());
-        }
-        let mut agent = self.chat_agent.write().await;
-        agent.set_approval_storage_path(storage_path).await;
         Ok(())
     }
 
@@ -448,20 +429,38 @@ impl ConversationService {
         &self,
         working_dir: std::path::PathBuf,
         mode: AgentMode,
+        trust_level: crate::tools::TrustLevel,
         todo_tracker: Option<Arc<std::sync::Mutex<crate::tools::TodoTracker>>>,
+        thinking_tracker: Option<Arc<std::sync::Mutex<crate::tools::ThinkingTracker>>>,
     ) {
-        let approvals_path = { self.approvals_path.read().await.clone() };
-        let tools = ToolRegistry::for_mode_with_services(
+        let mut tools = ToolRegistry::for_mode_with_services(
             working_dir,
             mode,
             true,
             self.interaction_tx.clone(),
             None,
-            approvals_path,
             todo_tracker,
+            thinking_tracker,
         );
+        // CRITICAL: Preserve trust level across mode changes to prevent security bypass
+        tools.set_trust_level(trust_level);
+
         let mut agent = self.chat_agent.write().await;
         agent.update_mode(tools, mode);
+    }
+
+    /// Refresh the agent's system prompt
+    /// Used when thinking_tool_enabled changes to inject/remove tool instructions
+    pub async fn refresh_system_prompt(&self) {
+        let mut agent = self.chat_agent.write().await;
+        agent.refresh_system_prompt_async().await;
+    }
+
+    /// Set thinking tool enabled and refresh system prompt
+    pub async fn set_thinking_tool_enabled(&self, enabled: bool) {
+        let mut agent = self.chat_agent.write().await;
+        agent.set_thinking_tool_enabled(enabled);
+        agent.refresh_system_prompt_async().await;
     }
 
     /// Interrupt the current operation
@@ -629,6 +628,23 @@ impl ConversationService {
     pub async fn message_count(&self) -> usize {
         let conv = self.conversation_mgr.read().await;
         conv.message_count()
+    }
+
+    /// List session approval patterns (for policy modal)
+    pub fn list_session_patterns(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<(
+        Vec<crate::policy::ApprovalPatternEntry>,
+        Vec<crate::policy::ApprovalPatternEntry>,
+    )> {
+        // Try to get a read lock on the chat agent
+        if let Ok(agent) = self.chat_agent.try_read() {
+            agent.list_session_patterns(session_id)
+        } else {
+            // If we can't get the lock, return empty lists
+            Ok((Vec::new(), Vec::new()))
+        }
     }
 }
 

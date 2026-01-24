@@ -1,0 +1,55 @@
+# Default Approval Policies
+# Hierarchical defaults for approval decisions based on risk + trust + location
+# Replaces the explicit rule matrix with computed defaults
+
+version = 1
+
+# ========== APPROVAL DEFAULTS ==========
+# Format: [risk_level].[trust_level].[location] = behavior
+# Behaviors: auto_approve, prompt, prompt_no_save
+
+[approval_defaults]
+# Safe operations: Always auto-approve (no risk)
+"safe.balanced.in_workdir" = "auto_approve"
+"safe.balanced.out_workdir" = "auto_approve"
+"safe.careful.in_workdir" = "auto_approve"
+"safe.careful.out_workdir" = "auto_approve"
+"safe.manual.in_workdir" = "auto_approve"
+"safe.manual.out_workdir" = "auto_approve"
+
+# Moderate operations: Depends on trust + location
+"moderate.balanced.in_workdir" = "auto_approve"
+"moderate.balanced.out_workdir" = "prompt"
+"moderate.careful.in_workdir" = "prompt"
+"moderate.careful.out_workdir" = "prompt"
+"moderate.manual.in_workdir" = "prompt"
+"moderate.manual.out_workdir" = "prompt"
+
+# Dangerous operations: Stricter (more prompts)
+"dangerous.balanced.in_workdir" = "auto_approve"
+"dangerous.balanced.out_workdir" = "prompt"
+"dangerous.careful.in_workdir" = "prompt"
+"dangerous.careful.out_workdir" = "prompt_no_save"
+"dangerous.manual.in_workdir" = "prompt"
+"dangerous.manual.out_workdir" = "prompt_no_save"
+
+# ========== COMPOUND COMMAND RULES ==========
+[[compound_rules]]
+separator = "&&"
+strategy = "highest_risk"
+description = "AND - use highest risk classification"
+
+[[compound_rules]]
+separator = "||"
+strategy = "highest_risk"
+description = "OR - use highest risk classification"
+
+[[compound_rules]]
+separator = ";"
+strategy = "highest_risk"
+description = "Sequential - use highest risk classification"
+
+[[compound_rules]]
+separator = "|"
+strategy = "first"
+description = "Pipe - classify by first command"
