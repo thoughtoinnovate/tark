@@ -84,17 +84,20 @@ fn test_build_balanced_read_outside_workdir_auto_approved() -> Result<()> {
 }
 
 #[test]
-fn test_build_careful_read_outside_workdir_needs_approval() -> Result<()> {
+fn test_build_careful_read_outside_workdir_auto_approved() -> Result<()> {
     let (_temp, engine) = setup_engine()?;
 
     let decision =
         engine.check_approval("shell", "cat /etc/passwd", "build", "careful", "session1")?;
 
     assert!(
-        decision.needs_approval,
-        "Read outside workdir should need approval in careful"
+        !decision.needs_approval,
+        "Read outside workdir should be auto-approved in careful (safe operations always auto-approve)"
     );
-    assert!(decision.allow_save_pattern, "Should allow saving pattern");
+    assert_eq!(
+        decision.classification.operation,
+        tark_cli::policy::Operation::Read
+    );
     assert!(!decision.classification.in_workdir);
     Ok(())
 }

@@ -197,7 +197,7 @@ impl<'a> IntegrityVerifier<'a> {
 
         // Re-enable foreign keys and recreate protection triggers
         self.conn.execute("PRAGMA foreign_keys = ON", [])?;
-        crate::policy::schema::create_protection_triggers(&self.conn)?;
+        crate::policy::schema::create_protection_triggers(self.conn)?;
 
         tracing::debug!("Cleared all builtin tables");
         Ok(())
