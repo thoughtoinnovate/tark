@@ -1,6 +1,6 @@
 [package]
 name = "tark-cli"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 description = "AI-powered CLI agent with LSP server for code completion, hover, diagnostics, and chat"
 authors = ["tark contributors"]

@@ -326,6 +326,7 @@ impl SessionService {
                         timestamp: timestamp.clone(),
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     });
                 } else {
                     for seg in &msg.segments {
@@ -338,6 +339,7 @@ impl SessionService {
                                 timestamp: timestamp.clone(),
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                             }),
                             crate::storage::SegmentRecord::Tool(idx) => {
                                 if let Some(tool_call) = msg.tool_calls.get(*idx) {
@@ -366,6 +368,7 @@ impl SessionService {
                                         timestamp: timestamp.clone(),
                                         tool_calls: Vec::new(),
                                         segments: Vec::new(),
+                                        tool_args: None,
                                     });
                                 }
                             }
@@ -383,6 +386,7 @@ impl SessionService {
                             timestamp: timestamp.clone(),
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                         });
                     }
                 }

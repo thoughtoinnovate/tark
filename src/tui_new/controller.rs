@@ -441,6 +441,7 @@ impl<B: Backend> TuiController<B> {
                 thinking: None,
                 tool_calls: Vec::new(),
                 segments: Vec::new(),
+                tool_args: None,
             });
 
             // Build response with all answers
@@ -582,6 +583,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                         });
                 }
             }
@@ -677,6 +679,32 @@ impl<B: Backend> TuiController<B> {
                     state.set_active_modal(Some(crate::ui_backend::ModalType::Help));
                     state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
                 }
+                return Ok(());
+            }
+            Command::ToggleThinkingTool => {
+                // Toggle thinking tool + display
+                let enabled = !state.thinking_tool_enabled();
+                state.set_thinking_tool_enabled(enabled);
+
+                // Notify service to refresh agent system prompt
+                self.service.set_thinking_tool_enabled(enabled).await;
+
+                use crate::ui_backend::{Message, MessageRole};
+                let msg = Message {
+                    role: MessageRole::System,
+                    content: if enabled {
+                        "✓ Thinking tool enabled. Agent will use structured reasoning.".to_string()
+                    } else {
+                        "✗ Thinking tool disabled.".to_string()
+                    },
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
+                    tool_args: None,
+                    collapsed: false,
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                };
+                state.add_message(msg);
                 return Ok(());
             }
             Command::CloseModal => {
@@ -1595,6 +1623,7 @@ impl<B: Backend> TuiController<B> {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     });
                 }
                 return Ok(());
@@ -1802,6 +1831,7 @@ impl<B: Backend> TuiController<B> {
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     };
                     // Clear streaming_content to avoid duplication in live display
                     state.set_streaming_content(None);
@@ -1874,6 +1904,7 @@ impl<B: Backend> TuiController<B> {
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     };
                     state.add_message(msg.clone());
                     self.service.record_session_message(&msg).await;
@@ -1889,6 +1920,7 @@ impl<B: Backend> TuiController<B> {
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                             };
                             state.add_message(thinking_msg.clone());
                             self.service.record_session_message(&thinking_msg).await;
@@ -1972,6 +2004,7 @@ impl<B: Backend> TuiController<B> {
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     };
                     state.add_message(msg.clone());
                     self.service.record_session_message(&msg).await;
@@ -2029,6 +2062,7 @@ impl<B: Backend> TuiController<B> {
                         segments: Vec::new(),
                         collapsed: false, // Running tools are expanded (renderer also forces this)
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        tool_args: Some(args.clone()), // Store original args for rich rendering
                     };
 
                     // Debug log before adding message
@@ -2234,6 +2268,7 @@ impl<B: Backend> TuiController<B> {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -2482,6 +2517,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2495,6 +2531,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2521,6 +2558,7 @@ impl<B: Backend> TuiController<B> {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -2553,6 +2591,7 @@ impl<B: Backend> TuiController<B> {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -2578,6 +2617,7 @@ impl<B: Backend> TuiController<B> {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -2604,6 +2644,7 @@ impl<B: Backend> TuiController<B> {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -2634,6 +2675,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2648,6 +2690,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2678,6 +2721,7 @@ impl<B: Backend> TuiController<B> {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -2760,6 +2804,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2801,6 +2846,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2835,6 +2881,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2848,6 +2895,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2878,6 +2926,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2891,6 +2940,7 @@ impl<B: Backend> TuiController<B> {
                             thinking: None,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
+                            tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         };
@@ -2923,6 +2973,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2936,6 +2987,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -2958,6 +3010,7 @@ impl<B: Backend> TuiController<B> {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };

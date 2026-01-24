@@ -194,6 +194,9 @@ pub struct Message {
     /// Segments for interleaved rendering (text, tools, thinking)
     #[serde(default)]
     pub segments: Vec<MessageSegment>,
+    /// Original tool arguments (for rich rendering of tools like think)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_args: Option<serde_json::Value>,
 }
 
 /// Source of an LLM provider

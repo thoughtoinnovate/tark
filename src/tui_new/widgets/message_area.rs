@@ -143,6 +143,8 @@ pub struct Message {
     pub timestamp: String,
     /// Optional question widget for interactive questions
     pub question: Option<QuestionWidget>,
+    /// Original tool arguments (for rich rendering of tools like think)
+    pub tool_args: Option<serde_json::Value>,
 }
 
 impl Message {
@@ -154,6 +156,7 @@ impl Message {
             collapsed: false,
             timestamp: String::new(),
             question: None,
+            tool_args: None,
         }
     }
 
@@ -181,6 +184,7 @@ impl Message {
             collapsed: false,
             timestamp: String::new(),
             question: Some(question),
+            tool_args: None,
         }
     }
 }
@@ -229,8 +233,6 @@ pub struct MessageArea<'a> {
     vim_mode: crate::ui_backend::VimMode,
     /// Set of collapsed tool group start indices
     collapsed_tool_groups: &'a std::collections::HashSet<usize>,
-    /// Thinking history for rendering think tool messages
-    thinking_history: Option<&'a [crate::tools::builtin::Thought]>,
 }
 
 /// Static empty hashset for default collapsed_tool_groups
@@ -324,7 +326,6 @@ impl<'a> MessageArea<'a> {
             focused_sub_index: None,
             vim_mode: crate::ui_backend::VimMode::Insert,
             collapsed_tool_groups: &EMPTY_HASHSET,
-            thinking_history: None,
         }
     }
 
@@ -402,12 +403,6 @@ impl<'a> MessageArea<'a> {
         collapsed: &'a std::collections::HashSet<usize>,
     ) -> Self {
         self.collapsed_tool_groups = collapsed;
-        self
-    }
-
-    /// Set thinking history for rendering think tool messages
-    pub fn thinking_history(mut self, history: &'a [crate::tools::builtin::Thought]) -> Self {
-        self.thinking_history = Some(history);
         self
     }
 
@@ -1318,12 +1313,14 @@ impl Widget for MessageArea<'_> {
 
                     // Show content only if not collapsed
                     if !effective_collapsed {
-                        // Special handling for "think" tool - render using ThinkingBlockWidget
+                        // Special handling for "think" tool - render from tool_args
                         if tool_name == "think" {
-                            if let Some(thoughts) = self.thinking_history {
-                                // Render thinking block widget inline
-                                // Note: We can't directly render a widget here, so we inline the rendering logic
-                                for thought in thoughts {
+                            // Parse THIS message's thought from its own args
+                            if let Some(ref args) = msg.tool_args {
+                                if let Ok(thought) = serde_json::from_value::<
+                                    crate::tools::builtin::Thought,
+                                >(args.clone())
+                                {
                                     // Thought number and content
                                     lines.push(Line::from(vec![
                                         Span::styled(
@@ -1338,7 +1335,7 @@ impl Widget for MessageArea<'_> {
                                                 .add_modifier(ratatui::style::Modifier::BOLD),
                                         ),
                                         Span::styled(
-                                            &thought.thought,
+                                            thought.thought.clone(),
                                             Style::default().fg(ratatui::style::Color::Gray),
                                         ),
                                     ]));
@@ -1395,16 +1392,14 @@ impl Widget for MessageArea<'_> {
                                         lines.push(Line::from(metadata_spans));
                                     }
 
-                                    // Add spacing between thoughts
+                                    // Add spacing after thought
                                     lines.push(Line::from(vec![Span::styled(
                                         "│ ",
                                         Style::default().fg(self.theme.text_muted),
                                     )]));
-                                }
 
-                                // Show "thinking..." indicator if more thoughts are coming
-                                if let Some(last) = thoughts.last() {
-                                    if last.next_thought_needed {
+                                    // Show "thinking..." indicator if more thoughts are coming
+                                    if thought.next_thought_needed {
                                         lines.push(Line::from(vec![
                                             Span::styled(
                                                 "│ ",

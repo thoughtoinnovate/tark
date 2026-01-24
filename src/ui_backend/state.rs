@@ -579,14 +579,6 @@ impl SharedState {
         self.write_inner().thinking_tool_enabled = enabled;
     }
 
-    /// Get the current thinking history for UI display
-    pub fn get_thinking_history(&self) -> Vec<crate::tools::builtin::Thought> {
-        self.thinking_tracker()
-            .lock()
-            .map(|t| t.history().to_vec())
-            .unwrap_or_default()
-    }
-
     pub fn generate_new_correlation_id(&self) -> String {
         let correlation_id = uuid::Uuid::new_v4().to_string();
         self.write_inner().current_correlation_id = Some(correlation_id.clone());
@@ -2474,6 +2466,7 @@ mod tests {
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:00".to_string(),
+            tool_args: None,
         });
         state.add_message(Message {
             role: MessageRole::System,
@@ -2483,6 +2476,7 @@ mod tests {
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:01".to_string(),
+            tool_args: None,
         });
         state.add_message(Message {
             role: MessageRole::System,
@@ -2492,6 +2486,7 @@ mod tests {
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:02".to_string(),
+            tool_args: None,
         });
         state.add_message(Message {
             role: MessageRole::Assistant,
@@ -2501,6 +2496,7 @@ mod tests {
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:03".to_string(),
+            tool_args: None,
         });
 
         assert_eq!(state.messages().len(), 4);

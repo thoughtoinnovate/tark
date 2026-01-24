@@ -142,6 +142,7 @@ impl<B: Backend> TuiRenderer<B> {
             // UI toggles
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(Command::ToggleSidebar),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(Command::ToggleThinking),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Command::ToggleThinkingTool),
 
             // Vim keybindings for messages panel and sidebar
             // These should only consume the key if actually used, otherwise fall through to insert
@@ -1830,6 +1831,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     collapsed: m.collapsed,
                     timestamp: m.timestamp.clone(),
                     question: None, // TODO: map questions if needed
+                    tool_args: m.tool_args.clone(),
                 })
                 .collect();
 
@@ -1879,7 +1881,6 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
             };
 
             let collapsed_groups = state.collapsed_tool_groups();
-            let thinking_history = state.get_thinking_history();
             let message_area = MessageArea::new(&message_widgets, theme)
                 .agent_name(&config.agent_name_short)
                 .focused(matches!(focused_component, FocusedComponent::Messages))
@@ -1892,8 +1893,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .streaming_lines(streaming_lines)
                 .thinking_lines(thinking_lines)
                 .processing(state.llm_processing())
-                .collapsed_tool_groups(&collapsed_groups)
-                .thinking_history(&thinking_history);
+                .collapsed_tool_groups(&collapsed_groups);
             let (total_lines, viewport_height) = message_area.metrics(chunks[1]);
             state.set_messages_metrics(total_lines, viewport_height);
             frame.render_widget(message_area, chunks[1]);

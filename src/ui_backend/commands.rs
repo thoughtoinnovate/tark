@@ -60,8 +60,11 @@ pub enum Command {
     /// Toggle sidebar visibility
     ToggleSidebar,
 
-    /// Toggle thinking block display
+    /// Toggle thinking block display (model-level extended thinking)
     ToggleThinking,
+
+    /// Toggle think tool for structured reasoning
+    ToggleThinkingTool,
 
     /// Toggle theme picker modal
     ToggleThemePicker,

@@ -770,7 +770,20 @@ impl OpenAiCompatProvider {
                     for item in &output.content {
                         if item.content_type == "output_text" {
                             if let Some(text) = &item.text {
-                                text_parts.push(text.clone());
+                                // Filter out echoed tool call markers from complete text
+                                let filtered_text = text
+                                    .lines()
+                                    .filter(|line| {
+                                        !line.starts_with("[Previous tool call:")
+                                            && !line.starts_with("[Tool result for call_id=")
+                                            && !line.starts_with("[Tool result]:")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+
+                                if !filtered_text.is_empty() {
+                                    text_parts.push(filtered_text);
+                                }
                             }
                         }
                     }
@@ -1206,9 +1219,16 @@ impl OpenAiCompatProvider {
                         "response.output_text.delta" => {
                             if let Some(delta) = event_data.delta {
                                 if !delta.is_empty() {
-                                    let event = StreamEvent::TextDelta(delta);
-                                    builder.process(&event);
-                                    callback(event);
+                                    // Filter out echoed tool call markers
+                                    let should_skip = delta.contains("[Previous tool call:")
+                                        || delta.contains("[Tool result for call_id=")
+                                        || delta.contains("[Tool result]:");
+
+                                    if !should_skip {
+                                        let event = StreamEvent::TextDelta(delta);
+                                        builder.process(&event);
+                                        callback(event);
+                                    }
                                 }
                             }
                         }
@@ -1278,9 +1298,16 @@ impl OpenAiCompatProvider {
                     "response.output_text.delta" => {
                         if let Some(delta) = event_data.delta {
                             if !delta.is_empty() {
-                                let event = StreamEvent::TextDelta(delta);
-                                builder.process(&event);
-                                callback(event);
+                                // Filter out echoed tool call markers
+                                let should_skip = delta.contains("[Previous tool call:")
+                                    || delta.contains("[Tool result for call_id=")
+                                    || delta.contains("[Tool result]:");
+
+                                if !should_skip {
+                                    let event = StreamEvent::TextDelta(delta);
+                                    builder.process(&event);
+                                    callback(event);
+                                }
                             }
                         }
                     }

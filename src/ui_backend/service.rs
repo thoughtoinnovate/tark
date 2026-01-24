@@ -148,7 +148,8 @@ impl AppService {
                 Some(state.thinking_tracker()),
             );
 
-            Ok(crate::agent::ChatAgent::new(Arc::from(llm_provider), tools))
+            Ok(crate::agent::ChatAgent::new(Arc::from(llm_provider), tools)
+                .with_max_iterations(global_config.agent.max_iterations))
         })();
 
         let (conversation_svc, session_svc) = match chat_agent_result {
@@ -210,6 +211,7 @@ impl AppService {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -896,6 +898,11 @@ impl AppService {
                     return Ok(());
                 }
 
+                // Clear thinking tracker for fresh conversation turn
+                if let Ok(mut tracker) = self.state.thinking_tracker().lock() {
+                    tracker.clear();
+                }
+
                 // If already processing, queue the message
                 let is_processing = self.state.llm_processing();
 
@@ -954,6 +961,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -971,6 +979,7 @@ impl AppService {
                     thinking: None,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
+                    tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 };
@@ -1082,6 +1091,7 @@ impl AppService {
                                 thinking: None,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
+                                tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                             };
@@ -1147,6 +1157,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -1186,6 +1197,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -1220,6 +1232,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     };
@@ -1328,6 +1341,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     });
 
                     self.event_tx
@@ -1461,6 +1475,7 @@ impl AppService {
                         thinking: None,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
+                        tool_args: None,
                     });
 
                     // Also update status bar
@@ -1763,33 +1778,6 @@ impl AppService {
         let current_model = self.state.current_model();
         self.state.set_provider(Some(provider.to_string()));
 
-        // Persist to session metadata
-        if let Some(ref session_svc) = self.session_svc {
-            if let Some(model) = self.state.current_model() {
-                let mode = self.state.agent_mode();
-                session_svc
-                    .update_metadata(provider.to_string(), model.clone(), mode)
-                    .await;
-                if let Some(logger) = crate::debug_logger() {
-                    let correlation_id = self
-                        .state
-                        .current_correlation_id()
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                        correlation_id,
-                        crate::LogCategory::Service,
-                        "provider_model_metadata_saved",
-                    )
-                    .with_data(serde_json::json!({
-                        "provider": provider,
-                        "model": model,
-                        "agent_mode": format!("{:?}", mode)
-                    }));
-                    logger.log(entry);
-                }
-            }
-        }
-
         if let Some(ref conv_svc) = self.conversation_svc {
             match crate::llm::create_provider_with_options(
                 provider,
@@ -1799,14 +1787,65 @@ impl AppService {
                 Ok(llm_provider) => {
                     if let Err(e) = conv_svc.update_llm_provider(Arc::from(llm_provider)).await {
                         self.state.set_llm_connected(false);
-                        let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                        // Revert to previous provider and model on update failure
+                        if let Some(prev) = previous_provider.clone() {
+                            self.state.set_provider(Some(prev.clone()));
+                            if let Some(prev_model) = current_model.clone() {
+                                self.state.set_model(Some(prev_model));
+                            }
+                            let _ = self.event_tx.send(AppEvent::LlmError(format!(
+                                "{}\n\nFalling back to: {}",
+                                e, prev
+                            )));
+                        } else {
+                            let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                        }
                     } else {
                         self.state.set_llm_connected(true);
+
+                        // Persist to session metadata AFTER successful switch
+                        if let Some(ref session_svc) = self.session_svc {
+                            if let Some(model) = self.state.current_model() {
+                                let mode = self.state.agent_mode();
+                                session_svc
+                                    .update_metadata(provider.to_string(), model.clone(), mode)
+                                    .await;
+                                if let Some(logger) = crate::debug_logger() {
+                                    let correlation_id = self
+                                        .state
+                                        .current_correlation_id()
+                                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                        correlation_id,
+                                        crate::LogCategory::Service,
+                                        "provider_model_metadata_saved",
+                                    )
+                                    .with_data(serde_json::json!({
+                                        "provider": provider,
+                                        "model": model,
+                                        "agent_mode": format!("{:?}", mode)
+                                    }));
+                                    logger.log(entry);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
                     self.state.set_llm_connected(false);
-                    let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                    // Revert to previous provider and model on creation failure
+                    if let Some(prev) = previous_provider.clone() {
+                        self.state.set_provider(Some(prev.clone()));
+                        if let Some(prev_model) = current_model.clone() {
+                            self.state.set_model(Some(prev_model));
+                        }
+                        let _ = self.event_tx.send(AppEvent::LlmError(format!(
+                            "{}\n\nFalling back to: {}",
+                            e, prev
+                        )));
+                    } else {
+                        let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                    }
                 }
             }
         }
@@ -1844,33 +1883,6 @@ impl AppService {
         let current_provider = self.state.current_provider();
         self.state.set_model(Some(model.to_string()));
 
-        // Persist to session metadata
-        if let Some(ref session_svc) = self.session_svc {
-            if let Some(provider) = self.state.current_provider() {
-                let mode = self.state.agent_mode();
-                session_svc
-                    .update_metadata(provider, model.to_string(), mode)
-                    .await;
-                if let Some(logger) = crate::debug_logger() {
-                    let correlation_id = self
-                        .state
-                        .current_correlation_id()
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                        correlation_id,
-                        crate::LogCategory::Service,
-                        "provider_model_metadata_saved",
-                    )
-                    .with_data(serde_json::json!({
-                        "provider": self.state.current_provider(),
-                        "model": model,
-                        "agent_mode": format!("{:?}", mode)
-                    }));
-                    logger.log(entry);
-                }
-            }
-        }
-
         if let (Some(conv_svc), Some(provider)) = (
             self.conversation_svc.as_ref(),
             self.state.current_provider(),
@@ -1895,16 +1907,61 @@ impl AppService {
                         .await
                     {
                         self.state.set_llm_connected(false);
-                        let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                        // Revert to previous model on update failure
+                        if let Some(prev) = previous_model.clone() {
+                            self.state.set_model(Some(prev.clone()));
+                            let _ = self.event_tx.send(AppEvent::LlmError(format!(
+                                "{}\n\nFalling back to: {}",
+                                e, prev
+                            )));
+                        } else {
+                            let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                        }
                     } else {
                         self.state.set_llm_connected(true);
                         // Refresh sidebar to update context progress bar with new model's limit
                         self.refresh_sidebar_data().await;
+
+                        // Persist to session metadata AFTER successful switch
+                        if let Some(ref session_svc) = self.session_svc {
+                            if let Some(provider) = self.state.current_provider() {
+                                let mode = self.state.agent_mode();
+                                session_svc
+                                    .update_metadata(provider, model.to_string(), mode)
+                                    .await;
+                                if let Some(logger) = crate::debug_logger() {
+                                    let correlation_id = self
+                                        .state
+                                        .current_correlation_id()
+                                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                                        correlation_id,
+                                        crate::LogCategory::Service,
+                                        "provider_model_metadata_saved",
+                                    )
+                                    .with_data(serde_json::json!({
+                                        "provider": self.state.current_provider(),
+                                        "model": model,
+                                        "agent_mode": format!("{:?}", mode)
+                                    }));
+                                    logger.log(entry);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
                     self.state.set_llm_connected(false);
-                    let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                    // Revert to previous model on creation failure
+                    if let Some(prev) = previous_model.clone() {
+                        self.state.set_model(Some(prev.clone()));
+                        let _ = self.event_tx.send(AppEvent::LlmError(format!(
+                            "{}\n\nFalling back to: {}",
+                            e, prev
+                        )));
+                    } else {
+                        let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+                    }
                 }
             }
         }

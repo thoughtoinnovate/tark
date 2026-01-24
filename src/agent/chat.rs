@@ -664,22 +664,19 @@ Example - User says "add authentication":
         format!(
             "{}\n\n\
             🧠 STRUCTURED REASONING:\n\
-            Use the `think` tool to record your reasoning process:\n\
-            - Call think() before complex decisions\n\
-            - Break problems into numbered steps\n\
-            - Track confidence levels (0.0 to 1.0)\n\
-            - Specify thought_type: hypothesis, analysis, plan, decision, reflection\n\
-            - Revise earlier thoughts if needed using revises_thought\n\n\
-            Example:\n\
-            think({{\n\
-              \"thought\": \"First I need to understand the authentication module structure\",\n\
-              \"thought_number\": 1,\n\
-              \"total_thoughts\": 3,\n\
-              \"next_thought_needed\": true,\n\
-              \"thought_type\": \"analysis\",\n\
-              \"confidence\": 0.9\n\
-            }})\n\n\
-            This creates a visible thinking trail for complex multi-step tasks.",
+            Use the `think` tool to reason through problems:\n\
+            - Call think() at the START of your response to plan your approach\n\
+            - INCREMENT thought_number (1, 2, 3...) for sequential thoughts in a chain\n\
+            - Set next_thought_needed=true to continue, false when reasoning is complete\n\
+            - After thinking is complete (next_thought_needed=false), take action or respond\n\n\
+            IMPORTANT: Do NOT call think() repeatedly with the same thought_number.\n\
+            If you set next_thought_needed=false, you are DONE thinking - proceed to action.\n\n\
+            Example chain:\n\
+            think({{\"thought_number\": 1, \"next_thought_needed\": true, \"thought_type\": \"analysis\"}})  // Analyze\n\
+            think({{\"thought_number\": 2, \"next_thought_needed\": true, \"thought_type\": \"plan\"}})      // Plan\n\
+            think({{\"thought_number\": 3, \"next_thought_needed\": false, \"thought_type\": \"decision\"}}) // Decide\n\
+            // Now take action - do NOT call think() again\n\n\
+            Track confidence levels (0.0-1.0) and use thought_type: hypothesis, analysis, plan, decision, reflection",
             prompt_with_thinking
         )
     } else {
@@ -724,6 +721,39 @@ pub struct CompactResult {
     pub old_messages: usize,
     /// Message count after compaction
     pub new_messages: usize,
+}
+
+/// Detects think tool loops where model gets stuck at step 1
+#[derive(Debug, Default)]
+struct ThinkLoopDetector {
+    consecutive_step_one_calls: usize,
+}
+
+impl ThinkLoopDetector {
+    const MAX_CONSECUTIVE_STEP_ONE: usize = 3;
+
+    /// Check if a think call would trigger the loop detector
+    /// Returns true if loop is detected (3+ consecutive step-1 calls)
+    fn check_and_record(&mut self, args: &serde_json::Value) -> bool {
+        let thought_number = args
+            .get("thought_number")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        if thought_number == 1 {
+            self.consecutive_step_one_calls += 1;
+            if self.consecutive_step_one_calls >= Self::MAX_CONSECUTIVE_STEP_ONE {
+                return true; // Loop detected
+            }
+        } else {
+            self.consecutive_step_one_calls = 0; // Reset on progression
+        }
+        false
+    }
+
+    fn reset(&mut self) {
+        self.consecutive_step_one_calls = 0;
+    }
 }
 
 /// Chat agent that can use tools to accomplish tasks
@@ -2387,6 +2417,9 @@ impl ChatAgent {
         const MAX_CONSECUTIVE_DUPLICATES: usize = 2;
         const MAX_TOOL_CALLS_PER_TURN: usize = 5;
 
+        // Track think tool loops
+        let mut think_detector = ThinkLoopDetector::default();
+
         loop {
             // Check for interrupt at start of each iteration
             if interrupt_check() {
@@ -2566,6 +2599,26 @@ impl ChatAgent {
 
                         // Yield to allow the UI to render the "tool started" state
                         tokio::task::yield_now().await;
+
+                        // Check for think tool loops (step-1 repetition)
+                        if call.name == "think" && think_detector.check_and_record(&call.arguments)
+                        {
+                            tracing::warn!(
+                                "Think loop detected: {} consecutive thought_number=1 calls",
+                                think_detector.consecutive_step_one_calls
+                            );
+                            // Skip this think call and force the model to act
+                            let loop_warning = "Loop detected: You've called think() with thought_number=1 three times. \
+                                Stop thinking and take action or provide your response now.";
+                            on_tool_complete(call.name.clone(), loop_warning.to_string(), false);
+                            self.context.add_tool_result(&call.id, loop_warning);
+                            tool_call_log.push(ToolCallLog {
+                                tool: call.name.clone(),
+                                args: call.arguments.clone(),
+                                result_preview: loop_warning.to_string(),
+                            });
+                            continue;
+                        }
 
                         tracing::info!(
                             "Executing tool: {} with args: {} (mode: {:?})",

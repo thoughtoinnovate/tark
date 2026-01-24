@@ -348,9 +348,10 @@ mod tests {
     #[test]
     fn test_slash_command_find_matches() {
         let matches = SlashCommand::find_matches("th");
-        assert_eq!(matches.len(), 2); // theme, think
+        assert_eq!(matches.len(), 3); // theme, think, thinking
         assert!(matches.contains(&SlashCommand::Theme));
         assert!(matches.contains(&SlashCommand::Think));
+        assert!(matches.contains(&SlashCommand::Thinking));
     }
 
     #[test]
@@ -427,11 +428,11 @@ mod tests {
             state.move_down();
         }
 
-        // Should be at index 8, scroll_offset should still be 0
+        // Should be at index 8, scroll_offset should be 1 now (with 17 total commands)
         assert_eq!(state.selected, 8);
-        assert_eq!(state.scroll_offset, 0);
+        assert_eq!(state.scroll_offset, 1);
 
-        // Move down one more time - should trigger scroll
+        // Move down one more time - should increase scroll
         state.move_down();
         assert_eq!(state.selected, 9);
         assert_eq!(state.scroll_offset, 2); // selected (9) - visible_count (8) + 1 = 2
