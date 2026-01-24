@@ -6,8 +6,7 @@
 
 set -e
 
-VERSION="v0.8.4"
-PREVIOUS_VERSION="v0.8.3"
+VERSION="v0.8.3"
 REPO="thoughtoinnovate/tark"
 BINARY_NAME="tark"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -193,7 +192,9 @@ install() {
     trap 'rm -rf "$tmp_dir"' EXIT
 
     # Try to download the primary version, fallback to the previous one
-    if installed_version=$(try_download "$VERSION" "$platform" "$tmp_dir"); then
+    if installed_version_raw=$(try_download "$VERSION" "$platform" "$tmp_dir"); then
+        installed_version=$(echo "$installed_version_raw" | tail -n 1)
+
         :
     elif installed_version=$(try_download "$PREVIOUS_VERSION" "$platform" "$tmp_dir"); then
         warn "Primary version ${VERSION} failed, but successfully downloaded fallback version ${PREVIOUS_VERSION}."
@@ -220,7 +221,8 @@ install() {
         actual_version=$($BINARY_NAME --version)
         info "Reported Version: ${actual_version}"
         
-        if [ "$installed_version" != "$(echo "$actual_version" | awk '{print $2}')" ]; then
+        local installed_version_for_compare=$(echo "$installed_version" | sed 's/^v//')
+        if [ "$installed_version_for_compare" != "$(echo "$actual_version" | awk '{print $2}')" ]; then
              warn "Installed version (${installed_version}) does not match reported version (${actual_version})."
         fi
 
