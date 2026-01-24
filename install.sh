@@ -6,7 +6,8 @@
 
 set -e
 
-VERSION="v0.8.3"
+VERSION="v0.8.4"
+PREVIOUS_VERSION="v0.8.3"
 REPO="thoughtoinnovate/tark"
 BINARY_NAME="tark"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -65,40 +66,17 @@ Note: FreeBSD/OpenBSD/NetBSD are not currently supported." ;;
     echo "${os}-${arch}"
 }
 
-# Get the download URL for the latest release
+# Get the download URL for a specific version
 get_download_url() {
-    local platform="$1"
+    local version="$1"
+    local platform="$2"
     local asset_name="tark-${platform}"
     
     if [[ "$platform" == windows* ]]; then
         asset_name="${asset_name}.exe"
     fi
 
-    if [ "$VERSION" = "latest" ]; then
-        # Get latest release
-        local release_url="https://api.github.com/repos/${REPO}/releases/latest"
-        local download_url
-        download_url=$(curl -sL "$release_url" | grep "browser_download_url.*${asset_name}\"" | head -1 | cut -d '"' -f 4)
-        
-        if [ -z "$download_url" ]; then
-            error "Could not find binary for platform: ${platform}
-
-Available platforms:
-  - linux-x86_64       (Any Linux x64)
-  - linux-arm64        (Any Linux ARM64)
-  - darwin-x86_64      (macOS Intel)
-  - darwin-arm64       (macOS Apple Silicon)
-  - windows-x86_64     (Windows x64)
-  - windows-arm64      (Windows ARM64)
-
-Check releases: https://github.com/${REPO}/releases"
-        fi
-        
-        echo "$download_url"
-    else
-        # Use specific version
-        echo "https://github.com/${REPO}/releases/download/${VERSION}/${asset_name}"
-    fi
+    echo "https://github.com/${REPO}/releases/download/${version}/${asset_name}"
 }
 
 # Get the checksum URL for a binary
@@ -144,23 +122,19 @@ download_checksum() {
     fi
 }
 
-# Download and install
-install() {
-    local platform download_url checksum_url tmp_dir expected_checksum
-
-    info "Detecting platform..."
-    platform=$(detect_platform)
-    info "Platform: ${platform}"
-
-    info "Fetching download URL..."
-    download_url=$(get_download_url "$platform")
+# Attempt to download a version
+try_download() {
+    local version="$1"
+    local platform="$2"
+    local tmp_dir="$3"
+    
+    info "Attempting to download version ${version}..."
+    local download_url
+    download_url=$(get_download_url "$version" "$platform")
     info "Download URL: ${download_url}"
 
-    # Create temp directory
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' EXIT
-
-    # Download checksum first (for verification)
+    # Download checksum first
+    local checksum_url expected_checksum
     if [ "$SKIP_VERIFY" != "true" ]; then
         security "Downloading checksum for verification..."
         checksum_url=$(get_checksum_url "$download_url")
@@ -169,8 +143,7 @@ install() {
         if [ -n "$expected_checksum" ]; then
             security "Expected SHA256: ${expected_checksum}"
         else
-            warn "Could not download checksum file. Binary verification will be skipped."
-            warn "To force install without verification, use: SKIP_VERIFY=true ./install.sh"
+            warn "Could not download checksum file for version ${version}. Binary verification will be skipped."
         fi
     else
         warn "Checksum verification skipped (SKIP_VERIFY=true)"
@@ -178,9 +151,15 @@ install() {
 
     info "Downloading ${BINARY_NAME}..."
     if command -v curl &> /dev/null; then
-        curl -fsSL "$download_url" -o "${tmp_dir}/${BINARY_NAME}"
+        if ! curl -fsSL "$download_url" -o "${tmp_dir}/${BINARY_NAME}"; then
+            warn "Failed to download version ${version}."
+            return 1
+        fi
     elif command -v wget &> /dev/null; then
-        wget -q "$download_url" -O "${tmp_dir}/${BINARY_NAME}"
+        if ! wget -q "$download_url" -O "${tmp_dir}/${BINARY_NAME}"; then
+            warn "Failed to download version ${version}."
+            return 1
+        fi
     else
         error "Neither curl nor wget found. Please install one of them."
     fi
@@ -191,19 +170,35 @@ install() {
         if verify_checksum "${tmp_dir}/${BINARY_NAME}" "$expected_checksum"; then
             success "Checksum verified! Binary is authentic."
         else
-            error "SECURITY ALERT: Checksum verification FAILED!
-            
-The downloaded binary does not match the expected checksum.
-This could indicate:
-  - A corrupted download
-  - A tampered binary (man-in-the-middle attack)
-  - A version mismatch
-
-Expected: ${expected_checksum}
-
-For security, the installation has been aborted.
-If you trust the source, you can bypass with: SKIP_VERIFY=true ./install.sh"
+            error "SECURITY ALERT: Checksum verification FAILED for version ${version}!"
+            return 1
         fi
+    fi
+    
+    success "Successfully downloaded version ${version}."
+    echo "$version"
+    return 0
+}
+
+# Download and install
+install() {
+    local platform tmp_dir installed_version
+
+    info "Detecting platform..."
+    platform=$(detect_platform)
+    info "Platform: ${platform}"
+
+    # Create temp directory
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' EXIT
+
+    # Try to download the primary version, fallback to the previous one
+    if installed_version=$(try_download "$VERSION" "$platform" "$tmp_dir"); then
+        :
+    elif installed_version=$(try_download "$PREVIOUS_VERSION" "$platform" "$tmp_dir"); then
+        warn "Primary version ${VERSION} failed, but successfully downloaded fallback version ${PREVIOUS_VERSION}."
+    else
+        error "Failed to download both primary version ${VERSION} and fallback version ${PREVIOUS_VERSION}. Aborting."
     fi
 
     # Make executable
@@ -221,10 +216,18 @@ If you trust the source, you can bypass with: SKIP_VERIFY=true ./install.sh"
     # Verify installation
     if command -v "$BINARY_NAME" &> /dev/null; then
         success "tark installed successfully!"
-        info "Version: $($BINARY_NAME --version)"
-        if [ "$SKIP_VERIFY" != "true" ] && [ -n "$expected_checksum" ]; then
+        info "Installed Version: ${installed_version}"
+        actual_version=$($BINARY_NAME --version)
+        info "Reported Version: ${actual_version}"
+        
+        if [ "$installed_version" != "$(echo "$actual_version" | awk '{print $2}')" ]; then
+             warn "Installed version (${installed_version}) does not match reported version (${actual_version})."
+        fi
+
+        if [ "$SKIP_VERIFY" != "true" ]; then
             security "Installation verified with SHA256 checksum"
         fi
+        
         echo ""
         info "Next steps:"
         echo "  1. Set your API key:"
@@ -251,7 +254,8 @@ If you trust the source, you can bypass with: SKIP_VERIFY=true ./install.sh"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version|-v)
-            VERSION="v0.8.0"
+            VERSION="$2"
+            PREVIOUS_VERSION="" # No fallback when specific version is requested
             shift 2
             ;;
         --install-dir|-d)
@@ -268,7 +272,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: install.sh [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  -v, --version VERSION   Install specific version (default: latest)"
+            echo "  -v, --version VERSION   Install specific version (default: ${VERSION}, fallback: ${PREVIOUS_VERSION})"
             echo "  -d, --install-dir DIR   Installation directory (default: /usr/local/bin)"
             echo "  --skip-verify           Skip SHA256 checksum verification (not recommended)"
             echo "  -h, --help              Show this help"
@@ -279,7 +283,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Examples:"
             echo "  curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash"
-            echo "  ./install.sh --version v0.1.0"
+            echo "  ./install.sh --version v0.8.3"
             echo "  ./install.sh --install-dir ~/.local/bin"
             exit 0
             ;;
@@ -291,4 +295,3 @@ done
 
 # Run installation
 install
-
