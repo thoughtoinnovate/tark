@@ -5,6 +5,7 @@
 use crate::config::Config;
 
 pub mod auth;
+pub mod adapters;
 mod claude;
 mod copilot;
 mod debug_wrapper;
@@ -290,6 +291,13 @@ pub fn create_provider_with_options(
                 p = p.with_model(m);
             }
             Ok(Box::new(p))
+        }
+        "gemini-cli" => {
+            use self::adapters::{GeminiCliAdapter, GenericCliProvider};
+            let cli_path = std::path::PathBuf::from("/usr/local/bin/gemini-cli");
+            let adapter = GeminiCliAdapter::new(cli_path);
+            let model = model.unwrap_or("gemini-1.5-flash").to_string();
+            Ok(Box::new(GenericCliProvider::new(adapter, model)))
         }
         "openrouter" => {
             let mut p =

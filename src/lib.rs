@@ -17,6 +17,7 @@ pub mod debug_logger;
 pub mod diagnostics;
 pub mod llm;
 pub mod lsp;
+pub mod orchestration;
 pub mod plugins;
 pub mod policy;
 pub mod services;

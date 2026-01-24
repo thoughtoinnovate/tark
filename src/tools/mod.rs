@@ -11,6 +11,7 @@
 // Tool category modules
 pub mod builtin;
 pub mod dangerous;
+pub mod external;
 pub mod plan;
 pub mod readonly;
 pub mod risk;
@@ -301,6 +302,10 @@ impl ToolRegistry {
         let todo_tracker = todo_tracker.unwrap_or_else(|| Arc::new(Mutex::new(TodoTracker::new())));
         registry.register(Arc::new(TodoTool::new(todo_tracker)));
         tracing::debug!("Registered todo tool");
+
+        // External tools
+        registry.register(Arc::new(self::external::CopilotSuggestTool));
+        tracing::debug!("Registered copilot_suggest tool");
 
         // ===== Read-only tools (available in ALL modes) =====
 
