@@ -345,8 +345,8 @@ impl StorageFacade {
 
     /// Get usage tracker
     pub fn get_usage_tracker(&self) -> Result<crate::storage::usage::UsageTracker, StorageError> {
-        let db_path = self.project.project_root().join("usage.db");
-        crate::storage::usage::UsageTracker::new(&db_path).map_err(StorageError::Other)
+        let db_dir = self.project.project_root();
+        crate::storage::usage::UsageTracker::new(db_dir).map_err(StorageError::Other)
     }
 
     /// Record usage

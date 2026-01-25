@@ -10,7 +10,7 @@ This document helps AI coding agents understand the tark codebase and make effec
 
 **Every code change MUST**:
 
-1. ✅ **Compile** - `cargo build --release` must pass
+1. ✅ **Compile** - `cargo check`/`cargo build` during development, `cargo build --release` before commit
 2. ✅ **Be formatted** - `cargo fmt --all` must be run
 3. ✅ **Pass linting** - `cargo clippy` with zero warnings
 4. ✅ **Pass all tests** - `cargo test --all-features` must succeed
@@ -259,6 +259,11 @@ For TUI features, you MUST:
 
 3. **Manual smoke test after EVERY TUI change**:
    ```bash
+   # During development (faster iteration)
+   cargo build
+   ./target/debug/tark tui
+   
+   # Before committing (test optimized binary)
    cargo build --release
    ./target/release/tark tui
    # Verify: /help, /model, /theme, Ctrl+?, Escape, Enter all work
@@ -527,7 +532,7 @@ git push && git push --tags
 ## Testing Locally
 
 ```bash
-# Run Rust tests
+# Run Rust tests (runs in debug mode by default, which is faster)
 cargo test --all-features
 
 # Check formatting
@@ -536,11 +541,13 @@ cargo fmt --all -- --check
 # Run clippy
 cargo clippy --all-targets --all-features -- -D warnings
 
-# Build release binary
-cargo build --release
+# Build binary
+cargo build              # Debug build (fast, for local testing)
+cargo build --release    # Release build (before commit)
 
 # Test the server
-./target/release/tark serve --port 8765
+./target/debug/tark serve --port 8765     # Debug binary
+./target/release/tark serve --port 8765   # Release binary
 
 # Test in Neovim (from plugin directory)
 nvim --cmd "set rtp+=." -c "lua require('tark').setup()"
@@ -574,10 +581,22 @@ nvim --headless -u tests/minimal_init.lua \
 ### 1. Verify Code Compiles
 
 ```bash
+# Fastest - type checking only, no codegen (~2-3x faster than build)
+cargo check
+
+# During development (fast, incremental debug builds)
+cargo build
+
+# Before committing (optimized binary, required for final check)
 cargo build --release
 ```
 
 **Why**: Compilation errors must be caught immediately, not in CI.
+
+**When to use which**:
+- `cargo check` - Use for rapid iteration when you just want to verify types/syntax compile
+- `cargo build` - Use when you need to run the binary locally (debug mode, faster builds)
+- `cargo build --release` - Use only when done with all changes, before committing
 
 ### 2. Format and Lint Code
 
@@ -598,7 +617,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ```bash
 # After ANY code change, ensure tests exist and pass
+# Tests run in debug mode by default (faster compilation)
 cargo test --all-features
+
+# For release-mode tests (rarely needed, mainly for perf-sensitive code)
+cargo test --all-features --release
 
 # For Lua changes
 nvim --headless -u tests/minimal_init.lua \
@@ -635,7 +658,10 @@ nvim --headless -u tests/minimal_init.lua \
 Before committing, run the complete validation suite:
 
 ```bash
-# One-liner for all checks
+# During development - quick check (use this while iterating)
+cargo check && cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings
+
+# Before committing - full check with release build
 cargo build --release && \
 cargo fmt --all -- --check && \
 cargo clippy --all-targets --all-features -- -D warnings && \
@@ -712,10 +738,10 @@ Then check GitHub Actions to ensure CI passes. If CI fails:
 **Use this before every commit**:
 
 ```
-□ Code compiles (cargo build --release)
+□ Code compiles (cargo check/build during dev, cargo build --release before commit)
 □ Code formatted (cargo fmt --all)
 □ Format verified (cargo fmt --all -- --check)
-□ Clippy passes with zero warnings (cargo clippy -- -D warnings)
+□ Clippy passes with zero warnings (cargo clippy --all-targets --all-features -- -D warnings)
 □ Rust tests pass (cargo test --all-features)
 □ Lua tests pass (if applicable: nvim --headless ... PlenaryBustedDirectory)
 □ Tests added/updated for code changes
@@ -743,8 +769,8 @@ vim src/new_feature.rs
 # 3. Write tests
 vim tests/new_feature_test.rs
 
-# 4. Compile and test
-cargo build --release
+# 4. Compile and test (use cargo check or debug build during development for speed)
+cargo check
 cargo test --all-features
 
 # 5. Format and lint
@@ -755,7 +781,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 vim README.md  # Add to features section
 vim AGENTS.md  # Update if architecture changed
 
-# 7. Verify all checks pass
+# 7. Final verification with release build before commit
 cargo build --release && \
 cargo fmt --all -- --check && \
 cargo clippy --all-targets --all-features -- -D warnings && \
@@ -779,22 +805,25 @@ cargo test  # Should fail
 # 2. Fix the bug
 vim src/buggy_module.rs
 
-# 3. Verify test passes
+# 3. Verify test passes (cargo check for fast type checking)
+cargo check
 cargo test --all-features
 
-# 4. Format, lint, and compile
+# 4. Format and lint
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
+
+# 5. Final release build before commit
 cargo build --release
 
-# 5. Update docs if needed
+# 6. Update docs if needed
 vim README.md  # If user-visible behavior changed
 
-# 6. Commit
+# 7. Commit
 git add -A
 git commit -m "fix: resolve issue with X causing Y"
 
-# 7. Push
+# 8. Push
 git push
 ```
 

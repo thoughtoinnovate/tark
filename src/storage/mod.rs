@@ -357,18 +357,23 @@ impl TarkStorage {
         std::fs::create_dir_all(session_dir.join("plans"))?;
 
         // Create conversations subdirectory
-        let conversations_dir = session_dir.join("conversations");
+        let conversations_dir = self.session_conversations_dir(&session.id);
         std::fs::create_dir_all(&conversations_dir)?;
+        std::fs::create_dir_all(self.session_archive_dir(&session.id))?;
 
         // Save session.json in the directory
         let path = session_dir.join("session.json");
         let content = serde_json::to_string_pretty(session)?;
         std::fs::write(&path, content)?;
 
-        // Save conversation messages in session conversations directory
-        let conversations_path = conversations_dir.join("conversation.json");
+        // Save active conversation messages
+        let active_path = self.session_active_conversation_path(&session.id);
         let messages_content = serde_json::to_string_pretty(&session.messages)?;
-        std::fs::write(&conversations_path, messages_content)?;
+        std::fs::write(&active_path, &messages_content)?;
+
+        // Backwards compatibility: also write legacy conversation.json
+        let legacy_path = conversations_dir.join("conversation.json");
+        std::fs::write(&legacy_path, messages_content)?;
 
         // Update current session pointer
         std::fs::write(self.current_session_file(), &session.id)?;
@@ -385,10 +390,16 @@ impl TarkStorage {
             let mut session: ChatSession =
                 serde_json::from_str(&content).context("Failed to parse session")?;
 
-            let conversations_path = self
+            let active_path = self.session_active_conversation_path(id);
+            let legacy_path = self
                 .session_dir(id)
                 .join("conversations")
                 .join("conversation.json");
+            let conversations_path = if active_path.exists() {
+                active_path
+            } else {
+                legacy_path
+            };
             if conversations_path.exists() {
                 if let Ok(conversations_content) = std::fs::read_to_string(&conversations_path) {
                     if let Ok(messages) =
@@ -410,6 +421,110 @@ impl TarkStorage {
         }
 
         Err(anyhow::anyhow!("Session not found: {}", id))
+    }
+
+    /// Archive a set of messages for a session (stored as a chunk).
+    pub fn archive_session_messages(
+        &self,
+        session_id: &str,
+        messages: &[SessionMessage],
+    ) -> Result<ArchiveChunkMeta> {
+        let archive_dir = self.session_archive_dir(session_id);
+        std::fs::create_dir_all(&archive_dir)?;
+
+        let sequence = self.next_archive_sequence(&archive_dir)?;
+        let created_at = Utc::now();
+        let filename = format!(
+            "archive_{:04}_{}.json",
+            sequence,
+            created_at.format("%Y%m%dT%H%M%S")
+        );
+        let path = archive_dir.join(&filename);
+        let content = serde_json::to_string_pretty(messages)?;
+        std::fs::write(&path, content)?;
+
+        Ok(ArchiveChunkMeta {
+            filename,
+            created_at,
+            sequence,
+            message_count: messages.len(),
+        })
+    }
+
+    /// List archived conversation chunks for a session (newest first).
+    pub fn list_session_archives(&self, session_id: &str) -> Result<Vec<ArchiveChunkMeta>> {
+        let archive_dir = self.session_archive_dir(session_id);
+        if !archive_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut chunks = Vec::new();
+        for entry in std::fs::read_dir(&archive_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            if let Some((sequence, created_at)) = parse_archive_filename(&file_name) {
+                let message_count = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|content| serde_json::from_str::<Vec<SessionMessage>>(&content).ok())
+                    .map(|msgs| msgs.len())
+                    .unwrap_or(0);
+                chunks.push(ArchiveChunkMeta {
+                    filename: file_name,
+                    created_at,
+                    sequence,
+                    message_count,
+                });
+            }
+        }
+
+        chunks.sort_by(|a, b| b.sequence.cmp(&a.sequence));
+        Ok(chunks)
+    }
+
+    /// Load an archived conversation chunk by filename.
+    pub fn load_session_archive(
+        &self,
+        session_id: &str,
+        filename: &str,
+    ) -> Result<Vec<SessionMessage>> {
+        let path = self.session_archive_dir(session_id).join(filename);
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str(&content).context("Failed to parse archive chunk")
+    }
+
+    fn session_conversations_dir(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("conversations")
+    }
+
+    fn session_archive_dir(&self, session_id: &str) -> PathBuf {
+        self.session_conversations_dir(session_id).join("archive")
+    }
+
+    fn session_active_conversation_path(&self, session_id: &str) -> PathBuf {
+        self.session_conversations_dir(session_id)
+            .join("active.json")
+    }
+
+    fn next_archive_sequence(&self, archive_dir: &Path) -> Result<usize> {
+        let mut max_seq = 0usize;
+        if archive_dir.exists() {
+            for entry in std::fs::read_dir(archive_dir)? {
+                let entry = entry?;
+                if let Some(name) = entry.file_name().to_str() {
+                    if let Some((sequence, _)) = parse_archive_filename(name) {
+                        max_seq = max_seq.max(sequence);
+                    }
+                }
+            }
+        }
+        Ok(max_seq + 1)
     }
 
     /// Get the current session ID
@@ -1783,6 +1898,9 @@ impl ChatSession {
             role: role.to_string(),
             content: content.to_string(),
             timestamp: Utc::now(),
+            provider: None,
+            model: None,
+            context_transient: false,
             tool_call_id: None,
             tool_calls: Vec::new(),
             thinking_content: None,
@@ -1802,6 +1920,9 @@ impl ChatSession {
             role: role.to_string(),
             content: content.to_string(),
             timestamp: Utc::now(),
+            provider: None,
+            model: None,
+            context_transient: false,
             tool_call_id: None,
             tool_calls,
             thinking_content: None,
@@ -1822,6 +1943,9 @@ impl ChatSession {
             role: "assistant".to_string(),
             content: content.to_string(),
             timestamp: Utc::now(),
+            provider: None,
+            model: None,
+            context_transient: false,
             tool_call_id: None,
             tool_calls,
             thinking_content,
@@ -1836,6 +1960,9 @@ impl ChatSession {
             role: "tool".to_string(),
             content: content.to_string(),
             timestamp: Utc::now(),
+            provider: None,
+            model: None,
+            context_transient: false,
             tool_call_id: Some(tool_call_id.to_string()),
             tool_calls: Vec::new(),
             thinking_content: None,
@@ -1906,6 +2033,12 @@ pub struct SessionMessage {
     pub role: String,
     pub content: String,
     pub timestamp: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub context_transient: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     /// Tool calls made during this message (for assistant messages)
@@ -1917,6 +2050,15 @@ pub struct SessionMessage {
     /// Segment order to preserve interleaved display
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub segments: Vec<SegmentRecord>,
+}
+
+/// Metadata for an archived conversation chunk.
+#[derive(Debug, Clone)]
+pub struct ArchiveChunkMeta {
+    pub filename: String,
+    pub created_at: DateTime<Utc>,
+    pub sequence: usize,
+    pub message_count: usize,
 }
 
 /// Session metadata for listing
@@ -3217,6 +3359,20 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     pattern == text || text.contains(&pattern)
 }
 
+fn parse_archive_filename(name: &str) -> Option<(usize, DateTime<Utc>)> {
+    let name = name.strip_suffix(".json")?;
+    let mut parts = name.splitn(3, '_');
+    let prefix = parts.next()?;
+    if prefix != "archive" {
+        return None;
+    }
+    let sequence = parts.next()?.parse::<usize>().ok()?;
+    let timestamp = parts.next()?;
+    let naive = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y%m%dT%H%M%S").ok()?;
+    let created_at = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+    Some((sequence, created_at))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3318,16 +3474,46 @@ mod tests {
 
         storage.save_session(&session).unwrap();
 
-        let conversations_path = storage
+        let active_path = storage
             .session_dir(&session.id)
             .join("conversations")
-            .join("conversation.json");
-        assert!(conversations_path.exists());
+            .join("active.json");
+        assert!(active_path.exists());
 
         let loaded = storage.load_session(&session.id).unwrap();
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0].content, "Hello");
         assert_eq!(loaded.messages[1].content, "Hi");
+    }
+
+    #[test]
+    fn test_session_archive_chunk_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let storage = TarkStorage::new(temp.path()).unwrap();
+
+        let mut session = ChatSession::new();
+        session.add_message("user", "Hello");
+        session.add_message("assistant", "Hi");
+        storage.save_session(&session).unwrap();
+
+        let mut archived = session.messages.clone();
+        for msg in &mut archived {
+            msg.context_transient = true;
+        }
+
+        let meta = storage
+            .archive_session_messages(&session.id, &archived)
+            .unwrap();
+        let archives = storage.list_session_archives(&session.id).unwrap();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0].filename, meta.filename);
+        assert_eq!(archives[0].message_count, 2);
+
+        let loaded = storage
+            .load_session_archive(&session.id, &meta.filename)
+            .unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded[0].context_transient);
     }
 
     #[test]

@@ -22,9 +22,10 @@ use super::modals::{
 };
 use super::theme::Theme;
 use super::widgets::{
-    FilePickerModal, GitChange, GitStatus, Header, HelpModal, InputWidget, MessageArea,
-    ModelPickerModal, ProviderPickerModal, QuestionOption, QuestionWidget, SessionInfo,
-    SessionPickerModal, Sidebar, StatusBar, Task, TaskStatus, TerminalFrame, ThemePickerModal,
+    FilePickerModal, FlashBar, FlashBarState, GitChange, GitStatus, Header, HelpModal, InputWidget,
+    MessageArea, ModelPickerModal, ProviderPickerModal, QuestionOption, QuestionWidget,
+    SessionInfo, SessionPickerModal, Sidebar, StatusBar, Task, TaskStatus, TerminalFrame,
+    ThemePickerModal,
 };
 
 fn resolve_model_display_name(
@@ -39,6 +40,38 @@ fn resolve_model_display_name(
             .map(|m| m.name.clone())
             .unwrap_or_else(|| model.clone())
     })
+}
+
+fn build_status_message(state: &SharedState) -> (FlashBarState, Option<String>) {
+    if let Some(retry_at) = state.rate_limit_retry_at() {
+        let now = std::time::Instant::now();
+        if retry_at > now {
+            let remaining = retry_at.saturating_duration_since(now).as_secs().max(1);
+            return (
+                FlashBarState::Warning,
+                Some(format!("Rate limited retrying in {}s", remaining)),
+            );
+        }
+    }
+
+    let flash_state = state.flash_bar_state();
+    let message = state.status_message();
+
+    if message.is_some() {
+        let resolved_state = match flash_state {
+            FlashBarState::Error | FlashBarState::Warning => flash_state,
+            FlashBarState::Idle | FlashBarState::Working => FlashBarState::Warning,
+        };
+        (resolved_state, message)
+    } else if flash_state == FlashBarState::Idle {
+        if state.idle_elapsed() >= Duration::from_secs(2) {
+            (FlashBarState::Idle, Some("Ready".to_string()))
+        } else {
+            (FlashBarState::Idle, None)
+        }
+    } else {
+        (flash_state, None)
+    }
 }
 
 /// Click target for hit testing
@@ -1571,10 +1604,11 @@ impl<B: Backend> TuiRenderer<B> {
         // The scrollbar is at the right edge of the messages panel
         let header_height = 2u16;
         let input_height = 5u16;
+        let status_message_height = 1u16;
         let status_height = 1u16;
 
         let messages_start_y = 1 + header_height;
-        let messages_end_y = size.height - status_height - input_height - 1;
+        let messages_end_y = size.height - status_height - input_height - status_message_height - 1;
         let messages_height = messages_end_y.saturating_sub(messages_start_y);
 
         // Check if the drag is in the messages scrollbar area (right edge)
@@ -1712,23 +1746,25 @@ impl<B: Backend> TuiRenderer<B> {
             }
         }
 
-        // Main area vertical layout: Header(2) | Messages(Min 5) | Input(5) | Status(1)
+        // Main area vertical layout: Header(2) | Messages(Min 5) | Status Strip(1) | Input(5) | Status(1)
         let header_height = 2u16;
         let input_height = 5u16;
+        let status_message_height = 1u16;
         let status_height = 1u16;
 
         let header_y = inner_y;
         let messages_y = header_y + header_height;
         let status_y = inner_y + inner_height - status_height;
         let input_y = status_y.saturating_sub(input_height);
+        let status_message_y = input_y.saturating_sub(status_message_height);
 
         // Determine which vertical section was clicked
         if col >= main_x && col < main_x + main_width {
             if row >= header_y && row < messages_y {
                 return ClickTarget::Header;
-            } else if row >= messages_y && row < input_y {
+            } else if row >= messages_y && row < status_message_y {
                 return ClickTarget::Messages;
-            } else if row >= input_y && row < status_y {
+            } else if row >= status_message_y && row < status_y {
                 return ClickTarget::Input;
             } else if row >= status_y && row < status_y + status_height {
                 return ClickTarget::StatusBar;
@@ -1793,12 +1829,13 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 (inner, None)
             };
 
-            // Vertical layout: Header | Messages | Input | Status
+            // Vertical layout: Header | Messages | Status Strip | Input | Status
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(2), // Header
                     Constraint::Min(5),    // Message area
+                    Constraint::Length(1), // Status message strip
                     Constraint::Length(5), // Input area
                     Constraint::Length(1), // Status bar
                 ])
@@ -1821,6 +1858,8 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                         UiMessageRole::Thinking => super::widgets::MessageRole::Thinking,
                     },
                     content: m.content.clone(),
+                    provider: m.provider.clone(),
+                    model: m.model.clone(),
                     collapsed: m.collapsed,
                     timestamp: m.timestamp.clone(),
                     question: None, // TODO: map questions if needed
@@ -1881,6 +1920,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .focused_sub_index(state.focused_sub_index())
                 .scroll(state.messages_scroll_offset())
                 .vim_mode(state.vim_mode())
+                .diff_view_mode(state.diff_view_mode())
                 .streaming_content(streaming_content)
                 .streaming_thinking(streaming_thinking)
                 .streaming_lines(streaming_lines)
@@ -1891,6 +1931,16 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
             state.set_messages_metrics(total_lines, viewport_height);
             frame.render_widget(message_area, chunks[1]);
 
+            // Render status message strip
+            let (flash_state, message) = build_status_message(state);
+            let mut status_strip = FlashBar::new(theme)
+                .kind(flash_state)
+                .animation_frame(state.flash_bar_animation_frame());
+            if let Some(message) = message.as_deref() {
+                status_strip = status_strip.message(message);
+            }
+            frame.render_widget(status_strip, chunks[2]);
+
             // Render input area
             let context_file_paths: Vec<String> =
                 context_files.iter().map(|f| f.path.clone()).collect();
@@ -1898,7 +1948,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .focused(matches!(focused_component, FocusedComponent::Input))
                 .context_files(context_file_paths)
                 .selection(state.input_selection());
-            frame.render_widget(input, chunks[2]);
+            frame.render_widget(input, chunks[3]);
 
             // Render command autocomplete dropdown if active
             if state.autocomplete_active() {
@@ -1909,7 +1959,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 ac_state.matches = super::widgets::SlashCommand::find_matches(&filter);
 
                 let autocomplete = super::widgets::CommandAutocomplete::new(theme, &ac_state);
-                frame.render_widget(autocomplete, chunks[2]);
+                frame.render_widget(autocomplete, chunks[3]);
             }
 
             // Render status bar
@@ -1936,7 +1986,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 status = status.model(name);
             }
 
-            frame.render_widget(status, chunks[3]);
+            frame.render_widget(status, chunks[4]);
 
             // Render sidebar if visible
             if let Some(sidebar_rect) = sidebar_area {

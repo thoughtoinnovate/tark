@@ -15,6 +15,7 @@ use ratatui::{
 
 use crate::tui_new::theme::Theme;
 use crate::tui_new::widgets::question::QuestionWidget;
+use crate::ui_backend::DiffViewMode;
 use ratatui::style::Color;
 use std::time::{Duration, Instant};
 
@@ -111,6 +112,287 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     result
 }
 
+fn truncate_text(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut chars = text.chars();
+    let mut result = String::new();
+    for _ in 0..max_width {
+        if let Some(ch) = chars.next() {
+            result.push(ch);
+        } else {
+            break;
+        }
+    }
+    result
+}
+
+const DIFF_SPLIT_MIN_WIDTH: usize = 88;
+const DIFF_SPLIT_SEPARATOR: &str = " | ";
+
+struct ArchiveMarkerInfo {
+    created_at: String,
+    sequence: usize,
+    message_count: usize,
+}
+
+fn archive_marker_info(message: &Message) -> Option<ArchiveMarkerInfo> {
+    let args = message.tool_args.as_ref()?;
+    let kind = args.get("kind")?.as_str()?;
+    if kind != "archive_marker" {
+        return None;
+    }
+    Some(ArchiveMarkerInfo {
+        created_at: args
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        sequence: args.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+        message_count: args
+            .get("message_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+    })
+}
+
+fn tool_line_prefix(theme: &Theme) -> Vec<Span<'static>> {
+    vec![
+        Span::styled("│ ", Style::default().fg(theme.text_muted)),
+        Span::raw("   "),
+    ]
+}
+
+fn prepend_tool_prefix(theme: &Theme, spans: Vec<Span<'static>>) -> Line<'static> {
+    let mut line_spans = tool_line_prefix(theme);
+    line_spans.extend(spans);
+    Line::from(line_spans)
+}
+
+fn pad_to_width(value: &str, width: usize) -> String {
+    let len = value.chars().count();
+    if len >= width {
+        value.to_string()
+    } else {
+        format!("{}{}", value, " ".repeat(width - len))
+    }
+}
+
+fn strip_first_char(value: &str) -> &str {
+    let mut chars = value.chars();
+    chars.next();
+    chars.as_str()
+}
+
+fn format_provider_model(provider: Option<&str>, model: Option<&str>) -> Option<String> {
+    match (provider, model) {
+        (Some(provider), Some(model)) => Some(format!("{}/{}", provider, model)),
+        (Some(provider), None) => Some(provider.to_string()),
+        (None, Some(model)) => Some(model.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn render_tool_text_lines(text: &str, content_width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let wrapped = wrap_text(text, content_width);
+    for line in wrapped {
+        lines.push(prepend_tool_prefix(
+            theme,
+            vec![Span::styled(
+                line,
+                Style::default().fg(theme.text_secondary),
+            )],
+        ));
+    }
+    lines
+}
+
+fn render_inline_diff(
+    diff_lines: &[String],
+    content_width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for raw_line in diff_lines {
+        let line = raw_line.as_str();
+        let style = if line.starts_with('+') {
+            Style::default().fg(theme.green)
+        } else if line.starts_with('-') {
+            Style::default().fg(theme.red)
+        } else if line.starts_with("@@") {
+            Style::default().fg(theme.cyan)
+        } else if line.starts_with("---") || line.starts_with("+++") {
+            Style::default().fg(theme.text_muted)
+        } else {
+            Style::default().fg(theme.text_secondary)
+        };
+
+        for chunk in wrap_text(line, content_width) {
+            lines.push(prepend_tool_prefix(theme, vec![Span::styled(chunk, style)]));
+        }
+    }
+    lines
+}
+
+fn render_split_diff(
+    diff_lines: &[String],
+    content_width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let column_width = content_width.saturating_sub(DIFF_SPLIT_SEPARATOR.chars().count()) / 2;
+    if column_width == 0 {
+        return render_inline_diff(diff_lines, content_width, theme);
+    }
+
+    let separator = Span::styled(DIFF_SPLIT_SEPARATOR, Style::default().fg(theme.text_muted));
+
+    for raw_line in diff_lines {
+        let line = raw_line.as_str();
+        if line.starts_with("@@") || line.starts_with("---") || line.starts_with("+++") {
+            for chunk in wrap_text(line, content_width) {
+                let style = if line.starts_with("@@") {
+                    Style::default().fg(theme.cyan)
+                } else {
+                    Style::default().fg(theme.text_muted)
+                };
+                lines.push(prepend_tool_prefix(theme, vec![Span::styled(chunk, style)]));
+            }
+            continue;
+        }
+
+        let (left, right, left_style, right_style) = if line.starts_with(' ') {
+            let value = strip_first_char(line);
+            (
+                value.to_string(),
+                value.to_string(),
+                Style::default().fg(theme.text_secondary),
+                Style::default().fg(theme.text_secondary),
+            )
+        } else if line.starts_with('-') {
+            (
+                strip_first_char(line).to_string(),
+                String::new(),
+                Style::default().fg(theme.red),
+                Style::default().fg(theme.text_secondary),
+            )
+        } else if line.starts_with('+') {
+            (
+                String::new(),
+                strip_first_char(line).to_string(),
+                Style::default().fg(theme.text_secondary),
+                Style::default().fg(theme.green),
+            )
+        } else {
+            (
+                line.to_string(),
+                String::new(),
+                Style::default().fg(theme.text_secondary),
+                Style::default().fg(theme.text_secondary),
+            )
+        };
+
+        let left_wrapped = wrap_text(&left, column_width.max(1));
+        let right_wrapped = wrap_text(&right, column_width.max(1));
+        let row_count = left_wrapped.len().max(right_wrapped.len());
+
+        for row in 0..row_count {
+            let left_text = left_wrapped.get(row).map(String::as_str).unwrap_or("");
+            let right_text = right_wrapped.get(row).map(String::as_str).unwrap_or("");
+            let left_padded = pad_to_width(left_text, column_width);
+            let right_padded = pad_to_width(right_text, column_width);
+            let row_spans = vec![
+                Span::styled(left_padded, left_style),
+                separator.clone(),
+                Span::styled(right_padded, right_style),
+            ];
+            lines.push(prepend_tool_prefix(theme, row_spans));
+        }
+    }
+
+    lines
+}
+
+fn render_diff_block(
+    diff_lines: &[String],
+    content_width: usize,
+    diff_view_mode: DiffViewMode,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    match diff_view_mode {
+        DiffViewMode::Auto => {
+            if content_width >= DIFF_SPLIT_MIN_WIDTH {
+                render_split_diff(diff_lines, content_width, theme)
+            } else {
+                render_inline_diff(diff_lines, content_width, theme)
+            }
+        }
+        DiffViewMode::Inline => render_inline_diff(diff_lines, content_width, theme),
+        DiffViewMode::Split => render_split_diff(diff_lines, content_width, theme),
+    }
+}
+
+fn render_tool_content_lines(
+    content: &str,
+    content_width: usize,
+    diff_view_mode: DiffViewMode,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut text_buffer: Vec<String> = Vec::new();
+    let mut diff_buffer: Vec<String> = Vec::new();
+    let mut in_diff_block = false;
+
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim_start();
+        if !in_diff_block && trimmed.starts_with("```diff") {
+            if !text_buffer.is_empty() {
+                let text = text_buffer.join("\n");
+                lines.extend(render_tool_text_lines(&text, content_width, theme));
+                text_buffer.clear();
+            }
+            in_diff_block = true;
+            continue;
+        }
+        if in_diff_block && trimmed.starts_with("```") {
+            if !diff_buffer.is_empty() {
+                lines.extend(render_diff_block(
+                    &diff_buffer,
+                    content_width,
+                    diff_view_mode,
+                    theme,
+                ));
+                diff_buffer.clear();
+            }
+            in_diff_block = false;
+            continue;
+        }
+
+        if in_diff_block {
+            diff_buffer.push(raw_line.to_string());
+        } else {
+            text_buffer.push(raw_line.to_string());
+        }
+    }
+
+    if !text_buffer.is_empty() {
+        let text = text_buffer.join("\n");
+        lines.extend(render_tool_text_lines(&text, content_width, theme));
+    }
+    if !diff_buffer.is_empty() {
+        lines.extend(render_diff_block(
+            &diff_buffer,
+            content_width,
+            diff_view_mode,
+            theme,
+        ));
+    }
+
+    lines
+}
+
 /// Message role/type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageRole {
@@ -137,6 +419,10 @@ pub struct Message {
     pub role: MessageRole,
     /// Message content
     pub content: String,
+    /// Provider ID for assistant messages
+    pub provider: Option<String>,
+    /// Model ID for assistant messages
+    pub model: Option<String>,
     /// Whether this message is collapsed (for thinking/tool)
     pub collapsed: bool,
     /// Timestamp of the message (HH:MM:SS)
@@ -153,6 +439,8 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            provider: None,
+            model: None,
             collapsed: false,
             timestamp: String::new(),
             question: None,
@@ -181,6 +469,8 @@ impl Message {
         Self {
             role: MessageRole::Question,
             content,
+            provider: None,
+            model: None,
             collapsed: false,
             timestamp: String::new(),
             question: Some(question),
@@ -231,6 +521,8 @@ pub struct MessageArea<'a> {
     focused_sub_index: Option<usize>,
     /// Vim mode
     vim_mode: crate::ui_backend::VimMode,
+    /// Diff rendering mode for tool previews
+    diff_view_mode: DiffViewMode,
     /// Set of collapsed tool group start indices
     collapsed_tool_groups: &'a std::collections::HashSet<usize>,
 }
@@ -325,6 +617,7 @@ impl<'a> MessageArea<'a> {
             focused_message_index: 0,
             focused_sub_index: None,
             vim_mode: crate::ui_backend::VimMode::Insert,
+            diff_view_mode: DiffViewMode::Auto,
             collapsed_tool_groups: &EMPTY_HASHSET,
         }
     }
@@ -394,6 +687,11 @@ impl<'a> MessageArea<'a> {
 
     pub fn vim_mode(mut self, mode: crate::ui_backend::VimMode) -> Self {
         self.vim_mode = mode;
+        self
+    }
+
+    pub fn diff_view_mode(mut self, mode: DiffViewMode) -> Self {
+        self.diff_view_mode = mode;
         self
     }
 
@@ -530,6 +828,16 @@ impl<'a> MessageArea<'a> {
                     format!("{} ", msg.timestamp),
                     Style::default().fg(self.theme.text_muted),
                 ));
+            }
+            if msg.role == MessageRole::Agent {
+                if let Some(badge) =
+                    format_provider_model(msg.provider.as_deref(), msg.model.as_deref())
+                {
+                    spans.push(Span::styled(
+                        format!("[{}] ", badge),
+                        Style::default().fg(self.theme.text_secondary),
+                    ));
+                }
             }
 
             // Add cursor indicator for focused message
@@ -1271,6 +1579,19 @@ impl Widget for MessageArea<'_> {
                         } else {
                             (content.clone(), None)
                         };
+                    let mut header_content = display_content.clone();
+                    if tool_name == "think" && effective_collapsed {
+                        // Show the thought inline when the think tool is collapsed.
+                        if let Some(ref args) = msg.tool_args {
+                            if let Ok(thought) = serde_json::from_value::<
+                                crate::tools::builtin::Thought,
+                            >(args.clone())
+                            {
+                                header_content =
+                                    format!("{}. {}", thought.thought_number, thought.thought);
+                            }
+                        }
+                    }
 
                     header_spans.extend([
                         Span::styled(
@@ -1289,11 +1610,11 @@ impl Widget for MessageArea<'_> {
                         ),
                         Span::raw("  "),
                         Span::styled(
-                            if display_content.chars().count() > 50 && effective_collapsed {
-                                let truncated: String = display_content.chars().take(47).collect();
+                            if header_content.chars().count() > 50 && effective_collapsed {
+                                let truncated: String = header_content.chars().take(47).collect();
                                 format!("{}...", truncated)
                             } else if effective_collapsed {
-                                display_content.clone()
+                                header_content.clone()
                             } else {
                                 String::new()
                             },
@@ -1420,19 +1741,15 @@ impl Widget for MessageArea<'_> {
                                 }
                             }
                         } else {
-                            // Regular tool content rendering
-                            let content_lines =
-                                wrap_text(&display_content, available_width.saturating_sub(6));
-                            for line in content_lines {
-                                lines.push(Line::from(vec![
-                                    Span::styled("│ ", Style::default().fg(self.theme.text_muted)), // Border continuation
-                                    Span::raw("   "), // Indent
-                                    Span::styled(
-                                        line,
-                                        Style::default().fg(self.theme.text_secondary),
-                                    ),
-                                ]));
-                            }
+                            // Regular tool content rendering with diff-aware formatting.
+                            let content_width = available_width.saturating_sub(6).max(10);
+                            let content_lines = render_tool_content_lines(
+                                &display_content,
+                                content_width,
+                                self.diff_view_mode,
+                                self.theme,
+                            );
+                            lines.extend(content_lines);
                         }
                     }
                 } else {
@@ -1510,6 +1827,17 @@ impl Widget for MessageArea<'_> {
                             Style::default().fg(self.theme.text_muted),
                         ));
                     }
+                    if msg.role == MessageRole::Agent {
+                        if let Some(badge) =
+                            format_provider_model(msg.provider.as_deref(), msg.model.as_deref())
+                        {
+                            header_spans.push(Span::raw(" · "));
+                            header_spans.push(Span::styled(
+                                badge,
+                                Style::default().fg(self.theme.text_secondary),
+                            ));
+                        }
+                    }
 
                     lines.push(Line::from(header_spans));
 
@@ -1572,6 +1900,65 @@ impl Widget for MessageArea<'_> {
                     ]));
                 } else {
                     // System, Tool, Command messages: simple format
+                    if msg.role == MessageRole::System {
+                        if let Some(info) = archive_marker_info(msg) {
+                            let is_at_position = msg_idx == self.focused_message_index;
+                            let is_focused = is_at_position && self.focused;
+                            let card_content_width = available_width.max(10);
+                            let border_color = if is_focused {
+                                self.theme.cyan
+                            } else {
+                                self.theme.text_muted
+                            };
+                            let top_border = format!("╭{}╮", "─".repeat(card_content_width));
+                            lines.push(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(top_border, Style::default().fg(border_color)),
+                            ]));
+
+                            let action = if is_focused { "▶ Load" } else { "▷ Load" };
+                            let action_width = action.chars().count();
+                            let left_max = card_content_width.saturating_sub(action_width + 2);
+                            let left_label = format!(
+                                "Archive · {} · chunk {:02} · {} messages",
+                                info.created_at, info.sequence, info.message_count
+                            );
+                            let left_text = truncate_text(&left_label, left_max);
+                            let padding_width = card_content_width
+                                .saturating_sub(left_text.chars().count() + action_width + 1);
+
+                            let mut line_spans = vec![
+                                Span::raw("  "),
+                                Span::styled("│", Style::default().fg(border_color)),
+                                Span::raw(" "),
+                                Span::styled(
+                                    left_text,
+                                    Style::default().fg(self.theme.text_secondary),
+                                ),
+                                Span::raw(" ".repeat(padding_width)),
+                                Span::styled(
+                                    action,
+                                    Style::default().fg(if is_focused {
+                                        self.theme.cyan
+                                    } else {
+                                        self.theme.text_muted
+                                    }),
+                                ),
+                                Span::raw(" "),
+                                Span::styled("│", Style::default().fg(border_color)),
+                            ];
+                            lines.push(Line::from(std::mem::take(&mut line_spans)));
+
+                            let bottom_border = format!("╰{}╯", "─".repeat(card_content_width));
+                            lines.push(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(bottom_border, Style::default().fg(border_color)),
+                            ]));
+                            lines.push(Line::from(""));
+                            continue;
+                        }
+                    }
+
                     let mut spans = vec![];
 
                     // Add position indicator - always show, but dim when not focused

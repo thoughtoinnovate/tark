@@ -153,25 +153,6 @@ Feature: Status Bar
     Then the queue indicator should be hidden or dimmed
 
   # =============================================================================
-  # AGENT WORKING INDICATOR
-  # =============================================================================
-
-  @working-indicator
-  Scenario: Show working indicator when agent is processing
-    Given the agent is processing a request
-    Then a green blinking dot should be visible in the status bar
-    And "Working..." text should be displayed
-
-  Scenario: Hide working indicator when agent is idle
-    Given the agent is idle
-    Then the working indicator should not be visible
-
-  Scenario: Working indicator animation
-    Given the agent is processing a request
-    Then the green dot should have a pulsing/ping animation
-    And the animation should be smooth and not jarring
-
-  # =============================================================================
   # HELP BUTTON
   # =============================================================================
 
@@ -202,5 +183,4 @@ Feature: Status Bar
   Scenario: Status bar elements maintain alignment
     Then the agent mode should be aligned to the left
     And the model selector should be in the center-left area
-    And the working indicator should be in the center
     And the help button should be aligned to the far right

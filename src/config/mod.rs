@@ -246,6 +246,8 @@ impl Default for AgentConfig {
 pub struct ToolsConfig {
     pub shell_enabled: bool,
     pub allowed_paths: Vec<String>,
+    /// Default timeout for tool execution (seconds)
+    pub tool_timeout_secs: u64,
 }
 
 impl Default for ToolsConfig {
@@ -253,6 +255,7 @@ impl Default for ToolsConfig {
         Self {
             shell_enabled: true,
             allowed_paths: vec![".".to_string()],
+            tool_timeout_secs: 60,
         }
     }
 }

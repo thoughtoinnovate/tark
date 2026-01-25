@@ -3,6 +3,7 @@
 //! Built with TDD approach following feature files in tests/visual/tui/features/
 
 pub mod command_autocomplete;
+mod flash_bar;
 mod header;
 mod input;
 pub mod markdown;
@@ -16,6 +17,7 @@ pub mod thinking_block;
 pub mod todo;
 
 pub use command_autocomplete::{AutocompleteState, CommandAutocomplete, SlashCommand};
+pub use flash_bar::{FlashBar, FlashBarState};
 pub use header::Header;
 #[allow(unused_imports)]
 pub use input::AttachmentBadge;

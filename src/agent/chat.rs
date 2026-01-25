@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use super::context::sanitize_tool_output_for_context;
 use super::ConversationContext;
 use crate::llm::{
     ContentPart, LlmProvider, LlmResponse, Message, MessageContent, Role, StreamCallback,
@@ -13,6 +14,19 @@ use crate::tools::{AgentMode, ToolRegistry};
 use crate::transport::update_status;
 use anyhow::Result;
 use std::sync::Arc;
+
+fn sanitize_tool_message_for_context(message: &str) -> String {
+    let parts: Vec<&str> = message.splitn(4, '|').collect();
+    if parts.len() >= 4 {
+        let sanitized = sanitize_tool_output_for_context(parts[1], parts[3]);
+        format!("{}|{}|{}|{}", parts[0], parts[1], parts[2], sanitized)
+    } else if parts.len() == 3 {
+        let sanitized = sanitize_tool_output_for_context(parts[1], parts[2]);
+        format!("{}|{}|{}", parts[0], parts[1], sanitized)
+    } else {
+        sanitize_tool_output_for_context("tool", message)
+    }
+}
 
 /// Lightweight plan context for system prompt injection in Build mode
 ///
@@ -133,6 +147,31 @@ fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// Generate a retry prompt when duplicate tool results are detected
+///
+/// Instead of stopping and asking the user, this prompts the agent to try
+/// a different approach while showing the repeated result.
+fn generate_duplicate_retry_prompt(
+    tool_name: &str,
+    result_output: &str,
+    duplicate_count: usize,
+) -> String {
+    let truncated_result = if result_output.len() > 500 {
+        format!("{}...", truncate_at_char_boundary(result_output, 500))
+    } else {
+        result_output.to_string()
+    };
+    format!(
+        "The agent has seen this result before and will try a different approach.\n\n\
+        Tool '{}' returned (repeated {} times):\n```\n{}\n```\n\n\
+        Please try a different approach - use different arguments, a different tool, \
+        or explain what you've learned and suggest next steps.",
+        tool_name,
+        duplicate_count + 1,
+        truncated_result
+    )
+}
+
 /// Generate system prompt based on agent mode, thinking capability, and thinking state
 ///
 /// # Arguments
@@ -246,11 +285,13 @@ Available tools:
 - shell: 🔒 Safe read-only commands (git status, ls, cat, grep, version checks)
 - ask_user: 💬 Ask user structured questions via popup (single-select, multi-select, free-text)
 - switch_mode: 🔄 Request mode switch (ask/plan/build) with user confirmation popup
+Note: You can pass optional `timeout_secs` to any tool call to override the default tool timeout.
 - save_plan: 📋 Create/update structured execution plans with tasks, subtasks, files
 - preview_plan: 👁️ Preview a plan before saving (for user review)
 - update_plan: ✏️ Modify an existing plan (add tasks, update sections)
 - get_plan_status: 📊 Check current plan progress
 - mark_task_done: ✅ Mark a task or subtask as completed
+Note: You can pass optional `timeout_secs` to any tool call to override the default tool timeout.
 
 You do NOT have: write_file, patch_file, delete_file (shell is limited to safe commands)
 
@@ -463,6 +504,7 @@ Available tools:
 - todo: 📋 Create/update session todo list (shown in sidebar) - use for multi-step tasks!
 - mark_task_done: ✅ Mark a task as completed when following an execution plan
 - get_plan_status: 📊 Check current plan progress
+Note: You can pass optional `timeout_secs` to any tool call to override the default tool timeout.
 
 ═══════════════════════════════════════════════════════════
 📋 PLAN EXECUTION WORKFLOW (when a plan is active)
@@ -1197,14 +1239,19 @@ impl ChatAgent {
 
         // Restore messages from session
         for msg in &session.messages {
+            if msg.context_transient {
+                continue;
+            }
             match msg.role.as_str() {
                 "user" => self.context.add_user(&msg.content),
                 "assistant" => self.context.add_assistant(&msg.content),
                 "tool" => {
                     if let Some(tool_call_id) = &msg.tool_call_id {
-                        self.context.add_tool_result(tool_call_id, &msg.content);
+                        let sanitized = sanitize_tool_message_for_context(&msg.content);
+                        self.context.add_tool_result(tool_call_id, sanitized);
                     }
                 }
+                "system" => self.context.add_user(&msg.content),
                 _ => {}
             }
         }
@@ -1254,6 +1301,9 @@ impl ChatAgent {
                     role: role.to_string(),
                     content,
                     timestamp: chrono::Utc::now(),
+                    provider: None,
+                    model: None,
+                    context_transient: false,
                     tool_call_id: m.tool_call_id.clone(),
                     tool_calls: Vec::new(),
                     thinking_content: None,
@@ -1648,12 +1698,17 @@ impl ChatAgent {
                                     MAX_CONSECUTIVE_DUPLICATES
                                 );
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                                    // Force the agent to summarize instead of looping
-                                    self.context.add_assistant(
-                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    // Prompt agent to try different approach instead of stopping
+                                    let retry_prompt = generate_duplicate_retry_prompt(
+                                        &call.name,
+                                        &result.output,
+                                        consecutive_duplicate_calls,
                                     );
-                                    // Break out of the tool execution loop
-                                    break;
+                                    self.context.add_assistant(&retry_prompt);
+                                    // Reset to allow agent to continue with new approach
+                                    consecutive_duplicate_calls = 0;
+                                    last_tool_results.clear();
+                                    // Don't break - let the agent continue and try something different
                                 }
                             }
                         } else {
@@ -1685,13 +1740,13 @@ impl ChatAgent {
                         });
 
                         // Add tool result to context
-                        self.context.add_tool_result(&call.id, &result.output);
+                        self.context.add_tool_result(
+                            &call.id,
+                            sanitize_tool_output_for_context(&call.name, &result.output),
+                        );
                     }
 
-                    // If we broke out of tool execution due to duplicates, break main loop too
-                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                        break;
-                    }
+                    // Duplicate handling now continues instead of breaking
                 }
                 LlmResponse::Mixed {
                     text, tool_calls, ..
@@ -1848,12 +1903,17 @@ impl ChatAgent {
                                     MAX_CONSECUTIVE_DUPLICATES
                                 );
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                                    // Force the agent to summarize instead of looping
-                                    self.context.add_assistant(
-                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    // Prompt agent to try different approach instead of stopping
+                                    let retry_prompt = generate_duplicate_retry_prompt(
+                                        &call.name,
+                                        &result.output,
+                                        consecutive_duplicate_calls,
                                     );
-                                    // Break out of the tool execution loop
-                                    break;
+                                    self.context.add_assistant(&retry_prompt);
+                                    // Reset to allow agent to continue with new approach
+                                    consecutive_duplicate_calls = 0;
+                                    last_tool_results.clear();
+                                    // Don't break - let the agent continue and try something different
                                 }
                             }
                         } else {
@@ -1875,13 +1935,13 @@ impl ChatAgent {
                             result_preview: preview,
                         });
 
-                        self.context.add_tool_result(&call.id, &result.output);
+                        self.context.add_tool_result(
+                            &call.id,
+                            sanitize_tool_output_for_context(&call.name, &result.output),
+                        );
                     }
 
-                    // If we broke out of tool execution due to duplicates, break main loop too
-                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                        break;
-                    }
+                    // Duplicate handling now continues instead of breaking
                 }
             }
         }
@@ -2070,8 +2130,13 @@ impl ChatAgent {
                                 "Agent interrupted before tool execution: {}",
                                 call.name
                             );
-                            self.context
-                                .add_tool_result(&call.id, "⚠️ Interrupted by user");
+                            self.context.add_tool_result(
+                                &call.id,
+                                sanitize_tool_output_for_context(
+                                    &call.name,
+                                    "⚠️ Interrupted by user",
+                                ),
+                            );
                             return Ok(AgentResponse {
                                 text: format!(
                                     "⚠️ *Operation interrupted before executing {}*",
@@ -2130,12 +2195,17 @@ impl ChatAgent {
                                     MAX_CONSECUTIVE_DUPLICATES
                                 );
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                                    // Force the agent to summarize instead of looping
-                                    self.context.add_assistant(
-                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    // Prompt agent to try different approach instead of stopping
+                                    let retry_prompt = generate_duplicate_retry_prompt(
+                                        &call.name,
+                                        &result.output,
+                                        consecutive_duplicate_calls,
                                     );
-                                    // Break out of the tool execution loop
-                                    break;
+                                    self.context.add_assistant(&retry_prompt);
+                                    // Reset to allow agent to continue with new approach
+                                    consecutive_duplicate_calls = 0;
+                                    last_tool_results.clear();
+                                    // Don't break - let the agent continue and try something different
                                 }
                             }
                         } else {
@@ -2163,13 +2233,13 @@ impl ChatAgent {
                             result_preview: preview,
                         });
 
-                        self.context.add_tool_result(&call.id, &result.output);
+                        self.context.add_tool_result(
+                            &call.id,
+                            sanitize_tool_output_for_context(&call.name, &result.output),
+                        );
                     }
 
-                    // If we broke out of tool execution due to duplicates, break main loop too
-                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                        break;
-                    }
+                    // Duplicate handling now continues instead of breaking
                 }
                 LlmResponse::Mixed {
                     text, tool_calls, ..
@@ -2233,8 +2303,13 @@ impl ChatAgent {
                                 "Agent interrupted before tool execution: {}",
                                 call.name
                             );
-                            self.context
-                                .add_tool_result(&call.id, "⚠️ Interrupted by user");
+                            self.context.add_tool_result(
+                                &call.id,
+                                sanitize_tool_output_for_context(
+                                    &call.name,
+                                    "⚠️ Interrupted by user",
+                                ),
+                            );
                             return Ok(AgentResponse {
                                 text: format!(
                                     "⚠️ *Operation interrupted before executing {}*",
@@ -2285,12 +2360,17 @@ impl ChatAgent {
                                     MAX_CONSECUTIVE_DUPLICATES
                                 );
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                                    // Force the agent to summarize instead of looping
-                                    self.context.add_assistant(
-                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    // Prompt agent to try different approach instead of stopping
+                                    let retry_prompt = generate_duplicate_retry_prompt(
+                                        &call.name,
+                                        &result.output,
+                                        consecutive_duplicate_calls,
                                     );
-                                    // Break out of the tool execution loop
-                                    break;
+                                    self.context.add_assistant(&retry_prompt);
+                                    // Reset to allow agent to continue with new approach
+                                    consecutive_duplicate_calls = 0;
+                                    last_tool_results.clear();
+                                    // Don't break - let the agent continue and try something different
                                 }
                             }
                         } else {
@@ -2317,13 +2397,13 @@ impl ChatAgent {
                             result_preview: preview,
                         });
 
-                        self.context.add_tool_result(&call.id, &result.output);
+                        self.context.add_tool_result(
+                            &call.id,
+                            sanitize_tool_output_for_context(&call.name, &result.output),
+                        );
                     }
 
-                    // If we broke out of tool execution due to duplicates, break main loop too
-                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                        break;
-                    }
+                    // Duplicate handling now continues instead of breaking
                 }
             }
         }
@@ -2618,7 +2698,10 @@ impl ChatAgent {
                             let loop_warning = "Loop detected: You've called think() with thought_number=1 three times. \
                                 Stop thinking and take action or provide your response now.";
                             on_tool_complete(call.name.clone(), loop_warning.to_string(), false);
-                            self.context.add_tool_result(&call.id, loop_warning);
+                            self.context.add_tool_result(
+                                &call.id,
+                                sanitize_tool_output_for_context(&call.name, loop_warning),
+                            );
                             tool_call_log.push(ToolCallLog {
                                 tool: call.name.clone(),
                                 args: call.arguments.clone(),
@@ -2641,7 +2724,10 @@ impl ChatAgent {
                                     // Surface error as tool result so model can recover
                                     let msg = format!("Tool '{}' failed: {}", call.name, e);
                                     on_tool_complete(call.name.clone(), msg.clone(), false);
-                                    self.context.add_tool_result(&call.id, &msg);
+                                    self.context.add_tool_result(
+                                        &call.id,
+                                        sanitize_tool_output_for_context(&call.name, &msg),
+                                    );
                                     let preview = if msg.len() > 200 {
                                         format!("{}...", truncate_at_char_boundary(&msg, 200))
                                     } else {
@@ -2672,12 +2758,17 @@ impl ChatAgent {
                                     MAX_CONSECUTIVE_DUPLICATES
                                 );
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                                    // Force the agent to summarize instead of looping
-                                    self.context.add_assistant(
-                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    // Prompt agent to try different approach instead of stopping
+                                    let retry_prompt = generate_duplicate_retry_prompt(
+                                        &call.name,
+                                        &result.output,
+                                        consecutive_duplicate_calls,
                                     );
-                                    // Break out of the tool execution loop
-                                    break;
+                                    self.context.add_assistant(&retry_prompt);
+                                    // Reset to allow agent to continue with new approach
+                                    consecutive_duplicate_calls = 0;
+                                    last_tool_results.clear();
+                                    // Don't break - let the agent continue and try something different
                                 }
                             }
                         } else {
@@ -2707,13 +2798,13 @@ impl ChatAgent {
                         // Notify that tool completed immediately
                         on_tool_complete(call.name.clone(), preview, result.success);
 
-                        self.context.add_tool_result(&call.id, &result.output);
+                        self.context.add_tool_result(
+                            &call.id,
+                            sanitize_tool_output_for_context(&call.name, &result.output),
+                        );
                     }
 
-                    // If we broke out of tool execution due to duplicates, break main loop too
-                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                        break;
-                    }
+                    // Duplicate handling now continues instead of breaking
                 }
                 LlmResponse::Mixed {
                     text, tool_calls, ..
@@ -2798,7 +2889,10 @@ impl ChatAgent {
                                     // Surface error as tool result so model can recover
                                     let msg = format!("Tool '{}' failed: {}", call.name, e);
                                     on_tool_complete(call.name.clone(), msg.clone(), false);
-                                    self.context.add_tool_result(&call.id, &msg);
+                                    self.context.add_tool_result(
+                                        &call.id,
+                                        sanitize_tool_output_for_context(&call.name, &msg),
+                                    );
                                     let preview = if msg.len() > 200 {
                                         format!("{}...", truncate_at_char_boundary(&msg, 200))
                                     } else {
@@ -2829,12 +2923,17 @@ impl ChatAgent {
                                     MAX_CONSECUTIVE_DUPLICATES
                                 );
                                 if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                                    // Force the agent to summarize instead of looping
-                                    self.context.add_assistant(
-                                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed."
+                                    // Prompt agent to try different approach instead of stopping
+                                    let retry_prompt = generate_duplicate_retry_prompt(
+                                        &call.name,
+                                        &result.output,
+                                        consecutive_duplicate_calls,
                                     );
-                                    // Break out of the tool execution loop
-                                    break;
+                                    self.context.add_assistant(&retry_prompt);
+                                    // Reset to allow agent to continue with new approach
+                                    consecutive_duplicate_calls = 0;
+                                    last_tool_results.clear();
+                                    // Don't break - let the agent continue and try something different
                                 }
                             }
                         } else {
@@ -2864,13 +2963,13 @@ impl ChatAgent {
                         // Notify that tool completed immediately
                         on_tool_complete(call.name.clone(), preview, result.success);
 
-                        self.context.add_tool_result(&call.id, &result.output);
+                        self.context.add_tool_result(
+                            &call.id,
+                            sanitize_tool_output_for_context(&call.name, &result.output),
+                        );
                     }
 
-                    // If we broke out of tool execution due to duplicates, break main loop too
-                    if consecutive_duplicate_calls >= MAX_CONSECUTIVE_DUPLICATES {
-                        break;
-                    }
+                    // Duplicate handling now continues instead of breaking
                 }
             }
         }

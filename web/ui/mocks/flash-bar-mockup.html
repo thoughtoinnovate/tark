@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flash Bar Mockup - Tark TUI</title>
+  <style>
+    :root {
+      /* Catppuccin Mocha */
+      --bg-main: #1e1e2e;
+      --bg-dark: #181825;
+      --cyan: #94e2d5;
+      --cyan-muted: #6c7086;
+      --yellow: #f9e2af;
+      --red: #f38ba8;
+      --peach: #fab387;
+      --text-dark: #1e1e2e;
+      --text-light: #cdd6f4;
+      --border: #313244;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+      background: #11111b;
+      color: var(--text-light);
+      padding: 40px;
+      min-height: 100vh;
+    }
+
+    h1 {
+      color: var(--cyan);
+      margin-bottom: 10px;
+      font-size: 24px;
+    }
+
+    h2 {
+      color: var(--text-light);
+      margin: 40px 0 20px;
+      font-size: 18px;
+      opacity: 0.8;
+    }
+
+    .description {
+      color: var(--cyan-muted);
+      margin-bottom: 40px;
+      font-size: 14px;
+    }
+
+    .flash-bar-container {
+      background: var(--bg-main);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 30px;
+      overflow: hidden;
+    }
+
+    .flash-bar-label {
+      background: var(--bg-dark);
+      padding: 8px 16px;
+      font-size: 12px;
+      color: var(--cyan-muted);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .flash-bar {
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-dark);
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Working Animation - Dots */
+    .flash-bar.working {
+      gap: 4px;
+    }
+
+    .dot {
+      border-radius: 50%;
+      background: var(--cyan);
+      flex-shrink: 0;
+    }
+
+    .dot.size-1 { width: 4px; height: 4px; opacity: 0.4; }
+    .dot.size-2 { width: 6px; height: 6px; opacity: 0.5; }
+    .dot.size-3 { width: 8px; height: 8px; opacity: 0.6; }
+    .dot.size-4 { width: 10px; height: 10px; opacity: 0.8; }
+    .dot.size-5 { width: 14px; height: 14px; opacity: 1; }
+
+    /* Idle - Single center dot */
+    .flash-bar.idle .dot {
+      background: var(--cyan-muted);
+      opacity: 0.5;
+    }
+
+    /* Rate Limit - Yellow background */
+    .flash-bar.rate-limit {
+      background: var(--yellow);
+      color: var(--text-dark);
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    /* Error - Red background */
+    .flash-bar.error {
+      background: var(--red);
+      color: var(--text-dark);
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    /* Warning - Peach/Mustard background */
+    .flash-bar.warning {
+      background: var(--peach);
+      color: var(--text-dark);
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    /* Animation */
+    @keyframes pulse-out {
+      0%, 100% {
+        transform: scale(0);
+        opacity: 0;
+      }
+      50% {
+        transform: scale(1);
+        opacity: 1;
+      }
+    }
+
+    .flash-bar.working.animated .dot:not(.center) {
+      animation: pulse-out 2s ease-in-out infinite;
+    }
+
+    .flash-bar.working.animated .dot.d1 { animation-delay: 0.4s; }
+    .flash-bar.working.animated .dot.d2 { animation-delay: 0.3s; }
+    .flash-bar.working.animated .dot.d3 { animation-delay: 0.2s; }
+    .flash-bar.working.animated .dot.d4 { animation-delay: 0.1s; }
+    .flash-bar.working.animated .dot.d5 { animation-delay: 0.4s; }
+    .flash-bar.working.animated .dot.d6 { animation-delay: 0.3s; }
+    .flash-bar.working.animated .dot.d7 { animation-delay: 0.2s; }
+    .flash-bar.working.animated .dot.d8 { animation-delay: 0.1s; }
+
+    /* Full width context */
+    .tui-context {
+      background: var(--bg-main);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-top: 60px;
+    }
+
+    .tui-header {
+      background: var(--bg-dark);
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .tui-header-title {
+      color: var(--cyan);
+      font-size: 14px;
+    }
+
+    .tui-messages {
+      padding: 20px;
+      min-height: 150px;
+      color: var(--text-light);
+      font-size: 13px;
+      opacity: 0.7;
+    }
+
+    .tui-flash-bar {
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tui-input {
+      padding: 16px;
+      background: var(--bg-dark);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tui-input-field {
+      background: var(--bg-main);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 10px 14px;
+      color: var(--cyan-muted);
+      font-size: 13px;
+    }
+
+    .tui-status-bar {
+      padding: 8px 16px;
+      background: var(--bg-dark);
+      font-size: 12px;
+      color: var(--cyan-muted);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .color-swatch {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-right: 20px;
+      font-size: 12px;
+    }
+
+    .color-swatch .swatch {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+
+    .color-palette {
+      margin-top: 40px;
+      padding: 20px;
+      background: var(--bg-main);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+
+    .color-palette h3 {
+      margin-bottom: 16px;
+      font-size: 14px;
+      color: var(--text-light);
+    }
+  </style>
+</head>
+<body>
+  <h1>Flash Bar Component</h1>
+  <p class="description">Status indicator bar positioned between messages and input area</p>
+
+  <!-- State 1: Working (Animated) -->
+  <h2>1. Working State (Animated Dots)</h2>
+  <div class="flash-bar-container">
+    <div class="flash-bar-label">Agent is processing...</div>
+    <div class="flash-bar working animated">
+      <div class="dot size-1 d1"></div>
+      <div class="dot size-2 d2"></div>
+      <div class="dot size-3 d3"></div>
+      <div class="dot size-4 d4"></div>
+      <div class="dot size-5 center"></div>
+      <div class="dot size-4 d5"></div>
+      <div class="dot size-3 d6"></div>
+      <div class="dot size-2 d7"></div>
+      <div class="dot size-1 d8"></div>
+    </div>
+  </div>
+
+  <!-- State 2: Idle (Single Dot) -->
+  <h2>2. Idle / Done State (Single Center Dot)</h2>
+  <div class="flash-bar-container">
+    <div class="flash-bar-label">Agent idle</div>
+    <div class="flash-bar idle">
+      <div class="dot size-5"></div>
+    </div>
+  </div>
+
+  <!-- State 3: Rate Limit -->
+  <h2>3. Rate Limit (Yellow Background)</h2>
+  <div class="flash-bar-container">
+    <div class="flash-bar-label">Rate limited by provider</div>
+    <div class="flash-bar rate-limit">
+      Rate limited, retrying in 5s
+    </div>
+  </div>
+
+  <!-- State 4: Error -->
+  <h2>4. Error State (Red Background)</h2>
+  <div class="flash-bar-container">
+    <div class="flash-bar-label">Connection or API error</div>
+    <div class="flash-bar error">
+      Connection failed: timeout
+    </div>
+  </div>
+
+  <!-- State 5: Warning -->
+  <h2>5. Warning / In-Progress Error (Peach/Mustard)</h2>
+  <div class="flash-bar-container">
+    <div class="flash-bar-label">Non-fatal warning during processing</div>
+    <div class="flash-bar warning">
+      Request timeout, retrying...
+    </div>
+  </div>
+
+  <!-- Full TUI Context -->
+  <h2>Full TUI Context</h2>
+  <div class="tui-context">
+    <div class="tui-header">
+      <span class="tui-header-title">tark</span>
+      <span style="color: var(--cyan-muted); font-size: 12px;">session_abc123</span>
+    </div>
+    <div class="tui-messages">
+      <div style="margin-bottom: 12px;"><span style="color: var(--cyan);">User:</span> understand the code</div>
+      <div><span style="color: #a6e3a1;">Agent:</span> I'll analyze the codebase structure...</div>
+    </div>
+    <div class="tui-flash-bar">
+      <div class="flash-bar working animated">
+        <div class="dot size-1 d1"></div>
+        <div class="dot size-2 d2"></div>
+        <div class="dot size-3 d3"></div>
+        <div class="dot size-4 d4"></div>
+        <div class="dot size-5 center"></div>
+        <div class="dot size-4 d5"></div>
+        <div class="dot size-3 d6"></div>
+        <div class="dot size-2 d7"></div>
+        <div class="dot size-1 d8"></div>
+      </div>
+    </div>
+    <div class="tui-input">
+      <div class="tui-input-field">> Type your message...</div>
+    </div>
+    <div class="tui-status-bar">
+      <span>agent • Build ▼  🟢 Balanced ▼  [🧠] [💭]</span>
+      <span>● gpt-5-nano OPENAI  [?]</span>
+    </div>
+  </div>
+
+  <!-- Color Palette Reference -->
+  <div class="color-palette">
+    <h3>Color Palette (Catppuccin Mocha)</h3>
+    <div class="color-swatch">
+      <div class="swatch" style="background: #94e2d5;"></div>
+      <span>Cyan (dots) #94e2d5</span>
+    </div>
+    <div class="color-swatch">
+      <div class="swatch" style="background: #6c7086;"></div>
+      <span>Muted (idle) #6c7086</span>
+    </div>
+    <div class="color-swatch">
+      <div class="swatch" style="background: #f9e2af;"></div>
+      <span>Yellow (rate limit) #f9e2af</span>
+    </div>
+    <div class="color-swatch">
+      <div class="swatch" style="background: #f38ba8;"></div>
+      <span>Red (error) #f38ba8</span>
+    </div>
+    <div class="color-swatch">
+      <div class="swatch" style="background: #fab387;"></div>
+      <span>Peach (warning) #fab387</span>
+    </div>
+    <div class="color-swatch">
+      <div class="swatch" style="background: #181825;"></div>
+      <span>Background #181825</span>
+    </div>
+  </div>
+</body>
+</html>

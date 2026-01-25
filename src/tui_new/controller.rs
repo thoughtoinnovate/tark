@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use ratatui::backend::Backend;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -14,6 +14,7 @@ use crate::llm::models_db;
 use crate::tools::questionnaire::{
     AnswerValue, ApprovalChoice, ApprovalResponse, InteractionRequest, UserResponse,
 };
+use crate::tui_new::widgets::FlashBarState;
 use crate::ui_backend::approval::ApprovalCardState;
 use crate::ui_backend::questionnaire::QuestionnaireState;
 use crate::ui_backend::UiRenderer;
@@ -49,6 +50,8 @@ pub struct TuiController<B: Backend> {
     /// Pending questionnaire data (for multi-question support)
     pending_questionnaire:
         std::sync::Arc<tokio::sync::Mutex<Option<crate::tools::questionnaire::Questionnaire>>>,
+    /// Last tick time for flash bar animation
+    flash_bar_last_tick: Instant,
 }
 
 impl<B: Backend> TuiController<B> {
@@ -68,6 +71,7 @@ impl<B: Backend> TuiController<B> {
             approval_responder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             modal_manager: ModalManager::new(),
             pending_questionnaire: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            flash_bar_last_tick: Instant::now(),
         }
     }
 
@@ -91,6 +95,9 @@ impl<B: Backend> TuiController<B> {
             // 3. Process async events (non-blocking)
             self.poll_events(&state).await?;
 
+            // 3b. Advance flash bar animation on tick
+            self.tick_flash_bar(&state);
+
             // 4. Check quit condition
             if self.renderer.should_quit(&state) {
                 break;
@@ -107,6 +114,29 @@ impl<B: Backend> TuiController<B> {
         }
 
         Ok(())
+    }
+
+    fn tick_flash_bar(&mut self, state: &SharedState) {
+        let tick_rate = Duration::from_millis(50);
+        if state.flash_bar_state() == FlashBarState::Working {
+            if self.flash_bar_last_tick.elapsed() >= tick_rate {
+                state.advance_flash_bar_animation();
+                self.flash_bar_last_tick = Instant::now();
+            }
+        } else {
+            self.flash_bar_last_tick = Instant::now();
+        }
+    }
+
+    fn maybe_handle_rate_limit_message(state: &SharedState, chunk: &str) -> bool {
+        if !is_rate_limit_message(chunk) {
+            return false;
+        }
+
+        let secs = parse_rate_limit_delay_secs(chunk).unwrap_or(1);
+        let retry_at = Instant::now() + Duration::from_secs(secs.max(1));
+        state.set_rate_limit(retry_at, None);
+        true
     }
 
     fn spawn_interaction_task(&mut self, state: SharedState) {
@@ -437,8 +467,11 @@ impl<B: Backend> TuiController<B> {
                 role: crate::ui_backend::MessageRole::User,
                 content: summary,
                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                provider: None,
+                model: None,
                 collapsed: false,
                 thinking: None,
+                context_transient: false,
                 tool_calls: Vec::new(),
                 segments: Vec::new(),
                 tool_args: None,
@@ -579,8 +612,11 @@ impl<B: Backend> TuiController<B> {
                             role: crate::ui_backend::MessageRole::System,
                             content: "ℹ️ Operation skipped by user".to_string(),
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            provider: None,
+                            model: None,
                             collapsed: false,
                             thinking: None,
+                            context_transient: true,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
                             tool_args: None,
@@ -684,8 +720,16 @@ impl<B: Backend> TuiController<B> {
             Command::ToggleThinkingTool => {
                 // Toggle thinking tool + display
                 let enabled = !state.thinking_tool_enabled();
-                state.set_thinking_tool_enabled(enabled);
+                if state.llm_processing() {
+                    state.set_pending_thinking_tool_enabled(Some(enabled));
+                    state.set_status_message(Some(
+                        "Thinking tool change queued (will apply after current response)"
+                            .to_string(),
+                    ));
+                    return Ok(());
+                }
 
+                state.set_thinking_tool_enabled(enabled);
                 // Notify service to refresh agent system prompt
                 self.service.set_thinking_tool_enabled(enabled).await;
 
@@ -698,6 +742,9 @@ impl<B: Backend> TuiController<B> {
                         "✗ Thinking tool disabled.".to_string()
                     },
                     thinking: None,
+                    provider: None,
+                    model: None,
+                    context_transient: true,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
                     tool_args: None,
@@ -1619,8 +1666,11 @@ impl<B: Backend> TuiController<B> {
                         role: crate::ui_backend::MessageRole::System,
                         content: "ℹ️ Question skipped by user".to_string(),
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        provider: None,
+                        model: None,
                         collapsed: false,
                         thinking: None,
+                        context_transient: true,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -1823,12 +1873,17 @@ impl<B: Backend> TuiController<B> {
             if let AppEvent::CommitIntermediateResponse(content) = event {
                 if !content.is_empty() {
                     use crate::ui_backend::{Message, MessageRole};
+                    let provider = state.current_provider();
+                    let model = state.current_model();
                     let msg = Message {
                         role: MessageRole::Assistant,
                         content, // Moved directly, no clone
                         thinking: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        provider,
+                        model,
+                        context_transient: false,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -1862,6 +1917,9 @@ impl<B: Backend> TuiController<B> {
             // Update state based on event type (borrow match for other events)
             match &event {
                 AppEvent::LlmTextChunk(chunk) => {
+                    if Self::maybe_handle_rate_limit_message(state, chunk) {
+                        continue;
+                    }
                     state.append_streaming_content(chunk);
                     state.scroll_to_bottom();
                 }
@@ -1880,6 +1938,8 @@ impl<B: Backend> TuiController<B> {
                     use crate::ui_backend::{Message, MessageRole};
                     // Prefer thinking from AgentResponse, fallback to streaming_thinking
                     let thinking_content = thinking.clone().or_else(|| state.streaming_thinking());
+                    let provider = state.current_provider();
+                    let model = state.current_model();
 
                     // Fast-path debug logging
                     if crate::is_debug_logging_enabled() {
@@ -1902,6 +1962,9 @@ impl<B: Backend> TuiController<B> {
                         thinking: thinking_content.clone(),
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        provider: provider.clone(),
+                        model: model.clone(),
+                        context_transient: false,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -1918,6 +1981,9 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 collapsed: true,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                provider: provider.clone(),
+                                model: model.clone(),
+                                context_transient: false,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
                                 tool_args: None,
@@ -1930,29 +1996,6 @@ impl<B: Backend> TuiController<B> {
 
                     // Clear streaming state
                     state.clear_streaming();
-
-                    // Apply any pending mode switch that was queued during streaming
-                    // This avoids a deadlock: handle_command(SetAgentMode) needs a write lock
-                    // on chat_agent, which would have been held by the streaming operation
-                    if let Some(pending_mode) = state.take_pending_mode_switch() {
-                        tracing::info!(
-                            "Applying queued mode switch to {:?} after streaming completed",
-                            pending_mode
-                        );
-                        if let Err(e) = self
-                            .service
-                            .handle_command(Command::SetAgentMode(pending_mode))
-                            .await
-                        {
-                            tracing::error!("Failed to apply queued mode switch: {}", e);
-                            state.set_status_message(Some(format!("Failed to switch mode: {}", e)));
-                        } else {
-                            state.set_status_message(Some(format!(
-                                "Switched to {} mode",
-                                pending_mode.display_name()
-                            )));
-                        }
-                    }
 
                     // Update session cost (models.dev pricing)
                     if let (Some(provider), Some(model_id)) =
@@ -1975,6 +2018,9 @@ impl<B: Backend> TuiController<B> {
                             .await;
                     }
 
+                    // Apply any pending changes queued during streaming
+                    self.apply_pending_changes(state).await?;
+
                     // Refresh sidebar data (updates costs and tokens)
                     self.service.refresh_sidebar_data().await;
 
@@ -1994,14 +2040,37 @@ impl<B: Backend> TuiController<B> {
                     // It will resume when the user confirms/cancels the edit
                 }
                 AppEvent::LlmError(error) => {
+                    let error_text = error.to_string();
+                    let is_rate_limit = is_rate_limit_message(&error_text)
+                        || error_text.contains("429")
+                        || error_text.contains("Too Many Requests");
+
+                    if let Err(log_error) =
+                        append_error_log(state.current_correlation_id(), &error_text)
+                    {
+                        tracing::warn!("Failed to write error log: {}", log_error);
+                    }
+
+                    if is_rate_limit {
+                        state.set_flash_bar_state(FlashBarState::Warning);
+                        state.set_status_message(Some("Rate limited".to_string()));
+                        state.clear_streaming();
+                        continue;
+                    }
+
                     // Add error message
                     use crate::ui_backend::{Message, MessageRole};
+                    state.set_flash_bar_state(FlashBarState::Error);
+                    state.set_status_message(Some(summarize_error_for_flash_bar(&error_text)));
                     let msg = Message {
                         role: MessageRole::System,
-                        content: format!("❌ Error: {}", error),
+                        content: format!("❌ Error: {}", error_text),
                         thinking: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        provider: None,
+                        model: None,
+                        context_transient: true,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -2012,6 +2081,9 @@ impl<B: Backend> TuiController<B> {
 
                     // Clear streaming state
                     state.clear_streaming();
+
+                    // Apply any pending changes queued during streaming
+                    self.apply_pending_changes(state).await?;
                 }
                 AppEvent::ToolStarted { name, args } => {
                     use crate::ui_backend::ActiveToolInfo;
@@ -2058,6 +2130,9 @@ impl<B: Backend> TuiController<B> {
                         role: MessageRole::Tool,
                         content: format!("⋯|{}|{}|{}", name, risk_group, description),
                         thinking: None,
+                        provider: None,
+                        model: None,
+                        context_transient: false,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         collapsed: false, // Running tools are expanded (renderer also forces this)
@@ -2243,6 +2318,10 @@ impl<B: Backend> TuiController<B> {
                     // Show auto-compaction message in UI
                     use crate::ui_backend::{Message, MessageRole};
 
+                    if let Err(err) = self.service.archive_old_messages(4).await {
+                        tracing::warn!("Failed to archive compacted messages: {}", err);
+                    }
+
                     let saved_tokens = old_tokens.saturating_sub(*new_tokens);
                     let saved_pct = if *old_tokens > 0 {
                         (saved_tokens as f64 / *old_tokens as f64 * 100.0) as usize
@@ -2266,6 +2345,9 @@ impl<B: Backend> TuiController<B> {
                             summary_text
                         ),
                         thinking: None,
+                        provider: None,
+                        model: None,
+                        context_transient: false,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -2296,6 +2378,7 @@ impl<B: Backend> TuiController<B> {
                                 state.add_message(msg);
                             }
                             state.scroll_to_bottom();
+                            self.service.refresh_archive_chunks().await;
 
                             // Clear session-specific runtime state
                             let _ = state.clear_message_queue();
@@ -2489,6 +2572,65 @@ impl<B: Backend> TuiController<B> {
                 }
                 state.set_theme_picker_filter(String::new());
             }
+            "/diff" => {
+                let next_mode = state.diff_view_mode().next();
+                state.set_diff_view_mode(next_mode);
+
+                use crate::ui_backend::{DiffViewMode, Message, MessageRole};
+                let hint = match next_mode {
+                    DiffViewMode::Auto => "Auto (responsive by width)",
+                    DiffViewMode::Inline => "Inline",
+                    DiffViewMode::Split => "Split",
+                };
+                let msg = Message {
+                    role: MessageRole::System,
+                    content: format!("Diff view: {}", hint),
+                    thinking: None,
+                    provider: None,
+                    model: None,
+                    context_transient: true,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
+                    tool_args: None,
+                    collapsed: false,
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                };
+                state.add_message(msg);
+                state.clear_input();
+                return Ok(());
+            }
+            cmd if cmd.starts_with("/diff ") => {
+                use crate::ui_backend::{DiffViewMode, Message, MessageRole};
+                let mode = cmd.trim_start_matches("/diff ").trim();
+                let selected = match mode {
+                    "auto" => Some(DiffViewMode::Auto),
+                    "inline" => Some(DiffViewMode::Inline),
+                    "split" => Some(DiffViewMode::Split),
+                    _ => None,
+                };
+
+                let msg = Message {
+                    role: MessageRole::System,
+                    content: if let Some(selected) = selected {
+                        state.set_diff_view_mode(selected);
+                        format!("Diff view: {}", selected.display_name())
+                    } else {
+                        "Usage: /diff [auto|inline|split]".to_string()
+                    },
+                    thinking: None,
+                    provider: None,
+                    model: None,
+                    context_transient: true,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
+                    tool_args: None,
+                    collapsed: false,
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                };
+                state.add_message(msg);
+                state.clear_input();
+                return Ok(());
+            }
             "/file" | "/files" => {
                 // Refresh file picker with workspace files
                 self.service.refresh_file_picker("");
@@ -2515,6 +2657,9 @@ impl<B: Backend> TuiController<B> {
                                     info.type_icon, info.filename, info.size_display
                                 ),
                                 thinking: None,
+                                provider: None,
+                                model: None,
+                                context_transient: true,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
                                 tool_args: None,
@@ -2529,6 +2674,9 @@ impl<B: Backend> TuiController<B> {
                                 role: MessageRole::System,
                                 content: format!("Failed to attach file: {}", e),
                                 thinking: None,
+                                provider: None,
+                                model: None,
+                                context_transient: true,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
                                 tool_args: None,
@@ -2556,6 +2704,9 @@ impl<B: Backend> TuiController<B> {
                     role: MessageRole::System,
                     content: "Cleared all attachments.".to_string(),
                     thinking: None,
+                    provider: None,
+                    model: None,
+                    context_transient: true,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
                     tool_args: None,
@@ -2589,6 +2740,9 @@ impl<B: Backend> TuiController<B> {
                     role: MessageRole::System,
                     content: "Chat and context cleared.".to_string(),
                     thinking: None,
+                    provider: None,
+                    model: None,
+                    context_transient: true,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
                     tool_args: None,
@@ -2615,6 +2769,9 @@ impl<B: Backend> TuiController<B> {
                         "✗ Model thinking disabled.".to_string()
                     },
                     thinking: None,
+                    provider: None,
+                    model: None,
+                    context_transient: true,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
                     tool_args: None,
@@ -2628,8 +2785,17 @@ impl<B: Backend> TuiController<B> {
             "/thinking" => {
                 // Toggle thinking tool + display
                 let enabled = !state.thinking_tool_enabled();
-                state.set_thinking_tool_enabled(enabled);
+                if state.llm_processing() {
+                    state.set_pending_thinking_tool_enabled(Some(enabled));
+                    state.set_status_message(Some(
+                        "Thinking tool change queued (will apply after current response)"
+                            .to_string(),
+                    ));
+                    state.clear_input();
+                    return Ok(());
+                }
 
+                state.set_thinking_tool_enabled(enabled);
                 // Notify service to refresh agent system prompt
                 self.service.set_thinking_tool_enabled(enabled).await;
 
@@ -2642,6 +2808,9 @@ impl<B: Backend> TuiController<B> {
                         "✗ Thinking tool disabled.".to_string()
                     },
                     thinking: None,
+                    provider: None,
+                    model: None,
+                    context_transient: true,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
                     tool_args: None,
@@ -2673,6 +2842,9 @@ impl<B: Backend> TuiController<B> {
                                     .unwrap_or_default()
                             ),
                             thinking: None,
+                            provider: None,
+                            model: None,
+                            context_transient: false,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
                             tool_args: None,
@@ -2688,6 +2860,9 @@ impl<B: Backend> TuiController<B> {
                             role: MessageRole::System,
                             content: format!("⚠️ Compaction failed: {}", e),
                             thinking: None,
+                            provider: None,
+                            model: None,
+                            context_transient: true,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
                             tool_args: None,
@@ -2719,11 +2894,14 @@ impl<B: Backend> TuiController<B> {
                             See: tark help mcp"
                             .to_string(),
                         thinking: None,
+                        context_transient: false,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        provider: None,
+                        model: None,
                     };
                     state.add_message(msg);
                 } else {
@@ -2802,11 +2980,14 @@ impl<B: Backend> TuiController<B> {
                             role: MessageRole::System,
                             content: format!("⚠️ Failed to load policy patterns: {}", e),
                             thinking: None,
+                            context_transient: true,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
                             tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            provider: None,
+                            model: None,
                         };
                         state.add_message(msg);
                     }
@@ -2844,11 +3025,14 @@ impl<B: Backend> TuiController<B> {
                             role: MessageRole::System,
                             content: format!("Failed to list sessions: {}", e),
                             thinking: None,
+                            context_transient: true,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
                             tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            provider: None,
+                            model: None,
                         };
                         state.add_message(msg);
                     }
@@ -2879,11 +3063,14 @@ impl<B: Backend> TuiController<B> {
                                 role: MessageRole::System,
                                 content: format!("Switched to session: {}", session_id),
                                 thinking: None,
+                                context_transient: true,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
                                 tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                provider: None,
+                                model: None,
                             };
                             state.add_message(msg);
                         }
@@ -2893,11 +3080,14 @@ impl<B: Backend> TuiController<B> {
                                 role: MessageRole::System,
                                 content: format!("Failed to switch session: {}", e),
                                 thinking: None,
+                                context_transient: true,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
                                 tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                provider: None,
+                                model: None,
                             };
                             state.add_message(msg);
                         }
@@ -2924,11 +3114,14 @@ impl<B: Backend> TuiController<B> {
                             role: MessageRole::System,
                             content: format!("Session exported to: {}", path),
                             thinking: None,
+                            context_transient: true,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
                             tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            provider: None,
+                            model: None,
                         };
                         state.add_message(msg);
                     }
@@ -2938,11 +3131,14 @@ impl<B: Backend> TuiController<B> {
                             role: MessageRole::System,
                             content: format!("Failed to export session: {}", e),
                             thinking: None,
+                            context_transient: true,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
                             tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            provider: None,
+                            model: None,
                         };
                         state.add_message(msg);
                     }
@@ -2971,11 +3167,14 @@ impl<B: Backend> TuiController<B> {
                                     session.session_id, session.created_at
                                 ),
                                 thinking: None,
+                                context_transient: true,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
                                 tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                provider: None,
+                                model: None,
                             };
                             state.add_message(msg);
                         }
@@ -2985,11 +3184,14 @@ impl<B: Backend> TuiController<B> {
                                 role: MessageRole::System,
                                 content: format!("Failed to import session: {}", e),
                                 thinking: None,
+                                context_transient: true,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
                                 tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                provider: None,
+                                model: None,
                             };
                             state.add_message(msg);
                         }
@@ -3008,11 +3210,14 @@ impl<B: Backend> TuiController<B> {
                         text
                     ),
                     thinking: None,
+                    context_transient: true,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
                     tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    provider: None,
+                    model: None,
                 };
                 state.add_message(system_msg);
             }
@@ -3022,5 +3227,221 @@ impl<B: Backend> TuiController<B> {
         state.clear_input();
 
         Ok(())
+    }
+
+    async fn apply_pending_changes(&mut self, state: &SharedState) -> Result<()> {
+        if let Some(provider) = state.take_pending_provider() {
+            tracing::info!(
+                "Applying queued provider switch to {} after streaming completed",
+                provider
+            );
+            if let Err(e) = self
+                .service
+                .handle_command(Command::SelectProvider(provider.clone()))
+                .await
+            {
+                tracing::error!("Failed to apply queued provider switch: {}", e);
+                state.set_status_message(Some(format!("Failed to switch provider: {}", e)));
+            } else {
+                state.set_status_message(Some(format!("Provider switched to {}", provider)));
+            }
+        }
+
+        if let Some(model) = state.take_pending_model() {
+            tracing::info!(
+                "Applying queued model switch to {} after streaming completed",
+                model
+            );
+            if let Err(e) = self
+                .service
+                .handle_command(Command::SelectModel(model.clone()))
+                .await
+            {
+                tracing::error!("Failed to apply queued model switch: {}", e);
+                state.set_status_message(Some(format!("Failed to switch model: {}", e)));
+            } else {
+                state.set_status_message(Some(format!("Model switched to {}", model)));
+            }
+        }
+
+        if let Some(enabled) = state.take_pending_thinking_tool_enabled() {
+            tracing::info!(
+                "Applying queued thinking tool toggle to {} after streaming completed",
+                enabled
+            );
+            self.service.set_thinking_tool_enabled(enabled).await;
+            state.set_status_message(Some(if enabled {
+                "Thinking tool enabled".to_string()
+            } else {
+                "Thinking tool disabled".to_string()
+            }));
+        }
+
+        if let Some(pending_mode) = state.take_pending_mode_switch() {
+            tracing::info!(
+                "Applying queued mode switch to {:?} after streaming completed",
+                pending_mode
+            );
+            if let Err(e) = self
+                .service
+                .handle_command(Command::SetAgentMode(pending_mode))
+                .await
+            {
+                tracing::error!("Failed to apply queued mode switch: {}", e);
+                state.set_status_message(Some(format!("Failed to switch mode: {}", e)));
+            } else {
+                state.set_status_message(Some(format!(
+                    "Switched to {} mode",
+                    pending_mode.display_name()
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn parse_rate_limit_delay_secs(text: &str) -> Option<u64> {
+    let lower = text.to_ascii_lowercase();
+    let markers = ["retrying in ", "retry in ", "quota resets in "];
+    for marker in markers {
+        if let Some(idx) = lower.find(marker) {
+            let start = idx + marker.len();
+            let digits: String = lower[start..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                return digits.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+fn is_rate_limit_message(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("rate limited") || lower.contains("rate limit")
+}
+
+fn summarize_error_for_flash_bar(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    let code = parse_error_code(error);
+    let label = if lower.contains("bad request") {
+        "Bad request"
+    } else if lower.contains("unauthorized") {
+        "Unauthorized"
+    } else if lower.contains("forbidden") {
+        "Forbidden"
+    } else if lower.contains("not found") {
+        "Not found"
+    } else if lower.contains("rate limit") {
+        "Rate limited"
+    } else if lower.contains("timeout") {
+        "Timeout"
+    } else {
+        "Error"
+    };
+
+    if let Some(code) = code {
+        format!("{} ({})", label, code)
+    } else if label != "Error" {
+        label.to_string()
+    } else {
+        let trimmed = error.trim();
+        if trimmed.len() > 80 {
+            format!("{}...", &trimmed[..80])
+        } else if trimmed.is_empty() {
+            "Error".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+fn parse_error_code(error: &str) -> Option<u16> {
+    for marker in ["\"code\":", "code:"] {
+        if let Some(idx) = error.find(marker) {
+            let mut digits = String::new();
+            for ch in error[idx + marker.len()..].chars() {
+                if ch.is_ascii_digit() {
+                    digits.push(ch);
+                } else if !digits.is_empty() {
+                    break;
+                }
+            }
+            if let Ok(code) = digits.parse::<u16>() {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+fn append_error_log(correlation_id: Option<String>, error: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let log_dir = std::path::Path::new(".tark");
+    std::fs::create_dir_all(log_dir)?;
+    let log_path = log_dir.join("err");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let corr = correlation_id.unwrap_or_else(|| "unknown".to_string());
+    writeln!(
+        file,
+        "[{}] correlation_id={} error={}",
+        timestamp, corr, error
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_rate_limit_message, parse_error_code, parse_rate_limit_delay_secs,
+        summarize_error_for_flash_bar,
+    };
+
+    #[test]
+    fn parse_rate_limit_retrying_in_seconds() {
+        let text = "Rate limited. Retrying in 5 seconds (attempt 2/7)...";
+        assert_eq!(parse_rate_limit_delay_secs(text), Some(5));
+    }
+
+    #[test]
+    fn parse_rate_limit_quota_resets_in() {
+        let text = "Rate limit exceeded. Quota resets in 10s.";
+        assert_eq!(parse_rate_limit_delay_secs(text), Some(10));
+    }
+
+    #[test]
+    fn parse_rate_limit_no_match() {
+        let text = "All good, no rate limit here.";
+        assert_eq!(parse_rate_limit_delay_secs(text), None);
+    }
+
+    #[test]
+    fn detect_rate_limit_message() {
+        assert!(is_rate_limit_message(
+            "Rate limited. Retrying in 5 seconds (attempt 2/7)..."
+        ));
+        assert!(is_rate_limit_message("Rate limit exceeded."));
+        assert!(!is_rate_limit_message("All good, no limits."));
+    }
+
+    #[test]
+    fn summarize_error_includes_code_when_present() {
+        let err = "Bad request: {\"code\": 400, \"message\": \"nope\"}";
+        assert_eq!(summarize_error_for_flash_bar(err), "Bad request (400)");
+    }
+
+    #[test]
+    fn parse_error_code_handles_json_style() {
+        let err = "{\"code\": 429, \"message\": \"Rate limit\"}";
+        assert_eq!(parse_error_code(err), Some(429));
     }
 }

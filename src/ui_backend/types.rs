@@ -188,6 +188,12 @@ pub struct Message {
     pub thinking: Option<String>,
     pub collapsed: bool,
     pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub context_transient: bool,
     /// Tool calls made during this message
     #[serde(default)]
     pub tool_calls: Vec<ToolCallInfo>,
@@ -197,6 +203,15 @@ pub struct Message {
     /// Original tool arguments (for rich rendering of tools like think)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_args: Option<serde_json::Value>,
+}
+
+/// Archived conversation chunk metadata (UI-friendly)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveChunkInfo {
+    pub filename: String,
+    pub created_at: String,
+    pub sequence: usize,
+    pub message_count: usize,
 }
 
 /// Source of an LLM provider
@@ -318,6 +333,33 @@ pub struct StatusInfo {
     pub processing: bool,
     pub tokens_used: usize,
     pub tokens_total: usize,
+}
+
+/// Diff rendering mode for tool previews
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffViewMode {
+    #[default]
+    Auto,
+    Inline,
+    Split,
+}
+
+impl DiffViewMode {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            DiffViewMode::Auto => "Auto",
+            DiffViewMode::Inline => "Inline",
+            DiffViewMode::Split => "Split",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            DiffViewMode::Auto => DiffViewMode::Split,
+            DiffViewMode::Split => DiffViewMode::Inline,
+            DiffViewMode::Inline => DiffViewMode::Auto,
+        }
+    }
 }
 
 /// Modal content

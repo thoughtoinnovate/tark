@@ -189,7 +189,8 @@ pub async fn run_chat(initial_message: Option<String>, working_dir: &str) -> Res
     let provider = Arc::from(provider);
 
     // Create tool registry
-    let tools = ToolRegistry::with_defaults(working_dir, config.tools.shell_enabled);
+    let mut tools = ToolRegistry::with_defaults(working_dir, config.tools.shell_enabled);
+    tools.set_tool_timeout_secs(config.tools.tool_timeout_secs);
 
     // Create agent
     let mut agent =

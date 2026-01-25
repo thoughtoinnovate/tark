@@ -246,16 +246,6 @@ impl Widget for StatusBar<'_> {
             ));
         }
 
-        // 5. Working indicator (with padding for centering)
-        if self.is_processing {
-            spans.push(Span::raw("    "));
-            spans.push(Span::styled("● ", Style::default().fg(self.theme.green)));
-            spans.push(Span::styled(
-                "Working...",
-                Style::default().fg(self.theme.text_secondary),
-            ));
-        }
-
         // Calculate right section width for alignment
         let model_provider_text = format!(
             "● {} {}  ?",

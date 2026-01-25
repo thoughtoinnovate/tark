@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use super::config::AppConfig;
 use super::theme::{Theme, ThemePreset};
+use crate::tui_new::widgets::FlashBarState;
 
 // Re-export types from ui_backend
 pub use crate::ui_backend::{AgentMode, BuildMode};
@@ -55,6 +56,10 @@ pub struct AppState {
     pub theme_preset: ThemePreset,
     /// Application configuration
     pub config: AppConfig,
+    /// Thin status message shown above the prompt
+    pub status_message: Option<String>,
+    /// Status message tone (info vs warning)
+    pub status_message_kind: FlashBarState,
     /// Current input text
     pub input_text: String,
     /// Input cursor position
@@ -117,6 +122,8 @@ impl Default for AppState {
             theme: Theme::default(),
             theme_preset: ThemePreset::default(),
             config: AppConfig::default(),
+            status_message: None,
+            status_message_kind: FlashBarState::Idle,
             input_text: String::new(),
             input_cursor: 0,
             active_modal: None,
@@ -663,9 +670,9 @@ impl<B: Backend> TuiApp<B> {
     /// Render the UI to the terminal
     pub fn render(&mut self) -> std::io::Result<()> {
         use super::widgets::{
-            FilePickerModal, GitChange, GitStatus, Header, HelpModal, InputWidget, MessageArea,
-            ModelPickerModal, ProviderPickerModal, SessionInfo, Sidebar, StatusBar, Task,
-            TaskStatus, TerminalFrame, ThemePickerModal,
+            FilePickerModal, FlashBar, GitChange, GitStatus, Header, HelpModal, InputWidget,
+            MessageArea, ModelPickerModal, ProviderPickerModal, SessionInfo, Sidebar, StatusBar,
+            Task, TaskStatus, TerminalFrame, ThemePickerModal,
         };
         use crate::core::context_tracker::ContextBreakdown;
         use ratatui::layout::{Constraint, Direction, Layout};
@@ -708,12 +715,13 @@ impl<B: Backend> TuiApp<B> {
                 (inner, None)
             };
 
-            // Vertical layout: Header | Messages | Input | Status
+            // Vertical layout: Header | Messages | Status Strip | Input | Status
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(2), // Header
                     Constraint::Min(5),    // Message area
+                    Constraint::Length(1), // Status message strip
                     Constraint::Length(5), // Input area (increased for multi-line)
                     Constraint::Length(1), // Status bar
                 ])
@@ -732,10 +740,17 @@ impl<B: Backend> TuiApp<B> {
                 ));
             frame.render_widget(message_area, chunks[1]);
 
+            // Render status message strip
+            let mut status_strip = FlashBar::new(theme).kind(state.status_message_kind);
+            if let Some(message) = state.status_message.as_deref() {
+                status_strip = status_strip.message(message);
+            }
+            frame.render_widget(status_strip, chunks[2]);
+
             // Render input area
             let input = InputWidget::new(&state.input_text, state.input_cursor, theme)
                 .focused(matches!(state.focused_component, FocusedComponent::Input));
-            frame.render_widget(input, chunks[2]);
+            frame.render_widget(input, chunks[3]);
 
             // Render status bar
             let status = StatusBar::new(theme)
@@ -748,7 +763,7 @@ impl<B: Backend> TuiApp<B> {
                     7
                 }) // Show 7 for demo
                 .processing(state.agent_processing);
-            frame.render_widget(status, chunks[3]);
+            frame.render_widget(status, chunks[4]);
 
             // Render sidebar if visible
             if let Some(sidebar_rect) = sidebar_area {

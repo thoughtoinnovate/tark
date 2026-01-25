@@ -140,8 +140,11 @@ impl CatalogService {
             });
         }
 
-        // Add plugin providers
-        for (plugin_id, display_name) in crate::llm::list_plugin_providers() {
+        // Add plugin providers (load in blocking task to avoid blocking in async context)
+        let plugin_providers = tokio::task::spawn_blocking(crate::llm::list_plugin_providers)
+            .await
+            .unwrap_or_default();
+        for (plugin_id, display_name) in plugin_providers {
             // Skip if already in list (avoid duplicates)
             if providers.iter().any(|p| p.id == plugin_id) {
                 continue;

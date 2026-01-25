@@ -15,7 +15,7 @@ use crate::storage::SessionMeta;
 
 use super::conversation::ConversationService;
 use super::errors::StorageError;
-use super::types::{Message, MessageRole, SessionInfo};
+use super::types::{ArchiveChunkInfo, Message, MessageRole, SessionInfo};
 
 /// Session Service
 ///
@@ -119,6 +119,38 @@ impl SessionService {
         mgr.list_all().map_err(|e| StorageError::Other(e.into()))
     }
 
+    /// Archive older messages for the current session.
+    pub async fn archive_old_messages(
+        &self,
+        keep_recent: usize,
+    ) -> Result<Option<ArchiveChunkInfo>, StorageError> {
+        let mut mgr = self.session_mgr.write().await;
+        let archived = mgr
+            .archive_old_messages(keep_recent)
+            .map_err(|e| StorageError::Other(e.into()))?;
+        mgr.auto_save_if_needed()
+            .map_err(|e| StorageError::Other(e.into()))?;
+        Ok(archived.map(ArchiveChunkInfo::from))
+    }
+
+    /// List archived conversation chunks for the current session.
+    pub async fn list_archive_chunks(&self) -> Result<Vec<ArchiveChunkInfo>, StorageError> {
+        let mgr = self.session_mgr.read().await;
+        let chunks = mgr
+            .list_archive_chunks()
+            .map_err(|e| StorageError::Other(e.into()))?;
+        Ok(chunks.into_iter().map(ArchiveChunkInfo::from).collect())
+    }
+
+    /// Load a specific archive chunk by filename.
+    pub async fn load_archive_chunk(&self, filename: &str) -> Result<Vec<Message>, StorageError> {
+        let mgr = self.session_mgr.read().await;
+        let messages = mgr
+            .load_archive_chunk(filename)
+            .map_err(|e| StorageError::Other(e.into()))?;
+        Ok(Self::messages_to_ui(&messages))
+    }
+
     /// Delete a session
     ///
     /// Cannot delete the current session.
@@ -171,6 +203,9 @@ impl SessionService {
             role: role.to_string(),
             content: message.content.clone(),
             timestamp: chrono::Utc::now(),
+            provider: message.provider.clone(),
+            model: message.model.clone(),
+            context_transient: message.context_transient,
             tool_call_id: None,
             tool_calls: Vec::new(),
             thinking_content: message.thinking.clone(),
@@ -292,8 +327,11 @@ impl SessionService {
     /// This also sanitizes tool messages: any "⋯" (running) status is converted to "?" (interrupted)
     /// since tools cannot actually be running after a session restart.
     pub fn session_messages_to_ui(session: &crate::storage::ChatSession) -> Vec<Message> {
-        session
-            .messages
+        Self::messages_to_ui(&session.messages)
+    }
+
+    fn messages_to_ui(messages: &[crate::storage::SessionMessage]) -> Vec<Message> {
+        messages
             .iter()
             .flat_map(|msg| {
                 let mut messages = Vec::new();
@@ -324,6 +362,9 @@ impl SessionService {
                         thinking: msg.thinking_content.clone(),
                         collapsed: false,
                         timestamp: timestamp.clone(),
+                        provider: msg.provider.clone(),
+                        model: msg.model.clone(),
+                        context_transient: msg.context_transient,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -337,6 +378,9 @@ impl SessionService {
                                 thinking: None,
                                 collapsed: false,
                                 timestamp: timestamp.clone(),
+                                provider: msg.provider.clone(),
+                                model: msg.model.clone(),
+                                context_transient: msg.context_transient,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
                                 tool_args: None,
@@ -366,6 +410,9 @@ impl SessionService {
                                         thinking: None,
                                         collapsed: true,
                                         timestamp: timestamp.clone(),
+                                        provider: msg.provider.clone(),
+                                        model: msg.model.clone(),
+                                        context_transient: msg.context_transient,
                                         tool_calls: Vec::new(),
                                         segments: Vec::new(),
                                         tool_args: None,
@@ -384,6 +431,9 @@ impl SessionService {
                             thinking: None,
                             collapsed: true,
                             timestamp: timestamp.clone(),
+                            provider: msg.provider.clone(),
+                            model: msg.model.clone(),
+                            context_transient: msg.context_transient,
                             tool_calls: Vec::new(),
                             segments: Vec::new(),
                             tool_args: None,
@@ -394,5 +444,16 @@ impl SessionService {
                 messages
             })
             .collect()
+    }
+}
+
+impl From<crate::storage::ArchiveChunkMeta> for ArchiveChunkInfo {
+    fn from(meta: crate::storage::ArchiveChunkMeta) -> Self {
+        Self {
+            filename: meta.filename,
+            created_at: meta.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            sequence: meta.sequence,
+            message_count: meta.message_count,
+        }
     }
 }

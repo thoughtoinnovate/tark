@@ -206,6 +206,7 @@ Press `<leader>tc` (or your configured keymap) to toggle the chat window.
 | `/model` | Open provider/model picker |
 | `/provider` | Open provider picker |
 | `/theme` | Open theme picker with live preview |
+| `/diff [auto\|inline\|split]` | Set diff preview mode |
 | `/ask` | Switch to Ask mode (read-only) |
 | `/plan` | Switch to Plan mode (propose changes) |
 | `/build` | Switch to Build mode (full access) |
@@ -281,6 +282,8 @@ Press `<leader>tc` (or your configured keymap) to toggle the chat window.
 | **Plan** | Read-only + propose | Propose changes as diffs without applying |
 | **Build** | Full access | Execute changes, run commands |
 
+Diff previews render inline on narrow terminals and side-by-side when there is enough width.
+
 ### Trust Levels (Build Mode)
 
 Control how risky operations are approved. Use `/trust` command or `Ctrl+Shift+B` in Build mode:
@@ -306,6 +309,10 @@ When you send multiple messages while the agent is working, they're queued and p
 - `e` - Edit a queued task before it runs
 - `D` - Delete a queued task
 - `J/K` - Reorder tasks in the queue
+
+### Context & Archives
+
+When context is compacted, Tark keeps the latest summary in the active conversation and archives older messages. Archived chunks can be loaded from the top of the message list; they are UI-only and not sent to the LLM.
 
 ## CLI Usage
 
@@ -357,7 +364,10 @@ port = 8765
 
 [tools]
 shell_enabled = true
+tool_timeout_secs = 60
 ```
+
+Tool calls can override the default timeout by including `timeout_secs` in their arguments.
 
 ### Project Config (`.tark/`)
 

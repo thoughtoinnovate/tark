@@ -378,7 +378,8 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         )
     })?;
 
-    let tools = ToolRegistry::with_defaults(working_dir.clone(), config.tools.shell_enabled);
+    let mut tools = ToolRegistry::with_defaults(working_dir.clone(), config.tools.shell_enabled);
+    tools.set_tool_timeout_secs(config.tools.tool_timeout_secs);
     let mut chat_agent =
         ChatAgent::new(provider, tools).with_max_iterations(config.agent.max_iterations);
 
@@ -599,8 +600,9 @@ async fn set_provider(
     };
 
     // Create new chat agent with new provider
-    let tools =
+    let mut tools =
         ToolRegistry::with_defaults(state.working_dir.clone(), state.config.tools.shell_enabled);
+    tools.set_tool_timeout_secs(state.config.tools.tool_timeout_secs);
     let new_agent =
         ChatAgent::new(provider, tools).with_max_iterations(state.config.agent.max_iterations);
 
@@ -880,8 +882,9 @@ async fn handle_chat(
             }
         };
 
-        let tools =
+        let mut tools =
             ToolRegistry::for_mode(working_dir.clone(), mode, state.config.tools.shell_enabled);
+        tools.set_tool_timeout_secs(state.config.tools.tool_timeout_secs);
         tracing::info!("Creating new agent for new cwd: {:?}", working_dir);
 
         let new_agent = ChatAgent::with_mode(provider, tools, mode)
@@ -917,6 +920,7 @@ async fn handle_chat(
         if mode_changed {
             let mut tools =
                 ToolRegistry::for_mode(working_dir.clone(), mode, state.config.tools.shell_enabled);
+            tools.set_tool_timeout_secs(state.config.tools.tool_timeout_secs);
             // CRITICAL: Preserve trust level to prevent security bypass
             tools.set_trust_level(agent.trust_level());
             agent.update_mode(tools, mode);

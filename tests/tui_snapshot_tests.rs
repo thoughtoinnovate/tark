@@ -14,6 +14,7 @@ use insta::assert_snapshot;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use regex::Regex;
+use tark_cli::tui_new::widgets::{Message, MessageRole};
 use tark_cli::tui_new::TuiApp;
 
 /// Create a test app with specified size
@@ -67,6 +68,12 @@ fn capture_buffer(app: &mut TuiApp<TestBackend>) -> String {
 
     // Normalize environment-specific values before returning
     normalize_output(result)
+}
+
+fn make_diff_tool_message() -> Message {
+    let diff = "Preview\n```diff\n--- a/foo.txt\n+++ b/foo.txt\n@@\n- old line\n+ new line\n```\n";
+    let content = format!("✓|write_file|write|{}", diff);
+    Message::new(MessageRole::Tool, content)
 }
 
 // ============================================================================
@@ -188,6 +195,20 @@ fn snapshot_with_welcome_message() {
     assert_snapshot!("with_welcome_message", capture_buffer(&mut app));
 }
 
+#[test]
+fn snapshot_tool_diff_inline() {
+    let mut app = create_test_app(80, 24);
+    app.state_mut().messages = vec![make_diff_tool_message()];
+    assert_snapshot!("tool_diff_inline", capture_buffer(&mut app));
+}
+
+#[test]
+fn snapshot_tool_diff_split() {
+    let mut app = create_test_app(120, 24);
+    app.state_mut().messages = vec![make_diff_tool_message()];
+    assert_snapshot!("tool_diff_split", capture_buffer(&mut app));
+}
+
 // ============================================================================
 // COMBINED STATE SNAPSHOTS
 // ============================================================================
@@ -207,5 +228,7 @@ fn snapshot_ask_mode_with_question() {
     app.state_mut()
         .set_agent_mode(tark_cli::core::types::AgentMode::Ask);
     app.state_mut().insert_str("What is rust?");
+    app.state_mut().status_message = Some("Rate limited retrying in 1s".to_string());
+    app.state_mut().status_message_kind = tark_cli::tui_new::widgets::FlashBarState::Warning;
     assert_snapshot!("ask_mode_with_question", capture_buffer(&mut app));
 }

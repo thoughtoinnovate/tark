@@ -16,6 +16,7 @@ use crate::tui_new::theme::Theme;
 /// Available slash commands
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashCommand {
+    Diff,
     Help,
     Model,
     Provider,
@@ -38,6 +39,7 @@ impl SlashCommand {
     /// Get all available commands
     pub fn all() -> Vec<Self> {
         vec![
+            Self::Diff,
             Self::Help,
             Self::Model,
             Self::Provider,
@@ -60,6 +62,7 @@ impl SlashCommand {
     /// Get command name (without slash)
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Diff => "diff",
             Self::Help => "help",
             Self::Model => "model",
             Self::Provider => "provider",
@@ -82,6 +85,7 @@ impl SlashCommand {
     /// Get command description
     pub fn description(&self) -> &'static str {
         match self {
+            Self::Diff => "Toggle diff view (auto/inline/split)",
             Self::Help => "Show help and keyboard shortcuts",
             Self::Model => "Open model picker",
             Self::Provider => "Open provider picker",
@@ -104,6 +108,7 @@ impl SlashCommand {
     /// Get command icon
     pub fn icon(&self) -> &'static str {
         match self {
+            Self::Diff => "🔀",
             Self::Help => "❓",
             Self::Model => "🤖",
             Self::Provider => "🔌",

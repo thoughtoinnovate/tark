@@ -49,6 +49,7 @@ use super::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::env;
 
 /// OpenAI-compatible endpoint for Gemini
@@ -378,6 +379,25 @@ impl CloudCodeAssistProvider {
         }
     }
 
+    fn ensure_thought_signature(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        existing: &Option<String>,
+    ) -> Option<String> {
+        if existing.is_some() {
+            return existing.clone();
+        }
+
+        let input_json = serde_json::to_string(input).unwrap_or_default();
+        let mut hasher = Sha256::new();
+        hasher.update(name.as_bytes());
+        hasher.update(b"|");
+        hasher.update(input_json.as_bytes());
+        let digest = hasher.finalize();
+        Some(format!("sig_{}", hex::encode(digest)))
+    }
+
     /// Convert messages to native Gemini format
     ///
     /// IMPORTANT: This version correctly handles:
@@ -458,7 +478,11 @@ impl CloudCodeAssistProvider {
                                         parts.push(GeminiPartRaw {
                                             text: None,
                                             thought: None,
-                                            thought_signature: thought_signature.clone(),
+                                            thought_signature: self.ensure_thought_signature(
+                                                name,
+                                                input,
+                                                thought_signature,
+                                            ),
                                             function_call: Some(GeminiFunctionCallInner {
                                                 name: name.clone(),
                                                 args: input.clone(),
@@ -1302,6 +1326,37 @@ mod tests {
         assert!(part.function_call.is_some());
         let fc = part.function_call.as_ref().unwrap();
         assert_eq!(fc.name, "test_function");
+    }
+
+    #[test]
+    fn test_cloud_code_assist_tool_use_includes_thought_signature() {
+        let provider = CloudCodeAssistProvider::new("token".to_string(), "project".to_string());
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![ContentPart::ToolUse {
+                id: "call_1".to_string(),
+                name: "list_directory".to_string(),
+                input: serde_json::json!({ "path": "." }),
+                thought_signature: None,
+            }]),
+            tool_call_id: None,
+        }];
+
+        let (_system, contents) = provider.convert_messages(&messages);
+        let parts = contents
+            .iter()
+            .find(|c| c.role == "model")
+            .and_then(|c| c.parts.first())
+            .expect("expected model part");
+
+        assert!(
+            parts
+                .thought_signature
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("sig_"),
+            "expected synthesized thought_signature for tool use"
+        );
     }
 
     #[test]

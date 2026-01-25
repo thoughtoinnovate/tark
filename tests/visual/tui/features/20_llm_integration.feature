@@ -17,7 +17,6 @@ Feature: LLM Integration
     When I press "Enter"
     Then the user message should appear in the message area
     And the LLM should start processing
-    And the status bar should show "● Working..."
     And a response should appear after a few seconds
     And the response should be from role "Agent"
 
@@ -62,7 +61,6 @@ Feature: LLM Integration
     When I press "Ctrl+C"
     Then the LLM processing should stop
     And a system message "Interrupted by user" should appear
-    And the status bar should stop showing "Working..."
     And I can send another message immediately
 
   @llm-provider-selection

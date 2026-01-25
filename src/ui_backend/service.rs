@@ -20,7 +20,9 @@ use super::events::AppEvent;
 use super::git_service::GitService;
 use super::session_service::SessionService;
 use super::state::{FocusedComponent, ModalType, SharedState, VimMode};
-use super::types::{AttachmentInfo, GitChangeInfo, Message, MessageRole, ModelInfo, ProviderInfo};
+use super::types::{
+    ArchiveChunkInfo, AttachmentInfo, GitChangeInfo, Message, MessageRole, ModelInfo, ProviderInfo,
+};
 use crate::tui_new::widgets::command_autocomplete::SlashCommand;
 
 fn char_to_byte(s: &str, char_idx: usize) -> usize {
@@ -60,6 +62,8 @@ pub struct AppService {
     storage: super::StorageFacade,
     tools: super::ToolExecutionService,
     git: GitService,
+    /// Default tool timeout in seconds (from config)
+    tool_timeout_secs: u64,
 }
 
 impl std::fmt::Debug for AppService {
@@ -147,6 +151,7 @@ impl AppService {
                 Some(state.todo_tracker()),
                 Some(state.thinking_tracker()),
             );
+            tools.set_tool_timeout_secs(global_config.tools.tool_timeout_secs);
 
             // Set initial trust level from state (defense in depth)
             let initial_trust = state.trust_level();
@@ -230,6 +235,9 @@ impl AppService {
                         error_msg
                     ),
                     thinking: None,
+                    provider: None,
+                    model: None,
+                    context_transient: true,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
                     tool_args: None,
@@ -262,6 +270,7 @@ impl AppService {
             storage: storage_facade,
             tools,
             git,
+            tool_timeout_secs: global_config.tools.tool_timeout_secs,
         })
     }
 
@@ -292,6 +301,14 @@ impl AppService {
             Command::CycleAgentMode => {
                 let current = self.state.agent_mode();
                 let next = current.next();
+                if self.state.llm_processing() {
+                    self.state.set_pending_mode_switch(Some(next));
+                    self.state.set_status_message(Some(format!(
+                        "Mode switch to {} queued (will apply after current response)",
+                        next.display_name()
+                    )));
+                    return Ok(());
+                }
                 self.state.set_agent_mode(next);
                 self.tools.set_mode(next);
                 if let Some(ref conv_svc) = self.conversation_svc {
@@ -300,6 +317,7 @@ impl AppService {
                             self.working_dir.clone(),
                             next,
                             self.state.trust_level(),
+                            self.tool_timeout_secs,
                             Some(self.state.todo_tracker()),
                             Some(self.state.thinking_tracker()),
                         )
@@ -322,6 +340,14 @@ impl AppService {
                 self.save_preferences();
             }
             Command::SetAgentMode(mode) => {
+                if self.state.llm_processing() {
+                    self.state.set_pending_mode_switch(Some(mode));
+                    self.state.set_status_message(Some(format!(
+                        "Mode switch to {} queued (will apply after current response)",
+                        mode.display_name()
+                    )));
+                    return Ok(());
+                }
                 self.state.set_agent_mode(mode);
                 self.tools.set_mode(mode);
                 if let Some(ref conv_svc) = self.conversation_svc {
@@ -330,6 +356,7 @@ impl AppService {
                             self.working_dir.clone(),
                             mode,
                             self.state.trust_level(),
+                            self.tool_timeout_secs,
                             Some(self.state.todo_tracker()),
                             Some(self.state.thinking_tracker()),
                         )
@@ -560,6 +587,11 @@ impl AppService {
                 self.state.ensure_focused_message_visible();
             }
             Command::ToggleMessageCollapse => {
+                if self.state.is_focused_archive_marker() {
+                    self.load_next_archive_chunk().await?;
+                    return Ok(());
+                }
+
                 let idx = self.state.focused_message();
                 let messages = self.state.messages();
 
@@ -988,6 +1020,9 @@ impl AppService {
                         role: MessageRole::System,
                         content: format!("⏳ Message queued ({} in queue)", queue_count),
                         thinking: None,
+                        provider: None,
+                        model: None,
+                        context_transient: true,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -1006,6 +1041,9 @@ impl AppService {
                     role: MessageRole::User,
                     content: text.clone(),
                     thinking: None,
+                    provider: None,
+                    model: None,
+                    context_transient: false,
                     tool_calls: Vec::new(),
                     segments: Vec::new(),
                     tool_args: None,
@@ -1118,6 +1156,9 @@ impl AppService {
                                 role: MessageRole::System,
                                 content: format!("❌ Failed to send message: {}", e),
                                 thinking: None,
+                                provider: None,
+                                model: None,
+                                context_transient: true,
                                 tool_calls: Vec::new(),
                                 segments: Vec::new(),
                                 tool_args: None,
@@ -1184,6 +1225,9 @@ impl AppService {
                         content: "⚠️  LLM not connected. Please configure your API key."
                             .to_string(),
                         thinking: None,
+                        provider: None,
+                        model: None,
+                        context_transient: true,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -1224,6 +1268,9 @@ impl AppService {
                         role: MessageRole::System,
                         content: format!("Failed to attach file: {}", e),
                         thinking: None,
+                        provider: None,
+                        model: None,
+                        context_transient: true,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -1259,6 +1306,9 @@ impl AppService {
                         role: MessageRole::System,
                         content: format!("Diff for {}:\n\n{}", file_path, diff),
                         thinking: None,
+                        provider: None,
+                        model: None,
+                        context_transient: true,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -1366,8 +1416,11 @@ impl AppService {
                         role: crate::ui_backend::MessageRole::System,
                         content: "⚠️ Operation interrupted (Ctrl+C)".to_string(),
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        provider: None,
+                        model: None,
                         collapsed: false,
                         thinking: None,
+                        context_transient: true,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -1500,8 +1553,11 @@ impl AppService {
                         role: crate::ui_backend::MessageRole::System,
                         content: cancel_msg,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        provider: None,
+                        model: None,
                         collapsed: false,
                         thinking: None,
+                        context_transient: true,
                         tool_calls: Vec::new(),
                         segments: Vec::new(),
                         tool_args: None,
@@ -1538,7 +1594,8 @@ impl AppService {
                                 state.clear_messages();
                                 state.clear_input();
                                 state.clear_context_files(); // Context files are session-specific
-                                                             // Reset cost/token tracking for new session
+                                state.set_archive_chunks(Vec::new());
+                                // Reset cost/token tracking for new session
                                 state.set_session_cost_total(0.0);
                                 state.set_session_tokens_total(0);
                                 state.set_session_cost_by_model(Vec::new());
@@ -1799,6 +1856,13 @@ impl AppService {
     /// Set thinking tool enablement
     /// This refreshes the agent's system prompt to add/remove think tool instructions
     pub async fn set_thinking_tool_enabled(&self, enabled: bool) {
+        if self.state.llm_processing() {
+            self.state.set_pending_thinking_tool_enabled(Some(enabled));
+            self.state.set_status_message(Some(
+                "Thinking tool change queued (will apply after current response)".to_string(),
+            ));
+            return;
+        }
         self.state.set_thinking_tool_enabled(enabled);
 
         // Update agent and refresh system prompt
@@ -1809,6 +1873,14 @@ impl AppService {
 
     /// Set the active provider
     pub async fn set_provider(&mut self, provider: &str) -> Result<()> {
+        if self.state.llm_processing() {
+            self.state.set_pending_provider(Some(provider.to_string()));
+            self.state.set_status_message(Some(format!(
+                "Provider switch to {} queued (will apply after current response)",
+                provider
+            )));
+            return Ok(());
+        }
         let previous_provider = self.state.current_provider();
         let current_model = self.state.current_model();
         self.state.set_provider(Some(provider.to_string()));
@@ -1914,6 +1986,14 @@ impl AppService {
 
     /// Set the active model
     pub async fn set_model(&mut self, model: &str) -> Result<()> {
+        if self.state.llm_processing() {
+            self.state.set_pending_model(Some(model.to_string()));
+            self.state.set_status_message(Some(format!(
+                "Model switch to {} queued (will apply after current response)",
+                model
+            )));
+            return Ok(());
+        }
         let previous_model = self.state.current_model();
         let current_provider = self.state.current_provider();
         self.state.set_model(Some(model.to_string()));
@@ -2305,6 +2385,9 @@ impl AppService {
                 if let Ok(session) = self.storage.load_session(&session_info.session_id) {
                     let messages = SessionService::session_messages_to_ui(&session);
                     self.state.set_messages(messages);
+                    if let Ok(chunks) = session_svc.list_archive_chunks().await {
+                        self.state.set_archive_chunks(chunks);
+                    }
 
                     // Restore provider and model from session if set
                     if !session.provider.is_empty() {
@@ -2441,6 +2524,54 @@ impl AppService {
                 }
             }
         }
+        Ok(())
+    }
+
+    pub async fn refresh_archive_chunks(&self) {
+        if let Some(ref session_svc) = self.session_svc {
+            if let Ok(chunks) = session_svc.list_archive_chunks().await {
+                self.state.set_archive_chunks(chunks);
+            }
+        }
+    }
+
+    pub async fn archive_old_messages(
+        &self,
+        keep_recent: usize,
+    ) -> Result<Option<ArchiveChunkInfo>> {
+        let Some(ref session_svc) = self.session_svc else {
+            return Ok(None);
+        };
+
+        let archived = session_svc.archive_old_messages(keep_recent).await?;
+        if let Some(ref info) = archived {
+            self.state.remove_oldest_messages(info.message_count);
+            self.refresh_archive_chunks().await;
+        }
+
+        Ok(archived)
+    }
+
+    pub async fn load_next_archive_chunk(&self) -> Result<()> {
+        let Some(ref session_svc) = self.session_svc else {
+            return Ok(());
+        };
+
+        let Some(chunk) = self.state.pop_next_archive_chunk() else {
+            return Ok(());
+        };
+
+        let mut messages = session_svc.load_archive_chunk(&chunk.filename).await?;
+        for msg in &mut messages {
+            msg.context_transient = true;
+        }
+
+        let insert_at = self
+            .state
+            .archive_marker_index()
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        self.state.insert_messages_at(insert_at, messages);
         Ok(())
     }
 }

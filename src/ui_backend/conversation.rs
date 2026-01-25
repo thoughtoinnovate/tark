@@ -430,6 +430,7 @@ impl ConversationService {
         working_dir: std::path::PathBuf,
         mode: AgentMode,
         trust_level: crate::tools::TrustLevel,
+        tool_timeout_secs: u64,
         todo_tracker: Option<Arc<std::sync::Mutex<crate::tools::TodoTracker>>>,
         thinking_tracker: Option<Arc<std::sync::Mutex<crate::tools::ThinkingTracker>>>,
     ) {
@@ -442,6 +443,7 @@ impl ConversationService {
             todo_tracker,
             thinking_tracker,
         );
+        tools.set_tool_timeout_secs(tool_timeout_secs);
         // CRITICAL: Preserve trust level across mode changes to prevent security bypass
         tools.set_trust_level(trust_level);
 

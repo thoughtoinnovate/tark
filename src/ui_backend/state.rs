@@ -3,16 +3,22 @@
 //! Thread-safe state that can be safely shared between the backend and frontend.
 
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+use serde_json::json;
 
 use super::approval::ApprovalCardState;
 use super::commands::{AgentMode, BuildMode};
 use super::questionnaire::QuestionnaireState;
 use super::types::{
-    AttachmentInfo, ContextFile, GitChangeInfo, Message, MessageRole, ModelInfo, ProviderInfo,
-    SessionInfo, TaskInfo, ThemePreset,
+    ArchiveChunkInfo, AttachmentInfo, ContextFile, DiffViewMode, GitChangeInfo, Message,
+    MessageRole, ModelInfo, ProviderInfo, SessionInfo, TaskInfo, ThemePreset,
 };
 use crate::core::context_tracker::ContextBreakdown;
 use crate::tools::TrustLevel;
+use crate::tui_new::widgets::FlashBarState;
+
+const MAX_FLASH_BAR_FRAME: u8 = 20;
 
 /// Error notification level
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +121,7 @@ pub struct DeviceFlowSession {
 #[derive(Debug, Clone, Default)]
 pub struct ConversationState {
     pub messages: Vec<Message>,
+    pub archive_chunks: Vec<ArchiveChunkInfo>,
     pub focused_message: usize,
     pub messages_scroll_offset: usize,
     pub messages_total_lines: usize,
@@ -141,7 +148,10 @@ pub struct UiState {
     pub active_modal: Option<ModalType>,
     pub sidebar_visible: bool,
     pub theme: ThemePreset,
+    pub diff_view_mode: DiffViewMode,
     pub status_message: Option<String>,
+    pub flash_bar_state: FlashBarState,
+    pub flash_bar_animation_frame: u8,
 
     // Picker states
     pub theme_picker_selected: usize,
@@ -167,7 +177,10 @@ impl Default for UiState {
             active_modal: None,
             sidebar_visible: true,
             theme: ThemePreset::CatppuccinMocha,
+            diff_view_mode: DiffViewMode::Auto,
             status_message: None,
+            flash_bar_state: FlashBarState::Idle,
+            flash_bar_animation_frame: 0,
             theme_picker_selected: 0,
             theme_picker_filter: String::new(),
             theme_before_preview: None,
@@ -219,6 +232,7 @@ struct StateInner {
 
     // ========== Messages ==========
     pub messages: Vec<Message>,
+    pub archive_chunks: Vec<ArchiveChunkInfo>,
     pub focused_message: usize,
     /// Sub-index for hierarchical navigation within tool groups
     /// None = at message level, Some(n) = focused on tool n within a group
@@ -266,7 +280,12 @@ struct StateInner {
     // ========== UI State ==========
     pub sidebar_visible: bool,
     pub theme: ThemePreset,
+    pub diff_view_mode: DiffViewMode,
     pub status_message: Option<String>,
+    pub flash_bar_state: FlashBarState,
+    pub flash_bar_animation_frame: u8,
+    pub flash_bar_expanding: bool,
+    pub last_activity_at: Instant,
     pub focused_component: FocusedComponent,
     pub active_modal: Option<ModalType>,
     pub vim_mode: VimMode,
@@ -352,6 +371,12 @@ struct StateInner {
     // ========== Pending Mode Switch ==========
     /// Mode switch requested during LLM streaming (applied when streaming completes)
     pub pending_mode_switch: Option<AgentMode>,
+    /// Provider switch requested during LLM streaming (applied when streaming completes)
+    pub pending_provider: Option<String>,
+    /// Model switch requested during LLM streaming (applied when streaming completes)
+    pub pending_model: Option<String>,
+    /// Thinking tool toggle requested during LLM streaming (applied when streaming completes)
+    pub pending_thinking_tool_enabled: Option<bool>,
 
     // ========== Message Queue ==========
     pub message_queue: Vec<String>,
@@ -404,6 +429,7 @@ impl SharedState {
                 llm_processing: false,
                 device_flow_session: None,
                 messages: Vec::new(),
+                archive_chunks: Vec::new(),
                 focused_message: 0,
                 focused_sub_index: None,
                 messages_scroll_offset: 0,
@@ -428,7 +454,12 @@ impl SharedState {
                 pending_operator: None,
                 sidebar_visible: true,
                 theme: ThemePreset::CatppuccinMocha,
+                diff_view_mode: DiffViewMode::Auto,
                 status_message: None,
+                flash_bar_state: FlashBarState::Idle,
+                flash_bar_animation_frame: 0,
+                flash_bar_expanding: true,
+                last_activity_at: Instant::now(),
                 focused_component: FocusedComponent::Input,
                 active_modal: None,
                 vim_mode: VimMode::Insert,
@@ -474,6 +505,9 @@ impl SharedState {
                 rate_limit_retry_at: None,
                 rate_limit_pending_message: None,
                 pending_mode_switch: None,
+                pending_provider: None,
+                pending_model: None,
+                pending_thinking_tool_enabled: None,
                 message_queue: Vec::new(),
                 editing_task_index: None,
                 editing_task_content: String::new(),
@@ -543,6 +577,11 @@ impl SharedState {
         self.read_inner().llm_processing
     }
 
+    pub fn idle_elapsed(&self) -> Duration {
+        let inner = self.read_inner();
+        Instant::now().saturating_duration_since(inner.last_activity_at)
+    }
+
     pub fn current_provider(&self) -> Option<String> {
         self.read_inner().current_provider.clone()
     }
@@ -602,6 +641,7 @@ impl SharedState {
         let inner = self.read_inner();
         ConversationState {
             messages: inner.messages.clone(),
+            archive_chunks: inner.archive_chunks.clone(),
             focused_message: inner.focused_message,
             messages_scroll_offset: inner.messages_scroll_offset,
             messages_total_lines: inner.messages_total_lines,
@@ -632,7 +672,10 @@ impl SharedState {
             active_modal: inner.active_modal,
             sidebar_visible: inner.sidebar_visible,
             theme: inner.theme,
+            diff_view_mode: inner.diff_view_mode,
             status_message: inner.status_message.clone(),
+            flash_bar_state: inner.flash_bar_state,
+            flash_bar_animation_frame: inner.flash_bar_animation_frame,
             theme_picker_selected: inner.theme_picker_selected,
             theme_picker_filter: inner.theme_picker_filter.clone(),
             theme_before_preview: inner.theme_before_preview,
@@ -700,6 +743,10 @@ impl SharedState {
 
     pub fn theme(&self) -> ThemePreset {
         self.read_inner().theme
+    }
+
+    pub fn diff_view_mode(&self) -> DiffViewMode {
+        self.read_inner().diff_view_mode
     }
 
     pub fn context_files(&self) -> Vec<ContextFile> {
@@ -849,6 +896,18 @@ impl SharedState {
         self.read_inner().error_notification.clone()
     }
 
+    pub fn status_message(&self) -> Option<String> {
+        self.read_inner().status_message.clone()
+    }
+
+    pub fn flash_bar_state(&self) -> FlashBarState {
+        self.read_inner().flash_bar_state
+    }
+
+    pub fn flash_bar_animation_frame(&self) -> u8 {
+        self.read_inner().flash_bar_animation_frame
+    }
+
     pub fn attachments(&self) -> Vec<AttachmentInfo> {
         self.read_inner().attachments.clone()
     }
@@ -940,7 +999,25 @@ impl SharedState {
     }
 
     pub fn set_llm_processing(&self, processing: bool) {
-        self.write_inner().llm_processing = processing;
+        let mut inner = self.write_inner();
+        inner.llm_processing = processing;
+
+        if processing {
+            if !matches!(
+                inner.flash_bar_state,
+                FlashBarState::Error | FlashBarState::Warning
+            ) {
+                inner.flash_bar_state = FlashBarState::Working;
+                inner.flash_bar_animation_frame = 0;
+                inner.flash_bar_expanding = true;
+            }
+        } else if inner.flash_bar_state == FlashBarState::Working {
+            inner.flash_bar_state = FlashBarState::Idle;
+            inner.flash_bar_animation_frame = 0;
+            inner.flash_bar_expanding = true;
+        }
+
+        inner.last_activity_at = Instant::now();
     }
 
     pub fn processing_correlation_id(&self) -> Option<String> {
@@ -968,7 +1045,9 @@ impl SharedState {
     }
 
     pub fn set_input_text(&self, text: String) {
-        self.write_inner().input_text = text;
+        let mut inner = self.write_inner();
+        inner.input_text = text;
+        inner.last_activity_at = Instant::now();
     }
 
     pub fn set_input_cursor(&self, cursor: usize) {
@@ -1172,12 +1251,112 @@ impl SharedState {
         self.write_inner().theme = theme;
     }
 
+    pub fn set_diff_view_mode(&self, mode: DiffViewMode) {
+        self.write_inner().diff_view_mode = mode;
+    }
+
     pub fn set_status_message(&self, message: Option<String>) {
         self.write_inner().status_message = message;
     }
 
+    pub fn set_flash_bar_state(&self, state: FlashBarState) {
+        let mut inner = self.write_inner();
+        if inner.flash_bar_state != state {
+            inner.flash_bar_state = state;
+            if state == FlashBarState::Working {
+                inner.flash_bar_animation_frame = 0;
+                inner.flash_bar_expanding = true;
+            }
+        }
+    }
+
+    pub fn set_flash_bar_animation_frame(&self, frame: u8) {
+        let mut inner = self.write_inner();
+        inner.flash_bar_animation_frame = frame.min(MAX_FLASH_BAR_FRAME);
+    }
+
+    pub fn advance_flash_bar_animation(&self) {
+        let mut inner = self.write_inner();
+        let mut frame = inner.flash_bar_animation_frame.min(MAX_FLASH_BAR_FRAME);
+
+        if inner.flash_bar_expanding {
+            if frame >= MAX_FLASH_BAR_FRAME {
+                inner.flash_bar_expanding = false;
+                frame = frame.saturating_sub(1);
+            } else {
+                frame += 1;
+            }
+        } else if frame == 0 {
+            inner.flash_bar_expanding = true;
+            frame = if MAX_FLASH_BAR_FRAME > 0 { 1 } else { 0 };
+        } else {
+            frame = frame.saturating_sub(1);
+        }
+
+        inner.flash_bar_animation_frame = frame;
+    }
+
     pub fn add_message(&self, message: Message) {
         self.write_inner().messages.push(message);
+    }
+
+    pub fn insert_messages_at(&self, index: usize, messages: Vec<Message>) {
+        let mut inner = self.write_inner();
+        let idx = index.min(inner.messages.len());
+        inner.messages.splice(idx..idx, messages);
+    }
+
+    pub fn set_archive_chunks(&self, chunks: Vec<ArchiveChunkInfo>) {
+        let mut inner = self.write_inner();
+        inner.archive_chunks = chunks;
+        update_archive_marker(&mut inner);
+    }
+
+    pub fn archive_chunks(&self) -> Vec<ArchiveChunkInfo> {
+        self.read_inner().archive_chunks.clone()
+    }
+
+    pub fn pop_next_archive_chunk(&self) -> Option<ArchiveChunkInfo> {
+        let mut inner = self.write_inner();
+        let chunk = if inner.archive_chunks.is_empty() {
+            None
+        } else {
+            Some(inner.archive_chunks.remove(0))
+        };
+        update_archive_marker(&mut inner);
+        chunk
+    }
+
+    pub fn is_focused_archive_marker(&self) -> bool {
+        let inner = self.read_inner();
+        inner
+            .messages
+            .get(inner.focused_message)
+            .is_some_and(is_archive_marker_message)
+    }
+
+    pub fn archive_marker_index(&self) -> Option<usize> {
+        let inner = self.read_inner();
+        inner.messages.iter().position(is_archive_marker_message)
+    }
+
+    pub fn remove_oldest_messages(&self, count: usize) {
+        let mut inner = self.write_inner();
+        let mut remaining = count;
+        let mut idx = 0usize;
+        while remaining > 0 && idx < inner.messages.len() {
+            if is_archive_marker_message(&inner.messages[idx]) {
+                idx += 1;
+                continue;
+            }
+            inner.messages.remove(idx);
+            remaining -= 1;
+        }
+        if count > remaining {
+            inner.focused_message = inner
+                .focused_message
+                .saturating_sub(count.saturating_sub(remaining));
+        }
     }
 
     /// Update the last tool message for a given tool name (for in-place animation)
@@ -1841,6 +2020,30 @@ impl SharedState {
         self.write_inner().pending_mode_switch.take()
     }
 
+    pub fn set_pending_provider(&self, provider: Option<String>) {
+        self.write_inner().pending_provider = provider;
+    }
+
+    pub fn take_pending_provider(&self) -> Option<String> {
+        self.write_inner().pending_provider.take()
+    }
+
+    pub fn set_pending_model(&self, model: Option<String>) {
+        self.write_inner().pending_model = model;
+    }
+
+    pub fn take_pending_model(&self) -> Option<String> {
+        self.write_inner().pending_model.take()
+    }
+
+    pub fn set_pending_thinking_tool_enabled(&self, enabled: Option<bool>) {
+        self.write_inner().pending_thinking_tool_enabled = enabled;
+    }
+
+    pub fn take_pending_thinking_tool_enabled(&self) -> Option<bool> {
+        self.write_inner().pending_thinking_tool_enabled.take()
+    }
+
     pub fn set_streaming_content(&self, content: Option<String>) {
         self.write_inner().streaming_content = content;
     }
@@ -1852,6 +2055,7 @@ impl SharedState {
         } else {
             inner.streaming_content = Some(chunk.to_string());
         }
+        inner.last_activity_at = Instant::now();
     }
 
     pub fn set_streaming_thinking(&self, thinking: Option<String>) {
@@ -1865,12 +2069,18 @@ impl SharedState {
         } else {
             inner.streaming_thinking = Some(chunk.to_string());
         }
+        inner.last_activity_at = Instant::now();
     }
 
     pub fn clear_streaming(&self) {
         let mut inner = self.write_inner();
         inner.streaming_content = None;
         inner.streaming_thinking = None;
+    }
+
+    #[cfg(test)]
+    pub fn set_last_activity_at(&self, instant: Instant) {
+        self.write_inner().last_activity_at = instant;
     }
 
     pub fn queue_message(&self, msg: String) {
@@ -2200,6 +2410,64 @@ impl SharedState {
     }
 }
 
+fn is_archive_marker_message(message: &Message) -> bool {
+    message
+        .tool_args
+        .as_ref()
+        .and_then(|args| args.get("kind"))
+        .and_then(|value| value.as_str())
+        == Some("archive_marker")
+}
+
+fn archive_marker_message(info: &ArchiveChunkInfo) -> Message {
+    Message {
+        role: MessageRole::System,
+        content: String::new(),
+        thinking: None,
+        collapsed: false,
+        timestamp: String::new(),
+        provider: None,
+        model: None,
+        context_transient: true,
+        tool_calls: Vec::new(),
+        segments: Vec::new(),
+        tool_args: Some(json!({
+            "kind": "archive_marker",
+            "filename": info.filename,
+            "sequence": info.sequence,
+            "created_at": info.created_at,
+            "message_count": info.message_count,
+        })),
+    }
+}
+
+fn update_archive_marker(inner: &mut StateInner) {
+    if inner.archive_chunks.is_empty() {
+        if inner
+            .messages
+            .first()
+            .is_some_and(is_archive_marker_message)
+        {
+            inner.messages.remove(0);
+            if inner.focused_message > 0 {
+                inner.focused_message = inner.focused_message.saturating_sub(1);
+            }
+        }
+        return;
+    }
+
+    let next = inner.archive_chunks[0].clone();
+    if let Some(first) = inner.messages.first_mut() {
+        if is_archive_marker_message(first) {
+            *first = archive_marker_message(&next);
+            return;
+        }
+    }
+
+    inner.messages.insert(0, archive_marker_message(&next));
+    inner.focused_message = inner.focused_message.saturating_add(1);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2462,40 +2730,52 @@ mod tests {
             role: MessageRole::User,
             content: "Hello".to_string(),
             thinking: None,
+            context_transient: false,
             tool_calls: Vec::new(),
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:00".to_string(),
+            provider: None,
+            model: None,
             tool_args: None,
         });
         state.add_message(Message {
             role: MessageRole::System,
             content: "⏳ Message queued (1 in queue)".to_string(),
             thinking: None,
+            context_transient: true,
             tool_calls: Vec::new(),
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:01".to_string(),
+            provider: None,
+            model: None,
             tool_args: None,
         });
         state.add_message(Message {
             role: MessageRole::System,
             content: "⏳ Message queued (2 in queue)".to_string(),
             thinking: None,
+            context_transient: true,
             tool_calls: Vec::new(),
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:02".to_string(),
+            provider: None,
+            model: None,
             tool_args: None,
         });
         state.add_message(Message {
             role: MessageRole::Assistant,
             content: "Response".to_string(),
             thinking: None,
+            context_transient: false,
             tool_calls: Vec::new(),
             segments: Vec::new(),
             collapsed: false,
             timestamp: "12:00:03".to_string(),
+            provider: None,
+            model: None,
             tool_args: None,
         });
 
@@ -2509,6 +2789,16 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, MessageRole::User);
         assert_eq!(messages[1].role, MessageRole::Assistant);
+    }
+
+    #[test]
+    fn test_idle_elapsed_reflects_activity() {
+        let state = SharedState::new();
+        state.set_last_activity_at(Instant::now() - Duration::from_secs(3));
+        assert!(
+            state.idle_elapsed() >= Duration::from_secs(3),
+            "idle_elapsed should reflect last activity timestamp"
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::process::Command;
+use tokio::process::Command;
 
 /// Allowlisted command prefixes for safe execution.
 /// These are read-only operations that cannot modify the system.
@@ -236,7 +236,8 @@ impl Tool for SafeShellTool {
             .arg("-c")
             .arg(command)
             .current_dir(&self.working_dir)
-            .output();
+            .output()
+            .await;
 
         match output {
             Ok(output) => {

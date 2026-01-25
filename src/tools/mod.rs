@@ -65,11 +65,13 @@ use crate::services::PlanService;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::FutureExt;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::time::timeout;
 
 // Re-export canonical AgentMode from core::types
 pub use crate::core::types::AgentMode;
@@ -171,6 +173,7 @@ pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     working_dir: PathBuf,
     mode: AgentMode,
+    tool_timeout_secs: u64,
     /// Policy engine for approval decisions
     policy_engine: Option<Arc<PolicyEngine>>,
     /// Current session ID for tracking patterns
@@ -187,6 +190,7 @@ impl ToolRegistry {
             tools: HashMap::new(),
             working_dir,
             mode: AgentMode::Build,
+            tool_timeout_secs: 60,
             policy_engine: None,
             session_id: uuid::Uuid::new_v4().to_string(),
             trust_level: crate::policy::types::TrustId::default(),
@@ -265,6 +269,7 @@ impl ToolRegistry {
             tools: HashMap::new(),
             working_dir: working_dir.clone(),
             mode,
+            tool_timeout_secs: 60,
             policy_engine,
             session_id: uuid::Uuid::new_v4().to_string(),
             trust_level: crate::policy::types::TrustId::default(),
@@ -411,6 +416,11 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    /// Set the default tool timeout (seconds)
+    pub fn set_tool_timeout_secs(&mut self, secs: u64) {
+        self.tool_timeout_secs = secs;
+    }
+
     /// Get a tool by name
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.tools.get(name)
@@ -424,6 +434,11 @@ impl ToolRegistry {
         let Some(tool) = self.tools.get(name) else {
             return Ok(ToolResult::error(format!("Unknown tool: {}", name)));
         };
+
+        let timeout_secs = self
+            .tool_timeout_override(&params)
+            .unwrap_or(self.tool_timeout_secs);
+        let timeout_duration = Duration::from_secs(timeout_secs);
 
         // Build command string for display/pattern matching
         let command = self.build_command_string(name, &params);
@@ -569,10 +584,15 @@ impl ToolRegistry {
             }
         }
 
-        // Wrap tool execution with panic recovery to prevent crashes
-        match AssertUnwindSafe(tool.execute(params)).catch_unwind().await {
-            Ok(result) => result,
-            Err(panic_info) => {
+        // Wrap tool execution with timeout + panic recovery to prevent crashes
+        match timeout(
+            timeout_duration,
+            AssertUnwindSafe(tool.execute(params)).catch_unwind(),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(panic_info)) => {
                 // Extract panic message
                 let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
                     (*s).to_string()
@@ -587,6 +607,10 @@ impl ToolRegistry {
                     name, panic_msg
                 )))
             }
+            Err(_) => Ok(ToolResult::error(format!(
+                "Tool '{}' timed out after {} seconds",
+                name, timeout_secs
+            ))),
         }
     }
 
@@ -623,7 +647,10 @@ impl ToolRegistry {
 
     /// Get all tool definitions for LLM
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|t| t.to_definition()).collect()
+        self.tools
+            .values()
+            .map(|t| Self::augment_tool_definition(t.to_definition()))
+            .collect()
     }
 
     /// Get tool definitions filtered by current mode using PolicyEngine
@@ -652,7 +679,7 @@ impl ToolRegistry {
         self.tools
             .values()
             .filter(|t| available_tool_ids.contains(t.name()))
-            .map(|t| t.to_definition())
+            .map(|t| Self::augment_tool_definition(t.to_definition()))
             .collect()
     }
 
@@ -692,6 +719,33 @@ impl ToolRegistry {
     /// Check if a tool requires approval based on its risk level
     pub fn tool_risk_level(&self, name: &str) -> Option<RiskLevel> {
         self.tools.get(name).map(|t| t.risk_level())
+    }
+
+    fn tool_timeout_override(&self, params: &Value) -> Option<u64> {
+        params.get("timeout_secs").and_then(|v| v.as_u64())
+    }
+
+    fn augment_tool_definition(mut def: ToolDefinition) -> ToolDefinition {
+        let params = def.parameters.as_object_mut();
+        if let Some(params) = params {
+            if params
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t == "object")
+                .unwrap_or(false)
+            {
+                let properties = params.entry("properties").or_insert_with(|| json!({}));
+                if let Some(props) = properties.as_object_mut() {
+                    props.entry("timeout_secs".to_string()).or_insert_with(|| {
+                        json!({
+                            "type": "integer",
+                            "description": "Optional tool timeout in seconds (overrides global default)"
+                        })
+                    });
+                }
+            }
+        }
+        def
     }
 
     /// Get trust level ID for PolicyEngine
@@ -780,5 +834,73 @@ impl ToolRegistry {
         } else {
             Ok((Vec::new(), Vec::new()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::time;
+
+    struct SleepTool {
+        name: &'static str,
+        duration: Duration,
+    }
+
+    #[async_trait]
+    impl Tool for SleepTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "sleep tool"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        async fn execute(&self, _params: Value) -> Result<ToolResult> {
+            time::sleep(self.duration).await;
+            Ok(ToolResult::success("done"))
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_registry_enforces_timeout() {
+        let mut registry = ToolRegistry::new(PathBuf::from("."));
+        registry.register(Arc::new(SleepTool {
+            name: "sleep",
+            duration: Duration::from_secs(5),
+        }));
+        registry.set_tool_timeout_secs(1);
+
+        let result = registry.execute("sleep", json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn tool_registry_timeout_override_respected() {
+        let mut registry = ToolRegistry::new(PathBuf::from("."));
+        registry.register(Arc::new(SleepTool {
+            name: "sleep",
+            duration: Duration::from_secs(2),
+        }));
+        registry.set_tool_timeout_secs(1);
+
+        let result = registry
+            .execute("sleep", json!({ "timeout_secs": 3 }))
+            .await
+            .unwrap();
+        assert!(result.success);
     }
 }

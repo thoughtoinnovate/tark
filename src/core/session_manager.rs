@@ -8,7 +8,7 @@
 
 use super::errors::SessionError;
 use crate::core::types::AgentMode;
-use crate::storage::{ChatSession, SessionMessage, SessionMeta, TarkStorage};
+use crate::storage::{ArchiveChunkMeta, ChatSession, SessionMessage, SessionMeta, TarkStorage};
 use chrono::Utc;
 
 /// Manages chat session lifecycle and persistence
@@ -73,6 +73,47 @@ impl SessionManager {
     /// Check if a given session ID is the current session
     pub fn is_current(&self, session_id: &str) -> bool {
         self.current_session.id == session_id
+    }
+
+    /// Archive older messages from the current session, keeping the most recent N.
+    pub fn archive_old_messages(
+        &mut self,
+        keep_recent: usize,
+    ) -> Result<Option<ArchiveChunkMeta>, SessionError> {
+        let total = self.current_session.messages.len();
+        if total <= keep_recent {
+            return Ok(None);
+        }
+
+        let cutoff = total - keep_recent;
+        let mut archived: Vec<SessionMessage> =
+            self.current_session.messages.drain(0..cutoff).collect();
+        for msg in &mut archived {
+            msg.context_transient = true;
+        }
+
+        let meta = self
+            .storage
+            .archive_session_messages(&self.current_session.id, &archived)
+            .map_err(|e| SessionError::Storage(e.to_string()))?;
+
+        self.dirty = true;
+        self.current_session.updated_at = chrono::Utc::now();
+        Ok(Some(meta))
+    }
+
+    /// List archived chunks for the current session.
+    pub fn list_archive_chunks(&self) -> Result<Vec<ArchiveChunkMeta>, SessionError> {
+        self.storage
+            .list_session_archives(&self.current_session.id)
+            .map_err(|e| SessionError::Storage(e.to_string()))
+    }
+
+    /// Load a specific archive chunk by filename.
+    pub fn load_archive_chunk(&self, filename: &str) -> Result<Vec<SessionMessage>, SessionError> {
+        self.storage
+            .load_session_archive(&self.current_session.id, filename)
+            .map_err(|e| SessionError::Storage(e.to_string()))
     }
 
     /// Create a new session

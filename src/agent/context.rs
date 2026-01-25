@@ -318,8 +318,70 @@ impl ConversationContext {
     }
 }
 
+pub(crate) fn sanitize_tool_output_for_context(tool_name: &str, output: &str) -> String {
+    let (sanitized, removed_diff) = strip_diff_blocks(output);
+    if !removed_diff {
+        return output.to_string();
+    }
+
+    let mut result = sanitized.trim().to_string();
+    if result.is_empty() {
+        result = format!("{} diff preview omitted from context.", tool_name);
+    } else {
+        result.push_str("\n\n[diff preview omitted]");
+    }
+    result
+}
+
 impl Default for ConversationContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn strip_diff_blocks(output: &str) -> (String, bool) {
+    let mut result = Vec::new();
+    let mut in_diff_block = false;
+    let mut removed = false;
+
+    for line in output.lines() {
+        let trimmed = line.trim_start();
+        if !in_diff_block && trimmed.starts_with("```diff") {
+            in_diff_block = true;
+            removed = true;
+            result.push("[diff preview omitted]");
+            continue;
+        }
+        if in_diff_block && trimmed.starts_with("```") {
+            in_diff_block = false;
+            continue;
+        }
+
+        if !in_diff_block {
+            result.push(line);
+        }
+    }
+
+    (result.join("\n"), removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_tool_output_for_context;
+
+    #[test]
+    fn test_sanitize_tool_output_strips_diff_block() {
+        let input = "Preview\n```diff\n- old\n+ new\n```\nDone";
+        let output = sanitize_tool_output_for_context("propose_change", input);
+        assert!(!output.contains("- old"));
+        assert!(!output.contains("+ new"));
+        assert!(output.contains("[diff preview omitted]"));
+    }
+
+    #[test]
+    fn test_sanitize_tool_output_keeps_non_diff_content() {
+        let input = "No diff here";
+        let output = sanitize_tool_output_for_context("write_file", input);
+        assert_eq!(output, input);
     }
 }

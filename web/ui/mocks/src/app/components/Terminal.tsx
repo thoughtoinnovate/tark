@@ -59,6 +59,7 @@ import {
   Clock          // For "run once" alternative icon
 } from 'lucide-react';
 import { themePresets, applyTheme, loadSavedTheme, type ThemePreset } from '../themes/presets';
+import { FlashBar, type FlashBarState } from './FlashBar';
 
 /**
  * ============================================================================
@@ -533,6 +534,20 @@ export function Terminal({
    * @ratatui-ui: Blinking green dot in center of status bar
    */
   const [isAgentWorking, setIsAgentWorking] = useState(true); // Demo: set to true to show indicator
+  
+  /**
+   * @ratatui-state: flash_bar_state: FlashBarState
+   * @ratatui-behavior: Controls the Flash Bar display state
+   * @ratatui-states: idle, working, rate-limit, error, warning
+   */
+  const [flashBarState, setFlashBarState] = useState<FlashBarState>('working');
+  const [flashBarMessage, setFlashBarMessage] = useState<string | undefined>(undefined);
+  
+  /**
+   * @web-only: Demo control visibility - NOT part of TUI implementation
+   * This is only for web mockup testing purposes
+   */
+  const [showFlashBarDemo, setShowFlashBarDemo] = useState(true);
   
   /**
    * @ratatui-state: question_responses: HashMap<usize, QuestionResponse>
@@ -2358,6 +2373,52 @@ export function Terminal({
       </div>
 
       {/* ===================================================================
+          FLASH BAR - STATUS INDICATOR
+          ===================================================================
+          @ratatui-widget: Custom FlashBar widget
+          @ratatui-layout: Constraint::Length(1) - Single line height
+          @ratatui-states: idle (single dot), working (animated dots), 
+                          rate-limit (yellow bg), error (red bg), warning (peach bg)
+       */}
+      <FlashBar state={flashBarState} message={flashBarMessage} />
+      
+      {/* Demo controls for FlashBar states - remove in production */}
+      {/* ============================================================
+          @web-only: DEMO CONTROLS - DO NOT IMPLEMENT IN TUI
+          ============================================================
+          These buttons are for testing the FlashBar states in the web mockup.
+          They should NOT be part of the Ratatui TUI implementation.
+          The FlashBar state in TUI will be controlled by the agent/backend.
+       */}
+      {showFlashBarDemo && (
+        <div className="flex items-center justify-center gap-2 py-1 bg-[var(--terminal-header-bg)] border-t border-[var(--terminal-border)]">
+          <span className="text-[10px] text-gray-500 mr-2">Flash Bar:</span>
+          {(['idle', 'working', 'rate-limit', 'error', 'warning'] as const).map((s) => (
+            <button
+              key={s}
+              onClick={() => {
+                setFlashBarState(s);
+                setFlashBarMessage(undefined);
+              }}
+              className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
+                flashBarState === s 
+                  ? 'bg-[var(--msg-system)] text-[var(--background)]' 
+                  : 'bg-[var(--terminal-border)] text-[var(--foreground)] hover:bg-[var(--mode-hover-bg)]'
+              }`}
+            >
+              {s}
+            </button>
+          ))}
+          <button
+            onClick={() => setShowFlashBarDemo(false)}
+            className="ml-2 px-2 py-0.5 text-[10px] rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+          >
+            Hide
+          </button>
+        </div>
+      )}
+
+      {/* ===================================================================
           STATUS BAR - MODE SELECTORS AND LLM INFO
           ===================================================================
           @ratatui-widget: Paragraph or horizontal layout of Spans
@@ -2379,6 +2440,336 @@ export function Terminal({
           
           @ratatui-popups: Mode dropdowns render as popup overlays
        */}
+      
+      {/* ===================================================================
+          INPUT AREA - CONTEXT FILES + INPUT FIELD
+          ===================================================================
+          @ratatui-widget: Vertical layout with conditional context row
+          @ratatui-layout: 
+            - If context_files empty: Single row for input (height 3)
+            - If context_files present: Two rows - context (2) + input (3)
+          
+          @ratatui-pattern:
+          ```rust
+          fn render_input(&mut self, frame: &mut Frame, area: Rect) {
+              let chunks = if self.context_files.is_empty() {
+                  vec![area]  // Just input area
+              } else {
+                  Layout::vertical([
+                      Constraint::Length(2),  // Context files
+                      Constraint::Length(3),  // Input field
+                  ]).split(area).to_vec()
+              };
+              
+              if !self.context_files.is_empty() {
+                  self.render_context_files(frame, chunks[0]);
+                  self.render_input_field(frame, chunks[1]);
+              } else {
+                  self.render_input_field(frame, chunks[0]);
+              }
+          }
+          ```
+       */}
+      <div className="px-4 py-3 bg-[#05070a] border-t border-amber-500/20">
+        <div className="space-y-2 max-w-4xl mx-auto">
+        {/* =====================================================
+            CONTEXT FILES DISPLAY
+            =====================================================
+            @ratatui-widget: Horizontal Spans wrapped in Paragraph
+            @ratatui-condition: Only rendered if context_files.len() > 0
+            @ratatui-style: Blue theme with badges
+            @ratatui-interactive: Navigate with Tab, remove with 'x' or Delete
+            
+            @ratatui-pattern:
+            ```rust
+            fn render_context_files(&self, frame: &mut Frame, area: Rect) {
+                let mut spans = vec![
+                    Span::styled(
+                        "Context: ",
+                        Style::default().fg(Color::Rgb(147, 197, 253))
+                    ),
+                ];
+                
+                for (idx, file) in self.context_files.iter().enumerate() {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        format!("📄 {} [x]", file.name),
+                        Style::default()
+                            .bg(Color::Rgb(29, 78, 216))
+                            .fg(Color::Rgb(191, 219, 254))
+                    ));
+                }
+                
+                let paragraph = Paragraph::new(Line::from(spans))
+                    .style(Style::default()
+                        .bg(Color::Rgb(30, 58, 138))
+                        .fg(Color::Rgb(147, 197, 253)));
+                
+                frame.render_widget(paragraph, area);
+            }
+            ```
+            
+            @ratatui-removal: When file is focused/selected, 'x' or Delete removes it
+         */}
+        {addedContextFiles.length > 0 && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded bg-blue-500/10 border border-blue-500/20">
+            <span className="text-xs text-blue-300 font-medium uppercase tracking-wider">Context:</span>
+            <div className="flex flex-wrap gap-1.5">
+              {addedContextFiles.map((file, idx) => (
+                <div
+                  key={idx}
+                  title={file.path ?? file.name}
+                  className="flex items-center gap-1.5 px-2 py-0.5 bg-blue-500/20 border border-blue-500/30 rounded text-xs text-blue-200 group/file"
+                >
+                  {/* @ratatui-icon: "📄" file icon */}
+                  <FileCode className="w-3 h-3" />
+                  <span className="max-w-[150px] truncate">{file.name}</span>
+                  {/* @ratatui-removal: In TUI, use 'x' when focused */}
+                  <button
+                    onClick={() => handleRemoveContext(idx)}
+                    className="ml-1 opacity-0 group-hover/file:opacity-100 group-focus-within/file:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/60 rounded hover:text-red-400 transition-all"
+                    title="Remove context file"
+                    aria-label={`Remove ${file.name}`}
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        
+        {/* =====================================================
+            INPUT FIELD WITH ADD CONTEXT BUTTON
+            =====================================================
+            @ratatui-widget: Paragraph for input with cursor position
+            @ratatui-state: input: String, cursor_position: usize
+            
+            FILE PICKER TRIGGERS (System Modal):
+            - Type "@" → IMMEDIATELY show file picker modal
+            - Click "+" button → Show file picker modal
+            - Ctrl+O → Show file picker modal
+            
+            @ratatui-keyboard:
+              - Char keys: Append to input
+              - Backspace: Remove character
+              - Left/Right: Move cursor
+              - Enter: Submit
+              - "@" key: IMMEDIATELY trigger file picker modal
+              - Ctrl+O or click '+': Open file picker modal
+            
+            @ratatui-file-picker-trigger:
+            ```rust
+            fn handle_char(&mut self, c: char) {
+                self.input.insert(self.cursor_position, c);
+                self.cursor_position += 1;
+                
+                // "@" IMMEDIATELY triggers file picker
+                if c == '@' {
+                    self.active_system_modal = SystemModal::FilePicker;
+                }
+            }
+            
+            fn handle_plus_click(&mut self) {
+                self.active_system_modal = SystemModal::FilePicker;
+            }
+            ```
+            
+            @ratatui-pattern:
+            ```rust
+            fn render_input_field(&mut self, frame: &mut Frame, area: Rect) {
+                let chunks = Layout::horizontal([
+                    Constraint::Length(3),   // Plus button
+                    Constraint::Min(0),      // Input field
+                ]).split(area);
+                
+                // Render plus button
+                let plus_btn = Paragraph::new("+")
+                    .style(Style::default()
+                        .fg(Color::Rgb(107, 114, 128))
+                        .bg(Color::Rgb(31, 41, 55)));
+                frame.render_widget(plus_btn, chunks[0]);
+                
+                // Render input with cursor
+                let input_display = if self.is_focused {
+                    format!("▶ {}█", self.input)  // With cursor
+                } else {
+                    format!("▶ {}", self.input)
+                };
+                
+                let input_widget = Paragraph::new(input_display)
+                    .style(Style::default()
+                        .fg(Color::Rgb(229, 231, 235))
+                        .bg(Color::Rgb(5, 7, 10)));
+                
+                frame.render_widget(input_widget, chunks[1]);
+            }
+            
+            // In event loop:
+            fn handle_input_key(&mut self, key: KeyEvent) {
+                match key.code {
+                    KeyCode::Char(c) => {
+                        self.input.insert(self.cursor_position, c);
+                        self.cursor_position += 1;
+                    }
+                    KeyCode::Backspace => {
+                        if self.cursor_position > 0 {
+                            self.input.remove(self.cursor_position - 1);
+                            self.cursor_position -= 1;
+                        }
+                    }
+                    KeyCode::Left => {
+                        self.cursor_position = self.cursor_position.saturating_sub(1);
+                    }
+                    KeyCode::Right => {
+                        self.cursor_position = (self.cursor_position + 1).min(self.input.len());
+                    }
+                    KeyCode::Enter => {
+                        self.handle_submit();
+                    }
+                    _ => {}
+                }
+            }
+            ```
+         */}
+        <form onSubmit={onSubmit} className="relative flex items-center gap-3">
+          {/* @ratatui-button: "+" for add context (Ctrl+O binding) */}
+          <button 
+            type="button"
+            onClick={handleAddContext}
+            className="p-1.5 text-gray-500 hover:text-gray-200 hover:bg-gray-800 rounded transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60"
+            title="Add Context / Files (Click or Cmd+V)"
+            aria-label="Add context files"
+            aria-keyshortcuts="Meta+V Control+V"
+          >
+            {/* @ratatui-icon: "+" or "📎" */}
+            <Plus className="w-4 h-4" />
+          </button>
+
+          <div className="flex-1 flex items-start gap-2 text-sm">
+            {/* @ratatui-prompt: "▶" or ">" prompt character */}
+            <ChevronRight className="w-4 h-4 text-amber-500/60 mt-2" />
+            {/* @ratatui-input: Main input buffer with cursor
+                @ratatui-cursor: Track position in string, render as "█" or "_"
+                @ratatui-placeholder: Show when input.is_empty() */}
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => {
+                const newValue = e.target.value;
+                onInputChange(newValue);
+                
+                // "@" typed → IMMEDIATELY show file picker
+                // @ratatui-trigger: if newValue.ends_with('@') && !input.ends_with('@')
+                if (newValue.endsWith('@') && !input.endsWith('@')) {
+                  setActiveSystemModal('file');
+                }
+                
+                // "/model" command → show provider picker
+                // @ratatui-trigger: if newValue.trim() == "/model"
+                if (newValue.trim() === '/model') {
+                  setActiveSystemModal('provider');
+                  onInputChange(''); // Clear input after command
+                }
+                
+                // "/theme" command → show theme picker
+                // @ratatui-trigger: if newValue.trim() == "/theme"
+                if (newValue.trim() === '/theme') {
+                  setActiveSystemModal('theme');
+                  onInputChange(''); // Clear input after command
+                }
+                
+                // "/help" command → show help/shortcuts modal
+                // @ratatui-trigger: if newValue.trim() == "/help"
+                if (newValue.trim() === '/help') {
+                  setActiveSystemModal('help');
+                  onInputChange(''); // Clear input after command
+                }
+              }}
+              onKeyDown={(e) => {
+                // Submit on Enter (without Shift)
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  // Form submission will be handled by the form's onSubmit
+                  const form = e.currentTarget.form;
+                  if (form) form.requestSubmit();
+                }
+                
+                /**
+                 * @ratatui-behavior: Backspace removes entire @mention word at once
+                 * @ratatui-pattern:
+                 * ```rust
+                 * fn handle_backspace(&mut self) {
+                 *     if let Some(pos) = self.cursor_position {
+                 *         // Check if cursor is right after an @mention
+                 *         let before_cursor = &self.input[..pos];
+                 *         if let Some(at_idx) = before_cursor.rfind('@') {
+                 *             // Check if there's no space between @ and cursor
+                 *             let mention = &before_cursor[at_idx..];
+                 *             if !mention.contains(' ') || mention.ends_with(' ') {
+                 *                 // Remove entire @mention
+                 *                 self.input = format!("{}{}", &self.input[..at_idx], &self.input[pos..]);
+                 *                 return;
+                 *             }
+                 *         }
+                 *     }
+                 *     // Default: remove single character
+                 * }
+                 * ```
+                 */
+                if (e.key === 'Backspace') {
+                  const cursorPos = e.currentTarget.selectionStart || 0;
+                  const beforeCursor = input.slice(0, cursorPos);
+                  
+                  // Find the last @ before cursor
+                  const lastAtIndex = beforeCursor.lastIndexOf('@');
+                  
+                  if (lastAtIndex !== -1) {
+                    const mention = beforeCursor.slice(lastAtIndex);
+                    // Check if cursor is at the end of an @mention (no space in the mention, or at end after space)
+                    // Pattern: @filename or @filename followed by cursor
+                    if (!mention.includes(' ') || mention.trim() === mention) {
+                      // Check if this looks like a complete @mention (has characters after @)
+                      if (mention.length > 1 || cursorPos === lastAtIndex + 1) {
+                        e.preventDefault();
+                        // Remove entire @mention word (find the end - next space or end of string)
+                        const afterAt = input.slice(lastAtIndex);
+                        const spaceAfter = afterAt.indexOf(' ', 1); // Find space after @
+                        const mentionEnd = spaceAfter === -1 ? input.length : lastAtIndex + spaceAfter + 1;
+                        
+                        const newInput = input.slice(0, lastAtIndex) + input.slice(mentionEnd);
+                        onInputChange(newInput);
+                      }
+                    }
+                  }
+                }
+              }}
+              className="flex-1 bg-transparent outline-none text-gray-200 placeholder:text-gray-700 font-medium resize-none min-h-[44px] max-h-[200px] py-2 leading-relaxed"
+              placeholder={`Message ${mode.toLowerCase()}...`}
+              rows={2}
+              autoFocus
+              style={{ 
+                overflowY: 'auto',
+                wordWrap: 'break-word',
+                whiteSpace: 'pre-wrap'
+              }}
+            />
+          </div>
+        </form>
+        </div>
+      </div>
+
+      {/* @ratatui-note: Hidden file input is web-specific
+          In TUI, use text input for paths or integrate with terminal file picker */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        onChange={handleFileSelect}
+        className="hidden"
+        accept="*"
+      />
+
       <div className="px-4 py-2 bg-[#0b1015] border-t border-gray-800 text-xs select-none relative z-20">
         <div className="flex items-center justify-between max-w-4xl mx-auto">
         
@@ -2719,40 +3110,6 @@ export function Terminal({
         </div>
 
         {/* =====================================================
-            CENTER: AGENT WORKING INDICATOR
-            =====================================================
-            @ratatui-widget: Blinking dot indicator
-            @ratatui-state: is_agent_working: bool
-            @ratatui-style: Green blinking dot when agent is processing
-            
-            @ratatui-pattern:
-            ```rust
-            fn render_working_indicator(&self, frame: &mut Frame, area: Rect) {
-                if self.is_agent_working {
-                    // Use tick counter for blinking effect
-                    let visible = (self.tick / 30) % 2 == 0; // Blink every ~500ms
-                    if visible {
-                        let dot = Span::styled("●", Style::default()
-                            .fg(Color::Rgb(34, 197, 94))); // Green
-                        let text = vec![dot, Span::raw(" Working...")];
-                        let para = Paragraph::new(Line::from(text));
-                        frame.render_widget(para, area);
-                    }
-                }
-            }
-            ```
-         */}
-        {isAgentWorking && (
-          <div className="flex items-center gap-1.5 px-2">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-            </span>
-            <span className="text-[10px] text-green-400/80 font-medium">Working...</span>
-          </div>
-        )}
-
-        {/* =====================================================
             RIGHT SIDE: LLM CONNECTION STATUS (CLICKABLE!)
             =====================================================
             @ratatui-widget: Clickable Paragraph with status indicator
@@ -2862,335 +3219,6 @@ export function Terminal({
         </div>
         </div>
       </div>
-
-      {/* ===================================================================
-          INPUT AREA - CONTEXT FILES + INPUT FIELD
-          ===================================================================
-          @ratatui-widget: Vertical layout with conditional context row
-          @ratatui-layout: 
-            - If context_files empty: Single row for input (height 3)
-            - If context_files present: Two rows - context (2) + input (3)
-          
-          @ratatui-pattern:
-          ```rust
-          fn render_input(&mut self, frame: &mut Frame, area: Rect) {
-              let chunks = if self.context_files.is_empty() {
-                  vec![area]  // Just input area
-              } else {
-                  Layout::vertical([
-                      Constraint::Length(2),  // Context files
-                      Constraint::Length(3),  // Input field
-                  ]).split(area).to_vec()
-              };
-              
-              if !self.context_files.is_empty() {
-                  self.render_context_files(frame, chunks[0]);
-                  self.render_input_field(frame, chunks[1]);
-              } else {
-                  self.render_input_field(frame, chunks[0]);
-              }
-          }
-          ```
-       */}
-      <div className="px-4 py-3 bg-[#05070a] border-t border-amber-500/20">
-        <div className="space-y-2 max-w-4xl mx-auto">
-        {/* =====================================================
-            CONTEXT FILES DISPLAY
-            =====================================================
-            @ratatui-widget: Horizontal Spans wrapped in Paragraph
-            @ratatui-condition: Only rendered if context_files.len() > 0
-            @ratatui-style: Blue theme with badges
-            @ratatui-interactive: Navigate with Tab, remove with 'x' or Delete
-            
-            @ratatui-pattern:
-            ```rust
-            fn render_context_files(&self, frame: &mut Frame, area: Rect) {
-                let mut spans = vec![
-                    Span::styled(
-                        "Context: ",
-                        Style::default().fg(Color::Rgb(147, 197, 253))
-                    ),
-                ];
-                
-                for (idx, file) in self.context_files.iter().enumerate() {
-                    spans.push(Span::raw(" "));
-                    spans.push(Span::styled(
-                        format!("📄 {} [x]", file.name),
-                        Style::default()
-                            .bg(Color::Rgb(29, 78, 216))
-                            .fg(Color::Rgb(191, 219, 254))
-                    ));
-                }
-                
-                let paragraph = Paragraph::new(Line::from(spans))
-                    .style(Style::default()
-                        .bg(Color::Rgb(30, 58, 138))
-                        .fg(Color::Rgb(147, 197, 253)));
-                
-                frame.render_widget(paragraph, area);
-            }
-            ```
-            
-            @ratatui-removal: When file is focused/selected, 'x' or Delete removes it
-         */}
-        {addedContextFiles.length > 0 && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded bg-blue-500/10 border border-blue-500/20">
-            <span className="text-xs text-blue-300 font-medium uppercase tracking-wider">Context:</span>
-            <div className="flex flex-wrap gap-1.5">
-              {addedContextFiles.map((file, idx) => (
-                <div
-                  key={idx}
-                  title={file.path ?? file.name}
-                  className="flex items-center gap-1.5 px-2 py-0.5 bg-blue-500/20 border border-blue-500/30 rounded text-xs text-blue-200 group/file"
-                >
-                  {/* @ratatui-icon: "📄" file icon */}
-                  <FileCode className="w-3 h-3" />
-                  <span className="max-w-[150px] truncate">{file.name}</span>
-                  {/* @ratatui-removal: In TUI, use 'x' when focused */}
-                  <button
-                    onClick={() => handleRemoveContext(idx)}
-                    className="ml-1 opacity-0 group-hover/file:opacity-100 group-focus-within/file:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/60 rounded hover:text-red-400 transition-all"
-                    title="Remove context file"
-                    aria-label={`Remove ${file.name}`}
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        
-        {/* =====================================================
-            INPUT FIELD WITH ADD CONTEXT BUTTON
-            =====================================================
-            @ratatui-widget: Paragraph for input with cursor position
-            @ratatui-state: input: String, cursor_position: usize
-            
-            FILE PICKER TRIGGERS (System Modal):
-            - Type "@" → IMMEDIATELY show file picker modal
-            - Click "+" button → Show file picker modal
-            - Ctrl+O → Show file picker modal
-            
-            @ratatui-keyboard:
-              - Char keys: Append to input
-              - Backspace: Remove character
-              - Left/Right: Move cursor
-              - Enter: Submit
-              - "@" key: IMMEDIATELY trigger file picker modal
-              - Ctrl+O or click '+': Open file picker modal
-            
-            @ratatui-file-picker-trigger:
-            ```rust
-            fn handle_char(&mut self, c: char) {
-                self.input.insert(self.cursor_position, c);
-                self.cursor_position += 1;
-                
-                // "@" IMMEDIATELY triggers file picker
-                if c == '@' {
-                    self.active_system_modal = SystemModal::FilePicker;
-                }
-            }
-            
-            fn handle_plus_click(&mut self) {
-                self.active_system_modal = SystemModal::FilePicker;
-            }
-            ```
-            
-            @ratatui-pattern:
-            ```rust
-            fn render_input_field(&mut self, frame: &mut Frame, area: Rect) {
-                let chunks = Layout::horizontal([
-                    Constraint::Length(3),   // Plus button
-                    Constraint::Min(0),      // Input field
-                ]).split(area);
-                
-                // Render plus button
-                let plus_btn = Paragraph::new("+")
-                    .style(Style::default()
-                        .fg(Color::Rgb(107, 114, 128))
-                        .bg(Color::Rgb(31, 41, 55)));
-                frame.render_widget(plus_btn, chunks[0]);
-                
-                // Render input with cursor
-                let input_display = if self.is_focused {
-                    format!("▶ {}█", self.input)  // With cursor
-                } else {
-                    format!("▶ {}", self.input)
-                };
-                
-                let input_widget = Paragraph::new(input_display)
-                    .style(Style::default()
-                        .fg(Color::Rgb(229, 231, 235))
-                        .bg(Color::Rgb(5, 7, 10)));
-                
-                frame.render_widget(input_widget, chunks[1]);
-            }
-            
-            // In event loop:
-            fn handle_input_key(&mut self, key: KeyEvent) {
-                match key.code {
-                    KeyCode::Char(c) => {
-                        self.input.insert(self.cursor_position, c);
-                        self.cursor_position += 1;
-                    }
-                    KeyCode::Backspace => {
-                        if self.cursor_position > 0 {
-                            self.input.remove(self.cursor_position - 1);
-                            self.cursor_position -= 1;
-                        }
-                    }
-                    KeyCode::Left => {
-                        self.cursor_position = self.cursor_position.saturating_sub(1);
-                    }
-                    KeyCode::Right => {
-                        self.cursor_position = (self.cursor_position + 1).min(self.input.len());
-                    }
-                    KeyCode::Enter => {
-                        self.handle_submit();
-                    }
-                    _ => {}
-                }
-            }
-            ```
-         */}
-        <form onSubmit={onSubmit} className="relative flex items-center gap-3">
-          {/* @ratatui-button: "+" for add context (Ctrl+O binding) */}
-          <button 
-            type="button"
-            onClick={handleAddContext}
-            className="p-1.5 text-gray-500 hover:text-gray-200 hover:bg-gray-800 rounded transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60"
-            title="Add Context / Files (Click or Cmd+V)"
-            aria-label="Add context files"
-            aria-keyshortcuts="Meta+V Control+V"
-          >
-            {/* @ratatui-icon: "+" or "📎" */}
-            <Plus className="w-4 h-4" />
-          </button>
-
-          <div className="flex-1 flex items-start gap-2 text-sm">
-            {/* @ratatui-prompt: "▶" or ">" prompt character */}
-            <ChevronRight className="w-4 h-4 text-amber-500/60 mt-2" />
-            {/* @ratatui-input: Main input buffer with cursor
-                @ratatui-cursor: Track position in string, render as "█" or "_"
-                @ratatui-placeholder: Show when input.is_empty() */}
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => {
-                const newValue = e.target.value;
-                onInputChange(newValue);
-                
-                // "@" typed → IMMEDIATELY show file picker
-                // @ratatui-trigger: if newValue.ends_with('@') && !input.ends_with('@')
-                if (newValue.endsWith('@') && !input.endsWith('@')) {
-                  setActiveSystemModal('file');
-                }
-                
-                // "/model" command → show provider picker
-                // @ratatui-trigger: if newValue.trim() == "/model"
-                if (newValue.trim() === '/model') {
-                  setActiveSystemModal('provider');
-                  onInputChange(''); // Clear input after command
-                }
-                
-                // "/theme" command → show theme picker
-                // @ratatui-trigger: if newValue.trim() == "/theme"
-                if (newValue.trim() === '/theme') {
-                  setActiveSystemModal('theme');
-                  onInputChange(''); // Clear input after command
-                }
-                
-                // "/help" command → show help/shortcuts modal
-                // @ratatui-trigger: if newValue.trim() == "/help"
-                if (newValue.trim() === '/help') {
-                  setActiveSystemModal('help');
-                  onInputChange(''); // Clear input after command
-                }
-              }}
-              onKeyDown={(e) => {
-                // Submit on Enter (without Shift)
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  // Form submission will be handled by the form's onSubmit
-                  const form = e.currentTarget.form;
-                  if (form) form.requestSubmit();
-                }
-                
-                /**
-                 * @ratatui-behavior: Backspace removes entire @mention word at once
-                 * @ratatui-pattern:
-                 * ```rust
-                 * fn handle_backspace(&mut self) {
-                 *     if let Some(pos) = self.cursor_position {
-                 *         // Check if cursor is right after an @mention
-                 *         let before_cursor = &self.input[..pos];
-                 *         if let Some(at_idx) = before_cursor.rfind('@') {
-                 *             // Check if there's no space between @ and cursor
-                 *             let mention = &before_cursor[at_idx..];
-                 *             if !mention.contains(' ') || mention.ends_with(' ') {
-                 *                 // Remove entire @mention
-                 *                 self.input = format!("{}{}", &self.input[..at_idx], &self.input[pos..]);
-                 *                 return;
-                 *             }
-                 *         }
-                 *     }
-                 *     // Default: remove single character
-                 * }
-                 * ```
-                 */
-                if (e.key === 'Backspace') {
-                  const cursorPos = e.currentTarget.selectionStart || 0;
-                  const beforeCursor = input.slice(0, cursorPos);
-                  
-                  // Find the last @ before cursor
-                  const lastAtIndex = beforeCursor.lastIndexOf('@');
-                  
-                  if (lastAtIndex !== -1) {
-                    const mention = beforeCursor.slice(lastAtIndex);
-                    // Check if cursor is at the end of an @mention (no space in the mention, or at end after space)
-                    // Pattern: @filename or @filename followed by cursor
-                    if (!mention.includes(' ') || mention.trim() === mention) {
-                      // Check if this looks like a complete @mention (has characters after @)
-                      if (mention.length > 1 || cursorPos === lastAtIndex + 1) {
-                        e.preventDefault();
-                        // Remove entire @mention word (find the end - next space or end of string)
-                        const afterAt = input.slice(lastAtIndex);
-                        const spaceAfter = afterAt.indexOf(' ', 1); // Find space after @
-                        const mentionEnd = spaceAfter === -1 ? input.length : lastAtIndex + spaceAfter + 1;
-                        
-                        const newInput = input.slice(0, lastAtIndex) + input.slice(mentionEnd);
-                        onInputChange(newInput);
-                      }
-                    }
-                  }
-                }
-              }}
-              className="flex-1 bg-transparent outline-none text-gray-200 placeholder:text-gray-700 font-medium resize-none min-h-[44px] max-h-[200px] py-2 leading-relaxed"
-              placeholder={`Message ${mode.toLowerCase()}...`}
-              rows={2}
-              autoFocus
-              style={{ 
-                overflowY: 'auto',
-                wordWrap: 'break-word',
-                whiteSpace: 'pre-wrap'
-              }}
-            />
-          </div>
-        </form>
-        </div>
-      </div>
-
-      {/* @ratatui-note: Hidden file input is web-specific
-          In TUI, use text input for paths or integrate with terminal file picker */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        onChange={handleFileSelect}
-        className="hidden"
-        accept="*"
-      />
 
       {/* =====================================================
           SYSTEM MODAL OVERLAYS (Provider/Model/File Picker)

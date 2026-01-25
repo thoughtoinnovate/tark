@@ -17,6 +17,7 @@ Tool calls in `tark` flow through three layers:
 │  • Tool registry with risk-based categorization      │
 │  • Tool execution with approval gates                │
 │  • Context management (adds tool results to history) │
+│    - Diff previews are stored in sessions but omitted from LLM context │
 │  • Provides ToolDefinition (name, desc, params)      │
 └────────────────────┬─────────────────────────────────┘
                      │

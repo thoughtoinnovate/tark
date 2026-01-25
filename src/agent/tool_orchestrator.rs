@@ -9,6 +9,7 @@
 
 #![allow(dead_code)] // API methods for future use
 
+use super::context::sanitize_tool_output_for_context;
 use super::{AgentResponse, ConversationContext, ToolCallLog};
 use crate::llm::{
     ContentPart, LlmProvider, LlmResponse, Message, MessageContent, Role, StreamCallback,
@@ -255,7 +256,10 @@ impl ToolOrchestrator {
                     // tool result and let the LLM decide what to do next.
                     let msg = format!("Tool '{}' failed: {}", call.name, e);
                     on_tool_complete(call.name.clone(), msg.clone(), false);
-                    self.context.add_tool_result(&call.id, &msg);
+                    self.context.add_tool_result(
+                        &call.id,
+                        sanitize_tool_output_for_context(&call.name, &msg),
+                    );
                     state.log_tool_call(call, truncate_preview(&msg, 200));
                     continue;
                 }
@@ -272,10 +276,25 @@ impl ToolOrchestrator {
                 );
 
                 if state.consecutive_duplicates >= self.config.max_consecutive_duplicates {
-                    self.context.add_assistant(
-                        "I'm seeing repeated results from tools. Please let me know how you'd like to proceed.",
+                    // Include the repeated result in the message so the agent sees what it got
+                    let truncated_result = truncate_preview(&result.output, 500);
+                    let retry_prompt = format!(
+                        "The agent has seen this result before and will try a different approach.\n\n\
+                        Tool '{}' returned (repeated {} times):\n```\n{}\n```\n\n\
+                        Please try a different approach - use different arguments, a different tool, \
+                        or explain what you've learned and suggest next steps.",
+                        call.name,
+                        state.consecutive_duplicates + 1,
+                        truncated_result
                     );
-                    return Ok(false); // Stop
+                    self.context.add_assistant(&retry_prompt);
+
+                    // Reset duplicate counter to allow the agent to continue with a new approach
+                    state.consecutive_duplicates = 0;
+                    state.last_results.clear();
+
+                    // Continue the loop instead of stopping - let the agent try again
+                    // The prompt above will guide it to try something different
                 }
             }
 
@@ -285,7 +304,10 @@ impl ToolOrchestrator {
             on_tool_complete(call.name.clone(), result.output.clone(), result.success);
 
             // Add to context
-            self.context.add_tool_result(&call.id, &result.output);
+            self.context.add_tool_result(
+                &call.id,
+                sanitize_tool_output_for_context(&call.name, &result.output),
+            );
 
             // Log for response
             let preview = truncate_preview(&result.output, 200);
