@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::channels::remote::{RemoteEvent, RemoteRegistry, RemoteRuntime};
+use crate::channels::request_channel_shutdown;
 use crate::config::Config;
 use crate::storage::TarkStorage;
 use crate::transport::http::run_http_server;
@@ -84,7 +85,10 @@ pub async fn run_remote_tui(working_dir: PathBuf, plugin_id: &str, debug_full: b
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        request_channel_shutdown();
+                        break;
+                    }
                     _ => {}
                 }
             }
@@ -95,6 +99,7 @@ pub async fn run_remote_tui(working_dir: PathBuf, plugin_id: &str, debug_full: b
     execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
     terminal.show_cursor().ok();
 
+    request_channel_shutdown();
     server_handle.abort();
     Ok(())
 }
@@ -122,6 +127,7 @@ pub async fn run_remote_headless(
         tokio::select! {
             _ = &mut ctrl_c => {
                 println!("[remote] shutdown requested");
+                request_channel_shutdown();
                 break;
             }
             event = rx.recv() => {
@@ -132,6 +138,7 @@ pub async fn run_remote_headless(
         }
     }
 
+    request_channel_shutdown();
     server_handle.abort();
     Ok(())
 }

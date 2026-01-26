@@ -29,12 +29,18 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 const STREAM_DEBOUNCE: Duration = Duration::from_millis(250);
 const STREAM_MIN_CHARS: usize = 200;
 const METADATA_RAW_LIMIT: usize = 2048;
+static CHANNEL_POLL_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+pub fn request_channel_shutdown() {
+    CHANNEL_POLL_SHUTDOWN.store(true, Ordering::SeqCst);
+}
 
 #[derive(Debug, Serialize)]
 struct ToolSummary {
@@ -164,6 +170,9 @@ impl ChannelManager {
             }
 
             loop {
+                if CHANNEL_POLL_SHUTDOWN.load(Ordering::SeqCst) {
+                    break;
+                }
                 let messages = match instance.channel_poll() {
                     Ok(messages) => messages,
                     Err(err) => {
