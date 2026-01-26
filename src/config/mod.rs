@@ -20,6 +20,7 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub thinking: ThinkingConfig,
     pub tui: TuiConfig,
+    pub remote: RemoteConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,6 +293,47 @@ impl TuiConfig {
             "solarized_light" => ThemePreset::SolarizedLight,
             "one_dark" => ThemePreset::OneDark,
             _ => ThemePreset::default(),
+        }
+    }
+}
+
+/// Remote channel configuration (Discord/Slack/etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteConfig {
+    pub allowed_plugins: Vec<String>,
+    pub allowed_users: Vec<String>,
+    pub allowed_channels: Vec<String>,
+    pub allowed_guilds: Vec<String>,
+    pub allowed_roles: Vec<String>,
+    pub allowed_models: Vec<String>,
+    pub allowed_providers: Vec<String>,
+    pub allow_model_change: bool,
+    pub allow_provider_change: bool,
+    pub allow_mode_change: bool,
+    pub allow_trust_change: bool,
+    pub default_mode: String,
+    pub default_trust_level: String,
+    pub require_allowlist: bool,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            allowed_plugins: Vec::new(),
+            allowed_users: Vec::new(),
+            allowed_channels: Vec::new(),
+            allowed_guilds: Vec::new(),
+            allowed_roles: Vec::new(),
+            allowed_models: Vec::new(),
+            allowed_providers: Vec::new(),
+            allow_model_change: false,
+            allow_provider_change: false,
+            allow_mode_change: false,
+            allow_trust_change: false,
+            default_mode: "ask".to_string(),
+            default_trust_level: "manual".to_string(),
+            require_allowlist: true,
         }
     }
 }

@@ -504,6 +504,10 @@ tark plugin list
 # Install a plugin from git
 tark plugin add https://github.com/user/tark-plugin
 
+# Update a plugin from its recorded source
+tark plugin update <plugin-id>
+tark plugin update --all
+
 # Show plugin details
 tark plugin info <plugin-id>
 
@@ -527,6 +531,43 @@ tark plugin remove <plugin-id>
 | `provider` | Add LLM providers |
 | `channel` | Add messaging channels (Slack, Discord, Signal) |
 | `hook` | Lifecycle event handlers |
+
+### Remote Channels
+
+Run channel plugins in remote mode to steer Tark from chat systems:
+
+```bash
+# Interactive TUI + Discord control
+tark --remote discord
+
+# Headless remote mode (prints live events to stdout)
+tark --headless --remote discord
+
+# Inspect or manage remote sessions
+tark show all
+tark show <session-id>
+tark stop <session-id>
+tark resume <session-id>
+```
+
+Remote access is gated by allowlists in `.tark/config.toml`:
+
+```toml
+[remote]
+allowed_plugins = ["discord"]
+allowed_users = ["1234567890"]
+allowed_guilds = ["0987654321"]
+allowed_channels = ["55555555"]
+allowed_roles = ["role-id"]
+allow_model_change = true
+allow_mode_change = true
+allow_trust_change = false
+require_allowlist = true
+```
+
+Logs are written to `.tark/logs/remote` (error-only by default; use `--remote-debug` for full logs).
+
+See `docs/REMOTE_CHANNELS.md` for Discord setup details.
 
 ### Building Plugins
 

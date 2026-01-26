@@ -1,8 +1,11 @@
 //! CLI commands for plugin management
 
-use crate::plugins::{PluginManifest, PluginRegistry};
+use crate::plugins::{InstalledPlugin, PluginManifest, PluginRegistry};
 use anyhow::{Context, Result};
+use chrono::Utc;
 use colored::Colorize;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use tabled::{settings::Style, Table, Tabled};
 
 /// List installed plugins
@@ -201,6 +204,7 @@ pub async fn run_plugin_add(url: &str, branch: &str, subpath: Option<&str>) -> R
     let source_path: std::path::PathBuf;
     let _temp_dir: Option<tempfile::TempDir>;
 
+    let source_meta;
     if is_local {
         // Local path - expand ~ and use directly
         let expanded = if url.starts_with('~') {
@@ -225,8 +229,9 @@ pub async fn run_plugin_add(url: &str, branch: &str, subpath: Option<&str>) -> R
             anyhow::bail!("Path does not exist: {}", final_path.display());
         }
 
-        source_path = final_path;
+        source_path = final_path.clone();
         _temp_dir = None;
+        source_meta = PluginInstallSource::local(final_path);
     } else {
         // Git URL - clone to temp directory
         println!("Repository: {}", url);
@@ -265,8 +270,9 @@ pub async fn run_plugin_add(url: &str, branch: &str, subpath: Option<&str>) -> R
             );
         }
 
-        source_path = final_path;
+        source_path = final_path.clone();
         _temp_dir = Some(temp);
+        source_meta = PluginInstallSource::git(url, branch, subpath.map(str::to_string));
     }
 
     // Verify plugin.toml exists
@@ -318,12 +324,87 @@ pub async fn run_plugin_add(url: &str, branch: &str, subpath: Option<&str>) -> R
     // Install via registry
     let mut registry = PluginRegistry::new()?;
     let plugin_id = registry.install(&source_path)?;
+    write_install_source(&registry, &plugin_id, &source_meta)?;
 
     println!();
     println!("✅ Successfully installed plugin: {}", plugin_id.green());
     println!();
     println!("The plugin will be loaded on next tark start.");
 
+    Ok(())
+}
+
+/// Update a plugin from its recorded source
+pub async fn run_plugin_update(plugin_id: &str) -> Result<()> {
+    println!("{}", "=== Updating Plugin ===".bold().cyan());
+    println!();
+
+    let mut registry = PluginRegistry::new()?;
+    let plugin = registry
+        .get(plugin_id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found", plugin_id))?;
+
+    let source = read_install_source(&plugin)?;
+    let update_source = resolve_update_source(&source).await?;
+    let source_path = update_source.path();
+
+    println!("Updating {} from {}", plugin_id.green(), source.display());
+    registry.update(plugin_id, source_path)?;
+    write_install_source(&registry, plugin_id, &source)?;
+
+    println!("✅ Updated plugin: {}", plugin_id.green());
+    Ok(())
+}
+
+/// Update all plugins that have a recorded source
+pub async fn run_plugin_update_all() -> Result<()> {
+    println!("{}", "=== Updating Plugins ===".bold().cyan());
+    println!();
+
+    let mut registry = PluginRegistry::new()?;
+    let plugins: Vec<InstalledPlugin> = registry.all().cloned().collect();
+    if plugins.is_empty() {
+        println!("No plugins installed.");
+        return Ok(());
+    }
+
+    let mut updated = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for plugin in plugins {
+        let source = match read_install_source(&plugin) {
+            Ok(source) => source,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let update_source = match resolve_update_source(&source).await {
+            Ok(source) => source,
+            Err(err) => {
+                failed += 1;
+                tracing::warn!("Failed to update {}: {}", plugin.id(), err);
+                continue;
+            }
+        };
+
+        if let Err(err) = registry.update(plugin.id(), update_source.path()) {
+            failed += 1;
+            tracing::warn!("Failed to update {}: {}", plugin.id(), err);
+            continue;
+        }
+        let _ = write_install_source(&registry, plugin.id(), &source);
+        updated += 1;
+        println!("✅ Updated {}", plugin.id().green());
+    }
+
+    println!();
+    println!(
+        "Done. updated={}, skipped={}, failed={}",
+        updated, skipped, failed
+    );
     Ok(())
 }
 
@@ -374,4 +455,128 @@ pub async fn run_plugin_disable(plugin_id: &str) -> Result<()> {
     println!("✅ Disabled plugin: {}", plugin_id.yellow());
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PluginInstallSource {
+    is_git: bool,
+    url: String,
+    branch: Option<String>,
+    path: Option<String>,
+    installed_at: String,
+}
+
+impl PluginInstallSource {
+    fn git(url: &str, branch: &str, path: Option<String>) -> Self {
+        Self {
+            is_git: true,
+            url: url.to_string(),
+            branch: Some(branch.to_string()),
+            path,
+            installed_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    fn local(path: PathBuf) -> Self {
+        Self {
+            is_git: false,
+            url: path.to_string_lossy().to_string(),
+            branch: None,
+            path: None,
+            installed_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    fn display(&self) -> String {
+        if self.is_git {
+            if let Some(path) = &self.path {
+                format!(
+                    "{} ({}:{})",
+                    self.url,
+                    self.branch.as_deref().unwrap_or("main"),
+                    path
+                )
+            } else {
+                format!(
+                    "{} ({})",
+                    self.url,
+                    self.branch.as_deref().unwrap_or("main")
+                )
+            }
+        } else {
+            self.url.clone()
+        }
+    }
+}
+
+fn source_file_path(registry: &PluginRegistry, plugin_id: &str) -> PathBuf {
+    registry.plugins_dir().join(plugin_id).join(".install.json")
+}
+
+fn write_install_source(
+    registry: &PluginRegistry,
+    plugin_id: &str,
+    source: &PluginInstallSource,
+) -> Result<()> {
+    let path = source_file_path(registry, plugin_id);
+    let payload = serde_json::to_string_pretty(source)?;
+    std::fs::write(&path, payload)?;
+    Ok(())
+}
+
+fn read_install_source(plugin: &InstalledPlugin) -> Result<PluginInstallSource> {
+    let path = plugin.path.join(".install.json");
+    let payload = std::fs::read_to_string(&path)
+        .with_context(|| format!("Missing install metadata: {}", path.display()))?;
+    let source = serde_json::from_str(&payload)?;
+    Ok(source)
+}
+
+struct UpdateSource {
+    _temp: Option<tempfile::TempDir>,
+    path: PathBuf,
+}
+
+impl UpdateSource {
+    fn path(&self) -> &PathBuf {
+        &self.path
+    }
+}
+
+async fn resolve_update_source(source: &PluginInstallSource) -> Result<UpdateSource> {
+    if !source.is_git {
+        let path = PathBuf::from(&source.url);
+        if !path.exists() {
+            anyhow::bail!("Local plugin source path not found: {}", path.display());
+        }
+        return Ok(UpdateSource { _temp: None, path });
+    }
+
+    let temp = tempfile::tempdir()?;
+    let clone_path = temp.path().join("plugin");
+    let branch = source.branch.as_deref().unwrap_or("main");
+
+    let status = std::process::Command::new("git")
+        .args(["clone", "--depth", "1", "--branch", branch, &source.url])
+        .arg(&clone_path)
+        .status()
+        .context("Failed to run git clone")?;
+    if !status.success() {
+        anyhow::bail!("git clone failed");
+    }
+
+    let final_path = if let Some(sub) = &source.path {
+        clone_path.join(sub)
+    } else {
+        clone_path
+    };
+
+    if !final_path.exists() {
+        anyhow::bail!("Subdirectory not found in repository");
+    }
+
+    Ok(UpdateSource {
+        _temp: Some(temp),
+        path: final_path,
+    })
 }

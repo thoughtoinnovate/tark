@@ -53,11 +53,23 @@ pub fn debug_log(entry: DebugLogEntry) {
 #[command(author, version, about = "Tark - AI-powered CLI agent with LSP server", long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 
     /// Enable verbose logging
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Enable remote channel mode for a plugin (e.g., discord)
+    #[arg(long, global = true)]
+    remote: Option<String>,
+
+    /// Run remote mode without the TUI (prints live events to stdout)
+    #[arg(long, global = true)]
+    headless: bool,
+
+    /// Enable full remote debug logging (otherwise error-only)
+    #[arg(long, global = true)]
+    remote_debug: bool,
 }
 
 #[derive(Subcommand)]
@@ -173,6 +185,24 @@ enum Commands {
         cleanup: Option<u32>,
     },
 
+    /// Show remote sessions (by id or 'all')
+    Show {
+        /// Session ID or 'all'
+        target: String,
+    },
+
+    /// Stop a remote session (or 'all')
+    Stop {
+        /// Session ID or 'all'
+        target: String,
+    },
+
+    /// Resume a remote session (or 'all')
+    Resume {
+        /// Session ID or 'all'
+        target: String,
+    },
+
     /// Plugin management commands
     Plugin {
         #[command(subcommand)]
@@ -240,6 +270,16 @@ enum PluginCommands {
         path: Option<String>,
     },
 
+    /// Update a plugin from its recorded source
+    Update {
+        /// Plugin ID (omit with --all)
+        plugin_id: Option<String>,
+
+        /// Update all plugins with recorded sources
+        #[arg(long)]
+        all: bool,
+    },
+
     /// Uninstall a plugin
     Remove {
         /// Plugin ID
@@ -272,7 +312,10 @@ async fn main() -> Result<()> {
     // Initialize logging
     // For TUI/Chat modes, default to quieter logging to avoid cluttering the interface
     // For other modes (LSP, Serve), use info level for debugging
-    let is_tui_mode = matches!(cli.command, Commands::Tui { .. } | Commands::Chat { .. });
+    let is_tui_mode = matches!(
+        cli.command,
+        Some(Commands::Tui { .. } | Commands::Chat { .. })
+    ) || (cli.command.is_none() && cli.remote.is_some() && !cli.headless);
 
     let filter = if cli.verbose {
         "tark_cli=debug,tower_lsp=debug"
@@ -302,7 +345,30 @@ async fn main() -> Result<()> {
         }
     }
 
-    match cli.command {
+    if cli.headless && cli.remote.is_none() && cli.command.is_none() {
+        anyhow::bail!("--headless requires --remote");
+    }
+
+    if cli.command.is_none() {
+        if let Some(remote_plugin) = cli.remote.as_deref() {
+            let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            if cli.headless {
+                transport::remote::run_remote_headless(
+                    working_dir,
+                    remote_plugin,
+                    cli.remote_debug,
+                )
+                .await?;
+            } else {
+                transport::remote::run_remote_tui(working_dir, remote_plugin, cli.remote_debug)
+                    .await?;
+            }
+            return Ok(());
+        }
+        anyhow::bail!("No command specified. Use --help for options.");
+    }
+
+    match cli.command.unwrap() {
         Commands::Lsp => {
             tracing::info!("Starting LSP server on stdio");
             lsp::run_lsp_server().await?;
@@ -317,7 +383,7 @@ async fn main() -> Result<()> {
                 port,
                 working_dir
             );
-            transport::http::run_http_server(&host, port, working_dir).await?;
+            transport::http::run_http_server(&host, port, working_dir, None).await?;
         }
         Commands::Start { port } => {
             tracing::info!("Starting LSP + HTTP servers");
@@ -325,7 +391,7 @@ async fn main() -> Result<()> {
             // Run HTTP server in background, LSP on stdio
             let http_handle = tokio::spawn(async move {
                 if let Err(e) =
-                    transport::http::run_http_server("127.0.0.1", port, working_dir).await
+                    transport::http::run_http_server("127.0.0.1", port, working_dir, None).await
                 {
                     tracing::error!("HTTP server error: {}", e);
                 }
@@ -385,6 +451,15 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
             transport::cli::run_usage(&working_dir, &format, cleanup).await?;
         }
+        Commands::Show { target } => {
+            transport::cli::run_remote_show(&target).await?;
+        }
+        Commands::Stop { target } => {
+            transport::cli::run_remote_stop(&target).await?;
+        }
+        Commands::Resume { target } => {
+            transport::cli::run_remote_resume(&target).await?;
+        }
         Commands::Plugin { command } => match command {
             PluginCommands::List => {
                 transport::plugin_cli::run_plugin_list().await?;
@@ -394,6 +469,15 @@ async fn main() -> Result<()> {
             }
             PluginCommands::Add { url, branch, path } => {
                 transport::plugin_cli::run_plugin_add(&url, &branch, path.as_deref()).await?;
+            }
+            PluginCommands::Update { plugin_id, all } => {
+                if all {
+                    transport::plugin_cli::run_plugin_update_all().await?;
+                } else if let Some(plugin_id) = plugin_id {
+                    transport::plugin_cli::run_plugin_update(&plugin_id).await?;
+                } else {
+                    anyhow::bail!("Specify a plugin ID or use --all");
+                }
             }
             PluginCommands::Remove { plugin_id } => {
                 transport::plugin_cli::run_plugin_remove(&plugin_id).await?;

@@ -644,6 +644,8 @@ impl LlmProvider for CloudCodeAssistProvider {
             "request": request
         });
 
+        crate::llm::raw_log::log_request_payload("gemini", &url, &wrapped_request);
+
         let response = self
             .client
             .post(&url)
@@ -821,6 +823,8 @@ impl LlmProvider for CloudCodeAssistProvider {
             "model": self.model,
             "request": request
         });
+
+        crate::llm::raw_log::log_request_payload("gemini", &url, &wrapped_request);
 
         // Retry logic with exponential backoff for 429 rate limit errors
         let retry_delays = [1, 5, 10, 20, 30, 60];

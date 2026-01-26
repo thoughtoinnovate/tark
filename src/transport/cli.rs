@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 use crate::agent::ChatAgent;
+use crate::channels::remote::RemoteRegistry;
 use crate::completion::{CompletionEngine, CompletionRequest};
 use crate::config::Config;
 use crate::llm;
@@ -63,6 +64,117 @@ pub async fn run_tui_chat(
     // Run the TUI event loop
     app.run()?;
 
+    Ok(())
+}
+
+/// Show remote session registry entries
+pub async fn run_remote_show(target: &str) -> Result<()> {
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let storage = TarkStorage::new(&working_dir)
+        .context("Failed to initialize storage. Run from a tark workspace.")?;
+    let project_root = storage.project_root();
+
+    let sessions = RemoteRegistry::snapshot(project_root).unwrap_or_default();
+    if target == "all" {
+        if sessions.is_empty() {
+            println!("No remote sessions found.");
+            return Ok(());
+        }
+        println!("Remote sessions:");
+        for session in sessions {
+            println!(
+                "  {} status={} mode={} provider={} model={} runtime={} plugin={}",
+                session.session_id,
+                session.status,
+                session.mode.unwrap_or_else(|| "-".to_string()),
+                session.provider.unwrap_or_else(|| "-".to_string()),
+                session.model.unwrap_or_else(|| "-".to_string()),
+                session.runtime_id,
+                session.plugin_id
+            );
+        }
+        return Ok(());
+    }
+
+    if let Some(session) = sessions.into_iter().find(|s| s.session_id == target) {
+        println!("Session {}", session.session_id);
+        println!("  status: {}", session.status);
+        println!(
+            "  mode: {}",
+            session.mode.unwrap_or_else(|| "-".to_string())
+        );
+        println!(
+            "  trust: {}",
+            session.trust_level.unwrap_or_else(|| "-".to_string())
+        );
+        println!(
+            "  provider: {}",
+            session.provider.unwrap_or_else(|| "-".to_string())
+        );
+        println!(
+            "  model: {}",
+            session.model.unwrap_or_else(|| "-".to_string())
+        );
+        println!("  plugin: {}", session.plugin_id);
+        println!("  runtime: {}", session.runtime_id);
+        println!(
+            "  user: {}",
+            session.user_id.unwrap_or_else(|| "-".to_string())
+        );
+        println!(
+            "  channel: {}",
+            session.channel_id.unwrap_or_else(|| "-".to_string())
+        );
+        println!(
+            "  guild: {}",
+            session.guild_id.unwrap_or_else(|| "-".to_string())
+        );
+        println!(
+            "  last_event: {}",
+            session.last_event.unwrap_or_else(|| "-".to_string())
+        );
+        println!(
+            "  last_message: {}",
+            session.last_message.unwrap_or_else(|| "-".to_string())
+        );
+        return Ok(());
+    }
+
+    println!("Session '{}' not found.", target);
+    Ok(())
+}
+
+/// Stop remote session(s)
+pub async fn run_remote_stop(target: &str) -> Result<()> {
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let storage = TarkStorage::new(&working_dir)
+        .context("Failed to initialize storage. Run from a tark workspace.")?;
+    let registry = RemoteRegistry::new(storage.project_root())?;
+
+    if target == "all" {
+        registry.stop_all()?;
+        println!("Stopped all remote sessions.");
+    } else {
+        registry.stop_session(target)?;
+        println!("Stopped session {}.", target);
+    }
+    Ok(())
+}
+
+/// Resume remote session(s)
+pub async fn run_remote_resume(target: &str) -> Result<()> {
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let storage = TarkStorage::new(&working_dir)
+        .context("Failed to initialize storage. Run from a tark workspace.")?;
+    let registry = RemoteRegistry::new(storage.project_root())?;
+
+    if target == "all" {
+        registry.resume_all()?;
+        println!("Resumed all remote sessions.");
+    } else {
+        registry.resume_session(target)?;
+        println!("Resumed session {}.", target);
+    }
     Ok(())
 }
 

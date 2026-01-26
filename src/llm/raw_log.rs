@@ -8,6 +8,8 @@ tokio::task_local! {
     pub static CORRELATION_ID: String;
 }
 
+use crate::debug_logger::SensitiveDataRedactor;
+
 /// Append a single line to the raw log (best-effort).
 /// If a correlation_id is set in task-local context, it will be included.
 pub fn append_raw_line(line: &str) {
@@ -56,6 +58,38 @@ pub fn log_request(provider: &str, model: &str, messages_count: usize, has_tools
         messages = messages_count,
         has_tools = has_tools,
         "LLM request"
+    );
+}
+
+/// Log a structured request payload (redacted).
+pub fn log_request_payload(provider: &str, url: &str, payload: &serde_json::Value) {
+    let correlation_id = CORRELATION_ID
+        .try_with(|id| id.clone())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let mut redacted_payload = payload.clone();
+    let redactor = SensitiveDataRedactor::new();
+    redactor.redact_json(&mut redacted_payload);
+
+    if let Some(logger) = crate::debug_logger() {
+        let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+            correlation_id,
+            crate::LogCategory::LlmRaw,
+            "request_payload",
+        )
+        .with_data(serde_json::json!({
+            "provider": provider,
+            "url": url,
+            "payload": redacted_payload
+        }));
+        logger.log(entry);
+    }
+
+    tracing::debug!(
+        target: "llm",
+        provider = provider,
+        url = url,
+        "LLM request payload logged"
     );
 }
 
@@ -248,6 +282,42 @@ mod tests {
                 let line = content.lines().last().unwrap(); // Get last line in case other tests wrote to it
                 let entry: serde_json::Value = serde_json::from_str(line).unwrap();
                 assert!(entry.get("correlation_id").is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn test_log_request_payload_redacts_tokens() {
+        let temp_dir = TempDir::new().unwrap();
+        let debug_config = crate::DebugLoggerConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            max_file_size: 10 * 1024 * 1024,
+            max_rotated_files: 3,
+        };
+
+        let _ = crate::init_debug_logger(debug_config);
+
+        let payload = serde_json::json!({
+            "access_token": "secret-token-value",
+            "nested": {"token": "another-secret"},
+            "message": "Bearer supersecrettoken"
+        });
+        log_request_payload("gemini", "https://example.test", &payload);
+
+        let log_path = temp_dir.path().join("tark-debug.log");
+        if log_path.exists() {
+            let content = fs::read_to_string(&log_path).unwrap();
+            if let Some(line) = content.lines().last() {
+                let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+                let payload_str = entry
+                    .get("data")
+                    .and_then(|d| d.get("payload"))
+                    .map(|p| p.to_string())
+                    .unwrap_or_default();
+                assert!(!payload_str.contains("secret-token-value"));
+                assert!(!payload_str.contains("another-secret"));
+                assert!(!payload_str.contains("supersecrettoken"));
+                assert!(payload_str.contains("[REDACTED]"));
             }
         }
     }

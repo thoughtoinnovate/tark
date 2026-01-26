@@ -334,7 +334,12 @@ async fn handle_channel_webhook(
 }
 
 /// Run the HTTP server
-pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Result<()> {
+pub async fn run_http_server(
+    host: &str,
+    port: u16,
+    working_dir: PathBuf,
+    remote: Option<Arc<crate::channels::remote::RemoteRuntime>>,
+) -> Result<()> {
     let config = Config::load().unwrap_or_default();
     let working_dir = working_dir.canonicalize().unwrap_or(working_dir);
     tracing::info!("Server working directory: {:?}", working_dir);
@@ -462,7 +467,7 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         working_dir.clone(),
         storage.clone(),
         usage_tracker.clone(),
-        None,
+        remote,
     );
     if let Err(e) = channel_manager.start_all().await {
         tracing::warn!("Failed to start channel plugins: {}", e);

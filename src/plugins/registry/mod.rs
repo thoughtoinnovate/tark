@@ -237,6 +237,33 @@ impl PluginRegistry {
         Ok(plugin_id)
     }
 
+    /// Update an installed plugin from a directory (preserves data and disabled state)
+    pub fn update(&mut self, id: &str, source_dir: &PathBuf) -> Result<()> {
+        let manifest_path = source_dir.join("plugin.toml");
+        let manifest = PluginManifest::load(&manifest_path)?;
+        let source_id = manifest.id();
+        if source_id != id {
+            anyhow::bail!(
+                "Plugin ID mismatch: expected '{}', found '{}'",
+                id,
+                source_id
+            );
+        }
+
+        let dest_dir = self.plugins_dir.join(id);
+        if !dest_dir.exists() {
+            anyhow::bail!("Plugin '{}' is not installed", id);
+        }
+
+        let preserve = ["data", ".disabled", ".install.json"];
+        clear_dir_except(&dest_dir, &preserve)?;
+        copy_dir_recursive_excluding(source_dir, &dest_dir, &preserve)?;
+
+        let plugin = InstalledPlugin::load(&dest_dir)?;
+        self.plugins.insert(id.to_string(), plugin);
+        Ok(())
+    }
+
     /// Uninstall a plugin
     pub fn uninstall(&mut self, id: &str) -> Result<()> {
         let plugin = self
@@ -279,6 +306,52 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_dir_recursive_excluding(src: &PathBuf, dst: &PathBuf, skip: &[&str]) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if skip.iter().any(|s| s == &name_str) {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(name);
+
+        if src_path.is_dir() {
+            copy_dir_recursive_excluding(&src_path, &dst_path, skip)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn clear_dir_except(dir: &PathBuf, keep: &[&str]) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if keep.iter().any(|s| s == &name_str) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
         }
     }
 

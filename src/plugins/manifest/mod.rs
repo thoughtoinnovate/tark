@@ -155,6 +155,28 @@ fn expand_home_path(path: &str) -> String {
     path.to_string()
 }
 
+fn expand_env_placeholders(value: &str) -> Result<String> {
+    if !value.contains("${") {
+        return Ok(value.to_string());
+    }
+    let re = regex::Regex::new(r"\$\{([A-Za-z0-9_]+)\}")?;
+    let mut result = String::with_capacity(value.len());
+    let mut last = 0;
+    for caps in re.captures_iter(value) {
+        let mat = caps.get(0).unwrap();
+        let var = caps.get(1).unwrap().as_str();
+        result.push_str(&value[last..mat.start()]);
+        if let Ok(env_value) = std::env::var(var) {
+            result.push_str(&env_value);
+        } else {
+            result.push_str(mat.as_str());
+        }
+        last = mat.end();
+    }
+    result.push_str(&value[last..]);
+    Ok(result)
+}
+
 /// Simple glob matching for paths (supports * and **)
 fn glob_match_path(pattern: &str, path: &str) -> bool {
     // Convert glob pattern to regex
@@ -375,9 +397,10 @@ impl PluginManifest {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read manifest: {}", path.display()))?;
 
-        let manifest: PluginManifest = toml::from_str(&content)
+        let mut manifest: PluginManifest = toml::from_str(&content)
             .with_context(|| format!("Failed to parse manifest: {}", path.display()))?;
 
+        manifest.expand_env()?;
         manifest.validate()?;
 
         Ok(manifest)
@@ -432,6 +455,33 @@ impl PluginManifest {
     pub fn plugin_type(&self) -> PluginType {
         self.plugin.plugin_type
     }
+
+    fn expand_env(&mut self) -> Result<()> {
+        if let Some(oauth) = &mut self.oauth {
+            oauth.auth_url = expand_env_placeholders(&oauth.auth_url)?;
+            oauth.token_url = expand_env_placeholders(&oauth.token_url)?;
+            oauth.client_id = expand_env_placeholders(&oauth.client_id)?;
+            if let Some(secret) = oauth.client_secret.as_mut() {
+                *secret = expand_env_placeholders(secret)?;
+            }
+            oauth.scopes = oauth
+                .scopes
+                .iter()
+                .map(|scope| expand_env_placeholders(scope))
+                .collect::<Result<Vec<_>>>()?;
+            oauth.redirect_uri = expand_env_placeholders(&oauth.redirect_uri)?;
+            if let Some(path) = oauth.credentials_path.as_mut() {
+                *path = expand_env_placeholders(path)?;
+            }
+            if let Some(callback) = oauth.process_tokens_callback.as_mut() {
+                *callback = expand_env_placeholders(callback)?;
+            }
+            for value in oauth.extra_params.values_mut() {
+                *value = expand_env_placeholders(value)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -480,6 +530,39 @@ channels = [{ id = "slack", name = "Slack" }]
         assert_eq!(manifest.plugin.plugin_type, PluginType::Channel);
         assert_eq!(manifest.contributes.channels.len(), 1);
         assert_eq!(manifest.contributes.channels[0].id, "slack");
+    }
+
+    #[test]
+    fn test_manifest_env_expansion() {
+        std::env::set_var("TEST_CLIENT_ID", "client-123");
+        std::env::set_var("TEST_REDIRECT", "http://localhost/callback");
+
+        let toml = r#"
+[plugin]
+name = "test-channel"
+version = "0.1.0"
+type = "channel"
+
+[oauth]
+flow = "pkce"
+auth_url = "https://example.com/auth"
+token_url = "https://example.com/token"
+client_id = "${TEST_CLIENT_ID}"
+scopes = ["bot"]
+redirect_uri = "${TEST_REDIRECT}"
+"#;
+
+        let path = std::env::temp_dir().join("tark-plugin-manifest-test.toml");
+        std::fs::write(&path, toml).unwrap();
+
+        let manifest = PluginManifest::load(&path).unwrap();
+        let oauth = manifest.oauth.unwrap();
+        assert_eq!(oauth.client_id, "client-123");
+        assert_eq!(oauth.redirect_uri, "http://localhost/callback");
+
+        let _ = std::fs::remove_file(path);
+        std::env::remove_var("TEST_CLIENT_ID");
+        std::env::remove_var("TEST_REDIRECT");
     }
 
     #[test]
