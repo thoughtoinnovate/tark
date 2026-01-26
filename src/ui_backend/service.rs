@@ -6,6 +6,9 @@
 //! - CatalogService for provider/model discovery
 
 use anyhow::Result;
+use base64::engine::general_purpose;
+use base64::Engine;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -32,6 +35,38 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(i, _)| i)
         .unwrap_or_else(|| s.len())
+}
+
+#[cfg(test)]
+static CLIPBOARD_SHOULD_FAIL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn try_set_clipboard(text: String) -> bool {
+    #[cfg(test)]
+    {
+        if CLIPBOARD_SHOULD_FAIL.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+    }
+
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        if clipboard.set_text(text.clone()).is_ok() {
+            return true;
+        }
+    }
+
+    let seq = osc52_sequence(&text);
+    let mut stdout = std::io::stdout().lock();
+    if stdout.write_all(seq.as_bytes()).is_ok() && stdout.flush().is_ok() {
+        return true;
+    }
+
+    false
+}
+
+fn osc52_sequence(text: &str) -> String {
+    let encoded = general_purpose::STANDARD.encode(text.as_bytes());
+    format!("\x1b]52;c;{}\x07", encoded)
 }
 
 fn tool_group_info(messages: &[Message], idx: usize) -> Option<(usize, usize)> {
@@ -651,10 +686,12 @@ impl AppService {
                 let messages = self.state.messages();
                 let idx = self.state.focused_message();
                 if let Some(msg) = messages.get(idx) {
-                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                        let _ = clipboard.set_text(msg.content.clone());
+                    if try_set_clipboard(msg.content.clone()) {
                         self.state
                             .set_status_message(Some("Yanked message".to_string()));
+                    } else {
+                        self.state
+                            .set_status_message(Some("Clipboard unavailable for yank".to_string()));
                     }
                 }
                 if self.state.vim_mode() == VimMode::Visual
@@ -1180,21 +1217,28 @@ impl AppService {
                 FocusedComponent::Messages => {
                     if let Some((start, end)) = self.state.message_selection() {
                         let idx = self.state.focused_message();
+                        let clipboard_ok = std::cell::Cell::new(true);
                         self.state.with_messages(|messages| {
                             if let Some(msg) = messages.get(idx) {
                                 if start < end {
                                     let start_byte = char_to_byte(&msg.content, start);
                                     let end_byte = char_to_byte(&msg.content, end);
-                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                        let _ = clipboard.set_text(
-                                            msg.content[start_byte..end_byte].to_string(),
-                                        );
+                                    if !try_set_clipboard(
+                                        msg.content[start_byte..end_byte].to_string(),
+                                    ) {
+                                        clipboard_ok.set(false);
                                     }
                                 }
                             }
                         });
-                        self.state
-                            .set_status_message(Some("Yanked selection".to_string()));
+                        if clipboard_ok.get() {
+                            self.state
+                                .set_status_message(Some("Yanked selection".to_string()));
+                        } else {
+                            self.state.set_status_message(Some(
+                                "Clipboard unavailable for yank".to_string(),
+                            ));
+                        }
                         self.state.set_vim_mode(VimMode::Normal);
                     }
                 }
@@ -1203,12 +1247,19 @@ impl AppService {
                         let text = self.state.input_text();
                         if start < end && end <= text.len() {
                             let selection = text[start..end].to_string();
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let _ = clipboard.set_text(selection);
+                            let mut clipboard_ok = true;
+                            if !try_set_clipboard(selection) {
+                                clipboard_ok = false;
+                            }
+                            if clipboard_ok {
+                                self.state
+                                    .set_status_message(Some("Yanked selection".to_string()));
+                            } else {
+                                self.state.set_status_message(Some(
+                                    "Clipboard unavailable for yank".to_string(),
+                                ));
                             }
                         }
-                        self.state
-                            .set_status_message(Some("Yanked selection".to_string()));
                         self.state.set_vim_mode(VimMode::Normal);
                     }
                 }
@@ -3317,6 +3368,7 @@ mod tests {
     use crate::core::types::{AgentMode, BuildMode};
     use crate::tools::TrustLevel;
     use crate::ui_backend::types::AttachmentToken;
+    use std::sync::atomic::Ordering;
     use tokio::sync::mpsc;
 
     fn test_message(role: MessageRole, content: &str) -> Message {
@@ -3414,6 +3466,45 @@ mod tests {
         assert_eq!(tool_group_info(&messages, 0), Some((0, 2)));
         assert_eq!(tool_group_info(&messages, 1), Some((0, 2)));
         assert_eq!(tool_group_info(&messages, 2), None);
+    }
+
+    #[test]
+    fn osc52_sequence_encodes_payload() {
+        let seq = osc52_sequence("hello");
+        assert!(seq.starts_with("\u{1b}]52;c;"));
+        assert!(seq.ends_with('\u{7}'));
+        assert!(
+            seq.contains("aGVsbG8="),
+            "Expected base64 payload in OSC52 sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn yank_message_reports_clipboard_failure() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let working_dir = tempdir.path().to_path_buf();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut service = AppService::new(working_dir, event_tx).expect("service");
+
+        service
+            .state
+            .add_message(test_message(MessageRole::User, "hello"));
+        service.state.set_focused_message(0);
+        service
+            .state
+            .set_focused_component(FocusedComponent::Messages);
+
+        CLIPBOARD_SHOULD_FAIL.store(true, Ordering::Relaxed);
+        service
+            .handle_command(Command::YankMessage)
+            .await
+            .expect("yank message");
+        CLIPBOARD_SHOULD_FAIL.store(false, Ordering::Relaxed);
+
+        assert_eq!(
+            service.state.status_message(),
+            Some("Clipboard unavailable for yank".to_string())
+        );
     }
 
     #[tokio::test]

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crate::ui_backend::UiRenderer;
 use crate::ui_backend::{
     AppEvent, Command, FocusedComponent, MessageRole as UiMessageRole, ModalType, SharedState,
-    TaskStatus as StateTaskStatus, VimMode,
+    TaskStatus as StateTaskStatus,
 };
 
 use super::modals::{
@@ -661,6 +661,7 @@ impl<B: Backend> TuiRenderer<B> {
                 }
             }
             (KeyCode::Char('-'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
                 // Pickers with text filter: pass character through for typing
                 if matches!(
                     state.active_modal(),
