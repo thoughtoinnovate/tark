@@ -1674,6 +1674,20 @@ impl SharedState {
         self.read_inner().collapsed_tool_groups.clone()
     }
 
+    /// Replace collapsed tool groups set
+    pub fn set_collapsed_tool_groups(&self, groups: std::collections::HashSet<usize>) {
+        self.write_inner().collapsed_tool_groups = groups;
+    }
+
+    /// Get the role of the focused message
+    pub fn focused_message_role(&self) -> Option<MessageRole> {
+        let inner = self.read_inner();
+        inner
+            .messages
+            .get(inner.focused_message)
+            .map(|msg| msg.role)
+    }
+
     /// Check if the focused message is a tool message
     pub fn is_focused_message_tool(&self) -> bool {
         let inner = self.read_inner();

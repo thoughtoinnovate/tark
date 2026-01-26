@@ -179,6 +179,8 @@ pub enum Command {
 
     /// Exit from tool group navigation (go back to message level)
     ExitGroup,
+    /// Enter tool group navigation (dive into group)
+    EnterGroup,
 
     /// Yank (copy) message content
     YankMessage,

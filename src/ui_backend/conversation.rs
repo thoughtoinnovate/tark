@@ -671,6 +671,12 @@ impl ConversationService {
         let agent = self.chat_agent.read().await;
         agent.mode()
     }
+
+    /// Get the current trust level (test helper)
+    pub(crate) async fn trust_level(&self) -> crate::tools::TrustLevel {
+        let agent = self.chat_agent.read().await;
+        agent.trust_level()
+    }
 }
 
 #[cfg(test)]

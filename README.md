@@ -267,7 +267,9 @@ Selected files and folders are inserted into the prompt as `@path` tokens. Remov
 | `w/b` | Next/previous word (message selection) |
 | `0/$` | Line start/end (message selection) |
 | `y` | Yank selection (visual) / yank message (normal) |
-| `Enter` | Toggle message collapse |
+| `Enter` | Toggle collapse for focused tool/group or tool item |
+| `Right` | Enter a tool group |
+| `-` | Exit a tool group |
 
 #### Sidebar Navigation
 

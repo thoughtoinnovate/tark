@@ -3,7 +3,7 @@
 //! Channel plugins translate external messages (Slack, Discord, Signal)
 //! into tark chat requests and send responses back to those channels.
 
-use crate::agent::ChatAgent;
+use crate::agent::{ChatAgent, ToolCallLog};
 use crate::config::Config;
 use crate::llm;
 use crate::plugins::{
@@ -17,7 +17,10 @@ use anyhow::{Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
+use serde::Serialize;
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -25,6 +28,24 @@ use tokio::time::{Duration, Instant};
 
 const STREAM_DEBOUNCE: Duration = Duration::from_millis(250);
 const STREAM_MIN_CHARS: usize = 200;
+const METADATA_RAW_LIMIT: usize = 2048;
+
+#[derive(Debug, Serialize)]
+struct ToolSummary {
+    tool_calls: usize,
+    tools_used: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChannelToolMetadata<'a> {
+    tool_calls_made: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_summary: Option<ToolSummary>,
+    #[serde(skip_serializing_if = "tool_log_is_empty")]
+    tool_log: &'a [ToolCallLog],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inbound_raw: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct ChannelManager {
@@ -208,12 +229,17 @@ impl ChannelManager {
                 .await?;
         } else {
             let response = agent.chat(&message.text).await?;
+            let summary = build_tool_summary(response.tool_calls_made, &response.tool_call_log);
             let send_request = ChannelSendRequest {
                 conversation_id: message.conversation_id.clone(),
-                text: response.text,
+                text: append_tool_summary(response.text, summary.as_ref()),
                 message_id: None,
                 is_final: true,
-                metadata_json: message.metadata_json.clone(),
+                metadata_json: build_metadata_json(
+                    &message.metadata_json,
+                    response.tool_calls_made,
+                    &response.tool_call_log,
+                ),
             };
             let _ = self.send_channel_message(plugin_id, &send_request).await?;
         }
@@ -234,15 +260,20 @@ impl ChannelManager {
     ) -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let tx_stream = tx.clone();
+        let final_text = Arc::new(std::sync::Mutex::new(String::new()));
+        let final_text_clone = Arc::clone(&final_text);
+        let message_id = Arc::new(std::sync::Mutex::new(None::<String>));
+        let message_id_clone = Arc::clone(&message_id);
         let manager = self.clone();
         let plugin_id = plugin_id.to_string();
+        let plugin_id_clone = plugin_id.clone();
         let conversation_id = message.conversation_id.clone();
         let metadata_json = message.metadata_json.clone();
 
         let sender = tokio::spawn(async move {
             let mut accumulated = String::new();
             let mut last_sent = Instant::now();
-            let mut message_id: Option<String> = None;
+            let mut message_id_local: Option<String> = None;
 
             while let Some(chunk) = rx.recv().await {
                 accumulated.push_str(&chunk);
@@ -255,32 +286,26 @@ impl ChannelManager {
                 let send_request = ChannelSendRequest {
                     conversation_id: conversation_id.clone(),
                     text: accumulated.clone(),
-                    message_id: message_id.clone(),
+                    message_id: message_id_local.clone(),
                     is_final: false,
                     metadata_json: metadata_json.clone(),
                 };
                 if let Ok(result) = manager
-                    .send_channel_message(&plugin_id, &send_request)
+                    .send_channel_message(&plugin_id_clone, &send_request)
                     .await
                 {
-                    if message_id.is_none() {
-                        message_id = result.message_id;
+                    if message_id_local.is_none() {
+                        message_id_local = result.message_id;
                     }
                 }
 
                 last_sent = Instant::now();
             }
-
-            let send_request = ChannelSendRequest {
-                conversation_id,
-                text: accumulated,
-                message_id,
-                is_final: true,
-                metadata_json,
-            };
-            let _ = manager
-                .send_channel_message(&plugin_id, &send_request)
-                .await;
+            if let Ok(mut guard) = message_id_clone.lock() {
+                if guard.is_none() {
+                    *guard = message_id_local;
+                }
+            }
         });
 
         let response = agent
@@ -288,6 +313,9 @@ impl ChannelManager {
                 &message.text,
                 || false,
                 move |chunk| {
+                    if let Ok(mut guard) = final_text_clone.lock() {
+                        guard.push_str(&chunk);
+                    }
                     let _ = tx_stream.send(chunk);
                 },
                 |_| {},
@@ -300,7 +328,35 @@ impl ChannelManager {
         drop(tx);
         let _ = sender.await;
 
-        if response.text.is_empty() {
+        let summary = build_tool_summary(response.tool_calls_made, &response.tool_call_log);
+        let fallback_text = final_text
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let response_was_empty = response.text.is_empty();
+        let mut response_text = if response_was_empty {
+            fallback_text
+        } else {
+            response.text
+        };
+        response_text = append_tool_summary(response_text, summary.as_ref());
+        let response_message_id = message_id.lock().ok().and_then(|guard| guard.clone());
+        let final_request = ChannelSendRequest {
+            conversation_id: message.conversation_id.clone(),
+            text: response_text,
+            message_id: response_message_id,
+            is_final: true,
+            metadata_json: build_metadata_json(
+                &message.metadata_json,
+                response.tool_calls_made,
+                &response.tool_call_log,
+            ),
+        };
+        let _ = self
+            .send_channel_message(&plugin_id, &final_request)
+            .await?;
+
+        if response_was_empty {
             tracing::warn!("Streaming response was empty");
         }
 
@@ -381,6 +437,100 @@ fn expand_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn build_tool_summary(tool_calls_made: usize, tool_log: &[ToolCallLog]) -> Option<ToolSummary> {
+    if tool_calls_made == 0 && tool_log.is_empty() {
+        return None;
+    }
+
+    let mut seen = HashSet::new();
+    let mut tools_used = Vec::new();
+    for entry in tool_log {
+        if seen.insert(entry.tool.clone()) {
+            tools_used.push(entry.tool.clone());
+        }
+    }
+
+    Some(ToolSummary {
+        tool_calls: tool_calls_made.max(tool_log.len()),
+        tools_used,
+    })
+}
+
+fn append_tool_summary(text: String, summary: Option<&ToolSummary>) -> String {
+    let Some(summary) = summary else {
+        return text;
+    };
+
+    let summary_text = if summary.tools_used.is_empty() {
+        format!("Tools used: {} call(s).", summary.tool_calls)
+    } else {
+        format!(
+            "Tools used: {} ({} call(s)).",
+            summary.tools_used.join(", "),
+            summary.tool_calls
+        )
+    };
+
+    let trimmed = text.trim_end_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        summary_text
+    } else {
+        format!("{}\n\n{}", trimmed, summary_text)
+    }
+}
+
+fn build_metadata_json(
+    inbound_metadata: &str,
+    tool_calls_made: usize,
+    tool_log: &[ToolCallLog],
+) -> String {
+    let mut parse_failed = false;
+    let mut root = match serde_json::from_str::<Value>(inbound_metadata) {
+        Ok(Value::Object(map)) => Value::Object(map),
+        Ok(other) => {
+            let mut map = Map::new();
+            map.insert("inbound".to_string(), other);
+            Value::Object(map)
+        }
+        Err(_) => {
+            parse_failed = true;
+            Value::Object(Map::new())
+        }
+    };
+
+    let summary = build_tool_summary(tool_calls_made, tool_log);
+    let inbound_raw = if parse_failed && !inbound_metadata.is_empty() {
+        let trimmed = inbound_metadata.chars().take(METADATA_RAW_LIMIT).collect();
+        Some(trimmed)
+    } else {
+        None
+    };
+
+    let metadata = ChannelToolMetadata {
+        tool_calls_made,
+        tool_summary: summary,
+        tool_log,
+        inbound_raw,
+    };
+
+    let mut tark_value = serde_json::to_value(metadata).unwrap_or_else(|_| json!({}));
+    if !tool_log.is_empty() || tool_calls_made > 0 {
+        if let Value::Object(map) = &mut tark_value {
+            map.insert("has_tools".to_string(), Value::Bool(true));
+        }
+    }
+
+    if let Value::Object(map) = &mut root {
+        map.insert("tark".to_string(), tark_value);
+    }
+
+    serde_json::to_string(&root).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn tool_log_is_empty(log: &[ToolCallLog]) -> bool {
+    log.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +541,30 @@ mod tests {
         let second = channel_session_id("slack", "thread-123");
         assert_eq!(first, second);
         assert!(first.starts_with("channel_slack_"));
+    }
+
+    #[test]
+    fn test_append_tool_summary() {
+        let summary = ToolSummary {
+            tool_calls: 2,
+            tools_used: vec!["read_file".to_string(), "grep".to_string()],
+        };
+        let text = "Hello world".to_string();
+        let result = append_tool_summary(text, Some(&summary));
+        assert!(result.contains("Tools used: read_file, grep (2 call(s))."));
+    }
+
+    #[test]
+    fn test_build_metadata_json_includes_tool_log() {
+        let log = vec![ToolCallLog {
+            tool: "read_file".to_string(),
+            args: json!({"path": "README.md"}),
+            result_preview: "ok".to_string(),
+        }];
+        let json_str = build_metadata_json("", 1, &log);
+        let value: Value = serde_json::from_str(&json_str).unwrap();
+        let tark = value.get("tark").expect("tark metadata missing");
+        assert_eq!(tark.get("tool_calls_made").unwrap(), 1);
+        assert!(tark.get("tool_log").is_some());
     }
 }

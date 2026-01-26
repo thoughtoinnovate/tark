@@ -34,6 +34,42 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .unwrap_or_else(|| s.len())
 }
 
+fn tool_group_info(messages: &[Message], idx: usize) -> Option<(usize, usize)> {
+    let msg = messages.get(idx)?;
+    if msg.role != MessageRole::Tool {
+        return None;
+    }
+    let risk_group = crate::tui_new::widgets::parse_tool_risk_group(&msg.content);
+    let mut start = idx;
+    while start > 0 {
+        let prev = &messages[start - 1];
+        if prev.role == MessageRole::Tool
+            && crate::tui_new::widgets::parse_tool_risk_group(&prev.content) == risk_group
+        {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    let mut end = start;
+    while end < messages.len() {
+        let current = &messages[end];
+        if current.role == MessageRole::Tool
+            && crate::tui_new::widgets::parse_tool_risk_group(&current.content) == risk_group
+        {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    let size = end.saturating_sub(start);
+    if size >= 2 {
+        Some((start, size))
+    } else {
+        None
+    }
+}
+
 fn paste_block_ranges(text: &str, blocks: &[PasteBlock]) -> Vec<(usize, usize, usize)> {
     if text.is_empty() || blocks.is_empty() {
         return Vec::new();
@@ -355,6 +391,14 @@ impl AppService {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn conversation_trust_level(&self) -> Option<crate::tools::TrustLevel> {
+        match self.conversation_svc {
+            Some(ref svc) => Some(svc.trust_level().await),
+            None => None,
+        }
+    }
+
     /// Take the interaction receiver (ask_user / approval)
     pub fn take_interaction_receiver(&mut self) -> Option<crate::tools::InteractionReceiver> {
         self.interaction_rx.take()
@@ -460,6 +504,15 @@ impl AppService {
                 let current = self.state.build_mode();
                 let next = current.next();
                 self.state.set_build_mode(next);
+                let trust_level = match next {
+                    BuildMode::Manual => crate::tools::TrustLevel::Manual,
+                    BuildMode::Balanced => crate::tools::TrustLevel::Balanced,
+                    BuildMode::Careful => crate::tools::TrustLevel::Careful,
+                };
+                self.state.set_trust_level(trust_level);
+                if let Some(ref conv_svc) = self.conversation_svc {
+                    let _ = conv_svc.set_trust_level(trust_level).await;
+                }
 
                 self.event_tx
                     .send(AppEvent::StatusChanged(format!(
@@ -471,6 +524,15 @@ impl AppService {
             }
             Command::SetBuildMode(mode) => {
                 self.state.set_build_mode(mode);
+                let trust_level = match mode {
+                    BuildMode::Manual => crate::tools::TrustLevel::Manual,
+                    BuildMode::Balanced => crate::tools::TrustLevel::Balanced,
+                    BuildMode::Careful => crate::tools::TrustLevel::Careful,
+                };
+                self.state.set_trust_level(trust_level);
+                if let Some(ref conv_svc) = self.conversation_svc {
+                    let _ = conv_svc.set_trust_level(trust_level).await;
+                }
 
                 self.event_tx
                     .send(AppEvent::StatusChanged(format!(
@@ -646,6 +708,19 @@ impl AppService {
 
                 // Normal message-level navigation
                 let current = self.state.focused_message();
+                let messages = self.state.messages();
+                if let Some((group_start, group_size)) = tool_group_info(&messages, current) {
+                    if self.state.is_tool_group_collapsed(group_start) {
+                        let next_msg = group_start + group_size;
+                        if next_msg < msg_count {
+                            self.state.set_focused_message(next_msg);
+                        } else {
+                            self.state.set_focused_message(msg_count.saturating_sub(1));
+                        }
+                        self.state.ensure_focused_message_visible();
+                        return Ok(());
+                    }
+                }
                 let next = (current + 1).min(msg_count - 1);
                 self.state.set_focused_message(next);
 
@@ -675,6 +750,18 @@ impl AppService {
 
                 // Normal message-level navigation
                 let current = self.state.focused_message();
+                let messages = self.state.messages();
+                if let Some((group_start, _group_size)) = tool_group_info(&messages, current) {
+                    if self.state.is_tool_group_collapsed(group_start) {
+                        if current > group_start {
+                            self.state.set_focused_message(group_start);
+                        } else if group_start > 0 {
+                            self.state.set_focused_message(group_start - 1);
+                        }
+                        self.state.ensure_focused_message_visible();
+                        return Ok(());
+                    }
+                }
                 let prev = current.saturating_sub(1);
                 self.state.set_focused_message(prev);
 
@@ -699,42 +786,15 @@ impl AppService {
                 }
 
                 // Check if we're on a tool message that's the first in a group
-                if let Some(msg) = messages.get(idx) {
-                    if msg.role == crate::ui_backend::MessageRole::Tool {
-                        // Check if this is the first tool in a group with 2+ tools
-                        // by looking at the risk group of consecutive tools
-                        let risk_group =
-                            crate::tui_new::widgets::parse_tool_risk_group(&msg.content);
-
-                        // Count consecutive tools with same risk group starting from this message
-                        let group_size = messages[idx..]
-                            .iter()
-                            .take_while(|m| {
-                                m.role == crate::ui_backend::MessageRole::Tool
-                                    && crate::tui_new::widgets::parse_tool_risk_group(&m.content)
-                                        == risk_group
-                            })
-                            .count();
-
-                        // Check if previous message is a tool with same risk group (we're not first)
-                        let is_first_in_group = idx == 0
-                            || messages.get(idx - 1).is_none_or(|prev| {
-                                prev.role != crate::ui_backend::MessageRole::Tool
-                                    || crate::tui_new::widgets::parse_tool_risk_group(&prev.content)
-                                        != risk_group
-                            });
-
-                        if is_first_in_group && group_size >= 2 {
-                            // Check if group is collapsed
-                            if self.state.is_tool_group_collapsed(idx) {
-                                // Expand the group
-                                self.state.expand_tool_group(idx);
-                            } else {
-                                // Dive into the group (start navigating tools)
-                                self.state.dive_into_group();
-                            }
-                            return Ok(());
+                if let Some((group_start, _group_size)) = tool_group_info(&messages, idx) {
+                    if idx == group_start {
+                        if self.state.is_tool_group_collapsed(group_start) {
+                            self.state.expand_tool_group(group_start);
+                            self.state.dive_into_group();
+                        } else {
+                            self.state.toggle_tool_group_collapse(group_start);
                         }
+                        return Ok(());
                     }
                 }
 
@@ -744,6 +804,21 @@ impl AppService {
             Command::ExitGroup => {
                 // Exit from group navigation back to message level
                 self.state.exit_group();
+            }
+            Command::EnterGroup => {
+                if self.state.focused_sub_index().is_some() {
+                    return Ok(());
+                }
+                let idx = self.state.focused_message();
+                let messages = self.state.messages();
+                if let Some((group_start, _group_size)) = tool_group_info(&messages, idx) {
+                    if idx == group_start {
+                        if self.state.is_tool_group_collapsed(group_start) {
+                            self.state.expand_tool_group(group_start);
+                        }
+                        self.state.dive_into_group();
+                    }
+                }
             }
 
             // Input handling
@@ -3240,8 +3315,25 @@ mod tests {
     use super::*;
     use crate::core::attachments::{AttachmentContent, MessageAttachment};
     use crate::core::types::{AgentMode, BuildMode};
+    use crate::tools::TrustLevel;
     use crate::ui_backend::types::AttachmentToken;
     use tokio::sync::mpsc;
+
+    fn test_message(role: MessageRole, content: &str) -> Message {
+        Message {
+            role,
+            content: content.to_string(),
+            thinking: None,
+            collapsed: false,
+            timestamp: String::new(),
+            provider: None,
+            model: None,
+            context_transient: false,
+            tool_calls: Vec::new(),
+            segments: Vec::new(),
+            tool_args: None,
+        }
+    }
 
     #[test]
     fn format_attachment_summary_prefers_tokens() {
@@ -3308,5 +3400,66 @@ mod tests {
             .await
             .expect("conversation mode");
         assert_eq!(conv_mode, AgentMode::Plan);
+    }
+
+    #[test]
+    fn tool_group_info_detects_multi_tool_group() {
+        let messages = vec![
+            test_message(MessageRole::Tool, "✓|a|Exploration|one"),
+            test_message(MessageRole::Tool, "✓|b|Exploration|two"),
+            test_message(MessageRole::Tool, "✓|c|Commands|three"),
+            test_message(MessageRole::User, "hello"),
+        ];
+
+        assert_eq!(tool_group_info(&messages, 0), Some((0, 2)));
+        assert_eq!(tool_group_info(&messages, 1), Some((0, 2)));
+        assert_eq!(tool_group_info(&messages, 2), None);
+    }
+
+    #[tokio::test]
+    async fn cycle_build_mode_syncs_trust_level() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let working_dir = tempdir.path().to_path_buf();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut service = AppService::new(working_dir, event_tx).expect("service");
+
+        service
+            .handle_command(Command::SetTrustLevel(TrustLevel::Balanced))
+            .await
+            .expect("set trust");
+
+        service
+            .handle_command(Command::CycleBuildMode)
+            .await
+            .expect("cycle build mode");
+
+        assert_eq!(service.state.build_mode(), BuildMode::Careful);
+        assert_eq!(service.state.trust_level(), TrustLevel::Careful);
+        let conv_trust = service
+            .conversation_trust_level()
+            .await
+            .expect("conversation trust");
+        assert_eq!(conv_trust, TrustLevel::Careful);
+    }
+
+    #[tokio::test]
+    async fn set_build_mode_syncs_trust_level() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let working_dir = tempdir.path().to_path_buf();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut service = AppService::new(working_dir, event_tx).expect("service");
+
+        service
+            .handle_command(Command::SetBuildMode(BuildMode::Manual))
+            .await
+            .expect("set build mode");
+
+        assert_eq!(service.state.build_mode(), BuildMode::Manual);
+        assert_eq!(service.state.trust_level(), TrustLevel::Manual);
+        let conv_trust = service
+            .conversation_trust_level()
+            .await
+            .expect("conversation trust");
+        assert_eq!(conv_trust, TrustLevel::Manual);
     }
 }

@@ -2206,6 +2206,7 @@ impl<B: Backend> TuiController<B> {
 
                     state.add_message(msg.clone());
                     self.service.record_session_message(&msg).await;
+                    self.collapse_old_tool_groups(state);
                     state.scroll_to_bottom();
                 }
                 AppEvent::ToolCompleted { ref name, result } => {
@@ -2247,6 +2248,7 @@ impl<B: Backend> TuiController<B> {
                     let new_content = format!("✓|{}|{}|{}", name, risk_group, result_with_time);
                     state.update_tool_message(name, new_content.clone(), true); // Collapse completed tool
                     state.collapse_all_tools_except_last(); // Make sure only most recent is visible
+                    self.collapse_old_tool_groups(state);
                     state.scroll_to_bottom();
 
                     // Persist the updated tool status to session storage
@@ -2346,6 +2348,7 @@ impl<B: Backend> TuiController<B> {
                     let new_content = format!("✗|{}|{}|{}", name, risk_group, error_with_time);
                     state.update_tool_message(name, new_content.clone(), true); // Collapse failed tool
                     state.collapse_all_tools_except_last(); // Make sure only most recent is visible
+                    self.collapse_old_tool_groups(state);
                     state.scroll_to_bottom();
 
                     // Persist the updated tool status to session storage
@@ -3364,6 +3367,59 @@ impl<B: Backend> TuiController<B> {
         }
 
         Ok(())
+    }
+
+    fn collapse_old_tool_groups(&self, state: &SharedState) {
+        let messages = state.messages();
+        let mut group_starts: Vec<usize> = Vec::new();
+        let mut current_start: Option<usize> = None;
+        let mut current_risk: Option<String> = None;
+        let mut current_len = 0usize;
+
+        for (idx, msg) in messages.iter().enumerate() {
+            if msg.role == crate::ui_backend::MessageRole::Tool {
+                let risk = crate::tui_new::widgets::parse_tool_risk_group(&msg.content).to_string();
+                match (&current_risk, current_start) {
+                    (Some(active_risk), Some(start)) if active_risk == &risk => {
+                        current_len += 1;
+                        current_start = Some(start);
+                    }
+                    _ => {
+                        if let Some(start) = current_start {
+                            if current_len >= 2 {
+                                group_starts.push(start);
+                            }
+                        }
+                        current_start = Some(idx);
+                        current_risk = Some(risk);
+                        current_len = 1;
+                    }
+                }
+            } else if let Some(start) = current_start {
+                if current_len >= 2 {
+                    group_starts.push(start);
+                }
+                current_start = None;
+                current_risk = None;
+                current_len = 0;
+            }
+        }
+
+        if let Some(start) = current_start {
+            if current_len >= 2 {
+                group_starts.push(start);
+            }
+        }
+
+        let last_group = group_starts.last().copied();
+        let mut collapsed = std::collections::HashSet::new();
+        for start in group_starts {
+            if Some(start) != last_group {
+                collapsed.insert(start);
+            }
+        }
+
+        state.set_collapsed_tool_groups(collapsed);
     }
 }
 

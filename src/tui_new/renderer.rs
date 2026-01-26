@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crate::ui_backend::UiRenderer;
 use crate::ui_backend::{
     AppEvent, Command, FocusedComponent, MessageRole as UiMessageRole, ModalType, SharedState,
-    TaskStatus as StateTaskStatus,
+    TaskStatus as StateTaskStatus, VimMode,
 };
 
 use super::modals::{
@@ -520,7 +520,12 @@ impl<B: Backend> TuiRenderer<B> {
                     }
                     return None;
                 }
+                let is_tool_header = state.focused_component() == FocusedComponent::Messages
+                    && state.vim_mode() == VimMode::Normal
+                    && state.focused_message_role() == Some(UiMessageRole::Tool)
+                    && !state.is_in_group();
                 match (state.focused_component(), state.vim_mode()) {
+                    _ if is_tool_header => Some(Command::EnterGroup),
                     (FocusedComponent::Messages, VimMode::Normal | VimMode::Visual) => {
                         Some(Command::CursorRight)
                     }
@@ -654,6 +659,44 @@ impl<B: Backend> TuiRenderer<B> {
                     (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('v')),
                     _ => None,
                 }
+            }
+            (KeyCode::Char('-'), KeyModifiers::NONE) => {
+                // Pickers with text filter: pass character through for typing
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("-".to_string()));
+                }
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}-", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('-'));
+                    }
+                    return None;
+                }
+                if let Some(q) = state.active_questionnaire() {
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('-');
+                    }
+                    return None;
+                }
+                if state.focused_component() == FocusedComponent::Messages && state.is_in_group() {
+                    return Some(Command::ExitGroup);
+                }
+                if state.focused_component() == FocusedComponent::Input
+                    && state.vim_mode() == VimMode::Insert
+                {
+                    return Some(Command::InsertChar('-'));
+                }
+                None
             }
             (KeyCode::Char('w'), KeyModifiers::NONE) => {
                 use crate::ui_backend::VimMode;
@@ -1343,7 +1386,15 @@ impl<B: Backend> TuiRenderer<B> {
                 _ => Some(Command::CursorLeft),
             },
             (KeyCode::Right, KeyModifiers::NONE) => match state.focused_component() {
-                FocusedComponent::Messages => Some(Command::NextMessage),
+                FocusedComponent::Messages => {
+                    if state.focused_message_role() == Some(UiMessageRole::Tool)
+                        && !state.is_in_group()
+                    {
+                        Some(Command::EnterGroup)
+                    } else {
+                        Some(Command::NextMessage)
+                    }
+                }
                 FocusedComponent::Panel => Some(Command::SidebarEnter),
                 _ => Some(Command::CursorRight),
             },
