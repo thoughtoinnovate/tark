@@ -111,18 +111,71 @@ impl ChannelManager {
             return;
         }
         let interval_ms = self.config.remote.channel_poll_ms;
-        let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
-        loop {
-            ticker.tick().await;
-            let manager = self.clone();
-            let plugin_for_poll = plugin.clone();
-            let result =
-                tokio::task::spawn_blocking(move || manager.poll_plugin(&plugin_for_poll)).await;
-            if let Ok(Ok(Some(messages))) = result {
+        let manager = self.clone();
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let mut host = match PluginHost::new() {
+                Ok(host) => host,
+                Err(err) => {
+                    tracing::error!("Channel poll host init failed: {}", err);
+                    return;
+                }
+            };
+
+            if let Some(local_dir) = manager.local_plugin_data_dir(plugin.id()) {
+                if local_dir.exists()
+                    || manager
+                        .local_oauth_credentials_path(plugin.id())
+                        .as_ref()
+                        .map(|p| p.exists())
+                        .unwrap_or(false)
+                {
+                    if let Err(err) = host.load_with_data_dir(&plugin, local_dir) {
+                        tracing::error!("Channel poll load failed: {}", err);
+                        return;
+                    }
+                } else if let Err(err) = host.load(&plugin) {
+                    tracing::error!("Channel poll load failed: {}", err);
+                    return;
+                }
+            } else if let Err(err) = host.load(&plugin) {
+                tracing::error!("Channel poll load failed: {}", err);
+                return;
+            }
+
+            let instance = match host.get_mut(plugin.id()) {
+                Some(instance) => instance,
+                None => {
+                    tracing::error!("Channel poll failed to load instance for {}", plugin.id());
+                    return;
+                }
+            };
+
+            if let Ok(Some(creds)) = manager.load_oauth_credentials(&plugin) {
+                if instance.has_channel_auth_init() {
+                    if let Err(err) = instance.channel_auth_init(&creds) {
+                        tracing::warn!("Channel poll auth init failed: {}", err);
+                    }
+                }
+            }
+
+            if !instance.has_channel_poll() {
+                return;
+            }
+
+            loop {
+                let messages = match instance.channel_poll() {
+                    Ok(messages) => messages,
+                    Err(err) => {
+                        tracing::error!("Channel poll failed: {}", err);
+                        Vec::new()
+                    }
+                };
+
                 if !messages.is_empty() {
-                    let manager = self.clone();
+                    let manager = manager.clone();
                     let plugin_id = plugin.id().to_string();
-                    tokio::spawn(async move {
+                    runtime.spawn(async move {
                         if let Err(err) =
                             manager.process_inbound_messages(&plugin_id, messages).await
                         {
@@ -130,8 +183,10 @@ impl ChannelManager {
                         }
                     });
                 }
+
+                std::thread::sleep(Duration::from_millis(interval_ms));
             }
-        }
+        });
     }
 
     pub async fn handle_webhook(
