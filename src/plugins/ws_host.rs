@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
@@ -88,11 +89,7 @@ impl WsManager {
         let runtime = tokio::runtime::Handle::try_current()
             .context("WebSocket connect requires a Tokio runtime")?;
         runtime.spawn(async move {
-            let mut request = match tokio_tungstenite::tungstenite::http::Request::builder()
-                .method("GET")
-                .uri(&url)
-                .body(())
-            {
+            let mut request = match url.clone().into_client_request() {
                 Ok(req) => req,
                 Err(err) => {
                     let _ = recv_tx.send(WsEvent::Closed(err.to_string()));
