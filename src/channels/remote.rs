@@ -1,0 +1,438 @@
+//! Remote channel runtime helpers (registry, logging, event bus)
+//!
+//! Used by --remote / --headless modes to track active sessions, emit
+//! live events, and persist rolling logs.
+
+use anyhow::{Context, Result};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
+
+use crate::debug_logger::SensitiveDataRedactor;
+
+const REMOTE_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+const REMOTE_LOG_PREFIX: &str = "remote";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteEvent {
+    pub timestamp: String,
+    pub event: String,
+    pub plugin_id: String,
+    pub session_id: String,
+    pub conversation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl RemoteEvent {
+    pub fn new(
+        event: impl Into<String>,
+        plugin_id: impl Into<String>,
+        session_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            timestamp: Utc::now().to_rfc3339(),
+            event: event.into(),
+            plugin_id: plugin_id.into(),
+            session_id: session_id.into(),
+            conversation_id: conversation_id.into(),
+            user_id: None,
+            message: None,
+            metadata: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSessionEntry {
+    pub session_id: String,
+    pub plugin_id: String,
+    pub conversation_id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub guild_id: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub trust_level: Option<String>,
+    #[serde(default)]
+    pub last_event_at: Option<String>,
+    #[serde(default)]
+    pub last_event: Option<String>,
+    #[serde(default)]
+    pub last_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RemoteRegistryData {
+    sessions: HashMap<String, RemoteSessionEntry>,
+}
+
+#[derive(Clone)]
+pub struct RemoteRegistry {
+    path: PathBuf,
+    stop_dir: PathBuf,
+    stop_all_path: PathBuf,
+    state: Arc<Mutex<RemoteRegistryData>>,
+}
+
+impl RemoteRegistry {
+    pub fn new(project_root: &Path) -> Result<Self> {
+        let remote_dir = project_root.join("remote");
+        let stop_dir = remote_dir.join("stops");
+        std::fs::create_dir_all(&stop_dir)?;
+        let path = remote_dir.join("registry.json");
+        let stop_all_path = remote_dir.join("stop_all");
+        let data = load_registry(&path)?;
+        Ok(Self {
+            path,
+            stop_dir,
+            stop_all_path,
+            state: Arc::new(Mutex::new(data)),
+        })
+    }
+
+    pub fn snapshot(project_root: &Path) -> Result<Vec<RemoteSessionEntry>> {
+        let path = project_root.join("remote").join("registry.json");
+        Ok(load_registry(&path)?.sessions.into_values().collect())
+    }
+
+    pub fn update(&self, entry: RemoteSessionEntry) -> Result<()> {
+        let mut guard = self.state.lock().unwrap();
+        guard.sessions.insert(entry.session_id.clone(), entry);
+        save_registry(&self.path, &guard)
+    }
+
+    pub fn mark_status(
+        &self,
+        session_id: &str,
+        plugin_id: &str,
+        conversation_id: &str,
+        status: &str,
+    ) -> Result<RemoteSessionEntry> {
+        let mut guard = self.state.lock().unwrap();
+        let entry = guard
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| RemoteSessionEntry {
+                session_id: session_id.to_string(),
+                plugin_id: plugin_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                status: status.to_string(),
+                user_id: None,
+                channel_id: None,
+                guild_id: None,
+                provider: None,
+                model: None,
+                mode: None,
+                trust_level: None,
+                last_event_at: None,
+                last_event: None,
+                last_message: None,
+            });
+
+        entry.status = status.to_string();
+        entry.last_event_at = Some(Utc::now().to_rfc3339());
+        entry.last_event = Some(format!("status:{}", status));
+        let snapshot = entry.clone();
+        save_registry(&self.path, &guard)?;
+        Ok(snapshot)
+    }
+
+    pub fn set_last_message(
+        &self,
+        session_id: &str,
+        plugin_id: &str,
+        conversation_id: &str,
+        message: Option<String>,
+    ) -> Result<()> {
+        let mut guard = self.state.lock().unwrap();
+        let entry = guard
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| RemoteSessionEntry {
+                session_id: session_id.to_string(),
+                plugin_id: plugin_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                status: "idle".to_string(),
+                user_id: None,
+                channel_id: None,
+                guild_id: None,
+                provider: None,
+                model: None,
+                mode: None,
+                trust_level: None,
+                last_event_at: None,
+                last_event: None,
+                last_message: None,
+            });
+
+        entry.last_message = message;
+        entry.last_event_at = Some(Utc::now().to_rfc3339());
+        save_registry(&self.path, &guard)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_context(
+        &self,
+        session_id: &str,
+        plugin_id: &str,
+        conversation_id: &str,
+        provider: Option<String>,
+        model: Option<String>,
+        mode: Option<String>,
+        trust_level: Option<String>,
+        user_id: Option<String>,
+        channel_id: Option<String>,
+        guild_id: Option<String>,
+    ) -> Result<()> {
+        let mut guard = self.state.lock().unwrap();
+        let entry = guard
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| RemoteSessionEntry {
+                session_id: session_id.to_string(),
+                plugin_id: plugin_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                status: "idle".to_string(),
+                user_id: None,
+                channel_id: None,
+                guild_id: None,
+                provider: None,
+                model: None,
+                mode: None,
+                trust_level: None,
+                last_event_at: None,
+                last_event: None,
+                last_message: None,
+            });
+
+        if provider.is_some() {
+            entry.provider = provider;
+        }
+        if model.is_some() {
+            entry.model = model;
+        }
+        if mode.is_some() {
+            entry.mode = mode;
+        }
+        if trust_level.is_some() {
+            entry.trust_level = trust_level;
+        }
+        if user_id.is_some() {
+            entry.user_id = user_id;
+        }
+        if channel_id.is_some() {
+            entry.channel_id = channel_id;
+        }
+        if guild_id.is_some() {
+            entry.guild_id = guild_id;
+        }
+
+        entry.last_event_at = Some(Utc::now().to_rfc3339());
+        entry.last_event = Some("context_update".to_string());
+        save_registry(&self.path, &guard)
+    }
+
+    pub fn stop_session(&self, session_id: &str) -> Result<()> {
+        std::fs::create_dir_all(&self.stop_dir)?;
+        std::fs::write(self.stop_dir.join(session_id), "")?;
+        if let Ok(mut guard) = self.state.lock() {
+            if let Some(entry) = guard.sessions.get_mut(session_id) {
+                entry.status = "stopped".to_string();
+                entry.last_event_at = Some(Utc::now().to_rfc3339());
+                entry.last_event = Some("status:stopped".to_string());
+                save_registry(&self.path, &guard)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resume_session(&self, session_id: &str) -> Result<()> {
+        let stop_path = self.stop_dir.join(session_id);
+        if stop_path.exists() {
+            std::fs::remove_file(stop_path)?;
+        }
+        Ok(())
+    }
+
+    pub fn stop_all(&self) -> Result<()> {
+        std::fs::write(&self.stop_all_path, "")?;
+        Ok(())
+    }
+
+    pub fn resume_all(&self) -> Result<()> {
+        if self.stop_all_path.exists() {
+            std::fs::remove_file(&self.stop_all_path)?;
+        }
+        Ok(())
+    }
+
+    pub fn is_stopped(&self, session_id: &str) -> bool {
+        self.stop_all_path.exists() || self.stop_dir.join(session_id).exists()
+    }
+}
+
+fn load_registry(path: &Path) -> Result<RemoteRegistryData> {
+    if !path.exists() {
+        return Ok(RemoteRegistryData::default());
+    }
+    let content = std::fs::read_to_string(path)?;
+    let data = serde_json::from_str(&content).unwrap_or_default();
+    Ok(data)
+}
+
+fn save_registry(path: &Path, data: &RemoteRegistryData) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(data)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+struct RemoteLogger {
+    log_dir: PathBuf,
+    seq: u64,
+    current_path: PathBuf,
+    file: std::fs::File,
+    current_size: u64,
+}
+
+impl RemoteLogger {
+    fn new(log_dir: PathBuf) -> Result<Self> {
+        std::fs::create_dir_all(&log_dir)?;
+        let seq = 1;
+        let (current_path, file) = open_new_log(&log_dir, seq)?;
+        let current_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(Self {
+            log_dir,
+            seq,
+            current_path,
+            file,
+            current_size,
+        })
+    }
+
+    fn log(&mut self, entry: &RemoteEvent, redactor: &SensitiveDataRedactor) -> Result<()> {
+        let mut value = serde_json::to_value(entry)?;
+        redactor.redact_json(&mut value);
+        let line = serde_json::to_string(&value)?;
+        writeln!(self.file, "{}", line)?;
+        self.current_size = self
+            .current_size
+            .saturating_add(line.len() as u64)
+            .saturating_add(1);
+        if self.current_size >= REMOTE_LOG_MAX_BYTES {
+            self.rotate()?;
+        }
+        Ok(())
+    }
+
+    fn rotate(&mut self) -> Result<()> {
+        self.seq = self.seq.saturating_add(1);
+        let (path, file) = open_new_log(&self.log_dir, self.seq)?;
+        self.current_path = path;
+        self.file = file;
+        self.current_size = 0;
+        Ok(())
+    }
+}
+
+fn open_new_log(log_dir: &Path, seq: u64) -> Result<(PathBuf, std::fs::File)> {
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
+    let filename = format!("{}-{}-{:04}.log", REMOTE_LOG_PREFIX, timestamp, seq);
+    let path = log_dir.join(filename);
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("Failed to open remote log file {}", path.display()))?;
+    Ok((path, file))
+}
+
+#[derive(Clone)]
+pub struct RemoteRuntime {
+    inner: Arc<RemoteRuntimeInner>,
+}
+
+struct RemoteRuntimeInner {
+    allowed_plugins: Option<HashSet<String>>,
+    events: broadcast::Sender<RemoteEvent>,
+    logger: Mutex<RemoteLogger>,
+    registry: RemoteRegistry,
+    redactor: SensitiveDataRedactor,
+}
+
+impl RemoteRuntime {
+    pub fn new(project_root: &Path, allowed_plugins: Option<HashSet<String>>) -> Result<Self> {
+        let log_dir = project_root.join("logs").join("remote");
+        let logger = RemoteLogger::new(log_dir)?;
+        let registry = RemoteRegistry::new(project_root)?;
+        let (events, _) = broadcast::channel(256);
+        Ok(Self {
+            inner: Arc::new(RemoteRuntimeInner {
+                allowed_plugins,
+                events,
+                logger: Mutex::new(logger),
+                registry,
+                redactor: SensitiveDataRedactor::new(),
+            }),
+        })
+    }
+
+    pub fn events(&self) -> broadcast::Sender<RemoteEvent> {
+        self.inner.events.clone()
+    }
+
+    pub fn registry(&self) -> &RemoteRegistry {
+        &self.inner.registry
+    }
+
+    pub fn allows_plugin(&self, plugin_id: &str) -> bool {
+        self.inner
+            .allowed_plugins
+            .as_ref()
+            .map(|set| set.contains(plugin_id))
+            .unwrap_or(true)
+    }
+
+    pub fn emit(&self, event: RemoteEvent) {
+        if let Ok(mut guard) = self.inner.logger.lock() {
+            let _ = guard.log(&event, &self.inner.redactor);
+        }
+        let _ = self.inner.events.send(event);
+    }
+}
+
+pub fn normalize_message_preview(text: &str) -> String {
+    const MAX_LEN: usize = 512;
+    let trimmed = text.trim();
+    if trimmed.len() <= MAX_LEN {
+        return trimmed.to_string();
+    }
+    let mut end = MAX_LEN;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &trimmed[..end])
+}

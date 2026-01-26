@@ -66,7 +66,12 @@ fn try_set_clipboard(text: String) -> bool {
 
 fn osc52_sequence(text: &str) -> String {
     let encoded = general_purpose::STANDARD.encode(text.as_bytes());
-    format!("\x1b]52;c;{}\x07", encoded)
+    let seq = format!("\x1b]52;c;{}\x07", encoded);
+    if std::env::var_os("TMUX").is_some() {
+        format!("\x1bPtmux;\x1b{}\x1b\\", seq)
+    } else {
+        seq
+    }
 }
 
 fn tool_group_info(messages: &[Message], idx: usize) -> Option<(usize, usize)> {
@@ -660,14 +665,21 @@ impl AppService {
 
             // Message scrolling
             Command::ScrollDown => {
+                let step = 3usize;
                 let current = self.state.messages_scroll_offset();
                 let total_lines = self.state.messages_total_lines();
                 let viewport_height = self.state.messages_viewport_height();
                 let max_offset = total_lines.saturating_sub(viewport_height);
-                let next = current.saturating_add(1).min(max_offset);
+                let normalized = if current == usize::MAX {
+                    max_offset
+                } else {
+                    current
+                };
+                let next = normalized.saturating_add(step).min(max_offset);
                 self.state.set_messages_scroll_offset(next);
             }
             Command::ScrollUp => {
+                let step = 3usize;
                 let total_lines = self.state.messages_total_lines();
                 let viewport_height = self.state.messages_viewport_height();
                 let max_offset = total_lines.saturating_sub(viewport_height);
@@ -679,7 +691,7 @@ impl AppService {
                 };
                 if normalized > 0 {
                     self.state
-                        .set_messages_scroll_offset(normalized.saturating_sub(1));
+                        .set_messages_scroll_offset(normalized.saturating_sub(step));
                 }
             }
             Command::YankMessage => {
@@ -3030,13 +3042,28 @@ impl AppService {
     }
 
     /// Update session usage stats (cost and tokens) and persist to disk
-    pub async fn update_session_usage(&self, cost: f64, input_tokens: usize, output_tokens: usize) {
+    pub async fn update_session_usage(
+        &self,
+        model: &str,
+        cost: f64,
+        input_tokens: usize,
+        output_tokens: usize,
+    ) {
         if let Some(ref session_svc) = self.session_svc {
             if let Err(e) = session_svc
-                .update_usage(cost, input_tokens, output_tokens)
+                .update_usage(model, cost, input_tokens, output_tokens)
                 .await
             {
                 tracing::warn!("Failed to update session usage: {}", e);
+            }
+        }
+    }
+
+    /// Clear accumulated cost and token usage for the current session
+    pub async fn clear_session_usage(&self) {
+        if let Some(ref session_svc) = self.session_svc {
+            if let Err(e) = session_svc.clear_usage().await {
+                tracing::warn!("Failed to clear session usage: {}", e);
             }
         }
     }
@@ -3151,6 +3178,15 @@ impl AppService {
                     if let Ok(chunks) = session_svc.list_archive_chunks().await {
                         self.state.set_archive_chunks(chunks);
                     }
+
+                    // Restore session usage (costs/tokens) for sidebar
+                    self.state.set_session_cost_total(session.total_cost);
+                    self.state
+                        .set_session_tokens_total(session.input_tokens + session.output_tokens);
+                    self.state
+                        .set_session_cost_by_model(session.cost_by_model.clone());
+                    self.state
+                        .set_session_tokens_by_model(session.tokens_by_model.clone());
 
                     // Restore provider and model from session if set
                     if !session.provider.is_empty() {
@@ -3470,7 +3506,12 @@ mod tests {
 
     #[test]
     fn osc52_sequence_encodes_payload() {
+        let original_tmux = std::env::var_os("TMUX");
+        std::env::remove_var("TMUX");
         let seq = osc52_sequence("hello");
+        if let Some(value) = original_tmux {
+            std::env::set_var("TMUX", value);
+        }
         assert!(seq.starts_with("\u{1b}]52;c;"));
         assert!(seq.ends_with('\u{7}'));
         assert!(

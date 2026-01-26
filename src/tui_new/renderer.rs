@@ -6,14 +6,15 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::backend::Backend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::ui_backend::UiRenderer;
 use crate::ui_backend::{
-    AppEvent, Command, FocusedComponent, MessageRole as UiMessageRole, ModalType, SharedState,
-    TaskStatus as StateTaskStatus,
+    AppEvent, Command, FocusedComponent, Message, MessageRole as UiMessageRole, ModalType,
+    SharedState, TaskStatus as StateTaskStatus,
 };
 
 use super::modals::{
@@ -420,7 +421,9 @@ impl<B: Backend> TuiRenderer<B> {
                     return Some(Command::ModalDown);
                 }
                 match (state.focused_component(), state.vim_mode()) {
-                    (FocusedComponent::Messages, VimMode::Normal) => Some(Command::ScrollDown),
+                    (FocusedComponent::Messages, VimMode::Normal | VimMode::Visual) => {
+                        Some(Command::NextMessage)
+                    }
                     (FocusedComponent::Panel, VimMode::Normal) => Some(Command::SidebarDown),
                     (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('j')),
                     _ => None,
@@ -480,7 +483,9 @@ impl<B: Backend> TuiRenderer<B> {
                     return Some(Command::ModalUp);
                 }
                 match (state.focused_component(), state.vim_mode()) {
-                    (FocusedComponent::Messages, VimMode::Normal) => Some(Command::ScrollUp),
+                    (FocusedComponent::Messages, VimMode::Normal | VimMode::Visual) => {
+                        Some(Command::PrevMessage)
+                    }
                     (FocusedComponent::Panel, VimMode::Normal) => Some(Command::SidebarUp),
                     (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('k')),
                     _ => None,
@@ -1586,6 +1591,191 @@ impl<B: Backend> TuiRenderer<B> {
         None
     }
 
+    fn build_message_widgets(messages: &[Message]) -> Vec<super::widgets::Message> {
+        messages
+            .iter()
+            .map(|m| super::widgets::Message {
+                role: match m.role {
+                    UiMessageRole::User => super::widgets::MessageRole::User,
+                    UiMessageRole::Assistant => super::widgets::MessageRole::Agent,
+                    UiMessageRole::System => super::widgets::MessageRole::System,
+                    UiMessageRole::Tool => super::widgets::MessageRole::Tool,
+                    UiMessageRole::Thinking => super::widgets::MessageRole::Thinking,
+                },
+                content: m.content.clone(),
+                provider: m.provider.clone(),
+                model: m.model.clone(),
+                collapsed: m.collapsed,
+                timestamp: m.timestamp.clone(),
+                question: None,
+                tool_args: m.tool_args.clone(),
+            })
+            .collect()
+    }
+
+    fn messages_area_rect(&self, state: &SharedState) -> Option<Rect> {
+        let size = self.terminal.size().ok()?;
+        if size.width < 3 || size.height < 3 {
+            return None;
+        }
+
+        let inner_x = 1u16;
+        let inner_y = 1u16;
+        let inner_width = size.width.saturating_sub(2);
+        let inner_height = size.height.saturating_sub(2);
+
+        if inner_width == 0 || inner_height == 0 {
+            return None;
+        }
+
+        let sidebar_visible = state.sidebar_visible();
+        let (main_x, main_width) = if sidebar_visible && inner_width > 80 {
+            (inner_x, inner_width.saturating_sub(35))
+        } else {
+            (inner_x, inner_width)
+        };
+
+        let header_height = 2u16;
+        let input_height = 5u16;
+        let status_message_height = 1u16;
+        let status_height = 1u16;
+
+        let header_y = inner_y;
+        let messages_y = header_y + header_height;
+        let status_y = inner_y + inner_height - status_height;
+        let input_y = status_y.saturating_sub(input_height);
+        let status_message_y = input_y.saturating_sub(status_message_height);
+        let messages_height = status_message_y.saturating_sub(messages_y);
+
+        if messages_height == 0 || main_width == 0 {
+            return None;
+        }
+
+        Some(Rect {
+            x: main_x,
+            y: messages_y,
+            width: main_width,
+            height: messages_height,
+        })
+    }
+
+    fn message_line_target_at(
+        &self,
+        col: u16,
+        row: u16,
+        state: &SharedState,
+    ) -> Option<super::widgets::MessageLineTarget> {
+        let messages_rect = self.messages_area_rect(state)?;
+
+        if col < messages_rect.x
+            || col >= messages_rect.x + messages_rect.width
+            || row < messages_rect.y
+            || row >= messages_rect.y + messages_rect.height
+        {
+            return None;
+        }
+
+        if messages_rect.width < 3 || messages_rect.height < 3 {
+            return None;
+        }
+
+        if col == messages_rect.x + messages_rect.width.saturating_sub(1) {
+            return None;
+        }
+
+        let inner_y = messages_rect.y + 1;
+        let inner_height = messages_rect.height.saturating_sub(2);
+        if row < inner_y || row >= inner_y + inner_height {
+            return None;
+        }
+
+        let relative_line = row.saturating_sub(inner_y);
+        let messages = state.messages();
+        let message_widgets = Self::build_message_widgets(&messages);
+        let collapsed = state.collapsed_tool_groups();
+        let message_area = MessageArea::new(&message_widgets, &self.theme)
+            .focused(matches!(
+                state.focused_component(),
+                FocusedComponent::Messages
+            ))
+            .focused_index(state.focused_message())
+            .focused_sub_index(state.focused_sub_index())
+            .message_cursor(state.message_cursor())
+            .message_selection(state.message_selection())
+            .vim_mode(state.vim_mode())
+            .diff_view_mode(state.diff_view_mode())
+            .collapsed_tool_groups(&collapsed)
+            .streaming_content(state.streaming_content())
+            .streaming_thinking(state.streaming_thinking());
+        let targets = message_area.line_targets(messages_rect);
+
+        if targets.is_empty() {
+            return None;
+        }
+
+        let total_lines = targets.len();
+        let viewport_height = if state.messages_viewport_height() == 0 {
+            inner_height as usize
+        } else {
+            state.messages_viewport_height()
+        };
+        let max_offset = total_lines.saturating_sub(viewport_height);
+        let scroll_offset = state.messages_scroll_offset();
+        let line_offset = if scroll_offset == usize::MAX {
+            max_offset
+        } else {
+            scroll_offset.min(max_offset)
+        };
+        let line_index = line_offset.saturating_add(relative_line as usize);
+
+        targets.get(line_index).copied()
+    }
+
+    fn handle_messages_click(&self, mouse: MouseEvent, state: &SharedState) -> Option<Command> {
+        let target = self.message_line_target_at(mouse.column, mouse.row, state)?;
+        state.set_focused_component(FocusedComponent::Messages);
+        state.set_vim_mode(crate::ui_backend::VimMode::Normal);
+
+        match target {
+            super::widgets::MessageLineTarget::ToolGroupHeader { start_index } => {
+                state.set_focused_message(start_index);
+                state.exit_group();
+                Some(Command::ToggleMessageCollapse)
+            }
+            super::widgets::MessageLineTarget::ToolHeader(message_index) => {
+                let messages = state.messages();
+                if let Some((group_start, _)) = tool_group_info(&messages, message_index) {
+                    let offset = message_index.saturating_sub(group_start);
+                    state.set_focused_message(group_start);
+                    state.set_focused_sub_index(Some(offset));
+                    if state.is_tool_group_collapsed(group_start) {
+                        state.expand_tool_group(group_start);
+                    }
+                } else {
+                    state.set_focused_message(message_index);
+                    state.exit_group();
+                }
+                Some(Command::ToggleMessageCollapse)
+            }
+            super::widgets::MessageLineTarget::Message(message_index) => {
+                let messages = state.messages();
+                if let Some((group_start, _)) = tool_group_info(&messages, message_index) {
+                    let offset = message_index.saturating_sub(group_start);
+                    state.set_focused_message(group_start);
+                    state.set_focused_sub_index(Some(offset));
+                    if state.is_tool_group_collapsed(group_start) {
+                        state.expand_tool_group(group_start);
+                    }
+                } else {
+                    state.set_focused_message(message_index);
+                    state.exit_group();
+                }
+                Some(Command::FocusMessages)
+            }
+            super::widgets::MessageLineTarget::None => None,
+        }
+    }
+
     /// Convert mouse event to command
     fn mouse_to_command(&self, mouse: MouseEvent, state: &SharedState) -> Option<Command> {
         // Debug log mouse events
@@ -1656,6 +1846,11 @@ impl<B: Backend> TuiRenderer<B> {
                             state.set_sidebar_selected_item(Some(task_idx));
                             return Some(Command::FocusPanel);
                         }
+                    }
+                }
+                if target == ClickTarget::Messages {
+                    if let Some(cmd) = self.handle_messages_click(mouse, state) {
+                        return Some(cmd);
                     }
                 }
                 // Handle clicks - delegate to hit testing
@@ -2067,6 +2262,42 @@ impl<B: Backend> TuiRenderer<B> {
     }
 }
 
+fn tool_group_info(messages: &[Message], idx: usize) -> Option<(usize, usize)> {
+    let msg = messages.get(idx)?;
+    if msg.role != UiMessageRole::Tool {
+        return None;
+    }
+    let risk_group = super::widgets::parse_tool_risk_group(&msg.content);
+    let mut start = idx;
+    while start > 0 {
+        let prev = &messages[start - 1];
+        if prev.role == UiMessageRole::Tool
+            && super::widgets::parse_tool_risk_group(&prev.content) == risk_group
+        {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    let mut end = start;
+    while end < messages.len() {
+        let current = &messages[end];
+        if current.role == UiMessageRole::Tool
+            && super::widgets::parse_tool_risk_group(&current.content) == risk_group
+        {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    let size = end.saturating_sub(start);
+    if size >= 2 {
+        Some((start, size))
+    } else {
+        None
+    }
+}
+
 impl<B: Backend> UiRenderer for TuiRenderer<B> {
     fn render(&mut self, state: &SharedState) -> Result<()> {
         use ratatui::layout::{Constraint, Direction, Layout};
@@ -2139,25 +2370,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
             frame.render_widget(header, chunks[0]);
 
             // Render message area
-            let message_widgets: Vec<_> = messages
-                .iter()
-                .map(|m| super::widgets::Message {
-                    role: match m.role {
-                        UiMessageRole::User => super::widgets::MessageRole::User,
-                        UiMessageRole::Assistant => super::widgets::MessageRole::Agent,
-                        UiMessageRole::System => super::widgets::MessageRole::System,
-                        UiMessageRole::Tool => super::widgets::MessageRole::Tool,
-                        UiMessageRole::Thinking => super::widgets::MessageRole::Thinking,
-                    },
-                    content: m.content.clone(),
-                    provider: m.provider.clone(),
-                    model: m.model.clone(),
-                    collapsed: m.collapsed,
-                    timestamp: m.timestamp.clone(),
-                    question: None, // TODO: map questions if needed
-                    tool_args: m.tool_args.clone(),
-                })
-                .collect();
+            let message_widgets = Self::build_message_widgets(&messages);
 
             let streaming_content = state.streaming_content();
             // Always show streaming_thinking if present - it contains both:
@@ -2857,6 +3070,25 @@ mod tests {
         );
 
         assert_eq!(cmd, Some(Command::FocusInput));
+    }
+
+    #[test]
+    fn test_jk_moves_between_messages_in_messages_panel() {
+        let state = SharedState::new();
+        state.set_focused_component(FocusedComponent::Messages);
+        state.set_vim_mode(crate::ui_backend::VimMode::Normal);
+
+        let cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+        let cmd_k = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('k'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_j, Some(Command::NextMessage));
+        assert_eq!(cmd_k, Some(Command::PrevMessage));
     }
 
     /// Helper to create a key event

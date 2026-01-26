@@ -457,7 +457,13 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         None
     };
 
-    let channel_manager = ChannelManager::new(config.clone(), working_dir.clone(), storage.clone());
+    let channel_manager = ChannelManager::new(
+        config.clone(),
+        working_dir.clone(),
+        storage.clone(),
+        usage_tracker.clone(),
+        None,
+    );
     if let Err(e) = channel_manager.start_all().await {
         tracing::warn!("Failed to start channel plugins: {}", e);
     }
@@ -1115,6 +1121,7 @@ async fn handle_chat(
                 session.mode = mode_str.clone();
                 session.window_style = state.window_style.read().await.clone();
                 session.window_position = state.window_position.read().await.clone();
+                let model_name = session.model.clone();
 
                 // Add messages
                 session.add_message("user", &req.message);
@@ -1122,8 +1129,37 @@ async fn handle_chat(
 
                 // Update token stats
                 if let Some(ref usage) = response.usage {
-                    session.input_tokens += usage.input_tokens as usize;
-                    session.output_tokens += usage.output_tokens as usize;
+                    let input_tokens = usage.input_tokens as usize;
+                    let output_tokens = usage.output_tokens as usize;
+                    let total_tokens = input_tokens + output_tokens;
+                    session.input_tokens += input_tokens;
+                    session.output_tokens += output_tokens;
+
+                    if !model_name.is_empty() {
+                        if let Some(entry) = session
+                            .tokens_by_model
+                            .iter_mut()
+                            .find(|(name, _)| name == &model_name)
+                        {
+                            entry.1 += total_tokens;
+                        } else {
+                            session
+                                .tokens_by_model
+                                .push((model_name.clone(), total_tokens));
+                        }
+
+                        if let Some(entry) = session
+                            .cost_by_model
+                            .iter_mut()
+                            .find(|(name, _)| name == &model_name)
+                        {
+                            entry.1 += calculated_cost;
+                        } else {
+                            session
+                                .cost_by_model
+                                .push((model_name.clone(), calculated_cost));
+                        }
+                    }
                 }
                 session.total_cost += calculated_cost;
 

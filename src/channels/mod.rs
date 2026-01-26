@@ -3,7 +3,10 @@
 //! Channel plugins translate external messages (Slack, Discord, Signal)
 //! into tark chat requests and send responses back to those channels.
 
+pub mod remote;
+
 use crate::agent::{ChatAgent, ToolCallLog};
+use crate::channels::remote::RemoteRuntime;
 use crate::config::Config;
 use crate::llm;
 use crate::plugins::{
@@ -11,6 +14,7 @@ use crate::plugins::{
     ChannelWebhookRequest, ChannelWebhookResponse, InstalledPlugin, PluginHost, PluginRegistry,
     PluginType,
 };
+use crate::storage::usage::UsageTracker;
 use crate::storage::{ChatSession, TarkStorage};
 use crate::tools::ToolRegistry;
 use anyhow::{Context, Result};
@@ -52,14 +56,25 @@ pub struct ChannelManager {
     config: Config,
     working_dir: PathBuf,
     storage: Option<Arc<TarkStorage>>,
+    #[allow(dead_code)]
+    usage_tracker: Option<Arc<UsageTracker>>,
+    remote: Option<Arc<RemoteRuntime>>,
 }
 
 impl ChannelManager {
-    pub fn new(config: Config, working_dir: PathBuf, storage: Option<Arc<TarkStorage>>) -> Self {
+    pub fn new(
+        config: Config,
+        working_dir: PathBuf,
+        storage: Option<Arc<TarkStorage>>,
+        usage_tracker: Option<Arc<UsageTracker>>,
+        remote: Option<Arc<RemoteRuntime>>,
+    ) -> Self {
         Self {
             config,
             working_dir,
             storage,
+            usage_tracker,
+            remote,
         }
     }
 
@@ -68,6 +83,11 @@ impl ChannelManager {
         for plugin in registry.by_type(PluginType::Channel) {
             if !plugin.enabled {
                 continue;
+            }
+            if let Some(remote) = &self.remote {
+                if !remote.allows_plugin(plugin.id()) {
+                    continue;
+                }
             }
             let plugin = plugin.clone();
             let manager = self.clone();
@@ -119,6 +139,14 @@ impl ChannelManager {
         let plugin = registry
             .get(plugin_id)
             .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found", plugin_id))?;
+        if let Some(remote) = &self.remote {
+            if !remote.allows_plugin(plugin_id) {
+                anyhow::bail!(
+                    "Plugin '{}' is not allowed for this remote runtime",
+                    plugin_id
+                );
+            }
+        }
         if plugin.plugin_type() != PluginType::Channel {
             anyhow::bail!("Plugin '{}' is not a channel plugin", plugin_id);
         }

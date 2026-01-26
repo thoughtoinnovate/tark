@@ -1498,6 +1498,7 @@ impl<B: Backend> TuiController<B> {
             }
             Command::ScrollUp => {
                 // Scroll up in messages area
+                let step = 3usize;
                 let total_lines = state.messages_total_lines();
                 let viewport_height = state.messages_viewport_height();
                 let max_offset = total_lines.saturating_sub(viewport_height);
@@ -1508,17 +1509,23 @@ impl<B: Backend> TuiController<B> {
                     current_offset
                 };
                 if normalized > 0 {
-                    state.set_messages_scroll_offset(normalized.saturating_sub(1));
+                    state.set_messages_scroll_offset(normalized.saturating_sub(step));
                 }
                 return Ok(());
             }
             Command::ScrollDown => {
                 // Scroll down in messages area
+                let step = 3usize;
                 let current_offset = state.messages_scroll_offset();
                 let total_lines = state.messages_total_lines();
                 let viewport_height = state.messages_viewport_height();
                 let max_offset = total_lines.saturating_sub(viewport_height);
-                let next = current_offset.saturating_add(1).min(max_offset);
+                let normalized = if current_offset == usize::MAX {
+                    max_offset
+                } else {
+                    current_offset
+                };
+                let next = normalized.saturating_add(step).min(max_offset);
                 state.set_messages_scroll_offset(next);
                 return Ok(());
             }
@@ -2058,7 +2065,7 @@ impl<B: Backend> TuiController<B> {
 
                         // Persist usage to session file so it survives session switches
                         self.service
-                            .update_session_usage(cost, *input_tokens, *output_tokens)
+                            .update_session_usage(&model_id, cost, *input_tokens, *output_tokens)
                             .await;
                     }
 
@@ -2425,13 +2432,15 @@ impl<B: Backend> TuiController<B> {
                                 state.add_message(msg);
                             }
                             state.scroll_to_bottom();
+                            state.collapse_all_tools_except_last();
+                            self.collapse_old_tool_groups(state);
                             self.service.refresh_archive_chunks().await;
 
                             // Clear session-specific runtime state
                             let _ = state.clear_message_queue();
-                            // Clear per-model cost/token breakdowns (runtime-only, not persisted)
-                            state.set_session_cost_by_model(Vec::new());
-                            state.set_session_tokens_by_model(Vec::new());
+                            // Restore per-model cost/token breakdowns
+                            state.set_session_cost_by_model(session.cost_by_model.clone());
+                            state.set_session_tokens_by_model(session.tokens_by_model.clone());
                             // Clear context files (session-specific, should not persist across sessions)
                             state.clear_context_files();
                             // Note: Tasks are NOT cleared - they are workspace-level, not session-specific
@@ -2464,7 +2473,20 @@ impl<B: Backend> TuiController<B> {
                                 session_id: session.id.clone(),
                                 session_name: session_name.clone(),
                                 total_cost: session.total_cost,
-                                model_count: 1,
+                                model_count: {
+                                    let count = session
+                                        .cost_by_model
+                                        .len()
+                                        .max(session.tokens_by_model.len());
+                                    if count == 0
+                                        && (session.total_cost > 0.0
+                                            || session.input_tokens + session.output_tokens > 0)
+                                    {
+                                        1
+                                    } else {
+                                        count
+                                    }
+                                },
                                 created_at: session
                                     .created_at
                                     .format("%Y-%m-%d %H:%M:%S")
@@ -2786,6 +2808,37 @@ impl<B: Backend> TuiController<B> {
                 let msg = Message {
                     role: MessageRole::System,
                     content: "Chat and context cleared.".to_string(),
+                    thinking: None,
+                    provider: None,
+                    model: None,
+                    context_transient: true,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
+                    tool_args: None,
+                    collapsed: false,
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                };
+                state.add_message(msg);
+                state.clear_input();
+            }
+            "/clear-costs" => {
+                state.set_session_cost_total(0.0);
+                state.set_session_tokens_total(0);
+                state.set_session_cost_by_model(Vec::new());
+                state.set_session_tokens_by_model(Vec::new());
+                if let Some(mut session) = state.session() {
+                    session.total_cost = 0.0;
+                    session.model_count = 0;
+                    state.set_session(Some(session));
+                }
+
+                self.service.clear_session_usage().await;
+                self.service.refresh_sidebar_data().await;
+
+                use crate::ui_backend::{Message, MessageRole};
+                let msg = Message {
+                    role: MessageRole::System,
+                    content: "Session usage cleared.".to_string(),
                     thinking: None,
                     provider: None,
                     model: None,
@@ -3371,7 +3424,7 @@ impl<B: Backend> TuiController<B> {
 
     fn collapse_old_tool_groups(&self, state: &SharedState) {
         let messages = state.messages();
-        let mut group_starts: Vec<usize> = Vec::new();
+        let mut groups: Vec<(usize, usize)> = Vec::new();
         let mut current_start: Option<usize> = None;
         let mut current_risk: Option<String> = None;
         let mut current_len = 0usize;
@@ -3387,7 +3440,7 @@ impl<B: Backend> TuiController<B> {
                     _ => {
                         if let Some(start) = current_start {
                             if current_len >= 2 {
-                                group_starts.push(start);
+                                groups.push((start, current_len));
                             }
                         }
                         current_start = Some(idx);
@@ -3397,7 +3450,7 @@ impl<B: Backend> TuiController<B> {
                 }
             } else if let Some(start) = current_start {
                 if current_len >= 2 {
-                    group_starts.push(start);
+                    groups.push((start, current_len));
                 }
                 current_start = None;
                 current_risk = None;
@@ -3407,19 +3460,30 @@ impl<B: Backend> TuiController<B> {
 
         if let Some(start) = current_start {
             if current_len >= 2 {
-                group_starts.push(start);
+                groups.push((start, current_len));
             }
         }
 
-        let last_group = group_starts.last().copied();
+        let last_group = groups.last().map(|(start, _)| *start);
         let mut collapsed = std::collections::HashSet::new();
-        for start in group_starts {
-            if Some(start) != last_group {
-                collapsed.insert(start);
+        for (start, _) in &groups {
+            if Some(*start) != last_group {
+                collapsed.insert(*start);
             }
         }
 
         state.set_collapsed_tool_groups(collapsed);
+
+        let focused = state.focused_message();
+        for (start, len) in groups {
+            if focused >= start && focused < start.saturating_add(len) {
+                if state.is_tool_group_collapsed(start) {
+                    state.set_focused_message(start);
+                    state.exit_group();
+                }
+                break;
+            }
+        }
     }
 }
 

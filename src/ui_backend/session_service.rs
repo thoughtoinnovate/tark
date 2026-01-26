@@ -28,6 +28,19 @@ pub struct SessionService {
     conversation_svc: Arc<ConversationService>,
 }
 
+fn session_model_count(session: &crate::storage::ChatSession) -> usize {
+    let count = session
+        .cost_by_model
+        .len()
+        .max(session.tokens_by_model.len());
+    if count == 0 && (session.total_cost > 0.0 || session.input_tokens + session.output_tokens > 0)
+    {
+        1
+    } else {
+        count
+    }
+}
+
 impl SessionService {
     /// Create a new session service
     pub fn new(session_mgr: SessionManager, conversation_svc: Arc<ConversationService>) -> Self {
@@ -50,8 +63,8 @@ impl SessionService {
             } else {
                 session.name.clone()
             },
-            total_cost: 0.0, // TODO: Get from usage tracker
-            model_count: 1,
+            total_cost: session.total_cost,
+            model_count: session_model_count(session),
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         }
     }
@@ -76,7 +89,7 @@ impl SessionService {
             session_id,
             session_name: "New Session".to_string(),
             total_cost: 0.0,
-            model_count: 1,
+            model_count: 0,
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         })
     }
@@ -105,10 +118,10 @@ impl SessionService {
         };
 
         Ok(SessionInfo {
-            session_id: session.id,
+            session_id: session.id.clone(),
             session_name,
             total_cost: session.total_cost,
-            model_count: 1,
+            model_count: session_model_count(&session),
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         })
     }
@@ -277,10 +290,10 @@ impl SessionService {
         };
 
         Ok(SessionInfo {
-            session_id: session.id,
+            session_id: session.id.clone(),
             session_name,
-            total_cost: 0.0,
-            model_count: 1,
+            total_cost: session.total_cost,
+            model_count: session_model_count(&session),
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         })
     }
@@ -294,6 +307,7 @@ impl SessionService {
     /// Update session usage stats (cost and tokens) and save
     pub async fn update_usage(
         &self,
+        model: &str,
         cost: f64,
         input_tokens: usize,
         output_tokens: usize,
@@ -303,9 +317,45 @@ impl SessionService {
         session.total_cost += cost;
         session.input_tokens += input_tokens;
         session.output_tokens += output_tokens;
+        let total_tokens = input_tokens + output_tokens;
+        if let Some(entry) = session
+            .cost_by_model
+            .iter_mut()
+            .find(|(name, _)| name == model)
+        {
+            entry.1 += cost;
+        } else {
+            session.cost_by_model.push((model.to_string(), cost));
+        }
+        if let Some(entry) = session
+            .tokens_by_model
+            .iter_mut()
+            .find(|(name, _)| name == model)
+        {
+            entry.1 += total_tokens;
+        } else {
+            session
+                .tokens_by_model
+                .push((model.to_string(), total_tokens));
+        }
         drop(mgr); // Release lock before saving
 
         // Save to persist the changes
+        let mgr = self.session_mgr.read().await;
+        mgr.save().map_err(|e| StorageError::Other(e.into()))
+    }
+
+    /// Clear accumulated cost and token usage for the current session
+    pub async fn clear_usage(&self) -> Result<(), StorageError> {
+        let mut mgr = self.session_mgr.write().await;
+        let session = mgr.current_mut();
+        session.total_cost = 0.0;
+        session.input_tokens = 0;
+        session.output_tokens = 0;
+        session.cost_by_model.clear();
+        session.tokens_by_model.clear();
+        drop(mgr); // Release lock before saving
+
         let mgr = self.session_mgr.read().await;
         mgr.save().map_err(|e| StorageError::Other(e.into()))
     }

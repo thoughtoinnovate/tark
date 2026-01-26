@@ -23,6 +23,7 @@ pub enum SlashCommand {
     Provider,
     Theme,
     Clear,
+    ClearCosts,
     Compact,
     Think,
     Thinking,
@@ -46,6 +47,7 @@ impl SlashCommand {
             Self::Provider,
             Self::Theme,
             Self::Clear,
+            Self::ClearCosts,
             Self::Compact,
             Self::Think,
             Self::Thinking,
@@ -69,6 +71,7 @@ impl SlashCommand {
             Self::Provider => "provider",
             Self::Theme => "theme",
             Self::Clear => "clear",
+            Self::ClearCosts => "clear-costs",
             Self::Compact => "compact",
             Self::Think => "think",
             Self::Thinking => "thinking",
@@ -92,6 +95,7 @@ impl SlashCommand {
             Self::Provider => "Open provider picker",
             Self::Theme => "Open theme picker",
             Self::Clear => "Clear conversation history",
+            Self::ClearCosts => "Reset session usage totals",
             Self::Compact => "Compact context to free up space",
             Self::Think => "Toggle model thinking level (off/low/medium/high)",
             Self::Thinking => "Toggle think tool for structured reasoning",
@@ -115,6 +119,7 @@ impl SlashCommand {
             Self::Provider => "🔌",
             Self::Theme => "🎨",
             Self::Clear => "🗑️",
+            Self::ClearCosts => "🧹",
             Self::Compact => "📦",
             Self::Think => "🧠",
             Self::Thinking => "💭",
@@ -364,8 +369,9 @@ mod tests {
     #[test]
     fn test_slash_command_find_matches_c() {
         let matches = SlashCommand::find_matches("c");
-        assert_eq!(matches.len(), 2); // clear, compact
+        assert_eq!(matches.len(), 3); // clear, clear-costs, compact
         assert!(matches.contains(&SlashCommand::Clear));
+        assert!(matches.contains(&SlashCommand::ClearCosts));
         assert!(matches.contains(&SlashCommand::Compact));
     }
 
@@ -435,7 +441,7 @@ mod tests {
             state.move_down();
         }
 
-        // Should be at index 8, scroll_offset should be 1 now (with 17 total commands)
+        // Should be at index 8, scroll_offset should be 1 now (with 18 total commands)
         assert_eq!(state.selected, 8);
         assert_eq!(state.scroll_offset, 1);
 

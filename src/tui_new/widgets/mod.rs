@@ -22,7 +22,9 @@ pub use header::Header;
 #[allow(unused_imports)]
 pub use input::AttachmentBadge;
 pub use input::InputWidget;
-pub use message_area::{parse_tool_risk_group, Message, MessageArea, MessageRole};
+pub use message_area::{
+    parse_tool_risk_group, Message, MessageArea, MessageLineTarget, MessageRole,
+};
 pub use modal::{
     FilePickerModal, HelpModal, ModelPickerModal, ProviderPickerModal, SessionPickerModal,
     ThemePickerModal,

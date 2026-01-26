@@ -212,6 +212,7 @@ Press `<leader>tc` (or your configured keymap) to toggle the chat window.
 | `/build` | Switch to Build mode (full access) |
 | `/trust` | Open trust level selector |
 | `/clear` | Clear chat history |
+| `/clear-costs` | Reset session usage totals |
 | `/compact` | Manually compact context window |
 | `/attach <file>` | Attach a file to context |
 | `/file` | Open file picker |
@@ -261,7 +262,7 @@ Selected files and folders are inserted into the prompt as `@path` tokens. Remov
 
 | Key | Description |
 |-----|-------------|
-| `j/k` | Scroll down/up |
+| `j/k` | Move focus to next/previous message |
 | `v` | Start visual selection in focused message |
 | `h/l` | Move cursor left/right (message selection) |
 | `w/b` | Next/previous word (message selection) |

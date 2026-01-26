@@ -408,6 +408,38 @@ fn test_tool_diff_forced_split_on_narrow_width() {
 }
 
 #[test]
+fn test_message_area_line_targets_include_tool_group_header() {
+    let theme = Theme::default();
+    let messages = vec![
+        Message::new(MessageRole::Tool, "✓|a|Exploration|one"),
+        Message::new(MessageRole::Tool, "✓|b|Exploration|two"),
+    ];
+    let widget = MessageArea::new(&messages, &theme);
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 20,
+    };
+    let targets = widget.line_targets(area);
+
+    assert!(
+        targets
+            .iter()
+            .any(|t| matches!(t, MessageLineTarget::ToolGroupHeader { start_index: 0 })),
+        "Expected tool group header line target"
+    );
+    assert!(
+        targets.contains(&MessageLineTarget::ToolHeader(0)),
+        "Expected first tool header target"
+    );
+    assert!(
+        targets.contains(&MessageLineTarget::ToolHeader(1)),
+        "Expected second tool header target"
+    );
+}
+
+#[test]
 fn test_flash_bar_error_bordered_card() {
     let theme = Theme::default();
     let widget = FlashBar::new(&theme)

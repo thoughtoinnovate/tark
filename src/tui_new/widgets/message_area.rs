@@ -554,6 +554,14 @@ pub struct ToolGroup {
     pub all_completed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageLineTarget {
+    None,
+    Message(usize),
+    ToolHeader(usize),
+    ToolGroupHeader { start_index: usize },
+}
+
 /// Message area widget displaying chat history
 pub struct MessageArea<'a> {
     /// Messages to display
@@ -811,8 +819,269 @@ impl<'a> MessageArea<'a> {
             return (0, 0);
         }
 
-        let lines = self.build_lines(inner);
+        let lines = self.line_targets(area);
         (lines.len(), inner.height as usize)
+    }
+
+    pub fn line_targets(&self, area: Rect) -> Vec<MessageLineTarget> {
+        let border_color = if self.focused {
+            self.theme.border_focused
+        } else {
+            self.theme.border
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(border_color))
+            .title(" Messages ");
+
+        let inner = block.inner(area);
+        if inner.height < 1 || inner.width < 1 {
+            return Vec::new();
+        }
+
+        let available_width = inner.width.saturating_sub(4) as usize;
+        let bubble_content_width = ((available_width as f32 * 0.9) as usize)
+            .max(40)
+            .min(available_width);
+
+        let tool_groups = collect_tool_groups(self.messages);
+        let mut targets: Vec<MessageLineTarget> = Vec::new();
+
+        let mut push_targets = |target: MessageLineTarget, count: usize| {
+            if count == 0 {
+                return;
+            }
+            targets.extend(std::iter::repeat_n(target, count));
+        };
+
+        for (msg_idx, msg) in self.messages.iter().enumerate() {
+            let message_target = MessageLineTarget::Message(msg_idx);
+
+            if msg.role == MessageRole::Question {
+                if let Some(ref question) = msg.question {
+                    if question.answered {
+                        push_targets(message_target, 2);
+                    } else {
+                        push_targets(message_target, 1 + question.options.len());
+                    }
+                } else {
+                    push_targets(message_target, 1);
+                }
+                push_targets(MessageLineTarget::None, 1);
+                continue;
+            }
+
+            let is_collapsible = matches!(msg.role, MessageRole::Thinking | MessageRole::Tool);
+            if is_collapsible {
+                if msg.role == MessageRole::Tool {
+                    let prev_role = if msg_idx > 0 {
+                        Some(self.messages[msg_idx - 1].role)
+                    } else {
+                        None
+                    };
+
+                    let tool_group = tool_groups
+                        .iter()
+                        .find(|g| g.tool_indices.contains(&msg_idx));
+                    let is_group_first = tool_group
+                        .map(|g| g.tool_indices.len() >= 2 && g.tool_indices[0] == msg_idx)
+                        .unwrap_or(false);
+                    let group_is_collapsed = tool_group
+                        .map(|g| self.collapsed_tool_groups.contains(&g.start_index))
+                        .unwrap_or(false);
+
+                    if is_group_first {
+                        if let Some(group) = tool_group {
+                            if prev_role == Some(MessageRole::Agent)
+                                || prev_role == Some(MessageRole::User)
+                                || (prev_role.is_none() && msg_idx == 0)
+                            {
+                                push_targets(MessageLineTarget::None, 1);
+                            }
+                            push_targets(
+                                MessageLineTarget::ToolGroupHeader {
+                                    start_index: group.start_index,
+                                },
+                                1,
+                            );
+                        }
+                    } else if prev_role == Some(MessageRole::Agent)
+                        || prev_role == Some(MessageRole::User)
+                        || (prev_role.is_none() && msg_idx == 0)
+                    {
+                        push_targets(MessageLineTarget::None, 1);
+                    }
+
+                    let parts: Vec<&str> = msg.content.splitn(4, '|').collect();
+                    let (status_icon, tool_name, content) = if parts.len() >= 4 {
+                        (parts[0], parts[1], parts[3].to_string())
+                    } else if parts.len() == 3 {
+                        (parts[0], parts[1], parts[2].to_string())
+                    } else if let Some(colon_idx) = msg.content.find(':') {
+                        (
+                            "🔧",
+                            &msg.content[..colon_idx],
+                            msg.content[colon_idx + 1..].trim().to_string(),
+                        )
+                    } else {
+                        ("🔧", "tool", msg.content.clone())
+                    };
+
+                    let (display_content, _elapsed_time) =
+                        if let Some(time_start) = content.rfind(" (") {
+                            if content.ends_with(')') {
+                                let time_part = &content[time_start..];
+                                if time_part.contains("ms") || time_part.contains('s') {
+                                    (
+                                        content[..time_start].to_string(),
+                                        Some(time_part.to_string()),
+                                    )
+                                } else {
+                                    (content.clone(), None)
+                                }
+                            } else {
+                                (content.clone(), None)
+                            }
+                        } else {
+                            (content.clone(), None)
+                        };
+
+                    let is_running = status_icon == "⋯";
+                    if group_is_collapsed && !is_running {
+                        continue;
+                    }
+
+                    let effective_collapsed = if is_running { false } else { msg.collapsed };
+
+                    push_targets(MessageLineTarget::ToolHeader(msg_idx), 1);
+
+                    if !effective_collapsed {
+                        if tool_name == "think" {
+                            if let Some(ref args) = msg.tool_args {
+                                if let Ok(thought) = serde_json::from_value::<
+                                    crate::tools::builtin::Thought,
+                                >(args.clone())
+                                {
+                                    let mut line_count = 1usize; // Thought line
+                                    if thought.thought_type.is_some()
+                                        || thought.confidence.is_some()
+                                    {
+                                        line_count += 1;
+                                    }
+                                    line_count += 1; // Spacing line
+                                    if thought.next_thought_needed {
+                                        line_count += 1;
+                                    }
+                                    push_targets(message_target, line_count);
+                                }
+                            }
+                        } else {
+                            let content_width = available_width.saturating_sub(6).max(10);
+                            let content_lines = render_tool_content_lines(
+                                &display_content,
+                                content_width,
+                                self.diff_view_mode,
+                                self.theme,
+                            );
+                            push_targets(message_target, content_lines.len());
+                        }
+                    }
+                } else {
+                    let content_lines = super::markdown::render_markdown(
+                        &msg.content,
+                        self.theme,
+                        bubble_content_width.saturating_sub(2),
+                    );
+                    let reasoning_lines = self.render_reasoning_block(
+                        content_lines,
+                        bubble_content_width,
+                        msg.collapsed,
+                    );
+                    push_targets(message_target, reasoning_lines.len());
+                }
+            } else if matches!(msg.role, MessageRole::User | MessageRole::Agent) {
+                push_targets(message_target, 2); // Header + top border
+
+                let show_message_cursor = self.focused
+                    && msg_idx == self.focused_message_index
+                    && matches!(
+                        self.vim_mode,
+                        crate::ui_backend::VimMode::Normal | crate::ui_backend::VimMode::Visual
+                    );
+
+                let content_lines = if show_message_cursor {
+                    wrap_text_with_positions(&msg.content, bubble_content_width - 2).len()
+                } else if msg.role == MessageRole::Agent {
+                    super::markdown::render_markdown(
+                        &msg.content,
+                        self.theme,
+                        bubble_content_width - 2,
+                    )
+                    .len()
+                } else {
+                    wrap_text(&msg.content, bubble_content_width - 2).len()
+                };
+
+                push_targets(message_target, content_lines);
+                push_targets(message_target, 1); // Bottom border
+            } else {
+                if msg.role == MessageRole::System && archive_marker_info(msg).is_some() {
+                    push_targets(message_target, 3);
+                    push_targets(MessageLineTarget::None, 1);
+                    continue;
+                }
+
+                let mut prefix_width = 2;
+                prefix_width += self.role_icon(msg.role).chars().count() + 1;
+                prefix_width += self.role_label(msg.role).chars().count();
+                prefix_width += 1;
+                if !msg.timestamp.is_empty() {
+                    prefix_width += msg.timestamp.chars().count() + 1;
+                }
+                let content_width = bubble_content_width.saturating_sub(prefix_width).max(20);
+                let wrapped = wrap_text(&msg.content, content_width);
+                push_targets(message_target, wrapped.len());
+            }
+
+            push_targets(MessageLineTarget::None, 1);
+        }
+
+        let has_thinking = self
+            .streaming_thinking
+            .as_ref()
+            .is_some_and(|t| !t.is_empty())
+            || self.thinking_lines.is_some();
+
+        if has_thinking {
+            let content_lines = if let Some(ref pre_rendered) = self.thinking_lines {
+                pre_rendered.clone()
+            } else if let Some(ref thinking) = self.streaming_thinking {
+                super::markdown::render_markdown(
+                    thinking,
+                    self.theme,
+                    bubble_content_width.saturating_sub(2),
+                )
+            } else {
+                Vec::new()
+            };
+            let line_count = 2 + content_lines.len() + 1;
+            push_targets(MessageLineTarget::None, line_count);
+            push_targets(MessageLineTarget::None, 1);
+        }
+
+        if let Some(ref content) = self.streaming_content {
+            if !content.is_empty() {
+                let markdown_lines =
+                    super::markdown::render_markdown(content, self.theme, bubble_content_width - 2);
+                let line_count = 2 + markdown_lines.len() + 1;
+                push_targets(MessageLineTarget::None, line_count);
+                push_targets(MessageLineTarget::None, 1);
+            }
+        }
+
+        targets
     }
 
     fn render_reasoning_block(
@@ -932,407 +1201,6 @@ impl<'a> MessageArea<'a> {
             Span::styled(bottom_border, Style::default().fg(border_color)),
         ]));
         lines.push(Line::from(""));
-
-        lines
-    }
-
-    fn build_lines(&self, inner: Rect) -> Vec<Line<'static>> {
-        // Calculate dynamic bubble width: 90% of panel width (5% padding on each side)
-        // Minimum 40 chars, maximum based on available width
-        let available_width = inner.width.saturating_sub(4) as usize; // Account for "  " prefix and borders
-        let bubble_content_width = ((available_width as f32 * 0.9) as usize)
-            .max(40)
-            .min(available_width);
-
-        // Build lines from messages
-        let mut lines: Vec<Line> = Vec::new();
-
-        for (msg_idx, msg) in self.messages.iter().enumerate() {
-            let icon = self.role_icon(msg.role);
-            let label = self.role_label(msg.role).to_string();
-            let fg_color = self.role_color(msg.role);
-            let _bg_color = self.role_bg_color(msg.role);
-
-            // Check if this message is focused
-            let is_focused_msg = self.focused && msg_idx == self.focused_message_index;
-            let is_visual = self.focused && self.vim_mode == crate::ui_backend::VimMode::Visual;
-
-            // Handle question messages specially
-            if msg.role == MessageRole::Question {
-                if let Some(ref question) = msg.question {
-                    if question.answered {
-                        // Answered state: show "✓ Answered: <selections>"
-                        let answer_text = match question.question_type {
-                            crate::tui_new::widgets::question::QuestionType::MultipleChoice
-                            | crate::tui_new::widgets::question::QuestionType::SingleChoice => {
-                                let selections: Vec<String> = question
-                                    .selected
-                                    .iter()
-                                    .map(|&idx| question.options[idx].text.clone())
-                                    .collect();
-                                selections.join(", ")
-                            }
-                            crate::tui_new::widgets::question::QuestionType::FreeText => {
-                                question.free_text_answer.clone()
-                            }
-                        };
-
-                        lines.push(Line::from(vec![
-                            Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
-                            Span::styled(
-                                format!("{}", msg.content),
-                                Style::default().fg(self.theme.text_primary),
-                            ),
-                        ]));
-                        lines.push(Line::from(vec![
-                            Span::raw("  "),
-                            Span::styled("✓ Answered: ", Style::default().fg(self.theme.green)),
-                            Span::styled(
-                                answer_text,
-                                Style::default()
-                                    .fg(self.theme.text_primary)
-                                    .bg(self.theme.agent_bubble_bg),
-                            ),
-                        ]));
-                    } else {
-                        // Unanswered: render question widget
-                        lines.push(Line::from(vec![
-                            Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
-                            Span::styled(
-                                format!("{}", msg.content),
-                                Style::default().fg(self.theme.text_primary),
-                            ),
-                        ]));
-                        for (idx, opt) in question.options.iter().enumerate() {
-                            let checkbox = if question.selected.contains(&idx) {
-                                "●"
-                            } else {
-                                "○"
-                            };
-                            lines.push(Line::from(vec![
-                                Span::raw("  "),
-                                Span::styled(
-                                    format!("{} ", checkbox),
-                                    Style::default().fg(self.theme.question_fg),
-                                ),
-                                Span::styled(
-                                    opt.text.clone(),
-                                    Style::default().fg(self.theme.text_primary),
-                                ),
-                            ]));
-                        }
-                    }
-                    lines.push(Line::from(""));
-                    continue;
-                }
-            }
-
-            let mut spans = vec![
-                Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
-                Span::styled(label.clone(), Style::default().fg(fg_color)),
-                Span::raw(" "),
-            ];
-
-            // Add timestamp if present
-            if !msg.timestamp.is_empty() {
-                spans.push(Span::styled(
-                    format!("{} ", msg.timestamp),
-                    Style::default().fg(self.theme.text_muted),
-                ));
-            }
-            if msg.role == MessageRole::Agent {
-                if let Some(badge) =
-                    format_provider_model(msg.provider.as_deref(), msg.model.as_deref())
-                {
-                    spans.push(Span::styled(
-                        format!("[{}] ", badge),
-                        Style::default().fg(self.theme.text_secondary),
-                    ));
-                }
-            }
-
-            // Add cursor indicator for focused message
-            if is_focused_msg {
-                let cursor_visible = get_message_cursor_visible();
-                let cursor = if cursor_visible {
-                    Span::styled("▮ ", Style::default().fg(self.theme.text_primary))
-                } else {
-                    Span::raw("  ")
-                };
-                spans.insert(0, cursor);
-            } else if self.focused {
-                spans.insert(0, Span::raw("  "));
-            }
-
-            // Standard message rendering (non-bubble)
-            if msg.role == MessageRole::System {
-                let mut system_spans = spans.clone();
-                system_spans.push(Span::styled(
-                    msg.content.clone(),
-                    Style::default().fg(self.theme.text_primary),
-                ));
-                lines.push(Line::from(system_spans));
-                lines.push(Line::from(""));
-                continue;
-            }
-
-            // Bubble rendering for user/assistant
-            if msg.role == MessageRole::User || msg.role == MessageRole::Agent {
-                let glow_color = if msg.role == MessageRole::User {
-                    self.theme.user_bubble
-                } else {
-                    self.theme.agent_bubble
-                };
-
-                let content = if msg.collapsed {
-                    "..."
-                } else {
-                    msg.content.as_str()
-                };
-
-                // Header line
-                let mut header_spans = spans.clone();
-                if msg.role == MessageRole::User {
-                    header_spans.push(Span::styled(
-                        self.agent_name.to_string(),
-                        Style::default().fg(self.theme.text_muted),
-                    ));
-                } else {
-                    header_spans.push(Span::styled(
-                        "Assistant",
-                        Style::default().fg(self.theme.text_muted),
-                    ));
-                }
-                lines.push(Line::from(header_spans));
-
-                // Top border
-                let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(top_border, Style::default().fg(glow_color)),
-                ]));
-
-                // Render streaming content as markdown (per chunk)
-                let markdown_lines =
-                    super::markdown::render_markdown(content, self.theme, bubble_content_width - 2);
-                for md_line in markdown_lines {
-                    let line_width = md_line.width();
-                    let padding = bubble_content_width.saturating_sub(2 + line_width);
-                    let mut line_spans = vec![
-                        Span::raw("  "),
-                        Span::styled("│", Style::default().fg(glow_color)),
-                        Span::raw(" "),
-                    ];
-                    line_spans.extend(md_line.spans);
-                    line_spans.push(Span::raw(" ".repeat(padding + 1)));
-                    line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
-                    lines.push(Line::from(line_spans));
-                }
-
-                // Bottom border
-                let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(bottom_border, Style::default().fg(glow_color)),
-                ]));
-                lines.push(Line::from(""));
-                continue;
-            }
-
-            // Non-bubble message types
-            let mut content_spans = spans.clone();
-
-            if is_visual && is_focused_msg {
-                content_spans.push(Span::styled(
-                    msg.content.clone(),
-                    Style::default()
-                        .fg(self.theme.text_primary)
-                        .bg(self.theme.bg_code),
-                ));
-            } else {
-                // Calculate prefix width for indentation
-                let mut prefix_width = 0;
-                if is_focused_msg {
-                    prefix_width += 2; // "▶ " or "  "
-                }
-                prefix_width += icon.chars().count() + 1; // "icon "
-                prefix_width += label.chars().count();
-                prefix_width += 1; // " "
-                if !msg.timestamp.is_empty() {
-                    prefix_width += msg.timestamp.chars().count() + 1; // "time "
-                }
-
-                let content_width = bubble_content_width.saturating_sub(prefix_width).max(20);
-                let wrapped_content = wrap_text(&msg.content, content_width);
-
-                for (i, line_content) in wrapped_content.into_iter().enumerate() {
-                    if i == 0 {
-                        let mut first_line_spans = content_spans.clone();
-                        first_line_spans.push(Span::styled(
-                            line_content,
-                            Style::default().fg(self.theme.text_primary),
-                        ));
-                        lines.push(Line::from(first_line_spans));
-                    } else {
-                        let indented_spans = vec![
-                            Span::raw(" ".repeat(prefix_width)),
-                            Span::styled(
-                                line_content,
-                                Style::default().fg(self.theme.text_primary),
-                            ),
-                        ];
-                        lines.push(Line::from(indented_spans));
-                    }
-                }
-                lines.push(Line::from(""));
-                continue;
-            }
-
-            lines.push(Line::from(content_spans));
-            lines.push(Line::from(""));
-        }
-
-        // Add streaming content if present
-        // Use pre-rendered lines if available (incremental rendering optimization),
-        // otherwise fall back to parsing the raw content
-        let has_streaming = self
-            .streaming_content
-            .as_ref()
-            .is_some_and(|c| !c.is_empty())
-            || self.streaming_lines.is_some();
-
-        // Show a "thinking" placeholder while processing but no streaming content yet
-        // This provides visual feedback during the waiting period before first chunk
-        let show_thinking_placeholder = self.is_processing && !has_streaming;
-
-        if show_thinking_placeholder {
-            let icon = self.role_icon(MessageRole::Agent);
-            let header_spans = vec![
-                Span::raw("  "),
-                Span::styled(
-                    format!("{} ", icon),
-                    Style::default().fg(self.theme.agent_bubble),
-                ),
-                Span::styled("Assistant", Style::default().fg(self.theme.text_muted)),
-            ];
-            lines.push(Line::from(header_spans));
-
-            let glow_color = self.theme.agent_bubble;
-            let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(top_border, Style::default().fg(glow_color)),
-            ]));
-
-            // Animated thinking indicator using the blink state
-            let indicator_visible = get_tool_indicator_visible();
-            let thinking_text = if indicator_visible {
-                "Thinking..."
-            } else {
-                "Thinking.  "
-            };
-            let padding = bubble_content_width.saturating_sub(2 + thinking_text.len());
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("│", Style::default().fg(glow_color)),
-                Span::raw(" "),
-                Span::styled(thinking_text, Style::default().fg(self.theme.text_muted)),
-                Span::raw(" ".repeat(padding + 1)),
-                Span::styled("│", Style::default().fg(glow_color)),
-            ]));
-
-            let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(bottom_border, Style::default().fg(glow_color)),
-            ]));
-            lines.push(Line::from(""));
-        } else if has_streaming {
-            let icon = self.role_icon(MessageRole::Agent);
-            let mut header_spans = vec![
-                Span::styled(
-                    format!("{} ", icon),
-                    Style::default().fg(self.theme.agent_bubble),
-                ),
-                Span::styled("Assistant", Style::default().fg(self.theme.text_muted)),
-            ];
-
-            if self.focused {
-                let cursor_visible = get_message_cursor_visible();
-                let cursor = if cursor_visible {
-                    Span::styled("▮ ", Style::default().fg(self.theme.text_primary))
-                } else {
-                    Span::raw("  ")
-                };
-                header_spans.insert(0, cursor);
-            } else {
-                header_spans.insert(0, Span::raw("  "));
-            }
-            lines.push(Line::from(header_spans));
-
-            let glow_color = self.theme.agent_bubble;
-            let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(top_border, Style::default().fg(glow_color)),
-            ]));
-
-            // Use pre-rendered lines if available (incremental rendering),
-            // otherwise parse the streaming content
-            let markdown_lines: Vec<Line<'_>> = if let Some(ref pre_rendered) = self.streaming_lines
-            {
-                pre_rendered.clone()
-            } else if let Some(ref content) = self.streaming_content {
-                super::markdown::render_markdown(content, self.theme, bubble_content_width - 2)
-            } else {
-                vec![]
-            };
-
-            for md_line in markdown_lines {
-                let line_width = md_line.width();
-                let padding = bubble_content_width.saturating_sub(2 + line_width);
-                let mut line_spans = vec![
-                    Span::raw("  "),
-                    Span::styled("│", Style::default().fg(glow_color)),
-                    Span::raw(" "),
-                ];
-                line_spans.extend(md_line.spans);
-                line_spans.push(Span::raw(" ".repeat(padding + 1)));
-                line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
-                lines.push(Line::from(line_spans));
-            }
-
-            let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(bottom_border, Style::default().fg(glow_color)),
-            ]));
-            lines.push(Line::from(""));
-        }
-
-        // Add streaming thinking if present and thinking mode enabled
-        // Use pre-rendered lines if available (incremental rendering optimization)
-        let has_thinking = self
-            .streaming_thinking
-            .as_ref()
-            .is_some_and(|t| !t.is_empty())
-            || self.thinking_lines.is_some();
-
-        if has_thinking {
-            let content_lines = if let Some(ref pre_rendered) = self.thinking_lines {
-                pre_rendered.clone()
-            } else if let Some(ref thinking) = self.streaming_thinking {
-                super::markdown::render_markdown(
-                    thinking,
-                    self.theme,
-                    bubble_content_width.saturating_sub(2),
-                )
-            } else {
-                Vec::new()
-            };
-
-            lines.extend(self.render_reasoning_block(content_lines, bubble_content_width, false));
-        }
 
         lines
     }
@@ -2067,6 +1935,9 @@ impl Widget for MessageArea<'_> {
                             Style::default().fg(self.theme.bg_main).bg(self.theme.blue);
                         let cursor_style =
                             Style::default().fg(self.theme.bg_main).bg(self.theme.cyan);
+                        let cursor_dim_style = Style::default()
+                            .fg(self.theme.bg_main)
+                            .bg(self.theme.text_muted);
                         let padding_style = if msg.role == MessageRole::User {
                             Style::default().bg(bg)
                         } else {
@@ -2089,8 +1960,13 @@ impl Widget for MessageArea<'_> {
                                         style = selection_style;
                                     }
                                 }
-                                if cursor_visible && char_pos == self.message_cursor {
-                                    line_spans.push(Span::styled("▮", cursor_style));
+                                if char_pos == self.message_cursor {
+                                    let style = if cursor_visible {
+                                        cursor_style
+                                    } else {
+                                        cursor_dim_style
+                                    };
+                                    line_spans.push(Span::styled("▮", style));
                                     cursor_rendered = true;
                                 } else {
                                     line_spans.push(Span::styled(ch.to_string(), style));
@@ -2098,9 +1974,13 @@ impl Widget for MessageArea<'_> {
                                 line_len += 1;
                             }
 
-                            if cursor_visible && !cursor_rendered && self.message_cursor == line.end
-                            {
-                                line_spans.push(Span::styled("▮", cursor_style));
+                            if !cursor_rendered && self.message_cursor == line.end {
+                                let style = if cursor_visible {
+                                    cursor_style
+                                } else {
+                                    cursor_dim_style
+                                };
+                                line_spans.push(Span::styled("▮", style));
                                 line_len += 1;
                             }
 

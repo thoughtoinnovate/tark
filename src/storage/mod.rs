@@ -1839,6 +1839,12 @@ pub struct ChatSession {
     pub output_tokens: usize,
     /// Total cost
     pub total_cost: f64,
+    /// Per-model cost breakdown for the session
+    #[serde(default)]
+    pub cost_by_model: Vec<(String, f64)>,
+    /// Per-model token breakdown for the session
+    #[serde(default)]
+    pub tokens_by_model: Vec<(String, usize)>,
 }
 
 impl ChatSession {
@@ -1866,6 +1872,8 @@ impl ChatSession {
             input_tokens: 0,
             output_tokens: 0,
             total_cost: 0.0,
+            cost_by_model: Vec::new(),
+            tokens_by_model: Vec::new(),
         }
     }
 
@@ -1988,12 +1996,10 @@ impl ChatSession {
         }
     }
 
-    /// Clear messages but keep settings and accumulated cost
+    /// Clear messages but keep settings and accumulated usage
     pub fn clear_messages(&mut self) {
         self.messages.clear();
-        self.input_tokens = 0;
-        self.output_tokens = 0;
-        // Note: total_cost is intentionally NOT reset - it accumulates across the session
+        // Note: usage totals are intentionally NOT reset - they accumulate across the session
         self.updated_at = Utc::now();
     }
 }
@@ -3413,7 +3419,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_messages_preserves_cost() {
+    fn test_clear_messages_preserves_usage() {
         let mut session = ChatSession::new();
 
         // Simulate some usage
@@ -3422,21 +3428,25 @@ mod tests {
         session.input_tokens = 100;
         session.output_tokens = 50;
         session.total_cost = 0.0025; // Accumulated cost
+        session.cost_by_model = vec![("gpt-4".to_string(), 0.0025)];
+        session.tokens_by_model = vec![("gpt-4".to_string(), 150)];
 
         // Clear messages
         session.clear_messages();
 
-        // Verify messages and tokens are cleared
+        // Verify messages are cleared
         assert!(session.messages.is_empty());
-        assert_eq!(session.input_tokens, 0);
-        assert_eq!(session.output_tokens, 0);
 
-        // Verify cost is PRESERVED (not reset)
+        // Verify usage is PRESERVED (not reset)
+        assert_eq!(session.input_tokens, 100);
+        assert_eq!(session.output_tokens, 50);
         assert_eq!(session.total_cost, 0.0025);
+        assert_eq!(session.cost_by_model, vec![("gpt-4".to_string(), 0.0025)]);
+        assert_eq!(session.tokens_by_model, vec![("gpt-4".to_string(), 150)]);
     }
 
     #[test]
-    fn test_clear_messages_accumulates_cost() {
+    fn test_clear_messages_accumulates_usage() {
         let mut session = ChatSession::new();
 
         // First conversation
@@ -3445,6 +3455,8 @@ mod tests {
         session.input_tokens = 50;
         session.output_tokens = 100;
         session.total_cost = 0.001;
+        session.cost_by_model = vec![("gpt-4".to_string(), 0.001)];
+        session.tokens_by_model = vec![("gpt-4".to_string(), 150)];
 
         // Clear and start new conversation
         session.clear_messages();
@@ -3452,15 +3464,34 @@ mod tests {
         // Second conversation adds more cost
         session.add_message("user", "Second question");
         session.add_message("assistant", "Second answer");
-        session.input_tokens = 75;
-        session.output_tokens = 150;
+        session.input_tokens += 75;
+        session.output_tokens += 150;
         session.total_cost += 0.002; // Add to existing cost
+        session.cost_by_model = vec![("gpt-4".to_string(), 0.003)];
+        session.tokens_by_model = vec![("gpt-4".to_string(), 375)];
 
-        // Total cost should be sum of both conversations
+        // Total usage should be sum of both conversations
         assert_eq!(session.total_cost, 0.003);
-        // But tokens should only reflect current context
-        assert_eq!(session.input_tokens, 75);
-        assert_eq!(session.output_tokens, 150);
+        assert_eq!(session.input_tokens, 125);
+        assert_eq!(session.output_tokens, 250);
+        assert_eq!(session.cost_by_model, vec![("gpt-4".to_string(), 0.003)]);
+        assert_eq!(session.tokens_by_model, vec![("gpt-4".to_string(), 375)]);
+    }
+
+    #[test]
+    fn test_session_usage_breakdown_persists() {
+        let temp = TempDir::new().unwrap();
+        let storage = TarkStorage::new(temp.path()).unwrap();
+
+        let mut session = ChatSession::new();
+        session.cost_by_model = vec![("gpt-4".to_string(), 0.01)];
+        session.tokens_by_model = vec![("gpt-4".to_string(), 500)];
+
+        storage.save_session(&session).unwrap();
+        let loaded = storage.load_session(&session.id).unwrap();
+
+        assert_eq!(loaded.cost_by_model, session.cost_by_model);
+        assert_eq!(loaded.tokens_by_model, session.tokens_by_model);
     }
 
     #[test]
