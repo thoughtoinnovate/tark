@@ -160,7 +160,7 @@ fn test_status_bar_plan_mode() {
 // ============================================================================
 
 #[test]
-fn test_sidebar_scrollbar_visible_only_when_focused() {
+fn test_sidebar_scrollbar_visible_when_overflowing() {
     let theme = Theme::default();
     let changes: Vec<GitChange> = (0..30)
         .map(|i| GitChange {
@@ -175,7 +175,7 @@ fn test_sidebar_scrollbar_visible_only_when_focused() {
         .focused(true)
         .selected_panel(4)
         .git_changes(changes.clone());
-    focused_sidebar.expanded_panels = [false, false, false, false, true];
+    focused_sidebar.expanded_panels = [false, false, false, false, true, false];
     focused_sidebar.selected_item = Some(0);
 
     let output = render_widget(focused_sidebar, 40, 16);
@@ -197,13 +197,13 @@ fn test_sidebar_scrollbar_visible_only_when_focused() {
         .focused(false)
         .selected_panel(4)
         .git_changes(unfocused_changes);
-    unfocused_sidebar.expanded_panels = [false, false, false, false, true];
+    unfocused_sidebar.expanded_panels = [false, false, false, false, true, false];
     unfocused_sidebar.selected_item = Some(0);
 
     let output = render_widget(unfocused_sidebar, 40, 16);
     assert!(
-        !output.contains("↑") && !output.contains("↓"),
-        "Unfocused panel should not render scrollbars"
+        output.contains("↑") && output.contains("↓"),
+        "Unfocused, overflowing sidebar should render scrollbars"
     );
 }
 
@@ -223,7 +223,7 @@ fn test_sidebar_session_model_line_highlights_when_selected() {
         .focused(true)
         .selected_panel(0)
         .session_info(session_info);
-    sidebar.expanded_panels = [true, false, false, false, false];
+    sidebar.expanded_panels = [true, false, false, false, false, false];
     sidebar.selected_item = Some(3);
 
     let buf = render_widget_buffer(sidebar, 40, 12);

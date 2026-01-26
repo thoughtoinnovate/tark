@@ -755,17 +755,18 @@ impl Widget for ThemedQuestion<'_> {
         // Center the button
         let button_width = button_text.len();
         let padding = (content_width as usize).saturating_sub(button_width) / 2;
-        let button_line = format!("{}{}", " ".repeat(padding), button_text);
+        let padding_span = Span::raw(" ".repeat(padding));
+        let button_span = Span::styled(
+            button_text,
+            Style::default()
+                .fg(button_fg)
+                .bg(button_bg)
+                .add_modifier(Modifier::BOLD),
+        );
 
         let submit_para = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled(
-                button_line,
-                Style::default()
-                    .fg(button_fg)
-                    .bg(button_bg)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            Line::from(vec![padding_span, button_span]),
         ]);
         submit_para.render(chunks[2], buf);
     }

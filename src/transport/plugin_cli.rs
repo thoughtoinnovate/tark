@@ -9,7 +9,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tabled::{settings::Style, Table, Tabled};
 
 /// List installed plugins
@@ -702,7 +702,7 @@ fn encrypt_credentials(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn ensure_parent_dir(path: &PathBuf) -> Result<()> {
+fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

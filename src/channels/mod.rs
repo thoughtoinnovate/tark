@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Messaging channel integration (WASM plugins)
 //!
 //! Channel plugins translate external messages (Slack, Discord, Signal)
@@ -28,8 +29,8 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
