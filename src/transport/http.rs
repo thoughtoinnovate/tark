@@ -1,6 +1,7 @@
 //! HTTP server for completions and chat API
 
 use crate::agent::ChatAgent;
+use crate::channels::ChannelManager;
 use crate::completion::{CompletionEngine, CompletionRequest};
 use crate::config::Config;
 use crate::llm::{self, LlmProvider};
@@ -9,9 +10,10 @@ use crate::storage::TarkStorage;
 use crate::tools::{CodeAnalyzer, ToolRegistry};
 use anyhow::Result;
 use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
+    body::Bytes,
+    extract::{Path, State},
+    http::{HeaderMap, Method, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -89,9 +91,10 @@ struct AppState {
     chat_agent: RwLock<ChatAgent>,
     working_dir: PathBuf,
     config: Config,
-    storage: Option<TarkStorage>,
+    storage: Option<Arc<TarkStorage>>,
     usage_tracker: Option<Arc<UsageTracker>>,
     session_id: String,
+    channel_manager: ChannelManager,
     /// Current chat session for multi-session management
     current_chat_session: RwLock<Option<crate::storage::ChatSession>>,
     /// Flag to interrupt current agent operation
@@ -282,6 +285,54 @@ async fn get_status() -> impl IntoResponse {
     Json(status.clone())
 }
 
+async fn handle_channel_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(plugin_id): Path<String>,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let headers_vec = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.to_string(), v.to_string()))
+        })
+        .collect();
+
+    let body_str = String::from_utf8_lossy(&body).to_string();
+    let request = crate::plugins::ChannelWebhookRequest {
+        method: method.to_string(),
+        path: format!("/channels/{}/webhook", plugin_id),
+        query: None,
+        headers: headers_vec,
+        body: body_str,
+    };
+
+    match state
+        .channel_manager
+        .handle_webhook(&plugin_id, request)
+        .await
+    {
+        Ok(response) => {
+            let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK);
+            let mut builder = Response::builder().status(status);
+            for (key, value) in response.headers {
+                builder = builder.header(key, value);
+            }
+            builder
+                .body(axum::body::Body::from(response.body))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Err(err) => {
+            tracing::error!("Channel webhook error: {}", err);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 /// Run the HTTP server
 pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Result<()> {
     let config = Config::load().unwrap_or_default();
@@ -289,7 +340,7 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
     tracing::info!("Server working directory: {:?}", working_dir);
 
     // Initialize storage
-    let storage = TarkStorage::new(working_dir.clone()).ok();
+    let storage = TarkStorage::new(working_dir.clone()).ok().map(Arc::new);
 
     // Initialize usage tracker and create session
     let (usage_tracker, session_id) = if let Some(ref storage) = storage {
@@ -406,6 +457,11 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         None
     };
 
+    let channel_manager = ChannelManager::new(config.clone(), working_dir.clone(), storage.clone());
+    if let Err(e) = channel_manager.start_all().await {
+        tracing::warn!("Failed to start channel plugins: {}", e);
+    }
+
     let state = Arc::new(AppState {
         current_provider: RwLock::new(default_provider),
         current_model: RwLock::new(default_model),
@@ -419,6 +475,7 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         storage,
         usage_tracker,
         session_id,
+        channel_manager,
         current_chat_session: RwLock::new(current_chat_session),
         interrupt_flag: std::sync::atomic::AtomicBool::new(false),
     });
@@ -445,6 +502,7 @@ pub async fn run_http_server(host: &str, port: u16, working_dir: PathBuf) -> Res
         .route("/plans", get(list_plans))
         .route("/plans/current", get(get_current_plan))
         .route("/plans/create", post(create_plan))
+        .route("/channels/:plugin_id/webhook", post(handle_channel_webhook))
         .route("/plans/update", post(update_plan))
         .route("/plans/task/status", post(update_task_status))
         .route("/plans/delete", post(delete_plan))

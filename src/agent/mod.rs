@@ -2,6 +2,7 @@
 
 mod chat;
 mod context;
+mod rate_limit;
 mod tool_orchestrator;
 
 // These are re-exported for use by the TUI module

@@ -5,6 +5,7 @@
 //! Baseline: screenshots/11-sidebar-panel.png
 
 use ratatui::prelude::*;
+use ratatui::symbols::border;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::super::theme::Theme;
@@ -357,7 +358,15 @@ impl<'a> Sidebar<'a> {
         self
     }
 
-    fn render_panel(&self, area: Rect, lines: Vec<Line>, scroll: usize, buf: &mut Buffer) {
+    fn render_panel(
+        &self,
+        area: Rect,
+        lines: Vec<Line>,
+        scroll: usize,
+        selected_line: Option<usize>,
+        show_scrollbar: bool,
+        buf: &mut Buffer,
+    ) {
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -365,12 +374,20 @@ impl<'a> Sidebar<'a> {
         let total_lines = lines.len();
         let visible_height = area.height as usize;
         let max_scroll = total_lines.saturating_sub(visible_height);
-        let scroll_pos = scroll.min(max_scroll);
+        let mut scroll_pos = scroll.min(max_scroll);
+        if let Some(selected_line) = selected_line {
+            let selected_line = selected_line.min(total_lines.saturating_sub(1));
+            if selected_line < scroll_pos {
+                scroll_pos = selected_line;
+            } else if selected_line >= scroll_pos.saturating_add(visible_height) {
+                scroll_pos = selected_line.saturating_sub(visible_height.saturating_sub(1));
+            }
+        }
 
         let paragraph = Paragraph::new(lines).scroll((scroll_pos as u16, 0));
         paragraph.render(area, buf);
 
-        if total_lines > visible_height {
+        if show_scrollbar && total_lines > visible_height {
             use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .style(Style::default().fg(self.theme.text_muted))
@@ -439,6 +456,7 @@ impl Widget for Sidebar<'_> {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
             .border_style(border_style)
             .title(Span::styled(
                 " Panel ",
@@ -457,6 +475,7 @@ impl Widget for Sidebar<'_> {
         let mut tasks_lines: Vec<Line> = vec![];
         let mut todo_lines: Vec<Line> = vec![];
         let mut git_lines: Vec<Line> = vec![];
+        let mut panel_item_lines: [Vec<usize>; 5] = std::array::from_fn(|_| Vec::new());
 
         // Available width for content (used for truncation)
         let content_width = inner.width;
@@ -515,20 +534,43 @@ impl Widget for Sidebar<'_> {
         );
 
         if session_expanded {
+            let mut session_item_idx = 0usize;
             // Show session name
             if !self.session_info.name.is_empty() {
+                let item_selected = self.focused
+                    && self.selected_panel == 0
+                    && self.selected_item == Some(session_item_idx);
+                let name_style = if item_selected {
+                    Style::default()
+                        .fg(self.theme.cyan)
+                        .bg(self.theme.selection_bg)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                };
+                let line_idx = session_lines.len();
+                panel_item_lines[0].push(line_idx);
                 Self::push_line(
                     &mut session_lines,
                     &mut all_lines,
                     Line::from(vec![
                         Span::raw("  "),
-                        Span::styled(
-                            &self.session_info.name,
-                            Style::default().fg(self.theme.text_secondary),
-                        ),
+                        Span::styled(&self.session_info.name, name_style),
                     ]),
                 );
+                session_item_idx += 1;
             }
+            let item_selected = self.focused
+                && self.selected_panel == 0
+                && self.selected_item == Some(session_item_idx);
+            let cost_style = if item_selected {
+                Style::default()
+                    .fg(self.theme.cyan)
+                    .bg(self.theme.selection_bg)
+            } else {
+                Style::default().fg(self.theme.text_muted)
+            };
+            let line_idx = session_lines.len();
+            panel_item_lines[0].push(line_idx);
             Self::push_line(
                 &mut session_lines,
                 &mut all_lines,
@@ -539,10 +581,23 @@ impl Widget for Sidebar<'_> {
                             "${:.3} ({} models) ▼",
                             self.session_info.total_cost, self.session_info.model_count
                         ),
-                        Style::default().fg(self.theme.text_muted),
+                        cost_style,
                     ),
                 ]),
             );
+            session_item_idx += 1;
+            let item_selected = self.focused
+                && self.selected_panel == 0
+                && self.selected_item == Some(session_item_idx);
+            let tokens_style = if item_selected {
+                Style::default()
+                    .fg(self.theme.cyan)
+                    .bg(self.theme.selection_bg)
+            } else {
+                Style::default().fg(self.theme.text_muted)
+            };
+            let line_idx = session_lines.len();
+            panel_item_lines[0].push(line_idx);
             Self::push_line(
                 &mut session_lines,
                 &mut all_lines,
@@ -550,10 +605,11 @@ impl Widget for Sidebar<'_> {
                     Span::raw("  "),
                     Span::styled(
                         format!("{} tokens total", self.session_info.total_tokens),
-                        Style::default().fg(self.theme.text_muted),
+                        tokens_style,
                     ),
                 ]),
             );
+            session_item_idx += 1;
             if !self.session_info.model_costs.is_empty() {
                 for (model, cost) in &self.session_info.model_costs {
                     let model_tokens = self
@@ -563,19 +619,39 @@ impl Widget for Sidebar<'_> {
                         .find(|(name, _)| name == model)
                         .map(|(_, tokens)| *tokens)
                         .unwrap_or(0);
+                    let item_selected = self.focused
+                        && self.selected_panel == 0
+                        && self.selected_item == Some(session_item_idx);
+                    let model_style = if item_selected {
+                        Style::default()
+                            .fg(self.theme.cyan)
+                            .bg(self.theme.selection_bg)
+                    } else {
+                        Style::default().fg(self.theme.text_secondary)
+                    };
+                    let cost_style = if item_selected {
+                        Style::default()
+                            .fg(self.theme.cyan)
+                            .bg(self.theme.selection_bg)
+                    } else {
+                        Style::default().fg(self.theme.text_muted)
+                    };
+                    let line_idx = session_lines.len();
+                    panel_item_lines[0].push(line_idx);
                     Self::push_line(
                         &mut session_lines,
                         &mut all_lines,
                         Line::from(vec![
                             Span::raw("    "),
-                            Span::styled(model, Style::default().fg(self.theme.text_secondary)),
+                            Span::styled(model, model_style),
                             Span::raw(" "),
                             Span::styled(
                                 format!("${:.3} · {} tok", cost, model_tokens),
-                                Style::default().fg(self.theme.text_muted),
+                                cost_style,
                             ),
                         ]),
                     );
+                    session_item_idx += 1;
                 }
             }
         }
@@ -710,7 +786,7 @@ impl Widget for Sidebar<'_> {
                 Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
-                        format!("LOADED FILES ({})", context_count),
+                        format!("LOADED CONTEXT ({})", context_count),
                         Style::default()
                             .fg(self.theme.text_muted)
                             .add_modifier(Modifier::BOLD),
@@ -718,7 +794,7 @@ impl Widget for Sidebar<'_> {
                 ]),
             );
 
-            for (i, file) in self.context_files.iter().enumerate().take(4) {
+            for (i, file) in self.context_files.iter().enumerate() {
                 let item_selected =
                     self.focused && self.selected_panel == 1 && self.selected_item == Some(i);
                 let item_style = if item_selected {
@@ -728,21 +804,17 @@ impl Widget for Sidebar<'_> {
                 } else {
                     Style::default().fg(self.theme.text_secondary)
                 };
+                let icon = if file.ends_with('/') { "📁" } else { "📄" };
 
+                let line_idx = context_lines.len();
+                panel_item_lines[1].push(line_idx);
                 Self::push_line(
                     &mut context_lines,
                     &mut all_lines,
-                    Line::from(vec![Span::raw("  📄 "), Span::styled(file, item_style)]),
-                );
-            }
-            if context_count > 4 {
-                Self::push_line(
-                    &mut context_lines,
-                    &mut all_lines,
-                    Line::from(vec![Span::styled(
-                        format!("  ... and {} more", context_count - 4),
-                        Style::default().fg(self.theme.text_muted),
-                    )]),
+                    Line::from(vec![
+                        Span::raw(format!("  {} ", icon)),
+                        Span::styled(file, item_style),
+                    ]),
                 );
             }
         }
@@ -832,6 +904,8 @@ impl Widget for Sidebar<'_> {
                 // Green filled circle (●) for active tasks
                 // Truncate task name to fit within available width (prefix "  ● " = 4 chars)
                 let truncated_name = Self::truncate_text(&task.name, content_width, 4);
+                let line_idx = tasks_lines.len();
+                panel_item_lines[2].push(line_idx);
                 Self::push_line(
                     &mut tasks_lines,
                     &mut all_lines,
@@ -878,6 +952,8 @@ impl Widget for Sidebar<'_> {
 
                 // Truncate task name to fit within available width (prefix "  ✓ " = 4 chars)
                 let truncated_name = Self::truncate_text(&task.name, content_width, 4);
+                let line_idx = tasks_lines.len();
+                panel_item_lines[2].push(line_idx);
                 Self::push_line(
                     &mut tasks_lines,
                     &mut all_lines,
@@ -981,6 +1057,8 @@ impl Widget for Sidebar<'_> {
                         spans.push(Span::styled(" x", Style::default().fg(self.theme.red)));
                     }
 
+                    let line_idx = tasks_lines.len();
+                    panel_item_lines[2].push(line_idx);
                     Self::push_line(&mut tasks_lines, &mut all_lines, Line::from(spans));
                     task_idx += 1;
                 }
@@ -1095,6 +1173,8 @@ impl Widget for Sidebar<'_> {
                 // Truncate content to fit
                 let truncated_content = Self::truncate_text(&item.content, content_width, 4);
 
+                let line_idx = todo_lines.len();
+                panel_item_lines[3].push(line_idx);
                 Self::push_line(
                     &mut todo_lines,
                     &mut all_lines,
@@ -1225,6 +1305,8 @@ impl Widget for Sidebar<'_> {
                     String::new()
                 };
 
+                let line_idx = git_lines.len();
+                panel_item_lines[4].push(line_idx);
                 Self::push_line(
                     &mut git_lines,
                     &mut all_lines,
@@ -1308,18 +1390,71 @@ impl Widget for Sidebar<'_> {
         let git_area = panel_chunks[5];
         let footer_area = panel_chunks[6];
 
+        let mut panel_selected_lines: [Option<usize>; 5] = [None, None, None, None, None];
+        if self.focused {
+            if let Some(selected_item) = self.selected_item {
+                let panel_idx = self.selected_panel;
+                if panel_idx < 5 {
+                    let indices = &panel_item_lines[panel_idx];
+                    panel_selected_lines[panel_idx] = indices
+                        .get(selected_item)
+                        .copied()
+                        .or_else(|| indices.last().copied());
+                }
+            }
+        }
+
+        let panel_has_focus = self.focused
+            && self.selected_panel < 5
+            && (self.selected_item.is_some() || self.expanded_panels[self.selected_panel]);
+
         Paragraph::new(header_lines).render(header_area, buf);
-        self.render_panel(session_area, session_lines, self.panel_scrolls[0], buf);
-        self.render_panel(context_area, context_lines, self.panel_scrolls[1], buf);
-        self.render_panel(tasks_area, tasks_lines, self.panel_scrolls[2], buf);
-        self.render_panel(todo_area, todo_lines, self.panel_scrolls[3], buf);
-        self.render_panel(git_area, git_lines, self.panel_scrolls[4], buf);
+        self.render_panel(
+            session_area,
+            session_lines,
+            self.panel_scrolls[0],
+            panel_selected_lines[0],
+            panel_has_focus && self.selected_panel == 0,
+            buf,
+        );
+        self.render_panel(
+            context_area,
+            context_lines,
+            self.panel_scrolls[1],
+            panel_selected_lines[1],
+            panel_has_focus && self.selected_panel == 1,
+            buf,
+        );
+        self.render_panel(
+            tasks_area,
+            tasks_lines,
+            self.panel_scrolls[2],
+            panel_selected_lines[2],
+            panel_has_focus && self.selected_panel == 2,
+            buf,
+        );
+        self.render_panel(
+            todo_area,
+            todo_lines,
+            self.panel_scrolls[3],
+            panel_selected_lines[3],
+            panel_has_focus && self.selected_panel == 3,
+            buf,
+        );
+        self.render_panel(
+            git_area,
+            git_lines,
+            self.panel_scrolls[4],
+            panel_selected_lines[4],
+            panel_has_focus && self.selected_panel == 4,
+            buf,
+        );
         Paragraph::new(footer_lines).render(footer_area, buf);
 
         // Global scrollbar (overall sidebar)
         let total_lines = all_lines.len();
         let visible_height = inner.height as usize;
-        if total_lines > visible_height {
+        if total_lines > visible_height && !panel_has_focus {
             use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
             let max = total_lines.saturating_sub(visible_height);

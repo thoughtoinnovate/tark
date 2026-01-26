@@ -78,6 +78,7 @@ tark/
 │   │
 │   ├── agent/                   # Chat agent with tool execution
 │   ├── completion/              # FIM (fill-in-middle) completions
+│   ├── channels/                # Messaging channels via WASM plugins
 │   ├── config/                  # Configuration management
 │   ├── diagnostics/             # Code analysis
 │   ├── llm/                     # LLM providers + model DB

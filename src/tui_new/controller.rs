@@ -1410,6 +1410,9 @@ impl<B: Backend> TuiController<B> {
                 };
                 state.set_focused_component(next);
                 state.set_vim_mode(vim_mode);
+                if next == FocusedComponent::Messages {
+                    state.snap_focused_message_to_viewport();
+                }
                 return Ok(());
             }
             Command::FocusInput => {
@@ -1422,6 +1425,7 @@ impl<B: Backend> TuiController<B> {
                 use crate::ui_backend::{FocusedComponent, VimMode};
                 state.set_focused_component(FocusedComponent::Messages);
                 state.set_vim_mode(VimMode::Normal); // Messages panel uses Normal mode
+                state.snap_focused_message_to_viewport();
                 return Ok(());
             }
             Command::FocusPanel => {
@@ -1520,7 +1524,7 @@ impl<B: Backend> TuiController<B> {
             }
             Command::ToggleSidebarPanel(panel_idx) => {
                 // Toggle the expansion state of a sidebar panel
-                if *panel_idx < 4 {
+                if *panel_idx < 5 {
                     let mut panels = state.sidebar_expanded_panels();
                     panels[*panel_idx] = !panels[*panel_idx];
                     state.set_sidebar_expanded_panels(panels);
@@ -1544,7 +1548,7 @@ impl<B: Backend> TuiController<B> {
                     }
                 } else {
                     // At panel level - navigate to previous panel
-                    let new_panel = if panel_idx == 0 { 4 } else { panel_idx - 1 };
+                    let new_panel = if panel_idx == 0 { 5 } else { panel_idx - 1 };
                     state.set_sidebar_selected_panel(new_panel);
                 }
                 return Ok(());
@@ -1556,11 +1560,28 @@ impl<B: Backend> TuiController<B> {
                 if selected_item.is_some() {
                     // Inside a panel - navigate items down
                     // Get max items for current panel
+                    let session_item_count = {
+                        let mut count = 2usize + state.session_cost_by_model().len();
+                        let has_name = state
+                            .session()
+                            .map(|s| !s.session_name.is_empty())
+                            .unwrap_or(true);
+                        if has_name {
+                            count += 1;
+                        }
+                        count
+                    };
+                    let todo_count = state
+                        .todo_tracker()
+                        .try_lock()
+                        .map(|todos| todos.items().len())
+                        .unwrap_or(0);
                     let max_items = match panel_idx {
-                        0 => 3, // Session: name, cost, tokens
+                        0 => session_item_count, // Session: name, cost, tokens, per-model lines
                         1 => state.context_files().len(),
                         2 => state.tasks().len(),
-                        3 => state.git_changes().len(),
+                        3 => todo_count,
+                        4 => state.git_changes().len(),
                         _ => 0,
                     };
                     if let Some(item) = selected_item {
@@ -1570,7 +1591,7 @@ impl<B: Backend> TuiController<B> {
                     }
                 } else {
                     // At panel level - navigate to next panel
-                    let new_panel = (panel_idx + 1) % 5;
+                    let new_panel = (panel_idx + 1) % 6;
                     state.set_sidebar_selected_panel(new_panel);
                 }
                 return Ok(());
@@ -1579,7 +1600,7 @@ impl<B: Backend> TuiController<B> {
                 let panel_idx = state.sidebar_selected_panel();
                 let selected_item = state.sidebar_selected_item();
 
-                if panel_idx == 4 {
+                if panel_idx == 5 {
                     // Theme panel - open theme picker
                     state.set_theme_before_preview(Some(state.theme()));
                     state.set_active_modal(Some(crate::ui_backend::ModalType::ThemePicker));
@@ -1592,7 +1613,7 @@ impl<B: Backend> TuiController<B> {
                         state.set_theme_picker_selected(idx);
                     }
                     state.set_theme_picker_filter(String::new());
-                } else if selected_item.is_none() {
+                } else if selected_item.is_none() && panel_idx < 5 {
                     // At panel header - toggle expansion
                     let mut panels = state.sidebar_expanded_panels();
                     panels[panel_idx] = !panels[panel_idx];
@@ -1606,8 +1627,8 @@ impl<B: Backend> TuiController<B> {
                 let panel_idx = state.sidebar_selected_panel();
                 let panels = state.sidebar_expanded_panels();
 
-                // Theme panel (4) opens theme picker instead of entering
-                if panel_idx == 4 {
+                // Theme panel (5) opens theme picker instead of entering
+                if panel_idx == 5 {
                     state.set_theme_before_preview(Some(state.theme()));
                     state.set_active_modal(Some(crate::ui_backend::ModalType::ThemePicker));
                     state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
@@ -1618,19 +1639,36 @@ impl<B: Backend> TuiController<B> {
                         state.set_theme_picker_selected(idx);
                     }
                     state.set_theme_picker_filter(String::new());
-                } else if panel_idx < 4 && panels[panel_idx] {
+                } else if panel_idx < 5 && panels[panel_idx] {
                     // Panel is expanded - enter and select first item
+                    let session_item_count = {
+                        let mut count = 2usize + state.session_cost_by_model().len();
+                        let has_name = state
+                            .session()
+                            .map(|s| !s.session_name.is_empty())
+                            .unwrap_or(true);
+                        if has_name {
+                            count += 1;
+                        }
+                        count
+                    };
+                    let todo_count = state
+                        .todo_tracker()
+                        .try_lock()
+                        .map(|todos| todos.items().len())
+                        .unwrap_or(0);
                     let max_items = match panel_idx {
-                        0 => 3, // Session: name, cost, tokens
+                        0 => session_item_count, // Session: name, cost, tokens, per-model lines
                         1 => state.context_files().len(),
                         2 => state.tasks().len(),
-                        3 => state.git_changes().len(),
+                        3 => todo_count,
+                        4 => state.git_changes().len(),
                         _ => 0,
                     };
                     if max_items > 0 {
                         state.set_sidebar_selected_item(Some(0));
                     }
-                } else if panel_idx < 4 {
+                } else if panel_idx < 5 {
                     // Panel is collapsed - expand it first
                     let mut panels = state.sidebar_expanded_panels();
                     panels[panel_idx] = true;
@@ -1916,6 +1954,11 @@ impl<B: Backend> TuiController<B> {
 
             // Update state based on event type (borrow match for other events)
             match &event {
+                AppEvent::LlmStarted => {
+                    state.clear_rate_limit();
+                    state.set_status_message(None);
+                    state.set_flash_bar_state(FlashBarState::Working);
+                }
                 AppEvent::LlmTextChunk(chunk) => {
                     if Self::maybe_handle_rate_limit_message(state, chunk) {
                         continue;
@@ -1979,7 +2022,7 @@ impl<B: Backend> TuiController<B> {
                                 role: MessageRole::Thinking,
                                 content: thinking,
                                 thinking: None,
-                                collapsed: true,
+                                collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                                 provider: provider.clone(),
                                 model: model.clone(),
@@ -1989,6 +2032,7 @@ impl<B: Backend> TuiController<B> {
                                 tool_args: None,
                             };
                             state.add_message(thinking_msg.clone());
+                            state.collapse_all_thinking_except_last();
                             self.service.record_session_message(&thinking_msg).await;
                             state.scroll_to_bottom();
                         }
@@ -2758,7 +2802,16 @@ impl<B: Backend> TuiController<B> {
             "/think" => {
                 // Toggle model-level thinking (API parameter)
                 let enabled = !state.thinking_enabled();
-                state.set_thinking_enabled(enabled);
+                if state.llm_processing() {
+                    state.set_pending_thinking_enabled(Some(enabled));
+                    state.set_status_message(Some(
+                        "Thinking change queued (will apply after current response)".to_string(),
+                    ));
+                    state.clear_input();
+                    return Ok(());
+                }
+
+                let enabled = self.service.set_thinking_enabled(enabled).await;
 
                 use crate::ui_backend::{Message, MessageRole};
                 let msg = Message {
@@ -3277,6 +3330,19 @@ impl<B: Backend> TuiController<B> {
             }));
         }
 
+        if let Some(enabled) = state.take_pending_thinking_enabled() {
+            tracing::info!(
+                "Applying queued thinking toggle to {} after streaming completed",
+                enabled
+            );
+            let enabled = self.service.set_thinking_enabled(enabled).await;
+            state.set_status_message(Some(if enabled {
+                "Thinking enabled".to_string()
+            } else {
+                "Thinking disabled".to_string()
+            }));
+        }
+
         if let Some(pending_mode) = state.take_pending_mode_switch() {
             tracing::info!(
                 "Applying queued mode switch to {:?} after streaming completed",
@@ -3344,17 +3410,21 @@ fn summarize_error_for_flash_bar(error: &str) -> String {
     };
 
     if let Some(code) = code {
-        format!("{} ({})", label, code)
+        if label == "Error" {
+            format!("Error ({})", code)
+        } else {
+            format!("{} ({})", label, code)
+        }
     } else if label != "Error" {
         label.to_string()
     } else {
         let trimmed = error.trim();
         if trimmed.len() > 80 {
-            format!("{}...", &trimmed[..80])
+            format!("Error · {}...", &trimmed[..80])
         } else if trimmed.is_empty() {
             "Error".to_string()
         } else {
-            trimmed.to_string()
+            format!("Error · {}", trimmed)
         }
     }
 }
@@ -3383,7 +3453,7 @@ fn append_error_log(correlation_id: Option<String>, error: &str) -> anyhow::Resu
 
     let log_dir = std::path::Path::new(".tark");
     std::fs::create_dir_all(log_dir)?;
-    let log_path = log_dir.join("err");
+    let log_path = log_dir.join("err.log");
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -3402,9 +3472,24 @@ fn append_error_log(correlation_id: Option<String>, error: &str) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        is_rate_limit_message, parse_error_code, parse_rate_limit_delay_secs,
+        append_error_log, is_rate_limit_message, parse_error_code, parse_rate_limit_delay_secs,
         summarize_error_for_flash_bar,
     };
+    use crate::core::types::AgentMode;
+    use crate::ui_backend::{AppService, Command};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use tokio::sync::mpsc;
+
+    struct DirGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
 
     #[test]
     fn parse_rate_limit_retrying_in_seconds() {
@@ -3443,5 +3528,69 @@ mod tests {
     fn parse_error_code_handles_json_style() {
         let err = "{\"code\": 429, \"message\": \"Rate limit\"}";
         assert_eq!(parse_error_code(err), Some(429));
+    }
+
+    #[test]
+    fn append_error_log_writes_err_log() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let original_dir = std::env::current_dir().expect("current dir");
+        let _guard = DirGuard {
+            original: original_dir,
+        };
+        std::env::set_current_dir(tempdir.path()).expect("set current dir");
+
+        append_error_log(Some("corr-123".to_string()), "boom").expect("append error log");
+
+        let log_path = tempdir.path().join(".tark").join("err.log");
+        let contents = std::fs::read_to_string(log_path).expect("read err.log");
+        assert!(contents.contains("correlation_id=corr-123"));
+        assert!(contents.contains("error=boom"));
+    }
+
+    #[tokio::test]
+    async fn queued_mode_switch_applies_after_streaming() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let working_dir = tempdir.path().to_path_buf();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let mut service = AppService::new(working_dir.clone(), event_tx).expect("service");
+        let interaction_rx = service.take_interaction_receiver();
+
+        let backend = TestBackend::new(80, 24);
+        let terminal = Terminal::new(backend).expect("terminal");
+        let renderer = super::TuiRenderer::new(terminal, working_dir.clone());
+
+        let mut controller = super::TuiController::new(service, renderer, event_rx, interaction_rx);
+        let state = controller.service.state().clone();
+
+        state.set_llm_processing(true);
+        controller
+            .service
+            .handle_command(Command::SetAgentMode(AgentMode::Plan))
+            .await
+            .expect("queue mode switch");
+
+        assert_eq!(state.pending_mode_switch(), Some(AgentMode::Plan));
+        assert_eq!(state.agent_mode(), AgentMode::Build);
+        let conv_mode = controller
+            .service
+            .conversation_mode()
+            .await
+            .expect("conversation mode");
+        assert_eq!(conv_mode, AgentMode::Build);
+
+        state.set_llm_processing(false);
+        controller
+            .apply_pending_changes(&state)
+            .await
+            .expect("apply pending changes");
+
+        assert!(state.pending_mode_switch().is_none());
+        assert_eq!(state.agent_mode(), AgentMode::Plan);
+        let conv_mode = controller
+            .service
+            .conversation_mode()
+            .await
+            .expect("conversation mode");
+        assert_eq!(conv_mode, AgentMode::Plan);
     }
 }

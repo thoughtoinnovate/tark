@@ -161,6 +161,13 @@ impl ConversationService {
         Ok(())
     }
 
+    /// Set the thinking level for the chat agent and refresh the system prompt
+    pub async fn set_think_level(&self, level_name: String) -> Result<(), ConversationError> {
+        let mut agent = self.chat_agent.write().await;
+        agent.set_think_level(level_name).await;
+        Ok(())
+    }
+
     /// Send a message and stream the response
     pub async fn send_message(
         &self,
@@ -658,6 +665,12 @@ impl ConversationService {
             Ok((Vec::new(), Vec::new()))
         }
     }
+
+    /// Get the current agent mode (test helper)
+    pub(crate) async fn agent_mode(&self) -> AgentMode {
+        let agent = self.chat_agent.read().await;
+        agent.mode()
+    }
 }
 
 #[cfg(test)]
@@ -735,6 +748,20 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn set_think_level_updates_agent() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let tools = crate::tools::ToolRegistry::new(std::path::PathBuf::from("."));
+        let mut agent = ChatAgent::new(Arc::new(TestProvider { name: "a" }), tools);
+        agent.set_thinking_config(crate::config::ThinkingConfig::default());
+
+        let service = ConversationService::new(agent, tx);
+        service.set_think_level("medium".to_string()).await.unwrap();
+
+        let agent = service.chat_agent.read().await;
+        assert_eq!(agent.think_level(), "medium");
     }
 
     #[tokio::test]

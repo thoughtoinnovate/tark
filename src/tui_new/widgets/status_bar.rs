@@ -146,17 +146,10 @@ impl Widget for StatusBar<'_> {
         }
 
         // Build the complete status bar as a single line (left to right):
-        // agent • Build ▼  🟢 Balanced ▼  [🧠] [💭]  ≡ 7    ● Working...    • Model Provider  [?]
+        // Build ▼  🟢 Balanced ▼  [🧠] [💭]  ≡ 7    ● Model Provider  [?]
         let mut spans = vec![];
 
-        // 1. Agent label (small, muted)
-        spans.push(Span::styled(
-            "agent ",
-            Style::default().fg(self.theme.text_muted),
-        ));
-
-        // 2. Agent mode (• Build ▼)
-        spans.push(Span::styled("• ", Style::default().fg(self.theme.yellow)));
+        // 1. Agent mode (Build ▼)
         spans.push(Span::styled(
             self.agent_mode_str(),
             Style::default().fg(self.theme.yellow),
@@ -166,7 +159,7 @@ impl Widget for StatusBar<'_> {
             Style::default().fg(self.theme.text_muted),
         ));
 
-        // 3. Build mode (only if Build agent mode)
+        // 2. Build mode (only if Build agent mode)
         if self.agent_mode == AgentMode::Build {
             spans.push(Span::raw(" "));
             spans.push(Span::styled("🟢 ", Style::default().fg(self.theme.green)));
@@ -180,7 +173,7 @@ impl Widget for StatusBar<'_> {
             ));
         }
 
-        // 4. Indicators section (thinking brain + thinking tool + queue)
+        // 3. Indicators section (thinking brain + thinking tool + queue)
         spans.push(Span::raw("  "));
 
         // Model-level thinking (brain)
@@ -261,7 +254,7 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::raw(" ".repeat(padding)));
         }
 
-        // 6. Model/Provider (right-aligned) with connection indicator
+        // 4. Model/Provider (right-aligned) with connection indicator
         // Connection dot: green if connected, red if not
         let connection_dot_color = if self.llm_connected {
             self.theme.green
@@ -282,7 +275,7 @@ impl Widget for StatusBar<'_> {
             Style::default().fg(self.theme.text_muted),
         ));
 
-        // 7. Help button (Ctrl+? to open)
+        // 5. Help button (Ctrl+? to open)
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             "[?]",

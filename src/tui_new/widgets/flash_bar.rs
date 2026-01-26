@@ -205,7 +205,12 @@ impl FlashBar<'_> {
             } else {
                 WORKING_BAR_THIN
             };
-            let fg = blend_color(self.theme.bg_dark, self.theme.cyan, strength);
+            let fg = if dist <= 0.5 {
+                let cap = blend_color(self.theme.cyan, self.theme.text_primary, 0.45);
+                blend_color(self.theme.bg_dark, cap, strength.max(0.9))
+            } else {
+                blend_color(self.theme.bg_dark, self.theme.cyan, strength)
+            };
             let style = Style::default().fg(fg).bg(self.theme.bg_dark);
             buf[(x, center_y)].set_char(ch).set_style(style);
         }

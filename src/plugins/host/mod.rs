@@ -483,6 +483,104 @@ impl PluginInstance {
     }
 
     // =========================================================================
+    // Channel Plugin Interface Methods
+    // =========================================================================
+
+    /// Get channel info (JSON)
+    pub fn channel_info(&mut self) -> Result<ChannelInfo> {
+        let json = self.call_string_return_fn("channel_info")?;
+        serde_json::from_str(&json).context("Failed to parse channel info JSON")
+    }
+
+    /// Start channel plugin
+    pub fn channel_start(&mut self) -> Result<()> {
+        let start_fn = self
+            .instance
+            .get_typed_func::<(), i32>(&mut self.store, "channel_start")
+            .context("Plugin does not export 'channel_start' function")?;
+
+        let result = start_fn.call(&mut self.store, ())?;
+        if result < 0 {
+            anyhow::bail!("Channel start failed");
+        }
+        Ok(())
+    }
+
+    /// Stop channel plugin
+    pub fn channel_stop(&mut self) -> Result<()> {
+        let stop_fn = self
+            .instance
+            .get_typed_func::<(), i32>(&mut self.store, "channel_stop")
+            .context("Plugin does not export 'channel_stop' function")?;
+
+        let result = stop_fn.call(&mut self.store, ())?;
+        if result < 0 {
+            anyhow::bail!("Channel stop failed");
+        }
+        Ok(())
+    }
+
+    /// Get channel auth status
+    pub fn channel_auth_status(&mut self) -> Result<ChannelAuthStatus> {
+        let status_fn = self
+            .instance
+            .get_typed_func::<(), i32>(&mut self.store, "channel_auth_status")
+            .context("Plugin does not export 'channel_auth_status' function")?;
+
+        let result = status_fn.call(&mut self.store, ())?;
+        Ok(match result {
+            0 => ChannelAuthStatus::NotRequired,
+            1 => ChannelAuthStatus::Authenticated,
+            2 => ChannelAuthStatus::NotAuthenticated,
+            3 => ChannelAuthStatus::Expired,
+            _ => ChannelAuthStatus::NotAuthenticated,
+        })
+    }
+
+    /// Initialize channel with credentials (JSON)
+    pub fn channel_auth_init(&mut self, credentials_json: &str) -> Result<()> {
+        self.call_string_param_fn("channel_auth_init", credentials_json)
+    }
+
+    /// Logout from channel
+    pub fn channel_auth_logout(&mut self) -> Result<()> {
+        let logout_fn = self
+            .instance
+            .get_typed_func::<(), i32>(&mut self.store, "channel_auth_logout")
+            .context("Plugin does not export 'channel_auth_logout' function")?;
+
+        let result = logout_fn.call(&mut self.store, ())?;
+        if result < 0 {
+            anyhow::bail!("Channel logout failed");
+        }
+        Ok(())
+    }
+
+    /// Handle webhook request (JSON)
+    pub fn channel_handle_webhook(
+        &mut self,
+        request: &ChannelWebhookRequest,
+    ) -> Result<ChannelWebhookResponse> {
+        let json = serde_json::to_string(request)?;
+        let response_json = self.call_string_param_return_fn("channel_handle_webhook", &json)?;
+        serde_json::from_str(&response_json).context("Failed to parse webhook response JSON")
+    }
+
+    /// Send outbound message (JSON)
+    pub fn channel_send(&mut self, request: &ChannelSendRequest) -> Result<ChannelSendResult> {
+        let json = serde_json::to_string(request)?;
+        let response_json = self.call_string_param_return_fn("channel_send", &json)?;
+        serde_json::from_str(&response_json).context("Failed to parse send result JSON")
+    }
+
+    /// Check if channel auth init is supported
+    pub fn has_channel_auth_init(&mut self) -> bool {
+        self.instance
+            .get_typed_func::<(i32, i32), i32>(&mut self.store, "channel_auth_init")
+            .is_ok()
+    }
+
+    // =========================================================================
     // Helper Methods
     // =========================================================================
 
@@ -544,6 +642,136 @@ impl PluginInstance {
 
         Ok(())
     }
+
+    /// Call a function that takes a string param and returns a string
+    fn call_string_param_return_fn(&mut self, fn_name: &str, param: &str) -> Result<String> {
+        let alloc_fn = self
+            .instance
+            .get_typed_func::<i32, i32>(&mut self.store, "alloc")
+            .context("Plugin does not export 'alloc' function")?;
+
+        let param_bytes = param.as_bytes();
+        let param_ptr = alloc_fn.call(&mut self.store, param_bytes.len() as i32)?;
+
+        let memory = self
+            .instance
+            .get_memory(&mut self.store, "memory")
+            .context("Plugin has no memory export")?;
+
+        memory.write(&mut self.store, param_ptr as usize, param_bytes)?;
+
+        let output_ptr = alloc_fn.call(&mut self.store, 64 * 1024)?;
+
+        let target_fn = self
+            .instance
+            .get_typed_func::<(i32, i32, i32), i32>(&mut self.store, fn_name)
+            .with_context(|| format!("Plugin does not export '{}' function", fn_name))?;
+
+        let output_len = target_fn.call(
+            &mut self.store,
+            (param_ptr, param_bytes.len() as i32, output_ptr),
+        )?;
+        if output_len < 0 {
+            anyhow::bail!(
+                "Function {} failed with error code: {}",
+                fn_name,
+                output_len
+            );
+        }
+
+        let memory = self
+            .instance
+            .get_memory(&mut self.store, "memory")
+            .context("Plugin has no memory export")?;
+
+        let data = memory.data(&self.store);
+        let result_bytes = &data[output_ptr as usize..(output_ptr + output_len) as usize];
+        String::from_utf8(result_bytes.to_vec()).context("Invalid UTF-8 in result")
+    }
+}
+
+// =============================================================================
+// Channel Plugin Types
+// =============================================================================
+
+/// Channel metadata from plugin
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChannelInfo {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub supports_streaming: bool,
+    #[serde(default)]
+    pub supports_edits: bool,
+}
+
+/// Auth status for channel plugins
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelAuthStatus {
+    NotRequired,
+    Authenticated,
+    NotAuthenticated,
+    Expired,
+}
+
+/// Inbound message from a channel
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChannelInboundMessage {
+    pub conversation_id: String,
+    pub user_id: String,
+    pub text: String,
+    #[serde(default)]
+    pub metadata_json: String,
+}
+
+/// Webhook request from host
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChannelWebhookRequest {
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub body: String,
+}
+
+/// Webhook response from plugin
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChannelWebhookResponse {
+    pub status: u16,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub messages: Vec<ChannelInboundMessage>,
+}
+
+/// Outbound message request
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChannelSendRequest {
+    pub conversation_id: String,
+    pub text: String,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub is_final: bool,
+    #[serde(default)]
+    pub metadata_json: String,
+}
+
+/// Send result from plugin
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChannelSendResult {
+    pub success: bool,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 // =============================================================================

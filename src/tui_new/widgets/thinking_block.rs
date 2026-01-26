@@ -6,6 +6,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
+    symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
@@ -175,6 +176,7 @@ impl Widget for ThinkingBlockWidget<'_> {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
             .border_style(border_style)
             .style(Style::default().bg(Color::Black));
 

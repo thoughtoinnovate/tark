@@ -26,6 +26,7 @@ Tark plugins are **WebAssembly (WASM) modules** that extend tark's functionality
 | **`auth`** | Add authentication methods | OAuth providers, API key management, SSO |
 | **`tool`** | Add agent capabilities | Custom file operations, API integrations, specialized workflows |
 | **`provider`** | Add LLM providers | Custom model endpoints, local models, alternative APIs |
+| **`channel`** | Add messaging channels | Slack, Discord, Signal bridges |
 | **`hook`** | Lifecycle event handlers | Pre/post processing, logging, notifications |
 
 ### Security Model
@@ -261,7 +262,7 @@ The `plugin.toml` file is the plugin's configuration and metadata.
 [plugin]
 name = "my-plugin"        # Lowercase, alphanumeric, dashes only
 version = "1.0.0"         # Semantic versioning (semver)
-type = "auth"             # One of: auth, tool, provider, hook
+type = "auth"             # One of: auth, tool, provider, channel, hook
 ```
 
 ### Optional Metadata
@@ -350,7 +351,7 @@ shell = true  # Use with extreme caution!
 |-------|------|
 | `name` | Lowercase, alphanumeric, hyphens only. No spaces. |
 | `version` | Valid semantic version (e.g., `1.0.0`, `0.2.3-beta.1`) |
-| `type` | One of: `auth`, `tool`, `provider`, `hook` |
+| `type` | One of: `auth`, `tool`, `provider`, `channel`, `hook` |
 | `http` | Valid domain or wildcard pattern |
 | `env` | Valid environment variable name or wildcard |
 
@@ -939,7 +940,7 @@ RUST_LOG=debug cargo test --test plugin_system -- --nocapture
 - [ ] `plugin.wasm` exists and is valid WASM
 - [ ] All required fields are present in manifest
 - [ ] Version is valid semver
-- [ ] Plugin type is one of: `auth`, `tool`, `provider`, `hook`
+- [ ] Plugin type is one of: `auth`, `tool`, `provider`, `channel`, `hook`
 - [ ] Capabilities match what your code uses
 - [ ] HTTP hosts are properly declared
 - [ ] Environment variables are declared

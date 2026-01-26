@@ -267,6 +267,13 @@ pub struct ContextFile {
     pub added_at: String,
 }
 
+/// Attachment token tracked in the input buffer
+#[derive(Debug, Clone)]
+pub struct AttachmentToken {
+    pub token: String,
+    pub paths: Vec<String>,
+}
+
 /// Attachment information for display in UI
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentInfo {

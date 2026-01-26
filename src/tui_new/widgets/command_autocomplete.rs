@@ -7,6 +7,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
+    symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
@@ -272,6 +273,7 @@ impl Widget for CommandAutocomplete<'_> {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
             .border_style(Style::default().fg(self.theme.cyan))
             .style(Style::default().bg(self.theme.bg_dark))
             .title(Span::styled(

@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub user_name: String,
     /// Icon for user messages
     pub user_icon: String,
+    /// Max visible lines for thinking blocks
+    pub thinking_max_lines: usize,
 }
 
 impl Default for AppConfig {
@@ -41,6 +43,10 @@ impl Default for AppConfig {
             agent_icon: "🤖".to_string(),
             user_name,
             user_icon: "👤".to_string(),
+            thinking_max_lines: crate::config::Config::load()
+                .unwrap_or_default()
+                .thinking
+                .max_visible_lines,
         }
     }
 }

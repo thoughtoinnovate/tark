@@ -19,6 +19,8 @@ pub enum PluginType {
     Tool,
     /// LLM provider plugin
     Provider,
+    /// Messaging channel plugin (Slack, Discord, Signal, etc.)
+    Channel,
     /// Hook plugin (lifecycle events)
     Hook,
 }
@@ -29,6 +31,7 @@ impl std::fmt::Display for PluginType {
             PluginType::Auth => write!(f, "auth"),
             PluginType::Tool => write!(f, "tool"),
             PluginType::Provider => write!(f, "provider"),
+            PluginType::Channel => write!(f, "channel"),
             PluginType::Hook => write!(f, "hook"),
         }
     }
@@ -175,6 +178,10 @@ pub struct PluginContributions {
     #[serde(default)]
     pub providers: Vec<ProviderContribution>,
 
+    /// Messaging channels contributed
+    #[serde(default)]
+    pub channels: Vec<ChannelContribution>,
+
     /// Commands contributed
     #[serde(default)]
     pub commands: Vec<CommandContribution>,
@@ -195,6 +202,15 @@ pub struct ProviderContribution {
     /// When set, tark loads models from models.dev using this provider key
     #[serde(default)]
     pub base_provider: Option<String>,
+}
+
+/// Channel contribution declaration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelContribution {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// Command contribution declaration
@@ -445,6 +461,25 @@ http = ["oauth2.googleapis.com", "*.google.com"]
             .is_http_allowed("oauth2.googleapis.com"));
         assert!(manifest.capabilities.is_http_allowed("accounts.google.com"));
         assert!(!manifest.capabilities.is_http_allowed("evil.com"));
+    }
+
+    #[test]
+    fn test_parse_channel_manifest() {
+        let toml = r#"
+[plugin]
+name = "test-channel"
+version = "0.1.0"
+type = "channel"
+
+[contributes]
+channels = [{ id = "slack", name = "Slack" }]
+"#;
+
+        let manifest: PluginManifest = toml::from_str(toml).unwrap();
+        assert_eq!(manifest.plugin.name, "test-channel");
+        assert_eq!(manifest.plugin.plugin_type, PluginType::Channel);
+        assert_eq!(manifest.contributes.channels.len(), 1);
+        assert_eq!(manifest.contributes.channels[0].id, "slack");
     }
 
     #[test]

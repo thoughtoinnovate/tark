@@ -106,6 +106,23 @@ fn test_input_widget_empty() {
     assert!(output.contains("│") || output.contains("┌") || output.contains("─"));
 }
 
+#[test]
+fn test_file_picker_modal_marks_selected_items() {
+    let theme = Theme::default();
+    let files = vec!["src/".to_string(), "src/main.rs".to_string()];
+    let selected_paths = vec!["src/".to_string()];
+    let widget = FilePickerModal::new(&theme)
+        .files(&files)
+        .filter("s")
+        .selected(0)
+        .selected_paths(&selected_paths)
+        .current_dir("./");
+
+    let output = render_widget(widget, 60, 20);
+    assert!(output.contains("[x]"), "Selected items should be marked");
+    assert!(output.contains("[ ]"), "Unselected items should be shown");
+}
+
 // ============================================================================
 // STATUS BAR TESTS
 // ============================================================================
@@ -135,6 +152,86 @@ fn test_status_bar_plan_mode() {
     assert!(
         output.contains("Plan") || output.contains("📋"),
         "Status should show Plan mode"
+    );
+}
+
+// ============================================================================
+// SIDEBAR WIDGET TESTS
+// ============================================================================
+
+#[test]
+fn test_sidebar_scrollbar_visible_only_when_focused() {
+    let theme = Theme::default();
+    let changes: Vec<GitChange> = (0..30)
+        .map(|i| GitChange {
+            status: GitStatus::Modified,
+            file: format!("file_{i}.rs"),
+            additions: 1,
+            deletions: 0,
+        })
+        .collect();
+
+    let mut focused_sidebar = Sidebar::new(&theme)
+        .focused(true)
+        .selected_panel(4)
+        .git_changes(changes.clone());
+    focused_sidebar.expanded_panels = [false, false, false, false, true];
+    focused_sidebar.selected_item = Some(0);
+
+    let output = render_widget(focused_sidebar, 40, 16);
+    assert!(
+        output.contains("↑") && output.contains("↓"),
+        "Focused, overflowing panel should render scrollbars"
+    );
+
+    let unfocused_changes: Vec<GitChange> = (0..2)
+        .map(|i| GitChange {
+            status: GitStatus::Modified,
+            file: format!("small_{i}.rs"),
+            additions: 1,
+            deletions: 0,
+        })
+        .collect();
+
+    let mut unfocused_sidebar = Sidebar::new(&theme)
+        .focused(false)
+        .selected_panel(4)
+        .git_changes(unfocused_changes);
+    unfocused_sidebar.expanded_panels = [false, false, false, false, true];
+    unfocused_sidebar.selected_item = Some(0);
+
+    let output = render_widget(unfocused_sidebar, 40, 16);
+    assert!(
+        !output.contains("↑") && !output.contains("↓"),
+        "Unfocused panel should not render scrollbars"
+    );
+}
+
+#[test]
+fn test_sidebar_session_model_line_highlights_when_selected() {
+    let theme = Theme::default();
+    let session_info = SessionInfo {
+        name: "Session A".to_string(),
+        total_cost: 1.234,
+        model_count: 2,
+        model_costs: vec![("ZMODEL".to_string(), 0.123), ("Other".to_string(), 1.111)],
+        total_tokens: 900,
+        model_tokens: vec![("ZMODEL".to_string(), 300), ("Other".to_string(), 600)],
+    };
+
+    let mut sidebar = Sidebar::new(&theme)
+        .focused(true)
+        .selected_panel(0)
+        .session_info(session_info);
+    sidebar.expanded_panels = [true, false, false, false, false];
+    sidebar.selected_item = Some(3);
+
+    let buf = render_widget_buffer(sidebar, 40, 12);
+    let fg = find_fg_for_symbol(&buf, 40, 12, "Z");
+    assert_eq!(
+        fg,
+        Some(theme.cyan),
+        "Selected session model line should use focused color"
     );
 }
 
@@ -232,6 +329,32 @@ fn test_tool_diff_renders_inline_on_narrow_width() {
     assert!(
         !output.contains(" | "),
         "Inline diff should not include split separator"
+    );
+}
+
+#[test]
+fn test_thinking_block_truncates_to_max_lines() {
+    let theme = Theme::default();
+    let content = vec!["word"; 200].join(" ");
+    let mut msg = Message::new(MessageRole::Thinking, content);
+    msg.collapsed = false;
+    let messages = vec![msg];
+
+    let widget = MessageArea::new(&messages, &theme).thinking_max_lines(2);
+    let output = render_widget(widget, 80, 12);
+
+    assert!(
+        output.contains("🧠"),
+        "Thinking block should show brain icon"
+    );
+    assert!(
+        output.contains("Thinking (model)"),
+        "Thinking block should include model label"
+    );
+    assert!(
+        output.contains("↑ more above"),
+        "Thinking block should indicate truncated content:\n{}",
+        output
     );
 }
 

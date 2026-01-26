@@ -257,6 +257,12 @@ enum PluginCommands {
         /// Plugin ID
         plugin_id: String,
     },
+
+    /// Run OAuth authentication for a plugin
+    Auth {
+        /// Plugin ID
+        plugin_id: String,
+    },
 }
 
 #[tokio::main]
@@ -397,6 +403,9 @@ async fn main() -> Result<()> {
             }
             PluginCommands::Disable { plugin_id } => {
                 transport::plugin_cli::run_plugin_disable(&plugin_id).await?;
+            }
+            PluginCommands::Auth { plugin_id } => {
+                transport::plugin_cli::run_plugin_auth(&plugin_id).await?;
             }
         },
         Commands::Policy { command } => match command {

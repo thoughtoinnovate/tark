@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::core::attachments::{resolve_file_path, AttachmentConfig, AttachmentManager};
+use crate::core::attachments::{
+    resolve_file_path, AttachmentConfig, AttachmentContent, AttachmentManager, MessageAttachment,
+};
 use crate::core::session_manager::SessionManager;
 use crate::storage::TarkStorage;
 
@@ -19,7 +21,7 @@ use super::conversation::{CompactionResult, ConversationService};
 use super::events::AppEvent;
 use super::git_service::GitService;
 use super::session_service::SessionService;
-use super::state::{FocusedComponent, ModalType, SharedState, VimMode};
+use super::state::{FocusedComponent, ModalType, PasteBlock, SharedState, VimMode};
 use super::types::{
     ArchiveChunkInfo, AttachmentInfo, GitChangeInfo, Message, MessageRole, ModelInfo, ProviderInfo,
 };
@@ -30,6 +32,31 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(i, _)| i)
         .unwrap_or_else(|| s.len())
+}
+
+fn paste_block_ranges(text: &str, blocks: &[PasteBlock]) -> Vec<(usize, usize, usize)> {
+    if text.is_empty() || blocks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::new();
+    let mut search_start = 0usize;
+
+    for (idx, block) in blocks.iter().enumerate() {
+        if block.placeholder.is_empty() {
+            continue;
+        }
+        if let Some(pos) = text[search_start..].find(&block.placeholder) {
+            let byte_start = search_start + pos;
+            let byte_end = byte_start + block.placeholder.len();
+            let start_char = text[..byte_start].chars().count();
+            let end_char = start_char + block.placeholder.chars().count();
+            ranges.push((start_char, end_char, idx));
+            search_start = byte_end;
+        }
+    }
+
+    ranges
 }
 
 /// Application Service - Business Logic Layer
@@ -97,6 +124,42 @@ impl AppService {
             _ => None,
         }
     }
+
+    fn resolve_default_think_level(config: &crate::config::ThinkingConfig) -> String {
+        config.effective_default_level_name()
+    }
+
+    fn resolve_enabled_think_level(config: &crate::config::ThinkingConfig) -> String {
+        let candidate = config
+            .default_level()
+            .unwrap_or("medium")
+            .trim()
+            .to_lowercase();
+
+        if !candidate.is_empty() && candidate != "off" && config.get_level(&candidate).is_some() {
+            return candidate;
+        }
+
+        if config.get_level("medium").is_some() {
+            return "medium".to_string();
+        }
+
+        config
+            .level_names()
+            .into_iter()
+            .next()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| "off".to_string())
+    }
+
+    async fn apply_think_level(&self, level: String) -> bool {
+        let enabled = level != "off";
+        self.state.set_thinking_enabled(enabled);
+        if let Some(ref conv_svc) = self.conversation_svc {
+            let _ = conv_svc.set_think_level(level).await;
+        }
+        enabled
+    }
     /// Create a new application service
     pub fn new(working_dir: PathBuf, event_tx: mpsc::UnboundedSender<AppEvent>) -> Result<Self> {
         Self::new_with_debug(working_dir, event_tx, false)
@@ -124,6 +187,8 @@ impl AppService {
         // Load global config and apply default theme
         let global_config = crate::config::Config::load().unwrap_or_default();
         state.set_theme(global_config.tui.theme_preset());
+        let default_think_level = Self::resolve_default_think_level(&global_config.thinking);
+        state.set_thinking_enabled(default_think_level != "off");
 
         // Initialize storage
         let storage_facade = super::StorageFacade::new(&working_dir)?;
@@ -157,8 +222,11 @@ impl AppService {
             let initial_trust = state.trust_level();
             tools.set_trust_level(initial_trust);
 
-            let agent = crate::agent::ChatAgent::new(Arc::from(llm_provider), tools)
+            let mut agent = crate::agent::ChatAgent::new(Arc::from(llm_provider), tools)
                 .with_max_iterations(global_config.agent.max_iterations);
+            agent.set_thinking_config(global_config.thinking.clone());
+            agent.set_think_level_sync(default_think_level.clone());
+            agent.refresh_system_prompt();
 
             // Note: Can't set trust_level synchronously during init.
             // It will be set via conv_svc.set_trust_level() after ConversationService creation.
@@ -277,6 +345,14 @@ impl AppService {
     /// Get the shared state
     pub fn state(&self) -> &SharedState {
         &self.state
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn conversation_mode(&self) -> Option<crate::core::types::AgentMode> {
+        match self.conversation_svc {
+            Some(ref svc) => Some(svc.agent_mode().await),
+            None => None,
+        }
     }
 
     /// Take the interaction receiver (ask_user / approval)
@@ -444,25 +520,44 @@ impl AppService {
             }
             Command::ToggleThinking => {
                 let enabled = !self.state.thinking_enabled();
-                self.state.set_thinking_enabled(enabled);
+                if self.state.llm_processing() {
+                    self.state.set_pending_thinking_enabled(Some(enabled));
+                    self.state.set_status_message(Some(
+                        "Thinking change queued (will apply after current response)".to_string(),
+                    ));
+                    return Ok(());
+                }
 
+                let effective_enabled = self.set_thinking_enabled(enabled).await;
                 self.event_tx
                     .send(AppEvent::StatusChanged(format!(
                         "Thinking blocks: {}",
-                        if enabled { "enabled" } else { "disabled" }
+                        if effective_enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
                     )))
                     .ok();
             }
             Command::SetVimMode(mode) => {
                 self.state.set_vim_mode(mode);
                 self.state.set_pending_operator(None);
-                if mode == VimMode::Visual
-                    && self.state.focused_component() == FocusedComponent::Input
-                {
-                    let cursor = self.state.input_cursor();
-                    self.state.set_input_selection(cursor, cursor);
-                } else if mode != VimMode::Visual {
+                if mode == VimMode::Visual {
+                    match self.state.focused_component() {
+                        FocusedComponent::Input => {
+                            let cursor = self.state.input_cursor();
+                            self.state.set_input_selection(cursor, cursor);
+                        }
+                        FocusedComponent::Messages => {
+                            let cursor = self.state.message_cursor();
+                            self.state.set_message_selection(cursor, cursor);
+                        }
+                        _ => {}
+                    }
+                } else {
                     self.state.clear_input_selection();
+                    self.state.clear_message_selection();
                 }
             }
 
@@ -691,6 +786,8 @@ impl AppService {
                         self.refresh_file_picker(&filter);
                     }
                 }
+
+                self.prune_missing_attachment_tokens().await;
             }
             Command::InsertText(text) => {
                 let mut input = self.state.input_text();
@@ -699,6 +796,7 @@ impl AppService {
                 input.insert_str(byte_cursor, &text);
                 self.state.set_input_text(input);
                 self.state.set_input_cursor(cursor + text.chars().count());
+                self.prune_missing_attachment_tokens().await;
             }
             Command::DeleteCharBefore => {
                 let text = self.state.input_text();
@@ -715,6 +813,33 @@ impl AppService {
                         self.state.set_file_picker_filter(filter);
                         return Ok(());
                     }
+                }
+
+                let blocks = self.state.paste_blocks();
+                if !blocks.is_empty() {
+                    let ranges = paste_block_ranges(&text, &blocks);
+                    if let Some((start, end, index)) = ranges
+                        .into_iter()
+                        .find(|(start, end, _)| cursor > *start && cursor <= *end)
+                    {
+                        let mut updated = text;
+                        let start_byte = char_to_byte(&updated, start);
+                        let end_byte = char_to_byte(&updated, end);
+                        updated.drain(start_byte..end_byte);
+                        self.state.set_input_text(updated);
+                        self.state.set_input_cursor(start);
+                        self.state.remove_paste_block(index);
+                        self.prune_missing_attachment_tokens().await;
+                        return Ok(());
+                    }
+                }
+
+                if self.state.active_modal() != Some(ModalType::FilePicker)
+                    && self.state.vim_mode() == VimMode::Insert
+                    && self.state.focused_component() == FocusedComponent::Input
+                    && self.remove_attachment_token_before_cursor().await
+                {
+                    return Ok(());
                 }
 
                 if cursor > 0 {
@@ -735,6 +860,8 @@ impl AppService {
                 } else {
                     self.state.deactivate_autocomplete();
                 }
+
+                self.prune_missing_attachment_tokens().await;
             }
             Command::DeleteCharAfter => {
                 let text = self.state.input_text();
@@ -746,127 +873,188 @@ impl AppService {
                     let new_text: String = chars.into_iter().collect();
                     self.state.set_input_text(new_text);
                 }
+                self.prune_missing_attachment_tokens().await;
             }
-            Command::CursorLeft => {
-                let cursor = self.state.input_cursor();
-                if cursor > 0 {
-                    self.state.set_input_cursor(cursor - 1);
-                }
-                if self.state.vim_mode() == VimMode::Visual
-                    && self.state.focused_component() == FocusedComponent::Input
-                {
-                    let end = self.state.input_cursor();
-                    if let Some((start, _)) = self.state.input_selection() {
-                        self.state.set_input_selection(start, end);
+            Command::CursorLeft => match self.state.focused_component() {
+                FocusedComponent::Messages => {
+                    self.state.move_message_cursor_left();
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.message_cursor();
+                        if let Some((start, _)) = self.state.message_selection() {
+                            self.state.set_message_selection(start, end);
+                        }
                     }
                 }
-            }
-            Command::CursorRight => {
-                let cursor = self.state.input_cursor();
-                let text = self.state.input_text();
-                let chars: Vec<char> = text.chars().collect();
-                if cursor < chars.len() {
-                    self.state.set_input_cursor(cursor + 1);
-                }
-                if self.state.vim_mode() == VimMode::Visual
-                    && self.state.focused_component() == FocusedComponent::Input
-                {
-                    let end = self.state.input_cursor();
-                    if let Some((start, _)) = self.state.input_selection() {
-                        self.state.set_input_selection(start, end);
+                FocusedComponent::Input => {
+                    let cursor = self.state.input_cursor();
+                    if cursor > 0 {
+                        self.state.set_input_cursor(cursor - 1);
+                    }
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.input_cursor();
+                        if let Some((start, _)) = self.state.input_selection() {
+                            self.state.set_input_selection(start, end);
+                        }
                     }
                 }
-            }
-            Command::CursorToLineStart => {
-                let text = self.state.input_text();
-                let cursor = self.state.input_cursor();
-                let chars: Vec<char> = text.chars().collect();
-                let mut idx = cursor;
-                while idx > 0 && chars[idx - 1] != '\n' {
-                    idx -= 1;
-                }
-                self.state.set_input_cursor(idx);
-                if self.state.vim_mode() == VimMode::Visual
-                    && self.state.focused_component() == FocusedComponent::Input
-                {
-                    let end = self.state.input_cursor();
-                    if let Some((start, _)) = self.state.input_selection() {
-                        self.state.set_input_selection(start, end);
+                _ => {}
+            },
+            Command::CursorRight => match self.state.focused_component() {
+                FocusedComponent::Messages => {
+                    self.state.move_message_cursor_right();
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.message_cursor();
+                        if let Some((start, _)) = self.state.message_selection() {
+                            self.state.set_message_selection(start, end);
+                        }
                     }
                 }
-            }
-            Command::CursorToLineEnd => {
-                let text = self.state.input_text();
-                let cursor = self.state.input_cursor();
-                let chars: Vec<char> = text.chars().collect();
-                let mut idx = cursor;
-                while idx < chars.len() && chars[idx] != '\n' {
-                    idx += 1;
-                }
-                self.state.set_input_cursor(idx);
-                if self.state.vim_mode() == VimMode::Visual
-                    && self.state.focused_component() == FocusedComponent::Input
-                {
-                    let end = self.state.input_cursor();
-                    if let Some((start, _)) = self.state.input_selection() {
-                        self.state.set_input_selection(start, end);
+                FocusedComponent::Input => {
+                    let cursor = self.state.input_cursor();
+                    let text = self.state.input_text();
+                    let chars: Vec<char> = text.chars().collect();
+                    if cursor < chars.len() {
+                        self.state.set_input_cursor(cursor + 1);
+                    }
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.input_cursor();
+                        if let Some((start, _)) = self.state.input_selection() {
+                            self.state.set_input_selection(start, end);
+                        }
                     }
                 }
-            }
-            Command::CursorWordForward => {
-                let text = self.state.input_text();
-                let cursor = self.state.input_cursor();
-
-                let mut new_cursor = cursor;
-                let chars: Vec<char> = text.chars().collect();
-
-                while new_cursor < chars.len() && !chars[new_cursor].is_whitespace() {
-                    new_cursor += 1;
-                }
-
-                while new_cursor < chars.len() && chars[new_cursor].is_whitespace() {
-                    new_cursor += 1;
-                }
-
-                self.state.set_input_cursor(new_cursor.min(chars.len()));
-                if self.state.vim_mode() == VimMode::Visual
-                    && self.state.focused_component() == FocusedComponent::Input
-                {
-                    let end = self.state.input_cursor();
-                    if let Some((start, _)) = self.state.input_selection() {
-                        self.state.set_input_selection(start, end);
+                _ => {}
+            },
+            Command::CursorToLineStart => match self.state.focused_component() {
+                FocusedComponent::Messages => {
+                    self.state.move_message_cursor_to_line_start();
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.message_cursor();
+                        if let Some((start, _)) = self.state.message_selection() {
+                            self.state.set_message_selection(start, end);
+                        }
                     }
                 }
-            }
-            Command::CursorWordBackward => {
-                let text = self.state.input_text();
-                let cursor = self.state.input_cursor();
-
-                if cursor == 0 {
-                    return Ok(());
-                }
-
-                let chars: Vec<char> = text.chars().collect();
-                let mut new_char_idx = cursor.saturating_sub(1);
-
-                while new_char_idx > 0 && chars[new_char_idx].is_whitespace() {
-                    new_char_idx -= 1;
-                }
-
-                while new_char_idx > 0 && !chars[new_char_idx - 1].is_whitespace() {
-                    new_char_idx -= 1;
-                }
-
-                self.state.set_input_cursor(new_char_idx);
-                if self.state.vim_mode() == VimMode::Visual
-                    && self.state.focused_component() == FocusedComponent::Input
-                {
-                    let end = self.state.input_cursor();
-                    if let Some((start, _)) = self.state.input_selection() {
-                        self.state.set_input_selection(start, end);
+                FocusedComponent::Input => {
+                    let text = self.state.input_text();
+                    let cursor = self.state.input_cursor();
+                    let chars: Vec<char> = text.chars().collect();
+                    let mut idx = cursor;
+                    while idx > 0 && chars[idx - 1] != '\n' {
+                        idx -= 1;
+                    }
+                    self.state.set_input_cursor(idx);
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.input_cursor();
+                        if let Some((start, _)) = self.state.input_selection() {
+                            self.state.set_input_selection(start, end);
+                        }
                     }
                 }
-            }
+                _ => {}
+            },
+            Command::CursorToLineEnd => match self.state.focused_component() {
+                FocusedComponent::Messages => {
+                    self.state.move_message_cursor_to_line_end();
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.message_cursor();
+                        if let Some((start, _)) = self.state.message_selection() {
+                            self.state.set_message_selection(start, end);
+                        }
+                    }
+                }
+                FocusedComponent::Input => {
+                    let text = self.state.input_text();
+                    let cursor = self.state.input_cursor();
+                    let chars: Vec<char> = text.chars().collect();
+                    let mut idx = cursor;
+                    while idx < chars.len() && chars[idx] != '\n' {
+                        idx += 1;
+                    }
+                    self.state.set_input_cursor(idx);
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.input_cursor();
+                        if let Some((start, _)) = self.state.input_selection() {
+                            self.state.set_input_selection(start, end);
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Command::CursorWordForward => match self.state.focused_component() {
+                FocusedComponent::Messages => {
+                    self.state.move_message_cursor_word_forward();
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.message_cursor();
+                        if let Some((start, _)) = self.state.message_selection() {
+                            self.state.set_message_selection(start, end);
+                        }
+                    }
+                }
+                FocusedComponent::Input => {
+                    let text = self.state.input_text();
+                    let cursor = self.state.input_cursor();
+
+                    let mut new_cursor = cursor;
+                    let chars: Vec<char> = text.chars().collect();
+
+                    while new_cursor < chars.len() && !chars[new_cursor].is_whitespace() {
+                        new_cursor += 1;
+                    }
+
+                    while new_cursor < chars.len() && chars[new_cursor].is_whitespace() {
+                        new_cursor += 1;
+                    }
+
+                    self.state.set_input_cursor(new_cursor.min(chars.len()));
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.input_cursor();
+                        if let Some((start, _)) = self.state.input_selection() {
+                            self.state.set_input_selection(start, end);
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Command::CursorWordBackward => match self.state.focused_component() {
+                FocusedComponent::Messages => {
+                    self.state.move_message_cursor_word_backward();
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.message_cursor();
+                        if let Some((start, _)) = self.state.message_selection() {
+                            self.state.set_message_selection(start, end);
+                        }
+                    }
+                }
+                FocusedComponent::Input => {
+                    let text = self.state.input_text();
+                    let cursor = self.state.input_cursor();
+
+                    if cursor == 0 {
+                        return Ok(());
+                    }
+
+                    let chars: Vec<char> = text.chars().collect();
+                    let mut new_char_idx = cursor.saturating_sub(1);
+
+                    while new_char_idx > 0 && chars[new_char_idx].is_whitespace() {
+                        new_char_idx -= 1;
+                    }
+
+                    while new_char_idx > 0 && !chars[new_char_idx - 1].is_whitespace() {
+                        new_char_idx -= 1;
+                    }
+
+                    self.state.set_input_cursor(new_char_idx);
+                    if self.state.vim_mode() == VimMode::Visual {
+                        let end = self.state.input_cursor();
+                        if let Some((start, _)) = self.state.input_selection() {
+                            self.state.set_input_selection(start, end);
+                        }
+                    }
+                }
+                _ => {}
+            },
             Command::InsertNewline => {
                 let text = self.state.input_text();
                 let cursor = self.state.input_cursor();
@@ -879,31 +1067,78 @@ impl AppService {
             Command::DeleteSelection => {
                 if let Some((start, end)) = self.state.input_selection() {
                     let mut text = self.state.input_text();
-                    let start_byte = char_to_byte(&text, start);
-                    let end_byte = char_to_byte(&text, end);
-                    if start < end && end_byte <= text.len() {
+                    let blocks = self.state.paste_blocks();
+                    let mut delete_start = start;
+                    let mut delete_end = end;
+                    let mut remove_indices = Vec::new();
+
+                    if !blocks.is_empty() {
+                        let ranges = paste_block_ranges(&text, &blocks);
+                        for (range_start, range_end, index) in ranges {
+                            if range_start < end && range_end > start {
+                                delete_start = delete_start.min(range_start);
+                                delete_end = delete_end.max(range_end);
+                                remove_indices.push(index);
+                            }
+                        }
+                    }
+
+                    let start_byte = char_to_byte(&text, delete_start);
+                    let end_byte = char_to_byte(&text, delete_end);
+                    if delete_start < delete_end && end_byte <= text.len() {
                         text.drain(start_byte..end_byte);
                         self.state.set_input_text(text);
-                        self.state.set_input_cursor(start);
+                        self.state.set_input_cursor(delete_start);
+                    }
+                    if !remove_indices.is_empty() {
+                        remove_indices.sort_unstable();
+                        for index in remove_indices.into_iter().rev() {
+                            self.state.remove_paste_block(index);
+                        }
                     }
                     self.state.clear_input_selection();
                     self.state.set_vim_mode(VimMode::Normal);
                 }
+                self.prune_missing_attachment_tokens().await;
             }
-            Command::YankSelection => {
-                if let Some((start, end)) = self.state.input_selection() {
-                    let text = self.state.input_text();
-                    if start < end && end <= text.len() {
-                        let selection = text[start..end].to_string();
-                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                            let _ = clipboard.set_text(selection);
-                        }
+            Command::YankSelection => match self.state.focused_component() {
+                FocusedComponent::Messages => {
+                    if let Some((start, end)) = self.state.message_selection() {
+                        let idx = self.state.focused_message();
+                        self.state.with_messages(|messages| {
+                            if let Some(msg) = messages.get(idx) {
+                                if start < end {
+                                    let start_byte = char_to_byte(&msg.content, start);
+                                    let end_byte = char_to_byte(&msg.content, end);
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(
+                                            msg.content[start_byte..end_byte].to_string(),
+                                        );
+                                    }
+                                }
+                            }
+                        });
+                        self.state
+                            .set_status_message(Some("Yanked selection".to_string()));
+                        self.state.set_vim_mode(VimMode::Normal);
                     }
-                    self.state
-                        .set_status_message(Some("Yanked selection".to_string()));
-                    self.state.set_vim_mode(VimMode::Normal);
                 }
-            }
+                FocusedComponent::Input => {
+                    if let Some((start, end)) = self.state.input_selection() {
+                        let text = self.state.input_text();
+                        if start < end && end <= text.len() {
+                            let selection = text[start..end].to_string();
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                let _ = clipboard.set_text(selection);
+                            }
+                        }
+                        self.state
+                            .set_status_message(Some("Yanked selection".to_string()));
+                        self.state.set_vim_mode(VimMode::Normal);
+                    }
+                }
+                _ => {}
+            },
             Command::DeleteLine => {
                 let text = self.state.input_text();
                 let cursor = self.state.input_cursor();
@@ -921,6 +1156,7 @@ impl AppService {
                 let new_text: String = chars.into_iter().collect();
                 self.state.set_input_text(new_text);
                 self.state.set_input_cursor(line_start);
+                self.prune_missing_attachment_tokens().await;
             }
             Command::DeleteWord => {
                 let text = self.state.input_text();
@@ -942,21 +1178,45 @@ impl AppService {
                 let new_text: String = chars.into_iter().collect();
                 self.state.set_input_text(new_text);
                 self.state.set_input_cursor(cursor);
+                self.prune_missing_attachment_tokens().await;
             }
             Command::ClearInput => {
                 self.state.clear_input();
+                self.prune_missing_attachment_tokens().await;
             }
 
             // Message sending
             Command::SendMessage(content) => {
-                let text = if content.is_empty() {
+                let mut display_text = if content.is_empty() {
                     self.state.input_text()
                 } else {
                     content
                 };
+                display_text = self.state.expand_paste_blocks(&display_text);
 
-                if text.trim().is_empty() {
+                if display_text.trim().is_empty() && self.attachment_manager.is_empty() {
                     return Ok(());
+                }
+
+                let attachments = self.attachment_manager.prepare_for_send();
+                let attachment_tokens = self.state.attachment_tokens();
+                let mut llm_text = display_text.clone();
+                if !attachments.is_empty() {
+                    if llm_text.trim().is_empty() {
+                        llm_text = "Attached files:".to_string();
+                    }
+                    let attachment_block = Self::format_attachments_for_prompt(&attachments);
+                    llm_text = format!("{}\n\n{}", llm_text.trim_end(), attachment_block);
+
+                    let summary = Self::format_attachment_summary(&attachment_tokens, &attachments);
+                    if display_text.trim().is_empty() {
+                        display_text = format!("Attached: {}", summary);
+                    } else {
+                        display_text =
+                            format!("{}\n\nAttached: {}", display_text.trim_end(), summary);
+                    }
+                    self.state.clear_context_files();
+                    self.state.clear_attachment_tokens();
                 }
 
                 // Clear thinking tracker for fresh conversation turn
@@ -981,7 +1241,7 @@ impl AppService {
                         )
                         .with_data(serde_json::json!({
                             "llm_processing": is_processing,
-                            "text": text,
+                            "text": llm_text,
                             "will_queue": is_processing
                         }));
                         logger.log(entry);
@@ -989,12 +1249,16 @@ impl AppService {
                 }
 
                 if is_processing {
-                    self.state.queue_message(text.clone());
+                    self.state.queue_message(llm_text.clone());
                     self.state.clear_input();
 
                     // Add queued indicator message
                     let queue_count = self.state.queued_message_count();
-                    tracing::info!("Message queued: '{}', queue_count={}", text, queue_count);
+                    tracing::info!(
+                        "Message queued: '{}', queue_count={}",
+                        llm_text,
+                        queue_count
+                    );
 
                     // Log to debug logger as well (fast-path for zero-cost when disabled)
                     if crate::is_debug_logging_enabled() {
@@ -1009,7 +1273,7 @@ impl AppService {
                                 "message_queued",
                             )
                             .with_data(serde_json::json!({
-                                "text": text,
+                                "text": llm_text,
                                 "queue_count": queue_count
                             }));
                             logger.log(entry);
@@ -1039,7 +1303,7 @@ impl AppService {
                 // Add user message
                 let user_msg = Message {
                     role: MessageRole::User,
-                    content: text.clone(),
+                    content: display_text.clone(),
                     thinking: None,
                     provider: None,
                     model: None,
@@ -1056,8 +1320,8 @@ impl AppService {
                 self.event_tx.send(AppEvent::MessageAdded(user_msg)).ok();
 
                 // Add to history (only non-slash commands)
-                if !text.starts_with('/') {
-                    self.state.add_to_history(text.clone());
+                if !display_text.starts_with('/') {
+                    self.state.add_to_history(display_text.clone());
                 }
 
                 // Clear input
@@ -1081,7 +1345,7 @@ impl AppService {
                             "provider": self.state.current_provider(),
                             "model": self.state.current_model(),
                             "queued_messages": self.state.queued_message_count(),
-                            "content_length": text.len()
+                            "content_length": llm_text.len()
                         }));
                         logger.log(entry);
                     }
@@ -1093,7 +1357,7 @@ impl AppService {
                     self.update_tasks(); // Update sidebar tasks
 
                     let conv_svc = conv_svc.clone();
-                    let text = text.clone();
+                    let text = llm_text.clone();
                     let event_tx = self.event_tx.clone();
                     let state = self.state.clone();
 
@@ -1283,19 +1547,106 @@ impl AppService {
                 }
             },
             Command::RemoveContextFile(path) => {
-                self.remove_attachment(&path);
-                self.state.remove_context_file(&path);
-                self.event_tx.send(AppEvent::ContextFileRemoved(path)).ok();
-                self.refresh_sidebar_data().await;
+                if let Some(token) = self
+                    .state
+                    .attachment_tokens()
+                    .into_iter()
+                    .find(|entry| entry.paths.iter().any(|p| p == &path))
+                    .map(|entry| entry.token)
+                {
+                    self.remove_attachment_token_and_paths(&token).await;
+                    self.remove_token_from_input(&token);
+                } else {
+                    self.remove_attachment(&path);
+                    self.state.remove_context_file(&path);
+                    self.event_tx.send(AppEvent::ContextFileRemoved(path)).ok();
+                    self.refresh_sidebar_data().await;
+                }
             }
             Command::RemoveContextByIndex(index) => {
                 let context_files = self.state.context_files();
                 if let Some(file) = context_files.get(index) {
                     let path = file.path.clone();
-                    self.remove_attachment(&path);
-                    self.state.remove_context_file(&path);
-                    self.event_tx.send(AppEvent::ContextFileRemoved(path)).ok();
-                    self.refresh_sidebar_data().await;
+                    let token = format!("@{}", path);
+                    if self
+                        .state
+                        .attachment_tokens()
+                        .iter()
+                        .any(|entry| entry.token == token)
+                    {
+                        self.remove_attachment_token_and_paths(&token).await;
+                        self.remove_token_from_input(&token);
+                        return Ok(());
+                    }
+                    if let Some(token) = self
+                        .state
+                        .attachment_tokens()
+                        .into_iter()
+                        .find(|entry| entry.paths.iter().any(|p| p == &path))
+                        .map(|entry| entry.token)
+                    {
+                        self.remove_attachment_token_and_paths(&token).await;
+                        self.remove_token_from_input(&token);
+                    } else {
+                        self.remove_attachment(&path);
+                        self.state.remove_context_file(&path);
+                        self.event_tx.send(AppEvent::ContextFileRemoved(path)).ok();
+                        self.refresh_sidebar_data().await;
+                    }
+                }
+            }
+            Command::ClearAttachments => {
+                self.clear_attachments();
+                self.state.clear_attachment_tokens();
+                self.remove_all_attachment_tokens_from_input();
+                self.refresh_sidebar_data().await;
+            }
+            Command::PasteClipboard => {
+                use crate::core::attachments::{format_size, AttachmentType};
+
+                match self.attachment_manager.attach_clipboard() {
+                    Ok(Some(attachment)) => {
+                        let info = AttachmentInfo {
+                            filename: attachment.filename.clone(),
+                            path: attachment.filename.clone(),
+                            size_display: format_size(attachment.size),
+                            size_bytes: attachment.size,
+                            type_icon: attachment.file_type.icon().to_string(),
+                            mime_type: attachment.file_type.mime_type().to_string(),
+                            is_image: matches!(attachment.file_type, AttachmentType::Image { .. }),
+                            added_at: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        };
+
+                        let token = format!("@{}", info.filename);
+                        self.state.add_context_file(super::types::ContextFile {
+                            path: info.path.clone(),
+                            size: info.size_bytes as usize,
+                            token_count: (info.size_bytes / 4) as usize,
+                            added_at: info.added_at.clone(),
+                        });
+                        self.state
+                            .add_attachment_token(super::types::AttachmentToken {
+                                token: token.clone(),
+                                paths: vec![info.path.clone()],
+                            });
+                        self.insert_attachment_token(&token);
+                        self.event_tx
+                            .send(AppEvent::ContextFileAdded(info.path.clone()))
+                            .ok();
+                        self.refresh_sidebar_data().await;
+                    }
+                    Ok(None) => {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            if let Ok(text) = clipboard.get_text() {
+                                if !text.is_empty() {
+                                    self.insert_text_at_cursor(&text);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Clipboard paste failed: {}", e);
+                    }
                 }
             }
 
@@ -1354,17 +1705,87 @@ impl AppService {
                 let files = self.state.file_picker_files();
                 let selected = self.state.file_picker_selected();
                 if let Some(file_path) = files.get(selected) {
-                    match self.add_attachment(file_path) {
-                        Ok(info) => {
+                    let token = format!("@{}", file_path);
+                    if self
+                        .state
+                        .attachment_tokens()
+                        .iter()
+                        .any(|entry| entry.token == token)
+                    {
+                        self.remove_attachment_token_and_paths(&token).await;
+                        self.remove_token_from_input(&token);
+                        return Ok(());
+                    }
+
+                    let mut added_paths = Vec::new();
+                    let mut total_size_bytes = 0usize;
+                    if file_path.ends_with('/') {
+                        use crate::core::attachments::search_workspace_files;
+                        let resolved = match resolve_file_path(file_path.trim_end_matches('/')) {
+                            Ok(path) => path,
+                            Err(e) => {
+                                tracing::error!("Failed to resolve folder: {}", e);
+                                return Ok(());
+                            }
+                        };
+                        let files = search_workspace_files(&resolved, "", true);
+                        for entry in files.into_iter().filter(|p| p.is_file()) {
+                            match self.add_attachment(&entry.display().to_string()) {
+                                Ok(info) => {
+                                    added_paths.push(info.path.clone());
+                                    total_size_bytes =
+                                        total_size_bytes.saturating_add(info.size_bytes as usize);
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to add file from folder '{}': {}",
+                                        file_path,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+
+                        for path in &added_paths {
+                            self.state.remove_context_file(path);
+                        }
+
+                        if !added_paths.is_empty() {
+                            use super::types::ContextFile;
+                            let added_at = chrono::Local::now().format("%H:%M:%S").to_string();
+                            self.state.add_context_file(ContextFile {
+                                path: file_path.clone(),
+                                size: total_size_bytes,
+                                token_count: total_size_bytes / 4,
+                                added_at,
+                            });
                             self.event_tx
-                                .send(AppEvent::ContextFileAdded(info.path.clone()))
+                                .send(AppEvent::ContextFileAdded(file_path.clone()))
                                 .ok();
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to add file to context: {}", e);
+                    } else {
+                        match self.add_attachment(file_path) {
+                            Ok(info) => {
+                                added_paths.push(info.path.clone());
+                                self.event_tx
+                                    .send(AppEvent::ContextFileAdded(info.path.clone()))
+                                    .ok();
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to add file to context: {}", e);
+                            }
                         }
                     }
-                    self.state.set_active_modal(None);
+
+                    if !added_paths.is_empty() {
+                        self.state
+                            .add_attachment_token(super::types::AttachmentToken {
+                                token: token.clone(),
+                                paths: added_paths,
+                            });
+                        self.insert_attachment_token(&token);
+                        self.refresh_sidebar_data().await;
+                    }
                 }
             }
             Command::UpdateFilePickerFilter(filter) => {
@@ -1770,6 +2191,183 @@ impl AppService {
         tracing::debug!("File picker refreshed with {} files", files.len());
     }
 
+    fn insert_text_at_cursor(&self, text: &str) {
+        let mut input = self.state.input_text();
+        let cursor = self.state.input_cursor();
+        let byte_cursor = char_to_byte(&input, cursor);
+        input.insert_str(byte_cursor, text);
+        self.state.set_input_cursor(cursor + text.chars().count());
+        self.state.set_input_text(input);
+    }
+
+    fn insert_attachment_token(&self, token: &str) {
+        let token_text = format!("{} ", token);
+        self.insert_text_at_cursor(&token_text);
+    }
+
+    fn remove_input_range(&self, start_char: usize, end_char: usize, new_cursor: usize) {
+        let text = self.state.input_text();
+        let mut chars: Vec<char> = text.chars().collect();
+        if start_char >= end_char || end_char > chars.len() {
+            return;
+        }
+        chars.drain(start_char..end_char);
+        let new_text: String = chars.into_iter().collect();
+        self.state.set_input_text(new_text);
+        let clamped_cursor = new_cursor.min(self.state.input_text().chars().count());
+        self.state.set_input_cursor(clamped_cursor);
+    }
+
+    fn remove_token_from_input(&self, token: &str) {
+        let text = self.state.input_text();
+        let token_with_space = format!("{} ", token);
+        let (start_byte, token_len_chars) = if let Some(start) = text.find(&token_with_space) {
+            (start, token_with_space.chars().count())
+        } else if let Some(start) = text.find(token) {
+            (start, token.chars().count())
+        } else {
+            return;
+        };
+
+        let start_char = text[..start_byte].chars().count();
+        let end_char = start_char + token_len_chars;
+        self.remove_input_range(start_char, end_char, start_char);
+    }
+
+    fn remove_all_attachment_tokens_from_input(&self) {
+        let tokens = self.state.attachment_tokens();
+        if tokens.is_empty() {
+            return;
+        }
+        for token in tokens {
+            self.remove_token_from_input(&token.token);
+        }
+    }
+
+    async fn remove_attachment_token_before_cursor(&mut self) -> bool {
+        let text = self.state.input_text();
+        let cursor = self.state.input_cursor();
+        if cursor == 0 {
+            return false;
+        }
+
+        let chars: Vec<char> = text.chars().collect();
+        if cursor > chars.len() {
+            return false;
+        }
+
+        let mut trimmed_end = cursor;
+        while trimmed_end > 0 && chars[trimmed_end - 1].is_whitespace() {
+            trimmed_end -= 1;
+        }
+        if trimmed_end == 0 {
+            return false;
+        }
+
+        let mut start = trimmed_end;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        if chars.get(start) != Some(&'@') {
+            return false;
+        }
+
+        let mut token_end = start;
+        while token_end < chars.len() && !chars[token_end].is_whitespace() {
+            token_end += 1;
+        }
+
+        let token: String = chars[start..token_end].iter().collect();
+        let mut remove_start = start;
+        if remove_start > 0 && chars[remove_start - 1].is_whitespace() {
+            remove_start -= 1;
+        }
+        let remove_end = if cursor > token_end {
+            cursor
+        } else {
+            token_end
+        };
+        self.remove_input_range(remove_start, remove_end, remove_start);
+        self.remove_attachment_token_and_paths(&token).await;
+        true
+    }
+
+    async fn remove_attachment_token_and_paths(&mut self, token: &str) {
+        if let Some(entry) = self.state.remove_attachment_token(token) {
+            let token_path = token.trim_start_matches('@');
+            self.state.remove_context_file(token_path);
+            for path in entry.paths {
+                self.remove_attachment(&path);
+                self.state.remove_context_file(&path);
+                self.event_tx.send(AppEvent::ContextFileRemoved(path)).ok();
+            }
+            self.refresh_sidebar_data().await;
+        }
+    }
+
+    async fn prune_missing_attachment_tokens(&mut self) {
+        let input = self.state.input_text();
+        let tokens = self.state.attachment_tokens();
+        for token in tokens {
+            if !input.contains(&token.token) {
+                self.remove_attachment_token_and_paths(&token.token).await;
+            }
+        }
+    }
+
+    fn format_attachments_for_prompt(attachments: &[MessageAttachment]) -> String {
+        let mut sections = Vec::new();
+        sections.push("[Attachments]".to_string());
+        for attachment in attachments {
+            sections.push(format!(
+                "name: {}\nmime: {}",
+                attachment.filename, attachment.mime_type
+            ));
+            match &attachment.content {
+                AttachmentContent::Base64(encoded) => {
+                    sections.push("content: base64".to_string());
+                    sections.push(encoded.clone());
+                }
+                AttachmentContent::Text(text) => {
+                    sections.push("content: text".to_string());
+                    sections.push(text.clone());
+                }
+                AttachmentContent::Path(path) => {
+                    sections.push("content: path".to_string());
+                    sections.push(path.display().to_string());
+                }
+            }
+            sections.push("---".to_string());
+        }
+        sections.push("[/Attachments]".to_string());
+        sections.join("\n")
+    }
+
+    fn format_attachment_summary(
+        tokens: &[super::types::AttachmentToken],
+        attachments: &[MessageAttachment],
+    ) -> String {
+        if !tokens.is_empty() {
+            let parts: Vec<String> = tokens
+                .iter()
+                .map(|token| {
+                    if token.paths.len() > 1 {
+                        format!("{} ({} files)", token.token, token.paths.len())
+                    } else {
+                        token.token.clone()
+                    }
+                })
+                .collect();
+            return parts.join(", ");
+        }
+
+        let parts: Vec<String> = attachments
+            .iter()
+            .map(|attachment| format!("@{}", attachment.filename))
+            .collect();
+        parts.join(", ")
+    }
+
     /// Get current session information
     pub async fn get_session_info(&self) -> Option<super::types::SessionInfo> {
         if let Some(ref session_svc) = self.session_svc {
@@ -1869,6 +2467,28 @@ impl AppService {
         if let Some(ref conv_svc) = self.conversation_svc {
             let _ = conv_svc.set_thinking_tool_enabled(enabled).await;
         }
+    }
+
+    /// Set model-level thinking enablement and sync to the ChatAgent.
+    /// Returns the effective enabled state after applying config defaults.
+    pub async fn set_thinking_enabled(&self, enabled: bool) -> bool {
+        if self.state.llm_processing() {
+            self.state.set_pending_thinking_enabled(Some(enabled));
+            self.state.set_status_message(Some(
+                "Thinking change queued (will apply after current response)".to_string(),
+            ));
+            return self.state.thinking_enabled();
+        }
+
+        let config = crate::config::Config::load().unwrap_or_default();
+        let level = if enabled {
+            Self::resolve_enabled_think_level(&config.thinking)
+        } else {
+            "off".to_string()
+        };
+        let effective_enabled = self.apply_think_level(level).await;
+        self.save_preferences();
+        effective_enabled
     }
 
     /// Set the active provider
@@ -2212,6 +2832,8 @@ impl AppService {
     pub fn clear_attachments(&mut self) {
         self.attachment_manager.clear();
         self.state.clear_context_files();
+        self.state.clear_attachment_tokens();
+        self.remove_all_attachment_tokens_from_input();
     }
 
     /// Check if there are any pending attachments
@@ -2250,6 +2872,21 @@ impl AppService {
 
         // Update tasks from current state
         self.update_tasks();
+
+        let mut panels = self.state.sidebar_expanded_panels();
+        if !self.state.tasks().is_empty() {
+            panels[2] = true;
+        }
+        let todo_count = self
+            .state
+            .todo_tracker()
+            .try_lock()
+            .map(|todos| todos.items().len())
+            .unwrap_or(0);
+        if todo_count > 0 {
+            panels[3] = true;
+        }
+        self.state.set_sidebar_expanded_panels(panels);
     }
 
     /// Silently interrupt agent processing without adding a visible message
@@ -2442,6 +3079,16 @@ impl AppService {
                         self.state.set_trust_level(trust_level);
                         // Propagate trust level to ChatAgent/ToolRegistry
                         if let Some(ref conv_svc) = self.conversation_svc {
+                            conv_svc
+                                .update_mode(
+                                    self.working_dir.clone(),
+                                    prefs.agent_mode,
+                                    trust_level,
+                                    self.tool_timeout_secs,
+                                    Some(self.state.todo_tracker()),
+                                    Some(self.state.thinking_tracker()),
+                                )
+                                .await;
                             let _ = conv_svc.set_trust_level(trust_level).await;
                         }
 
@@ -2454,19 +3101,31 @@ impl AppService {
                                 .await;
                         }
 
+                        // Apply thinking level (model-level reasoning)
+                        let think_level = if prefs.thinking_enabled {
+                            Self::resolve_enabled_think_level(&global_config.thinking)
+                        } else {
+                            "off".to_string()
+                        };
+                        let thinking_enabled = self.apply_think_level(think_level).await;
+
                         // Apply theme (use session theme or global default)
                         let effective_theme = prefs.effective_theme(global_default_theme);
                         self.state.set_theme(effective_theme);
 
                         tracing::info!(
-                            "Restored preferences: agent_mode={:?}, build_mode={:?}, thinking_tool={}, theme={:?}",
+                            "Restored preferences: agent_mode={:?}, build_mode={:?}, thinking_enabled={}, thinking_tool={}, theme={:?}",
                             prefs.agent_mode,
                             prefs.build_mode,
+                            thinking_enabled,
                             prefs.thinking_tool_enabled,
                             effective_theme
                         );
                     } else {
                         // If preferences can't be loaded, at least apply global default theme
+                        let default_think_level =
+                            Self::resolve_default_think_level(&global_config.thinking);
+                        let _ = self.apply_think_level(default_think_level).await;
                         self.state.set_theme(global_default_theme);
                     }
                 }
@@ -2573,5 +3232,81 @@ impl AppService {
             .unwrap_or(0);
         self.state.insert_messages_at(insert_at, messages);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::attachments::{AttachmentContent, MessageAttachment};
+    use crate::core::types::{AgentMode, BuildMode};
+    use crate::ui_backend::types::AttachmentToken;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn format_attachment_summary_prefers_tokens() {
+        let tokens = vec![
+            AttachmentToken {
+                token: "@src/".to_string(),
+                paths: vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
+            },
+            AttachmentToken {
+                token: "@README.md".to_string(),
+                paths: vec!["README.md".to_string()],
+            },
+        ];
+        let attachments = Vec::new();
+        let summary = AppService::format_attachment_summary(&tokens, &attachments);
+        assert_eq!(summary, "@src/ (2 files), @README.md");
+    }
+
+    #[test]
+    fn format_attachment_summary_falls_back_to_filenames() {
+        let tokens = Vec::new();
+        let attachments = vec![MessageAttachment {
+            filename: "notes.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            content: AttachmentContent::Text("hi".to_string()),
+        }];
+        let summary = AppService::format_attachment_summary(&tokens, &attachments);
+        assert_eq!(summary, "@notes.txt");
+    }
+
+    #[tokio::test]
+    async fn load_active_session_syncs_agent_mode() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let working_dir = tempdir.path().to_path_buf();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut service = AppService::new(working_dir.clone(), event_tx).expect("service");
+
+        let session_info = service.get_session_info().await.expect("session info");
+
+        let prefs = crate::tui_new::TuiPreferences {
+            build_mode: BuildMode::Balanced,
+            agent_mode: AgentMode::Plan,
+            thinking_enabled: false,
+            thinking_tool_enabled: false,
+            selected_provider: None,
+            selected_model: None,
+            selected_model_name: None,
+            theme: None,
+        };
+
+        let tark_dir = working_dir.join(".tark");
+        prefs
+            .save_for_session(&tark_dir, &session_info.session_id)
+            .expect("save prefs");
+
+        service
+            .load_active_session()
+            .await
+            .expect("load active session");
+
+        assert_eq!(service.state.agent_mode(), AgentMode::Plan);
+        let conv_mode = service
+            .conversation_mode()
+            .await
+            .expect("conversation mode");
+        assert_eq!(conv_mode, AgentMode::Plan);
     }
 }

@@ -9,10 +9,10 @@ use serde_json::json;
 
 use super::approval::ApprovalCardState;
 use super::commands::{AgentMode, BuildMode};
-use super::questionnaire::QuestionnaireState;
+use super::questionnaire::{QuestionType, QuestionnaireState};
 use super::types::{
-    ArchiveChunkInfo, AttachmentInfo, ContextFile, DiffViewMode, GitChangeInfo, Message,
-    MessageRole, ModelInfo, ProviderInfo, SessionInfo, TaskInfo, ThemePreset,
+    ArchiveChunkInfo, AttachmentInfo, AttachmentToken, ContextFile, DiffViewMode, GitChangeInfo,
+    Message, MessageRole, ModelInfo, ProviderInfo, SessionInfo, TaskInfo, ThemePreset,
 };
 use crate::core::context_tracker::ContextBreakdown;
 use crate::tools::TrustLevel;
@@ -34,6 +34,12 @@ pub struct ErrorNotification {
     pub message: String,
     pub level: ErrorLevel,
     pub timestamp: chrono::DateTime<chrono::Local>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PasteBlock {
+    pub placeholder: String,
+    pub content: String,
 }
 
 /// Currently focused UI component
@@ -192,7 +198,7 @@ impl Default for UiState {
             session_picker_filter: String::new(),
             sidebar_selected_panel: 0,
             sidebar_selected_item: None,
-            sidebar_expanded_panels: [false; 5],
+            sidebar_expanded_panels: [true, true, false, false, false],
         }
     }
 }
@@ -234,6 +240,12 @@ struct StateInner {
     pub messages: Vec<Message>,
     pub archive_chunks: Vec<ArchiveChunkInfo>,
     pub focused_message: usize,
+    /// Cursor position (char offset) within the focused message content
+    pub message_cursor: usize,
+    /// Visual selection start (char offset) for focused message content
+    pub message_selection_start: Option<usize>,
+    /// Visual selection end (char offset) for focused message content
+    pub message_selection_end: Option<usize>,
     /// Sub-index for hierarchical navigation within tool groups
     /// None = at message level, Some(n) = focused on tool n within a group
     pub focused_sub_index: Option<usize>,
@@ -276,6 +288,8 @@ struct StateInner {
     pub input_selection_end: Option<usize>,
     /// Pending vim operator (e.g., 'd' for delete)
     pub pending_operator: Option<char>,
+    /// Paste blocks stored for placeholder replacement in input
+    pub paste_blocks: Vec<PasteBlock>,
 
     // ========== UI State ==========
     pub sidebar_visible: bool,
@@ -357,6 +371,7 @@ struct StateInner {
     // ========== Attachments ==========
     pub attachments: Vec<AttachmentInfo>,
     pub attachment_dropdown_visible: bool,
+    pub attachment_tokens: Vec<AttachmentToken>,
 
     // ========== Questionnaire (ask_user) ==========
     pub active_questionnaire: Option<QuestionnaireState>,
@@ -377,6 +392,8 @@ struct StateInner {
     pub pending_model: Option<String>,
     /// Thinking tool toggle requested during LLM streaming (applied when streaming completes)
     pub pending_thinking_tool_enabled: Option<bool>,
+    /// Thinking mode toggle requested during LLM streaming (applied when streaming completes)
+    pub pending_thinking_enabled: Option<bool>,
 
     // ========== Message Queue ==========
     pub message_queue: Vec<String>,
@@ -395,6 +412,7 @@ struct StateInner {
     pub autocomplete_active: bool,
     pub autocomplete_filter: String,
     pub autocomplete_selected: usize,
+    pub autocomplete_scroll_offset: usize,
 
     // ========== Session Cost Tracking ==========
     pub session_cost_total: f64,
@@ -431,6 +449,9 @@ impl SharedState {
                 messages: Vec::new(),
                 archive_chunks: Vec::new(),
                 focused_message: 0,
+                message_cursor: 0,
+                message_selection_start: None,
+                message_selection_end: None,
                 focused_sub_index: None,
                 messages_scroll_offset: 0,
                 messages_total_lines: 0,
@@ -452,6 +473,7 @@ impl SharedState {
                 input_selection_start: None,
                 input_selection_end: None,
                 pending_operator: None,
+                paste_blocks: Vec::new(),
                 sidebar_visible: true,
                 theme: ThemePreset::CatppuccinMocha,
                 diff_view_mode: DiffViewMode::Auto,
@@ -484,7 +506,7 @@ impl SharedState {
                 policy_modal: None,
                 sidebar_selected_panel: 0,
                 sidebar_selected_item: None,
-                sidebar_expanded_panels: [true, true, true, true, true],
+                sidebar_expanded_panels: [true, true, false, false, false],
                 sidebar_scroll_offset: 0,
                 sidebar_panel_scrolls: [0, 0, 0, 0, 0],
                 context_files: Vec::new(),
@@ -500,6 +522,7 @@ impl SharedState {
                 error_notification: None,
                 attachments: Vec::new(),
                 attachment_dropdown_visible: false,
+                attachment_tokens: Vec::new(),
                 active_questionnaire: None,
                 pending_approval: None,
                 rate_limit_retry_at: None,
@@ -508,6 +531,7 @@ impl SharedState {
                 pending_provider: None,
                 pending_model: None,
                 pending_thinking_tool_enabled: None,
+                pending_thinking_enabled: None,
                 message_queue: Vec::new(),
                 editing_task_index: None,
                 editing_task_content: String::new(),
@@ -517,6 +541,7 @@ impl SharedState {
                 autocomplete_active: false,
                 autocomplete_filter: String::new(),
                 autocomplete_selected: 0,
+                autocomplete_scroll_offset: 0,
                 session_cost_total: 0.0,
                 session_cost_by_model: Vec::new(),
                 session_tokens_total: 0,
@@ -771,6 +796,30 @@ impl SharedState {
 
     pub fn vim_mode(&self) -> VimMode {
         self.read_inner().vim_mode
+    }
+
+    /// Flag to enable/disable vim-style key handling based on active context.
+    pub fn is_vim_key_enabled(&self) -> bool {
+        let inner = self.read_inner();
+        if matches!(
+            inner.active_modal,
+            Some(ModalType::ThemePicker)
+                | Some(ModalType::ProviderPicker)
+                | Some(ModalType::ModelPicker)
+                | Some(ModalType::SessionPicker)
+                | Some(ModalType::FilePicker)
+                | Some(ModalType::TaskEdit)
+        ) {
+            return false;
+        }
+
+        if let Some(q) = &inner.active_questionnaire {
+            if q.question_type == QuestionType::FreeText || q.allow_other {
+                return false;
+            }
+        }
+
+        true
     }
 
     pub fn theme_picker_selected(&self) -> usize {
@@ -1054,6 +1103,51 @@ impl SharedState {
         self.write_inner().input_cursor = cursor;
     }
 
+    pub fn paste_blocks(&self) -> Vec<PasteBlock> {
+        self.read_inner().paste_blocks.clone()
+    }
+
+    pub fn paste_placeholders(&self) -> Vec<String> {
+        self.read_inner()
+            .paste_blocks
+            .iter()
+            .map(|block| block.placeholder.clone())
+            .collect()
+    }
+
+    pub fn add_paste_block(&self, placeholder: String, content: String) {
+        self.write_inner().paste_blocks.push(PasteBlock {
+            placeholder,
+            content,
+        });
+    }
+
+    pub fn remove_paste_block(&self, index: usize) {
+        let mut inner = self.write_inner();
+        if index < inner.paste_blocks.len() {
+            inner.paste_blocks.remove(index);
+        }
+    }
+
+    pub fn clear_paste_blocks(&self) {
+        self.write_inner().paste_blocks.clear();
+    }
+
+    pub fn expand_paste_blocks(&self, text: &str) -> String {
+        let blocks = self.paste_blocks();
+        if blocks.is_empty() {
+            return text.to_string();
+        }
+
+        let mut expanded = text.to_string();
+        for block in blocks {
+            if let Some(pos) = expanded.find(&block.placeholder) {
+                expanded.replace_range(pos..pos + block.placeholder.len(), &block.content);
+            }
+        }
+        expanded
+    }
+
     /// Get current input selection range (start, end)
     pub fn input_selection(&self) -> Option<(usize, usize)> {
         let inner = self.read_inner();
@@ -1075,6 +1169,42 @@ impl SharedState {
         let mut inner = self.write_inner();
         inner.input_selection_start = None;
         inner.input_selection_end = None;
+    }
+
+    /// Get current message selection range (start, end)
+    pub fn message_selection(&self) -> Option<(usize, usize)> {
+        let inner = self.read_inner();
+        match (inner.message_selection_start, inner.message_selection_end) {
+            (Some(start), Some(end)) => Some((start.min(end), start.max(end))),
+            _ => None,
+        }
+    }
+
+    /// Set message selection range
+    pub fn set_message_selection(&self, start: usize, end: usize) {
+        let mut inner = self.write_inner();
+        let max = focused_message_char_len(&inner);
+        inner.message_selection_start = Some(start.min(max));
+        inner.message_selection_end = Some(end.min(max));
+    }
+
+    /// Clear message selection
+    pub fn clear_message_selection(&self) {
+        let mut inner = self.write_inner();
+        inner.message_selection_start = None;
+        inner.message_selection_end = None;
+    }
+
+    /// Get current message cursor position
+    pub fn message_cursor(&self) -> usize {
+        self.read_inner().message_cursor
+    }
+
+    /// Set message cursor position
+    pub fn set_message_cursor(&self, cursor: usize) {
+        let mut inner = self.write_inner();
+        let max = focused_message_char_len(&inner);
+        inner.message_cursor = cursor.min(max);
     }
 
     /// Set pending operator (vim)
@@ -1243,6 +1373,84 @@ impl SharedState {
         }
     }
 
+    // ========== Message Cursor Navigation ==========
+
+    pub fn move_message_cursor_left(&self) {
+        let mut inner = self.write_inner();
+        if inner.message_cursor > 0 {
+            inner.message_cursor -= 1;
+        }
+    }
+
+    pub fn move_message_cursor_right(&self) {
+        let mut inner = self.write_inner();
+        let max = focused_message_char_len(&inner);
+        if inner.message_cursor < max {
+            inner.message_cursor += 1;
+        }
+    }
+
+    pub fn move_message_cursor_to_line_start(&self) {
+        let mut inner = self.write_inner();
+        let Some(content) = focused_message_content(&inner) else {
+            return;
+        };
+        let chars: Vec<char> = content.chars().collect();
+        let mut idx = inner.message_cursor.min(chars.len());
+        while idx > 0 && chars[idx - 1] != '\n' {
+            idx -= 1;
+        }
+        inner.message_cursor = idx;
+    }
+
+    pub fn move_message_cursor_to_line_end(&self) {
+        let mut inner = self.write_inner();
+        let Some(content) = focused_message_content(&inner) else {
+            return;
+        };
+        let chars: Vec<char> = content.chars().collect();
+        let mut idx = inner.message_cursor.min(chars.len());
+        while idx < chars.len() && chars[idx] != '\n' {
+            idx += 1;
+        }
+        inner.message_cursor = idx;
+    }
+
+    pub fn move_message_cursor_word_forward(&self) {
+        let mut inner = self.write_inner();
+        let Some(content) = focused_message_content(&inner) else {
+            return;
+        };
+        let chars: Vec<char> = content.chars().collect();
+        let mut idx = inner.message_cursor.min(chars.len());
+        while idx < chars.len() && !chars[idx].is_whitespace() {
+            idx += 1;
+        }
+        while idx < chars.len() && chars[idx].is_whitespace() {
+            idx += 1;
+        }
+        inner.message_cursor = idx.min(chars.len());
+    }
+
+    pub fn move_message_cursor_word_backward(&self) {
+        let mut inner = self.write_inner();
+        let Some(content) = focused_message_content(&inner) else {
+            return;
+        };
+        if inner.message_cursor == 0 {
+            return;
+        }
+        let chars: Vec<char> = content.chars().collect();
+        let mut idx = inner.message_cursor.saturating_sub(1).min(chars.len());
+        while idx > 0 && chars[idx].is_whitespace() {
+            idx -= 1;
+        }
+        while idx > 0 && !chars[idx - 1].is_whitespace() {
+            idx -= 1;
+        }
+        inner.message_cursor = idx;
+    }
+
     pub fn set_sidebar_visible(&self, visible: bool) {
         self.write_inner().sidebar_visible = visible;
     }
@@ -1407,6 +1615,25 @@ impl SharedState {
         }
     }
 
+    /// Collapse all thinking messages except the most recent one
+    pub fn collapse_all_thinking_except_last(&self) {
+        let mut inner = self.write_inner();
+        let messages = &mut inner.messages;
+
+        let last_thinking_idx = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, msg)| msg.role == crate::ui_backend::MessageRole::Thinking)
+            .map(|(idx, _)| idx);
+
+        for (idx, msg) in messages.iter_mut().enumerate() {
+            if msg.role == crate::ui_backend::MessageRole::Thinking {
+                msg.collapsed = Some(idx) != last_thinking_idx;
+            }
+        }
+    }
+
     /// Toggle collapse state of a specific message by index
     /// Returns true if the message was found and toggled
     pub fn toggle_message_collapse(&self, index: usize) -> bool {
@@ -1458,11 +1685,48 @@ impl SharedState {
     }
 
     pub fn set_messages(&self, messages: Vec<Message>) {
-        self.write_inner().messages = messages;
+        let mut inner = self.write_inner();
+        inner.messages = messages;
+
+        let msg_count = inner.messages.len();
+        if msg_count == 0 {
+            inner.focused_message = 0;
+            inner.focused_sub_index = None;
+            inner.message_cursor = 0;
+            inner.message_selection_start = None;
+            inner.message_selection_end = None;
+            return;
+        }
+
+        if inner.focused_message >= msg_count {
+            inner.focused_message = msg_count.saturating_sub(1);
+            inner.focused_sub_index = None;
+        } else if let Some(sub_idx) = inner.focused_sub_index {
+            if inner.focused_message.saturating_add(sub_idx) >= msg_count {
+                inner.focused_sub_index = None;
+            } else {
+                let focused = inner.focused_message;
+                let is_tool = inner
+                    .messages
+                    .get(focused)
+                    .is_some_and(|msg| msg.role == MessageRole::Tool);
+                if !is_tool {
+                    inner.focused_sub_index = None;
+                }
+            }
+        }
+        inner.message_cursor = inner.message_cursor.min(focused_message_char_len(&inner));
+        inner.message_selection_start = None;
+        inner.message_selection_end = None;
     }
 
     pub fn clear_messages(&self) {
-        self.write_inner().messages.clear();
+        let mut inner = self.write_inner();
+        inner.messages.clear();
+        inner.focused_message = 0;
+        inner.message_cursor = 0;
+        inner.message_selection_start = None;
+        inner.message_selection_end = None;
     }
 
     /// Remove system messages containing specific text (used for transient notifications)
@@ -1520,6 +1784,9 @@ impl SharedState {
     pub fn set_focused_message(&self, index: usize) {
         let mut inner = self.write_inner();
         inner.focused_message = index;
+        inner.message_cursor = 0;
+        inner.message_selection_start = None;
+        inner.message_selection_end = None;
         // Reset sub-index when moving to a new message
         inner.focused_sub_index = None;
     }
@@ -1610,6 +1877,42 @@ impl SharedState {
         }
     }
 
+    /// Snap focused message to the current visible viewport if it is off-screen.
+    /// This keeps the cursor visible when entering the Messages panel.
+    pub fn snap_focused_message_to_viewport(&self) {
+        let inner = self.read_inner();
+        let msg_count = inner.messages.len();
+        let viewport_height = inner.messages_viewport_height;
+        let total_lines = inner.messages_total_lines;
+
+        if msg_count == 0 || viewport_height == 0 {
+            return;
+        }
+
+        let lines_per_msg = (total_lines as f32 / msg_count as f32).max(3.0);
+        let max_offset = total_lines.saturating_sub(viewport_height);
+        let current_offset = if inner.messages_scroll_offset == usize::MAX {
+            max_offset
+        } else {
+            inner.messages_scroll_offset.min(max_offset)
+        };
+
+        let visible_start = current_offset;
+        let visible_end = current_offset.saturating_add(viewport_height);
+        let estimated_line = (inner.focused_message as f32 * lines_per_msg) as usize;
+
+        if estimated_line < visible_start || estimated_line >= visible_end {
+            let target_line = if estimated_line < visible_start {
+                visible_start
+            } else {
+                visible_end.saturating_sub(1)
+            };
+            let target_msg = ((target_line as f32) / lines_per_msg).floor() as usize;
+            drop(inner);
+            self.set_focused_message(target_msg.min(msg_count.saturating_sub(1)));
+        }
+    }
+
     pub fn add_context_file(&self, file: ContextFile) {
         self.write_inner().context_files.push(file);
     }
@@ -1643,6 +1946,7 @@ impl SharedState {
         inner.input_selection_start = None;
         inner.input_selection_end = None;
         inner.pending_operator = None;
+        inner.paste_blocks.clear();
     }
 
     pub fn input_history(&self) -> Vec<String> {
@@ -1696,7 +2000,12 @@ impl SharedState {
     }
 
     pub fn set_focused_component(&self, component: FocusedComponent) {
-        self.write_inner().focused_component = component;
+        let mut inner = self.write_inner();
+        if component != FocusedComponent::Messages {
+            inner.message_selection_start = None;
+            inner.message_selection_end = None;
+        }
+        inner.focused_component = component;
     }
 
     pub fn set_active_modal(&self, modal: Option<ModalType>) {
@@ -1859,6 +2168,30 @@ impl SharedState {
 
     pub fn clear_attachments(&self) {
         self.write_inner().attachments.clear();
+    }
+
+    pub fn attachment_tokens(&self) -> Vec<AttachmentToken> {
+        self.read_inner().attachment_tokens.clone()
+    }
+
+    pub fn add_attachment_token(&self, token: AttachmentToken) {
+        self.write_inner().attachment_tokens.push(token);
+    }
+
+    pub fn remove_attachment_token(&self, token: &str) -> Option<AttachmentToken> {
+        let mut inner = self.write_inner();
+        if let Some(pos) = inner
+            .attachment_tokens
+            .iter()
+            .position(|t| t.token == token)
+        {
+            return Some(inner.attachment_tokens.remove(pos));
+        }
+        None
+    }
+
+    pub fn clear_attachment_tokens(&self) {
+        self.write_inner().attachment_tokens.clear();
     }
 
     pub fn set_attachment_dropdown_visible(&self, visible: bool) {
@@ -2042,6 +2375,14 @@ impl SharedState {
 
     pub fn take_pending_thinking_tool_enabled(&self) -> Option<bool> {
         self.write_inner().pending_thinking_tool_enabled.take()
+    }
+
+    pub fn set_pending_thinking_enabled(&self, enabled: Option<bool>) {
+        self.write_inner().pending_thinking_enabled = enabled;
+    }
+
+    pub fn take_pending_thinking_enabled(&self) -> Option<bool> {
+        self.write_inner().pending_thinking_enabled.take()
     }
 
     pub fn set_streaming_content(&self, content: Option<String>) {
@@ -2276,6 +2617,7 @@ impl SharedState {
     }
 
     // ========== Command Autocomplete ==========
+    const AUTOCOMPLETE_VISIBLE_COUNT: usize = 8;
 
     /// Check if autocomplete is active
     pub fn autocomplete_active(&self) -> bool {
@@ -2292,12 +2634,18 @@ impl SharedState {
         self.read_inner().autocomplete_selected
     }
 
+    /// Get autocomplete scroll offset
+    pub fn autocomplete_scroll_offset(&self) -> usize {
+        self.read_inner().autocomplete_scroll_offset
+    }
+
     /// Activate autocomplete with initial filter
     pub fn activate_autocomplete(&self, filter: &str) {
         let mut inner = self.write_inner();
         inner.autocomplete_active = true;
         inner.autocomplete_filter = filter.to_string();
         inner.autocomplete_selected = 0;
+        inner.autocomplete_scroll_offset = 0;
     }
 
     /// Deactivate autocomplete
@@ -2306,11 +2654,14 @@ impl SharedState {
         inner.autocomplete_active = false;
         inner.autocomplete_filter.clear();
         inner.autocomplete_selected = 0;
+        inner.autocomplete_scroll_offset = 0;
     }
 
     /// Update autocomplete filter
     pub fn update_autocomplete_filter(&self, filter: &str) {
-        self.write_inner().autocomplete_filter = filter.to_string();
+        let mut inner = self.write_inner();
+        inner.autocomplete_filter = filter.to_string();
+        inner.autocomplete_scroll_offset = 0;
     }
 
     /// Set autocomplete selected index
@@ -2323,6 +2674,9 @@ impl SharedState {
         let mut inner = self.write_inner();
         if inner.autocomplete_selected > 0 {
             inner.autocomplete_selected -= 1;
+            if inner.autocomplete_selected < inner.autocomplete_scroll_offset {
+                inner.autocomplete_scroll_offset = inner.autocomplete_selected;
+            }
         }
     }
 
@@ -2331,6 +2685,13 @@ impl SharedState {
         let mut inner = self.write_inner();
         if inner.autocomplete_selected + 1 < max_items {
             inner.autocomplete_selected += 1;
+            if inner.autocomplete_selected
+                >= inner.autocomplete_scroll_offset + Self::AUTOCOMPLETE_VISIBLE_COUNT
+            {
+                inner.autocomplete_scroll_offset = inner
+                    .autocomplete_selected
+                    .saturating_sub(Self::AUTOCOMPLETE_VISIBLE_COUNT - 1);
+            }
         }
     }
 
@@ -2441,6 +2802,19 @@ fn archive_marker_message(info: &ArchiveChunkInfo) -> Message {
     }
 }
 
+fn focused_message_char_len(inner: &StateInner) -> usize {
+    focused_message_content(inner)
+        .map(|content| content.chars().count())
+        .unwrap_or(0)
+}
+
+fn focused_message_content(inner: &StateInner) -> Option<&str> {
+    inner
+        .messages
+        .get(inner.focused_message)
+        .map(|msg| msg.content.as_str())
+}
+
 fn update_archive_marker(inner: &mut StateInner) {
     if inner.archive_chunks.is_empty() {
         if inner
@@ -2471,6 +2845,22 @@ fn update_archive_marker(inner: &mut StateInner) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_message(role: MessageRole, content: &str) -> Message {
+        Message {
+            role,
+            content: content.to_string(),
+            thinking: None,
+            context_transient: false,
+            tool_calls: Vec::new(),
+            segments: Vec::new(),
+            collapsed: false,
+            timestamp: "00:00:00".to_string(),
+            provider: None,
+            model: None,
+            tool_args: None,
+        }
+    }
 
     #[test]
     fn test_history_navigation_prev() {
@@ -2572,6 +2962,100 @@ mod tests {
     }
 
     #[test]
+    fn test_autocomplete_scroll_offset_updates() {
+        let state = SharedState::new();
+        state.activate_autocomplete("");
+
+        for _ in 0..8 {
+            state.autocomplete_move_down(20);
+        }
+
+        assert_eq!(state.autocomplete_selected(), 8);
+        assert_eq!(state.autocomplete_scroll_offset(), 1);
+
+        state.autocomplete_move_up();
+        assert_eq!(state.autocomplete_selected(), 7);
+        assert_eq!(state.autocomplete_scroll_offset(), 1);
+    }
+
+    #[test]
+    fn test_set_messages_clamps_focus_and_clears_sub_index() {
+        let state = SharedState::new();
+        state.set_focused_message(5);
+        state.set_focused_sub_index(Some(2));
+
+        state.set_messages(vec![
+            test_message(MessageRole::User, "a"),
+            test_message(MessageRole::Assistant, "b"),
+        ]);
+
+        assert_eq!(state.focused_message(), 1);
+        assert_eq!(state.focused_sub_index(), None);
+
+        state.set_focused_message(0);
+        state.set_focused_sub_index(Some(1));
+        state.set_messages(vec![test_message(MessageRole::User, "c")]);
+
+        assert_eq!(state.focused_message(), 0);
+        assert_eq!(state.focused_sub_index(), None);
+
+        state.set_focused_message(1);
+        state.set_focused_sub_index(Some(3));
+        state.set_messages(vec![
+            test_message(MessageRole::Tool, "tool-1"),
+            test_message(MessageRole::Tool, "tool-2"),
+        ]);
+
+        assert_eq!(state.focused_message(), 1);
+        assert_eq!(state.focused_sub_index(), None);
+    }
+
+    #[test]
+    fn test_message_cursor_resets_on_focus_change() {
+        let state = SharedState::new();
+        state.set_messages(vec![
+            test_message(MessageRole::User, "hello"),
+            test_message(MessageRole::Assistant, "world"),
+        ]);
+        state.set_message_cursor(4);
+        state.set_message_selection(1, 3);
+
+        state.set_focused_message(1);
+
+        assert_eq!(state.message_cursor(), 0);
+        assert_eq!(state.message_selection(), None);
+    }
+
+    #[test]
+    fn test_message_selection_clamps_to_content_len() {
+        let state = SharedState::new();
+        state.set_messages(vec![test_message(MessageRole::User, "short")]);
+        state.set_message_selection(2, 99);
+
+        assert_eq!(state.message_selection(), Some((2, 5)));
+    }
+
+    #[test]
+    fn test_snap_focused_message_to_viewport() {
+        let state = SharedState::new();
+        let messages = (0..10)
+            .map(|idx| test_message(MessageRole::User, &format!("msg-{idx}")))
+            .collect();
+        state.set_messages(messages);
+        state.set_messages_metrics(100, 10);
+
+        state.set_focused_message(0);
+        state.set_messages_scroll_offset(usize::MAX);
+        state.snap_focused_message_to_viewport();
+        assert_eq!(state.focused_message(), 9);
+
+        state.set_focused_message(0);
+        state.set_messages_scroll_offset(40);
+        state.snap_focused_message_to_viewport();
+        assert_eq!(state.focused_message(), 4);
+    }
+
+    #[test]
     fn test_agent_mode_build_mode() {
         let state = SharedState::new();
 
@@ -2610,6 +3094,41 @@ mod tests {
         // Disable thinking
         state.set_thinking_enabled(false);
         assert!(!state.thinking_enabled());
+    }
+
+    #[test]
+    fn test_pending_thinking_toggle() {
+        let state = SharedState::new();
+        assert!(state.take_pending_thinking_enabled().is_none());
+
+        state.set_pending_thinking_enabled(Some(true));
+        assert_eq!(state.take_pending_thinking_enabled(), Some(true));
+
+        state.set_pending_thinking_enabled(Some(false));
+        assert_eq!(state.take_pending_thinking_enabled(), Some(false));
+        assert!(state.take_pending_thinking_enabled().is_none());
+    }
+
+    #[test]
+    fn test_collapse_all_thinking_except_last() {
+        let state = SharedState::new();
+        let mut msg1 = test_message(MessageRole::Thinking, "thought-1");
+        msg1.collapsed = false;
+        let mut msg2 = test_message(MessageRole::Thinking, "thought-2");
+        msg2.collapsed = false;
+        let msg3 = test_message(MessageRole::User, "user");
+
+        state.set_messages(vec![msg1, msg3, msg2]);
+        state.collapse_all_thinking_except_last();
+
+        let messages = state.messages();
+        let thinking_states: Vec<bool> = messages
+            .iter()
+            .filter(|msg| msg.role == MessageRole::Thinking)
+            .map(|msg| msg.collapsed)
+            .collect();
+
+        assert_eq!(thinking_states, vec![true, false]);
     }
 
     #[test]

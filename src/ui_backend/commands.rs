@@ -300,6 +300,8 @@ pub enum Command {
 
     /// Clear all attachments
     ClearAttachments,
+    /// Paste from clipboard (prefer image attachment if available)
+    PasteClipboard,
 
     // ========== Session Management ==========
     /// Create a new session
@@ -380,6 +382,7 @@ pub fn key_to_command(key: KeyEvent) -> Option<Command> {
         // UI toggles
         (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(Command::ToggleSidebar),
         (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(Command::ToggleThinking),
+        (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Command::PasteClipboard),
 
         // Message sending
         (KeyCode::Enter, KeyModifiers::NONE) => Some(Command::SendMessage(String::new())),

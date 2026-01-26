@@ -19,6 +19,7 @@ Tark plugins are WebAssembly (WASM) modules that run in a sandboxed environment.
 | `auth` | Add authentication methods | OAuth providers, API key management |
 | `tool` | Add agent capabilities | Custom file operations, API integrations |
 | `provider` | Add LLM providers | Custom model endpoints, local models |
+| `channel` | Add messaging channels | Slack, Discord, Signal bridges |
 | `hook` | Lifecycle event handlers | Pre/post processing, logging |
 
 ## Quick Start
@@ -53,7 +54,7 @@ Every plugin must have a `plugin.toml` manifest:
 [plugin]
 name = "my-plugin"
 version = "0.1.0"
-type = "auth"  # or "tool", "provider", "hook"
+type = "auth"  # or "tool", "provider", "channel", "hook"
 description = "My awesome plugin"
 author = "Your Name"
 homepage = "https://github.com/you/my-plugin"
@@ -197,6 +198,27 @@ interface provider-plugin {
     
     // Send chat completion (non-streaming)
     chat: func(messages: list<message>, model: string) -> result<chat-response, string>;
+}
+```
+
+### Channel Plugin
+
+Add messaging channels (Slack, Discord, Signal).
+
+```rust
+interface channel-plugin {
+    // Get channel metadata
+    info: func() -> channel-info;
+
+    // Start/stop lifecycle
+    start: func() -> result<_, string>;
+    stop: func() -> result<_, string>;
+
+    // Handle inbound webhooks
+    handle-webhook: func(request: webhook-request) -> result<webhook-response, string>;
+
+    // Send outbound messages
+    send: func(message: outbound-message) -> result<send-result, string>;
 }
 ```
 

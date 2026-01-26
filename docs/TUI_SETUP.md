@@ -355,7 +355,7 @@ Control how risky operations are approved with `Ctrl+Shift+B` or `/trust`:
 |-----|--------|
 | `Ctrl+C` | Cancel LLM / Quit |
 | `Ctrl+B` | Toggle sidebar |
-| `Ctrl+T` | Toggle thinking blocks |
+| `Ctrl+T` | Toggle model-level thinking |
 | `Shift+Tab` | Cycle agent mode |
 | `Ctrl+M` | Cycle build mode |
 | `Ctrl+?` | Help modal |

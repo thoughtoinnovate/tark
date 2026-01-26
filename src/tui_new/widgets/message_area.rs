@@ -9,6 +9,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
+    symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget},
 };
@@ -110,6 +111,67 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     }
 
     result
+}
+
+#[derive(Debug, Clone)]
+struct VisualLine {
+    text: String,
+    start: usize,
+    end: usize,
+}
+
+fn wrap_text_with_positions(text: &str, max_width: usize) -> Vec<VisualLine> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut line_start = 0usize;
+    let mut line_len = 0usize;
+    let mut char_index = 0usize;
+
+    for ch in text.chars() {
+        if ch == '\n' {
+            lines.push(VisualLine {
+                text: current.clone(),
+                start: line_start,
+                end: char_index,
+            });
+            current.clear();
+            line_len = 0;
+            char_index += 1;
+            line_start = char_index;
+            continue;
+        }
+
+        if line_len >= max_width {
+            lines.push(VisualLine {
+                text: current.clone(),
+                start: line_start,
+                end: char_index,
+            });
+            current.clear();
+            line_len = 0;
+            line_start = char_index;
+        }
+
+        current.push(ch);
+        line_len += 1;
+        char_index += 1;
+    }
+
+    lines.push(VisualLine {
+        text: current,
+        start: line_start,
+        end: char_index,
+    });
+
+    if lines.is_empty() {
+        lines.push(VisualLine {
+            text: String::new(),
+            start: 0,
+            end: 0,
+        });
+    }
+
+    lines
 }
 
 fn truncate_text(text: &str, max_width: usize) -> String {
@@ -511,6 +573,8 @@ pub struct MessageArea<'a> {
     streaming_lines: Option<Vec<Line<'static>>>,
     /// Pre-rendered thinking lines (for incremental rendering optimization)
     thinking_lines: Option<Vec<Line<'static>>>,
+    /// Max visible lines for thinking blocks
+    thinking_max_lines: usize,
     /// Whether LLM is currently processing (shows placeholder before streaming starts)
     is_processing: bool,
     /// Agent name for display
@@ -519,6 +583,10 @@ pub struct MessageArea<'a> {
     focused_message_index: usize,
     /// Sub-index for hierarchical navigation within tool groups
     focused_sub_index: Option<usize>,
+    /// Cursor position within focused message
+    message_cursor: usize,
+    /// Selection range within focused message
+    message_selection: Option<(usize, usize)>,
     /// Vim mode
     vim_mode: crate::ui_backend::VimMode,
     /// Diff rendering mode for tool previews
@@ -612,10 +680,13 @@ impl<'a> MessageArea<'a> {
             streaming_thinking: None,
             streaming_lines: None,
             thinking_lines: None,
+            thinking_max_lines: 6,
             is_processing: false,
             agent_name: "Tark", // Default
             focused_message_index: 0,
             focused_sub_index: None,
+            message_cursor: 0,
+            message_selection: None,
             vim_mode: crate::ui_backend::VimMode::Insert,
             diff_view_mode: DiffViewMode::Auto,
             collapsed_tool_groups: &EMPTY_HASHSET,
@@ -661,6 +732,12 @@ impl<'a> MessageArea<'a> {
         self
     }
 
+    /// Set max visible lines for thinking blocks
+    pub fn thinking_max_lines(mut self, max_lines: usize) -> Self {
+        self.thinking_max_lines = max_lines.max(1);
+        self
+    }
+
     /// Set processing state (shows placeholder while waiting for first chunk)
     pub fn processing(mut self, is_processing: bool) -> Self {
         self.is_processing = is_processing;
@@ -682,6 +759,18 @@ impl<'a> MessageArea<'a> {
     /// Set focused sub-index for hierarchical navigation
     pub fn focused_sub_index(mut self, sub: Option<usize>) -> Self {
         self.focused_sub_index = sub;
+        self
+    }
+
+    /// Set message cursor position
+    pub fn message_cursor(mut self, cursor: usize) -> Self {
+        self.message_cursor = cursor;
+        self
+    }
+
+    /// Set message selection range
+    pub fn message_selection(mut self, selection: Option<(usize, usize)>) -> Self {
+        self.message_selection = selection;
         self
     }
 
@@ -713,6 +802,7 @@ impl<'a> MessageArea<'a> {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
             .border_style(Style::default().fg(border_color))
             .title(" Messages ");
 
@@ -723,6 +813,127 @@ impl<'a> MessageArea<'a> {
 
         let lines = self.build_lines(inner);
         (lines.len(), inner.height as usize)
+    }
+
+    fn render_reasoning_block(
+        &self,
+        content_lines: Vec<Line<'static>>,
+        bubble_content_width: usize,
+        collapsed: bool,
+    ) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line> = Vec::new();
+        let icon = self.role_icon(MessageRole::Thinking);
+        let chevron = if collapsed { "▶" } else { "▼" };
+        let header_label = "Thinking (model)";
+
+        let mut header_spans = vec![
+            Span::styled(
+                format!("{} ", icon),
+                Style::default().fg(self.theme.thinking_fg),
+            ),
+            Span::styled(
+                format!("{} {} ", chevron, header_label),
+                Style::default().fg(self.theme.text_primary),
+            ),
+        ];
+
+        if collapsed {
+            if let Some(first) = content_lines.first() {
+                let preview: String = first
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !preview.is_empty() {
+                    let truncated = if preview.chars().count() > 60 {
+                        let short: String = preview.chars().take(57).collect();
+                        format!("{}...", short)
+                    } else {
+                        preview
+                    };
+                    header_spans.push(Span::styled(
+                        truncated,
+                        Style::default().fg(self.theme.text_muted),
+                    ));
+                }
+            }
+            lines.push(Line::from(header_spans));
+            lines.push(Line::from(""));
+            return lines;
+        }
+
+        lines.push(Line::from(header_spans));
+
+        let border_color = self.theme.thinking_fg;
+        let top_border = format!("╭{}╮", "─".repeat(bubble_content_width));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(top_border, Style::default().fg(border_color)),
+        ]));
+
+        let content_width = bubble_content_width.saturating_sub(2);
+        let mut display_lines = content_lines;
+        let mut truncated = false;
+
+        if display_lines.len() > self.thinking_max_lines {
+            truncated = true;
+            let start = display_lines.len().saturating_sub(self.thinking_max_lines);
+            display_lines = display_lines.split_off(start);
+        }
+
+        if truncated && !display_lines.is_empty() {
+            display_lines[0] = Line::from(Span::styled(
+                "↑ more above",
+                Style::default()
+                    .fg(self.theme.text_muted)
+                    .bg(self.theme.thinking_bubble_bg),
+            ));
+        }
+
+        while display_lines.len() < self.thinking_max_lines {
+            display_lines.push(Line::from(Span::styled(
+                "",
+                Style::default().bg(self.theme.thinking_bubble_bg),
+            )));
+        }
+
+        for line in display_lines {
+            let line_width = line.width();
+            let padding = content_width.saturating_sub(line_width);
+            let mut line_spans = vec![
+                Span::raw("  "),
+                Span::styled("│", Style::default().fg(border_color)),
+                Span::styled(" ", Style::default().bg(self.theme.thinking_bubble_bg)),
+            ];
+
+            for span in line.spans {
+                let style = span.style.bg(self.theme.thinking_bubble_bg);
+                line_spans.push(Span::styled(span.content, style));
+            }
+
+            if padding > 0 {
+                line_spans.push(Span::styled(
+                    " ".repeat(padding),
+                    Style::default().bg(self.theme.thinking_bubble_bg),
+                ));
+            }
+            line_spans.push(Span::styled(
+                " ",
+                Style::default().bg(self.theme.thinking_bubble_bg),
+            ));
+            line_spans.push(Span::styled("│", Style::default().fg(border_color)));
+            lines.push(Line::from(line_spans));
+        }
+
+        let bottom_border = format!("╰{}╯", "─".repeat(bubble_content_width));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(bottom_border, Style::default().fg(border_color)),
+        ]));
+        lines.push(Line::from(""));
+
+        lines
     }
 
     fn build_lines(&self, inner: Rect) -> Vec<Line<'static>> {
@@ -1108,29 +1319,19 @@ impl<'a> MessageArea<'a> {
             || self.thinking_lines.is_some();
 
         if has_thinking {
-            let icon = self.role_icon(MessageRole::Thinking);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{} ", icon),
-                    Style::default().fg(self.theme.thinking_fg),
-                ),
-                Span::styled("▼ Thinking ", Style::default().fg(self.theme.text_primary)),
-            ]));
-
-            // Use pre-rendered lines if available, otherwise use raw thinking content
-            if let Some(ref pre_rendered) = self.thinking_lines {
-                for line in pre_rendered {
-                    lines.push(line.clone());
-                }
+            let content_lines = if let Some(ref pre_rendered) = self.thinking_lines {
+                pre_rendered.clone()
             } else if let Some(ref thinking) = self.streaming_thinking {
-                lines.push(Line::from(Span::styled(
-                    thinking.clone(),
-                    Style::default()
-                        .fg(self.theme.text_secondary)
-                        .bg(self.theme.thinking_bubble_bg),
-                )));
-            }
-            lines.push(Line::from(""));
+                super::markdown::render_markdown(
+                    thinking,
+                    self.theme,
+                    bubble_content_width.saturating_sub(2),
+                )
+            } else {
+                Vec::new()
+            };
+
+            lines.extend(self.render_reasoning_block(content_lines, bubble_content_width, false));
         }
 
         lines
@@ -1205,6 +1406,7 @@ impl Widget for MessageArea<'_> {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
             .border_style(Style::default().fg(border_color))
             .title(" Messages ");
 
@@ -1753,23 +1955,16 @@ impl Widget for MessageArea<'_> {
                         }
                     }
                 } else {
-                    // Thinking messages - keep original collapsible behavior
-                    let chevron = if msg.collapsed { "▶" } else { "▼" };
-                    let header_line = Line::from(vec![
-                        Span::styled(format!("{} ", icon), Style::default().fg(fg_color)),
-                        Span::styled(
-                            format!("{} {} ", chevron, label),
-                            Style::default().fg(self.theme.text_primary),
-                        ),
-                    ]);
-                    lines.push(header_line);
-
-                    if !msg.collapsed {
-                        lines.push(Line::from(Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(self.theme.text_secondary).bg(bg_color),
-                        )));
-                    }
+                    let content_lines = super::markdown::render_markdown(
+                        &msg.content,
+                        self.theme,
+                        bubble_content_width.saturating_sub(2),
+                    );
+                    lines.extend(self.render_reasoning_block(
+                        content_lines,
+                        bubble_content_width,
+                        msg.collapsed,
+                    ));
                 }
             } else {
                 // Regular message with role icon, label, and content
@@ -1848,8 +2043,75 @@ impl Widget for MessageArea<'_> {
                         Span::styled(top_border, Style::default().fg(glow_color)),
                     ]));
 
-                    // For Agent messages, use markdown rendering
-                    if msg.role == MessageRole::Agent {
+                    let show_message_cursor = self.focused
+                        && msg_idx == self.focused_message_index
+                        && matches!(
+                            self.vim_mode,
+                            crate::ui_backend::VimMode::Normal | crate::ui_backend::VimMode::Visual
+                        );
+                    if show_message_cursor {
+                        let selection = if is_visual {
+                            self.message_selection
+                        } else {
+                            None
+                        };
+                        let cursor_visible = get_message_cursor_visible();
+                        let content_width = bubble_content_width - 2;
+                        let visual_lines = wrap_text_with_positions(&msg.content, content_width);
+                        let normal_style = if msg.role == MessageRole::User {
+                            Style::default().fg(self.theme.text_primary).bg(bg)
+                        } else {
+                            Style::default().fg(self.theme.text_primary)
+                        };
+                        let selection_style =
+                            Style::default().fg(self.theme.bg_main).bg(self.theme.blue);
+                        let cursor_style =
+                            Style::default().fg(self.theme.bg_main).bg(self.theme.cyan);
+                        let padding_style = if msg.role == MessageRole::User {
+                            Style::default().bg(bg)
+                        } else {
+                            Style::default()
+                        };
+
+                        for line in visual_lines {
+                            let mut line_spans = vec![
+                                Span::raw("  "),
+                                Span::styled("│", Style::default().fg(glow_color)),
+                                Span::raw(" "),
+                            ];
+                            let mut cursor_rendered = false;
+                            let mut line_len = 0usize;
+                            for (offset, ch) in line.text.chars().enumerate() {
+                                let char_pos = line.start + offset;
+                                let mut style = normal_style;
+                                if let Some((sel_start, sel_end)) = selection {
+                                    if char_pos >= sel_start && char_pos < sel_end {
+                                        style = selection_style;
+                                    }
+                                }
+                                if cursor_visible && char_pos == self.message_cursor {
+                                    line_spans.push(Span::styled("▮", cursor_style));
+                                    cursor_rendered = true;
+                                } else {
+                                    line_spans.push(Span::styled(ch.to_string(), style));
+                                }
+                                line_len += 1;
+                            }
+
+                            if cursor_visible && !cursor_rendered && self.message_cursor == line.end
+                            {
+                                line_spans.push(Span::styled("▮", cursor_style));
+                                line_len += 1;
+                            }
+
+                            let padding = content_width.saturating_sub(line_len);
+                            if padding > 0 {
+                                line_spans.push(Span::styled(" ".repeat(padding), padding_style));
+                            }
+                            line_spans.push(Span::styled("│", Style::default().fg(glow_color)));
+                            lines.push(Line::from(line_spans));
+                        }
+                    } else if msg.role == MessageRole::Agent {
                         let markdown_lines = super::markdown::render_markdown(
                             &msg.content,
                             self.theme,
@@ -2265,6 +2527,7 @@ mod tests {
         };
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
             .border_style(Style::default())
             .title(" Messages ");
         let inner = block.inner(area);

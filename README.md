@@ -237,7 +237,7 @@ Press `<leader>tc` (or your configured keymap) to toggle the chat window.
 | `Tab` | Cycle focus (Input → Messages → Sidebar) |
 | `Shift+Tab` | Cycle agent mode (Build → Plan → Ask) |
 | `Ctrl+B` | Toggle sidebar visibility |
-| `Ctrl+T` | Toggle thinking blocks display |
+| `Ctrl+T` | Toggle model-level thinking |
 | `Ctrl+M` | Cycle build mode (Manual → Balanced → Careful) |
 | `Ctrl+Shift+B` | Open trust level selector (Build mode only) |
 | `Esc` | Close modal / Cancel operation |
@@ -252,14 +252,21 @@ Press `<leader>tc` (or your configured keymap) to toggle the chat window.
 | `Ctrl+Left/Right` | Word navigation |
 | `Home/End` | Line start/end |
 | `Up/Down` | Input history navigation |
-| `@` | Open file picker for attachments |
+| `@` | Open file picker for attachments (Enter toggles, Esc closes) |
+| `Ctrl+V` | Paste text or attach clipboard image |
+
+Selected files and folders are inserted into the prompt as `@path` tokens. Removing a token from the prompt clears the matching attachments; folders appear as a single token with their file count.
 
 #### Message Area (Vim-style)
 
 | Key | Description |
 |-----|-------------|
 | `j/k` | Scroll down/up |
-| `y` | Yank (copy) selected message |
+| `v` | Start visual selection in focused message |
+| `h/l` | Move cursor left/right (message selection) |
+| `w/b` | Next/previous word (message selection) |
+| `0/$` | Line start/end (message selection) |
+| `y` | Yank selection (visual) / yank message (normal) |
 | `Enter` | Toggle message collapse |
 
 #### Sidebar Navigation
@@ -497,6 +504,9 @@ tark plugin add https://github.com/user/tark-plugin
 # Show plugin details
 tark plugin info <plugin-id>
 
+# Run OAuth for a plugin
+tark plugin auth <plugin-id>
+
 # Enable/disable plugins
 tark plugin enable <plugin-id>
 tark plugin disable <plugin-id>
@@ -512,6 +522,7 @@ tark plugin remove <plugin-id>
 | `auth` | Add authentication methods (OAuth, API keys) |
 | `tool` | Add agent capabilities |
 | `provider` | Add LLM providers |
+| `channel` | Add messaging channels (Slack, Discord, Signal) |
 | `hook` | Lifecycle event handlers |
 
 ### Building Plugins

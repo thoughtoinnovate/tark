@@ -855,6 +855,8 @@ pub struct FilePickerModal<'a> {
     files: &'a [String],
     filter: &'a str,
     selected: usize,
+    selected_paths: &'a [String],
+    current_dir: &'a str,
 }
 
 impl<'a> FilePickerModal<'a> {
@@ -864,6 +866,8 @@ impl<'a> FilePickerModal<'a> {
             files: &[],
             filter: "",
             selected: 0,
+            selected_paths: &[],
+            current_dir: ".",
         }
     }
 
@@ -879,6 +883,16 @@ impl<'a> FilePickerModal<'a> {
 
     pub fn selected(mut self, index: usize) -> Self {
         self.selected = index;
+        self
+    }
+
+    pub fn selected_paths(mut self, paths: &'a [String]) -> Self {
+        self.selected_paths = paths;
+        self
+    }
+
+    pub fn current_dir(mut self, dir: &'a str) -> Self {
+        self.current_dir = dir;
         self
     }
 
@@ -924,15 +938,19 @@ impl Widget for FilePickerModal<'_> {
                     },
                 ),
             ]),
+            Line::from(vec![Span::styled(
+                format!("Dir: {}", self.current_dir),
+                Style::default().fg(self.theme.text_muted),
+            )]),
             Line::from(""),
             // Navigation hints
             Line::from(vec![
                 Span::styled("↑↓", Style::default().fg(self.theme.cyan)),
                 Span::styled(" Navigate  ", Style::default().fg(self.theme.text_muted)),
                 Span::styled("Enter", Style::default().fg(self.theme.green)),
-                Span::styled(" Select  ", Style::default().fg(self.theme.text_muted)),
+                Span::styled(" Toggle  ", Style::default().fg(self.theme.text_muted)),
                 Span::styled("Esc", Style::default().fg(self.theme.yellow)),
-                Span::styled(" Cancel", Style::default().fg(self.theme.text_muted)),
+                Span::styled(" Done", Style::default().fg(self.theme.text_muted)),
             ]),
             Line::from(""),
         ];
@@ -943,9 +961,27 @@ impl Widget for FilePickerModal<'_> {
                 Style::default().fg(self.theme.text_muted),
             )));
         } else {
-            for (i, file_path) in self.files.iter().enumerate().take(15) {
-                let is_selected = i == self.selected;
-                let prefix = if is_selected { "▸ " } else { "  " };
+            let max_visible = 15usize;
+            let total = self.files.len();
+            let mut start = 0usize;
+            if self.selected >= max_visible {
+                start = self.selected + 1 - max_visible;
+            }
+            let end = (start + max_visible).min(total);
+
+            if start > 0 {
+                content.push(Line::from(Span::styled(
+                    format!("  ... {} above", start),
+                    Style::default().fg(self.theme.text_muted),
+                )));
+            }
+
+            for (i, file_path) in self.files[start..end].iter().enumerate() {
+                let index = start + i;
+                let is_selected = index == self.selected;
+                let is_marked = self.selected_paths.iter().any(|p| p == file_path);
+                let prefix = if is_selected { "▸" } else { " " };
+                let marker = if is_marked { "[x]" } else { "[ ]" };
                 let icon = self.get_file_icon(file_path);
 
                 let style = if is_selected {
@@ -958,14 +994,14 @@ impl Widget for FilePickerModal<'_> {
                 };
 
                 content.push(Line::from(Span::styled(
-                    format!("{}{} {}", prefix, icon, file_path),
+                    format!("{} {} {} {}", prefix, marker, icon, file_path),
                     style,
                 )));
             }
 
-            if self.files.len() > 15 {
+            if end < total {
                 content.push(Line::from(Span::styled(
-                    format!("  ... {} more files", self.files.len() - 15),
+                    format!("  ... {} more files", total - end),
                     Style::default().fg(self.theme.text_muted),
                 )));
             }
@@ -1010,5 +1046,34 @@ mod tests {
         let has_help = (0..80)
             .any(|x| (0..24).any(|y| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or("") == "H"));
         assert!(has_help, "Help modal should render");
+    }
+
+    #[test]
+    fn test_file_picker_scrolls_to_selected() {
+        let backend = TestBackend::new(80, 60);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+        let files: Vec<String> = (0..30).map(|i| format!("file_{i}.rs")).collect();
+
+        terminal
+            .draw(|f| {
+                let modal = FilePickerModal::new(&theme)
+                    .files(&files)
+                    .selected(29)
+                    .selected_paths(&[])
+                    .current_dir(".");
+                f.render_widget(modal, f.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in 0..60 {
+            for x in 0..80 {
+                rendered.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(""));
+            }
+        }
+        assert!(rendered.contains("file_29.rs"));
+        assert!(!rendered.contains("file_0.rs"));
     }
 }

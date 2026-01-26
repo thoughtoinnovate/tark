@@ -154,7 +154,7 @@ impl Default for AppState {
             context_files: Vec::new(),
             sidebar_selected_panel: 0,
             sidebar_selected_item: None,
-            sidebar_expanded_panels: [true, true, true, true, true],
+            sidebar_expanded_panels: [true, true, false, false, false],
         }
     }
 }

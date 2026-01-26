@@ -14,8 +14,8 @@ use insta::assert_snapshot;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use regex::Regex;
-use tark_cli::tui_new::widgets::{Message, MessageRole};
-use tark_cli::tui_new::TuiApp;
+use tark_cli::tui_new::widgets::{FilePickerModal, Message, MessageRole};
+use tark_cli::tui_new::{Theme, TuiApp};
 
 /// Create a test app with specified size
 fn create_test_app(width: u16, height: u16) -> TuiApp<TestBackend> {
@@ -67,6 +67,30 @@ fn capture_buffer(app: &mut TuiApp<TestBackend>) -> String {
     }
 
     // Normalize environment-specific values before returning
+    normalize_output(result)
+}
+
+/// Capture a widget as string for snapshot testing
+fn capture_widget<W: ratatui::widgets::Widget>(widget: W, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal
+        .draw(|f| {
+            let area = f.area();
+            f.render_widget(widget, area);
+        })
+        .unwrap();
+
+    let buf = terminal.backend().buffer();
+    let mut result = String::new();
+    for y in 0..height {
+        for x in 0..width {
+            result.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+        }
+        result.push('\n');
+    }
+
     normalize_output(result)
 }
 
@@ -162,6 +186,25 @@ fn snapshot_empty_input() {
     let mut app = create_test_app(100, 30);
     app.state_mut().clear_input();
     assert_snapshot!("empty_input", capture_buffer(&mut app));
+}
+
+#[test]
+fn snapshot_file_picker_modal_selected() {
+    let theme = Theme::default();
+    let files = vec![
+        "src/".to_string(),
+        "src/main.rs".to_string(),
+        "README.md".to_string(),
+    ];
+    let selected_paths = vec!["src/".to_string()];
+    let widget = FilePickerModal::new(&theme)
+        .files(&files)
+        .filter("s")
+        .selected(0)
+        .selected_paths(&selected_paths)
+        .current_dir("./");
+
+    assert_snapshot!("file_picker_modal_selected", capture_widget(widget, 60, 20));
 }
 
 // ============================================================================

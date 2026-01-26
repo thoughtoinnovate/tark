@@ -143,6 +143,44 @@ pub async fn run_plugin_info(plugin_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run OAuth authentication for a plugin
+pub async fn run_plugin_auth(plugin_id: &str) -> Result<()> {
+    let registry = PluginRegistry::new()?;
+    let plugin = registry
+        .get(plugin_id)
+        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found", plugin_id))?
+        .clone();
+
+    let oauth_config = plugin
+        .manifest
+        .oauth
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' has no OAuth configuration", plugin_id))?;
+
+    println!(
+        "{}",
+        format!("=== Plugin OAuth: {} ===", plugin_id).bold().cyan()
+    );
+    println!();
+
+    let result = crate::plugins::run_oauth_flow_for_plugin(&plugin, &oauth_config).await?;
+
+    if plugin.plugin_type() == crate::plugins::PluginType::Channel {
+        let mut host = crate::plugins::PluginHost::new()?;
+        host.load(&plugin)?;
+        if let Some(instance) = host.get_mut(plugin.id()) {
+            if instance.has_channel_auth_init() {
+                if let Err(err) = instance.channel_auth_init(&result.tokens_json) {
+                    tracing::warn!("Failed to initialize channel auth: {}", err);
+                }
+            }
+        }
+    }
+
+    println!("✅ Saved credentials to {}", result.creds_path.display());
+    Ok(())
+}
+
 /// Install a plugin from git repository or local path
 ///
 /// # Arguments

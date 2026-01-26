@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod auth;
+pub mod channels;
 pub mod completion;
 pub mod config;
 pub mod core;

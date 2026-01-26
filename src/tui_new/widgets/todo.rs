@@ -14,6 +14,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
+    symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
@@ -175,6 +176,7 @@ impl Widget for TodoWidget<'_> {
         // Render with border
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
             .border_style(Style::default().fg(self.theme.border));
 
         let inner = block.inner(area);

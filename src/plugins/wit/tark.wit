@@ -261,6 +261,91 @@ interface provider-plugin {
     chat-stream-poll: func(stream-id: u64) -> result<stream-chunk, string>;
 }
 
+/// Messaging channel plugin interface
+interface channel-plugin {
+    /// Channel metadata
+    record channel-info {
+        id: string,
+        display-name: string,
+        description: string,
+        supports-streaming: bool,
+        supports-edits: bool,
+    }
+
+    /// Inbound message from a channel
+    record inbound-message {
+        conversation-id: string,
+        user-id: string,
+        text: string,
+        metadata-json: string,
+    }
+
+    /// Webhook request from host
+    record webhook-request {
+        method: string,
+        path: string,
+        query: option<string>,
+        headers: list<tuple<string, string>>,
+        body: string,
+    }
+
+    /// Webhook response to return to caller
+    record webhook-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: string,
+        messages: list<inbound-message>,
+    }
+
+    /// Outbound message from agent to channel
+    record outbound-message {
+        conversation-id: string,
+        text: string,
+        message-id: option<string>,
+        is-final: bool,
+        metadata-json: string,
+    }
+
+    /// Send result
+    record send-result {
+        success: bool,
+        message-id: option<string>,
+        error: option<string>,
+    }
+
+    /// Auth status for channel
+    enum auth-status {
+        not-required,
+        authenticated,
+        not-authenticated,
+        expired,
+    }
+
+    /// Get channel metadata
+    info: func() -> channel-info;
+
+    /// Start the channel plugin
+    start: func() -> result<_, string>;
+
+    /// Stop the channel plugin
+    stop: func() -> result<_, string>;
+
+    /// Get authentication status
+    auth-status: func() -> auth-status;
+
+    /// Initialize with credentials (JSON)
+    auth-init: func(credentials-json: string) -> result<_, string>;
+
+    /// Logout
+    auth-logout: func() -> result<_, string>;
+
+    /// Handle inbound webhook request
+    handle-webhook: func(request: webhook-request) -> result<webhook-response, string>;
+
+    /// Send outbound message
+    send: func(message: outbound-message) -> result<send-result, string>;
+}
+
 // ============================================================================
 // World definitions (what plugins export)
 // ============================================================================
@@ -296,4 +381,15 @@ world provider-world {
     import fs;
     
     export provider-plugin;
+}
+
+/// Channel plugin world
+world channel-world {
+    import storage;
+    import http;
+    import env;
+    import log;
+    import fs;
+
+    export channel-plugin;
 }

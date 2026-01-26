@@ -1,0 +1,21 @@
+---
+source: tests/tui_snapshot_tests.rs
+assertion_line: 207
+expression: "capture_widget(widget, 60, 20)"
+---
+                                                            
+                                                            
+                                                            
+            ╭ Add Context File ────────────────╮            
+            │Search: s▏                        │            
+            │Dir: ./                           │            
+            │                                  │            
+            │↑↓ Navigate  Enter Toggle  Esc Don│            
+            │                                  │            
+            │▸ [x] 📁  src/                     │            
+            │  [ ] 🦀  src/main.rs              │            
+            │  [ ] 📄  README.md                │            
+            │                                  │            
+            │                                  │            
+            │                                  │            
+            ╰──────────────────────────────────╯

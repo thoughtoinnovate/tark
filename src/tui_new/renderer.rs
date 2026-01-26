@@ -49,7 +49,7 @@ fn build_status_message(state: &SharedState) -> (FlashBarState, Option<String>) 
             let remaining = retry_at.saturating_duration_since(now).as_secs().max(1);
             return (
                 FlashBarState::Warning,
-                Some(format!("Rate limited retrying in {}s", remaining)),
+                Some(format!("Rate limited · retrying in {}s", remaining)),
             );
         }
     }
@@ -64,7 +64,10 @@ fn build_status_message(state: &SharedState) -> (FlashBarState, Option<String>) 
         };
         (resolved_state, message)
     } else if flash_state == FlashBarState::Idle {
-        if state.idle_elapsed() >= Duration::from_secs(2) {
+        let idle_elapsed = state.idle_elapsed();
+        if idle_elapsed >= Duration::from_secs(10) {
+            (FlashBarState::Idle, None)
+        } else if idle_elapsed >= Duration::from_secs(2) {
             (FlashBarState::Idle, Some("Ready".to_string()))
         } else {
             (FlashBarState::Idle, None)
@@ -125,8 +128,196 @@ impl<B: Backend> TuiRenderer<B> {
         &mut self.terminal
     }
 
+    fn handle_text_char(c: char, state: &SharedState) -> Option<Command> {
+        if let Some(q) = state.active_questionnaire() {
+            use crate::ui_backend::questionnaire::QuestionType;
+
+            if q.question_type == QuestionType::FreeText {
+                // Free text: only insert if in edit mode
+                if q.is_editing_free_text {
+                    state.questionnaire_insert_char(c);
+                }
+                // Block all typing when not in edit mode
+                None
+            } else if q.is_editing_other() {
+                // "Other" is focused and selected: typing goes to other_text
+                state.questionnaire_insert_char(c);
+                None
+            } else if c == ' ' && q.question_type == QuestionType::MultipleChoice {
+                // Space only toggles for multiple choice (checkboxes)
+                // Single choice auto-selects on navigation, no space needed
+                Some(Command::QuestionToggle)
+            } else {
+                // Block other keys from going to prompt when questionnaire is active
+                None
+            }
+        } else {
+            match state.active_modal() {
+                Some(ModalType::Approval) => {
+                    // Handle approval actions
+                    match c.to_ascii_lowercase() {
+                        'r' => Some(Command::ApproveOperation),
+                        'a' => Some(Command::ApproveAlways),
+                        'p' => Some(Command::ApproveSession),
+                        's' => Some(Command::DenyOperation),
+                        _ => None,
+                    }
+                }
+                Some(ModalType::TaskDeleteConfirm) => {
+                    // Quick keys for delete confirmation
+                    match c.to_ascii_lowercase() {
+                        'y' => Some(Command::ConfirmDeleteTask),
+                        'n' => Some(Command::CancelDeleteTask),
+                        _ => None,
+                    }
+                }
+                Some(ModalType::TaskEdit) => {
+                    // In edit modal, characters go to the edit buffer
+                    let mut content = state.editing_task_content();
+                    content.push(c);
+                    state.set_editing_task_content(content);
+                    None
+                }
+                Some(ModalType::FilePicker) => {
+                    // FilePicker is an overlay - pass through to input
+                    // Update both file picker filter and input
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}{}", current_filter, c));
+
+                    // Also insert into input if focused on input
+                    if state.focused_component() == FocusedComponent::Input {
+                        Some(Command::InsertChar(c))
+                    } else {
+                        None
+                    }
+                }
+                Some(ModalType::ThemePicker)
+                | Some(ModalType::ProviderPicker)
+                | Some(ModalType::ModelPicker)
+                | Some(ModalType::SessionPicker) => Some(Command::ModalFilter(c.to_string())),
+                _ => {
+                    use crate::ui_backend::VimMode;
+
+                    let vim_mode = state.vim_mode();
+                    let focused = state.focused_component();
+
+                    // Handle pending operator in Normal mode (e.g., dd, dw)
+                    if vim_mode == VimMode::Normal && focused == FocusedComponent::Input {
+                        if let Some(op) = state.pending_operator() {
+                            state.set_pending_operator(None);
+                            match (op, c) {
+                                ('d', 'd') => return Some(Command::DeleteLine),
+                                ('d', 'w') => return Some(Command::DeleteWord),
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Vim mode commands (work in Normal mode for Input)
+                    if vim_mode == VimMode::Normal && focused == FocusedComponent::Input {
+                        match c {
+                            // Mode switching
+                            'i' => return Some(Command::SetVimMode(VimMode::Insert)),
+                            'v' => return Some(Command::SetVimMode(VimMode::Visual)),
+                            'a' => {
+                                // Enter insert mode after cursor (move right then insert)
+                                state.move_cursor_right();
+                                return Some(Command::SetVimMode(VimMode::Insert));
+                            }
+                            'A' => {
+                                // Enter insert mode at end of line
+                                state.move_cursor_to_line_end();
+                                return Some(Command::SetVimMode(VimMode::Insert));
+                            }
+                            'I' => {
+                                // Enter insert mode at start of line
+                                state.move_cursor_to_line_start();
+                                return Some(Command::SetVimMode(VimMode::Insert));
+                            }
+                            // Operator-pending commands
+                            'd' => {
+                                state.set_pending_operator(Some('d'));
+                                return None;
+                            }
+                            // Navigation
+                            'h' => return Some(Command::CursorLeft),
+                            'l' => return Some(Command::CursorRight),
+                            'w' => return Some(Command::CursorWordForward),
+                            'b' => return Some(Command::CursorWordBackward),
+                            '0' => return Some(Command::CursorToLineStart),
+                            '$' => return Some(Command::CursorToLineEnd),
+                            '^' => return Some(Command::CursorToLineStart), // First non-whitespace (simplified)
+                            // Deletion
+                            'x' => return Some(Command::DeleteCharAfter),
+                            'X' => return Some(Command::DeleteCharBefore),
+                            // Other common commands
+                            'o' => {
+                                // Open new line below and enter insert mode
+                                state.move_cursor_to_line_end();
+                                state.insert_newline();
+                                return Some(Command::SetVimMode(VimMode::Insert));
+                            }
+                            'O' => {
+                                // Open new line above and enter insert mode
+                                state.move_cursor_to_line_start();
+                                state.insert_newline();
+                                state.move_cursor_up();
+                                return Some(Command::SetVimMode(VimMode::Insert));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Visual mode selection + yank/delete
+                    if vim_mode == VimMode::Visual && focused == FocusedComponent::Input {
+                        match c {
+                            'h' => return Some(Command::CursorLeft),
+                            'l' => return Some(Command::CursorRight),
+                            'w' => return Some(Command::CursorWordForward),
+                            'b' => return Some(Command::CursorWordBackward),
+                            '0' => return Some(Command::CursorToLineStart),
+                            '$' => return Some(Command::CursorToLineEnd),
+                            'y' => return Some(Command::YankSelection),
+                            'd' => return Some(Command::DeleteSelection),
+                            _ => {}
+                        }
+                    }
+
+                    // Text editing only works in Insert mode
+                    if vim_mode == VimMode::Insert && focused == FocusedComponent::Input {
+                        // Detect '/' at start of input for slash commands
+                        if c == '/' && state.input_text().is_empty() {
+                            // Activate autocomplete for slash commands
+                            state.activate_autocomplete("");
+                        }
+                        Some(Command::InsertChar(c))
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+    }
+
     /// Convert keyboard event to command
     fn key_to_command(key: event::KeyEvent, state: &SharedState) -> Option<Command> {
+        let vim_keys_enabled = state.is_vim_key_enabled();
+        if key.code == KeyCode::Char('i')
+            && key.modifiers == KeyModifiers::NONE
+            && state.active_modal().is_none()
+            && state.active_questionnaire().is_none()
+            && state.focused_component() != FocusedComponent::Input
+        {
+            return Some(Command::FocusInput);
+        }
+        if !vim_keys_enabled
+            && (key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT)
+        {
+            if let KeyCode::Char(c) = key.code {
+                return Self::handle_text_char(c, state);
+            }
+        }
+
         match (key.code, key.modifiers) {
             // Application control
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
@@ -140,6 +331,7 @@ impl<B: Backend> TuiRenderer<B> {
             (KeyCode::Char('q'), KeyModifiers::CONTROL) => Some(Command::Quit),
             // Ctrl+? opens help (allows ? to be typed normally in input)
             (KeyCode::Char('?'), KeyModifiers::CONTROL) => Some(Command::ToggleHelp),
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Command::PasteClipboard),
 
             // Focus management / Autocomplete
             (KeyCode::Tab, KeyModifiers::NONE) => {
@@ -329,6 +521,9 @@ impl<B: Backend> TuiRenderer<B> {
                     return None;
                 }
                 match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal | VimMode::Visual) => {
+                        Some(Command::CursorRight)
+                    }
                     (FocusedComponent::Panel, VimMode::Normal) => Some(Command::SidebarEnter),
                     (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('l')),
                     _ => None,
@@ -369,6 +564,9 @@ impl<B: Backend> TuiRenderer<B> {
                     return None;
                 }
                 match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal | VimMode::Visual) => {
+                        Some(Command::CursorLeft)
+                    }
                     (FocusedComponent::Panel, VimMode::Normal) => Some(Command::SidebarExit),
                     (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('h')),
                     _ => None,
@@ -410,7 +608,7 @@ impl<B: Backend> TuiRenderer<B> {
                 }
                 match (state.focused_component(), state.vim_mode()) {
                     (FocusedComponent::Messages, VimMode::Normal) => Some(Command::YankMessage),
-                    (FocusedComponent::Messages, VimMode::Visual) => Some(Command::YankMessage),
+                    (FocusedComponent::Messages, VimMode::Visual) => Some(Command::YankSelection),
                     (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('y')),
                     _ => None,
                 }
@@ -454,6 +652,151 @@ impl<B: Backend> TuiRenderer<B> {
                         Some(Command::SetVimMode(VimMode::Visual))
                     }
                     (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('v')),
+                    _ => None,
+                }
+            }
+            (KeyCode::Char('w'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("w".to_string()));
+                }
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}w", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('w'));
+                    }
+                    return None;
+                }
+                if let Some(q) = state.active_questionnaire() {
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('w');
+                    }
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal | VimMode::Visual) => {
+                        Some(Command::CursorWordForward)
+                    }
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('w')),
+                    _ => None,
+                }
+            }
+            (KeyCode::Char('b'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("b".to_string()));
+                }
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}b", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('b'));
+                    }
+                    return None;
+                }
+                if let Some(q) = state.active_questionnaire() {
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('b');
+                    }
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal | VimMode::Visual) => {
+                        Some(Command::CursorWordBackward)
+                    }
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('b')),
+                    _ => None,
+                }
+            }
+            (KeyCode::Char('0'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("0".to_string()));
+                }
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}0", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('0'));
+                    }
+                    return None;
+                }
+                if let Some(q) = state.active_questionnaire() {
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('0');
+                    }
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal | VimMode::Visual) => {
+                        Some(Command::CursorToLineStart)
+                    }
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('0')),
+                    _ => None,
+                }
+            }
+            (KeyCode::Char('$'), KeyModifiers::SHIFT)
+            | (KeyCode::Char('$'), KeyModifiers::NONE) => {
+                use crate::ui_backend::VimMode;
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("$".to_string()));
+                }
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}$", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('$'));
+                    }
+                    return None;
+                }
+                if let Some(q) = state.active_questionnaire() {
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('$');
+                    }
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal | VimMode::Visual) => {
+                        Some(Command::CursorToLineEnd)
+                    }
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('$')),
                     _ => None,
                 }
             }
@@ -918,7 +1261,6 @@ impl<B: Backend> TuiRenderer<B> {
                 } else if matches!(state.focused_component(), FocusedComponent::Messages) {
                     Some(Command::ToggleMessageCollapse)
                 } else if matches!(state.focused_component(), FocusedComponent::Panel) {
-                    // Toggle sidebar panel expansion
                     Some(Command::SidebarSelect)
                 } else {
                     None
@@ -927,176 +1269,7 @@ impl<B: Backend> TuiRenderer<B> {
 
             // Text editing (only in input focus)
             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                if let Some(q) = state.active_questionnaire() {
-                    use crate::ui_backend::questionnaire::QuestionType;
-
-                    if q.question_type == QuestionType::FreeText {
-                        // Free text: only insert if in edit mode
-                        if q.is_editing_free_text {
-                            state.questionnaire_insert_char(c);
-                        }
-                        // Block all typing when not in edit mode
-                        None
-                    } else if q.is_editing_other() {
-                        // "Other" is focused and selected: typing goes to other_text
-                        state.questionnaire_insert_char(c);
-                        None
-                    } else if c == ' ' && q.question_type == QuestionType::MultipleChoice {
-                        // Space only toggles for multiple choice (checkboxes)
-                        // Single choice auto-selects on navigation, no space needed
-                        Some(Command::QuestionToggle)
-                    } else {
-                        // Block other keys from going to prompt when questionnaire is active
-                        None
-                    }
-                } else {
-                    match state.active_modal() {
-                        Some(ModalType::Approval) => {
-                            // Handle approval actions
-                            match c.to_ascii_lowercase() {
-                                'r' => Some(Command::ApproveOperation),
-                                'a' => Some(Command::ApproveAlways),
-                                'p' => Some(Command::ApproveSession),
-                                's' => Some(Command::DenyOperation),
-                                _ => None,
-                            }
-                        }
-                        Some(ModalType::TaskDeleteConfirm) => {
-                            // Quick keys for delete confirmation
-                            match c.to_ascii_lowercase() {
-                                'y' => Some(Command::ConfirmDeleteTask),
-                                'n' => Some(Command::CancelDeleteTask),
-                                _ => None,
-                            }
-                        }
-                        Some(ModalType::TaskEdit) => {
-                            // In edit modal, characters go to the edit buffer
-                            let mut content = state.editing_task_content();
-                            content.push(c);
-                            state.set_editing_task_content(content);
-                            None
-                        }
-                        Some(ModalType::FilePicker) => {
-                            // FilePicker is an overlay - pass through to input
-                            // Update both file picker filter and input
-                            let current_filter = state.file_picker_filter();
-                            state.set_file_picker_filter(format!("{}{}", current_filter, c));
-
-                            // Also insert into input if focused on input
-                            if state.focused_component() == FocusedComponent::Input {
-                                Some(Command::InsertChar(c))
-                            } else {
-                                None
-                            }
-                        }
-                        Some(ModalType::ThemePicker)
-                        | Some(ModalType::ProviderPicker)
-                        | Some(ModalType::ModelPicker)
-                        | Some(ModalType::SessionPicker) => {
-                            Some(Command::ModalFilter(c.to_string()))
-                        }
-                        _ => {
-                            use crate::ui_backend::VimMode;
-
-                            let vim_mode = state.vim_mode();
-                            let focused = state.focused_component();
-
-                            // Handle pending operator in Normal mode (e.g., dd, dw)
-                            if vim_mode == VimMode::Normal && focused == FocusedComponent::Input {
-                                if let Some(op) = state.pending_operator() {
-                                    state.set_pending_operator(None);
-                                    match (op, c) {
-                                        ('d', 'd') => return Some(Command::DeleteLine),
-                                        ('d', 'w') => return Some(Command::DeleteWord),
-                                        _ => {}
-                                    }
-                                }
-                            }
-
-                            // Vim mode commands (work in Normal mode for Input)
-                            if vim_mode == VimMode::Normal && focused == FocusedComponent::Input {
-                                match c {
-                                    // Mode switching
-                                    'i' => return Some(Command::SetVimMode(VimMode::Insert)),
-                                    'v' => return Some(Command::SetVimMode(VimMode::Visual)),
-                                    'a' => {
-                                        // Enter insert mode after cursor (move right then insert)
-                                        state.move_cursor_right();
-                                        return Some(Command::SetVimMode(VimMode::Insert));
-                                    }
-                                    'A' => {
-                                        // Enter insert mode at end of line
-                                        state.move_cursor_to_line_end();
-                                        return Some(Command::SetVimMode(VimMode::Insert));
-                                    }
-                                    'I' => {
-                                        // Enter insert mode at start of line
-                                        state.move_cursor_to_line_start();
-                                        return Some(Command::SetVimMode(VimMode::Insert));
-                                    }
-                                    // Operator-pending commands
-                                    'd' => {
-                                        state.set_pending_operator(Some('d'));
-                                        return None;
-                                    }
-                                    // Navigation
-                                    'h' => return Some(Command::CursorLeft),
-                                    'l' => return Some(Command::CursorRight),
-                                    'w' => return Some(Command::CursorWordForward),
-                                    'b' => return Some(Command::CursorWordBackward),
-                                    '0' => return Some(Command::CursorToLineStart),
-                                    '$' => return Some(Command::CursorToLineEnd),
-                                    '^' => return Some(Command::CursorToLineStart), // First non-whitespace (simplified)
-                                    // Deletion
-                                    'x' => return Some(Command::DeleteCharAfter),
-                                    'X' => return Some(Command::DeleteCharBefore),
-                                    // Other common commands
-                                    'o' => {
-                                        // Open new line below and enter insert mode
-                                        state.move_cursor_to_line_end();
-                                        state.insert_newline();
-                                        return Some(Command::SetVimMode(VimMode::Insert));
-                                    }
-                                    'O' => {
-                                        // Open new line above and enter insert mode
-                                        state.move_cursor_to_line_start();
-                                        state.insert_newline();
-                                        state.move_cursor_up();
-                                        return Some(Command::SetVimMode(VimMode::Insert));
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            // Visual mode selection + yank/delete
-                            if vim_mode == VimMode::Visual && focused == FocusedComponent::Input {
-                                match c {
-                                    'h' => return Some(Command::CursorLeft),
-                                    'l' => return Some(Command::CursorRight),
-                                    'w' => return Some(Command::CursorWordForward),
-                                    'b' => return Some(Command::CursorWordBackward),
-                                    '0' => return Some(Command::CursorToLineStart),
-                                    '$' => return Some(Command::CursorToLineEnd),
-                                    'y' => return Some(Command::YankSelection),
-                                    'd' => return Some(Command::DeleteSelection),
-                                    _ => {}
-                                }
-                            }
-
-                            // Text editing only works in Insert mode
-                            if vim_mode == VimMode::Insert && focused == FocusedComponent::Input {
-                                // Detect '/' at start of input for slash commands
-                                if c == '/' && state.input_text().is_empty() {
-                                    // Activate autocomplete for slash commands
-                                    state.activate_autocomplete("");
-                                }
-                                Some(Command::InsertChar(c))
-                            } else {
-                                None
-                            }
-                        }
-                    }
-                }
+                Self::handle_text_char(c, state)
             }
 
             // Backspace
@@ -1329,6 +1502,38 @@ impl<B: Backend> TuiRenderer<B> {
         }
     }
 
+    fn handle_paste(state: &SharedState, text: String) -> Option<Command> {
+        // Questionnaire takes priority for paste
+        if let Some(q) = state.active_questionnaire() {
+            use crate::ui_backend::questionnaire::QuestionType;
+            // For FreeText: only paste if in edit mode
+            // For Other: only paste if editing other
+            if (q.question_type == QuestionType::FreeText && q.is_editing_free_text)
+                || q.is_editing_other()
+            {
+                // Insert pasted text into questionnaire
+                for c in text.chars() {
+                    state.questionnaire_insert_char(c);
+                }
+            }
+            // Block paste from going to input
+            return None;
+        }
+        // Paste should insert full text without submitting
+        if matches!(state.focused_component(), FocusedComponent::Input) {
+            if state.active_modal().is_none() {
+                let line_count = text.split('\n').count();
+                if line_count > 1 {
+                    let placeholder = format!("[pasted {} lines]", line_count);
+                    state.add_paste_block(placeholder.clone(), text);
+                    return Some(Command::InsertText(placeholder));
+                }
+            }
+            return Some(Command::InsertText(text));
+        }
+        None
+    }
+
     /// Convert mouse event to command
     fn mouse_to_command(&self, mouse: MouseEvent, state: &SharedState) -> Option<Command> {
         // Debug log mouse events
@@ -1445,7 +1650,7 @@ impl<B: Backend> TuiRenderer<B> {
                     state.set_sidebar_selected_panel(idx);
                     state.set_sidebar_selected_item(None);
 
-                    if idx == 4 {
+                    if idx == 5 {
                         // Theme panel clicked - open theme picker
                         Some(Command::ToggleThemePicker)
                     } else {
@@ -1475,17 +1680,45 @@ impl<B: Backend> TuiRenderer<B> {
 
     /// Determine which sidebar panel was clicked based on row position
     fn get_clicked_sidebar_panel(&self, row: u16, state: &SharedState) -> Option<usize> {
-        // Get terminal size to calculate sidebar area
-        let size = self.terminal.size().unwrap_or_default();
-        let sidebar_height = size.height.saturating_sub(2); // Account for top/bottom borders
+        use ratatui::layout::{Constraint, Direction, Layout};
+
+        let area = self.terminal.size().unwrap_or_default();
+        let area = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: area.width,
+            height: area.height,
+        };
+        let inner = ratatui::layout::Rect {
+            x: area.x + 1,
+            y: area.y + 1,
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(2),
+        };
+        let sidebar_visible = state.sidebar_visible();
+        let sidebar_rect = if sidebar_visible && inner.width > 80 {
+            let horizontal_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Min(60),    // Main terminal area
+                    Constraint::Length(35), // Sidebar panel
+                ])
+                .split(inner);
+            Some(horizontal_chunks[1])
+        } else {
+            None
+        }?;
+
+        let sidebar_height = sidebar_rect.height.saturating_sub(2);
 
         // Footer is the last 1-2 lines of the sidebar
         // Check if click is in footer area (theme icon)
-        if row >= sidebar_height.saturating_sub(1) {
-            return Some(4); // Theme panel
+        let footer_row = sidebar_rect.y + sidebar_rect.height.saturating_sub(2);
+        if row >= footer_row {
+            return Some(5); // Theme panel
         }
 
-        let inner_y = 1u16;
+        let inner_y = sidebar_rect.y + 1;
 
         // Panel heights - use dynamic approach based on expansion state
         let header_h = 2u16; // VIM mode indicator
@@ -1497,6 +1730,7 @@ impl<B: Backend> TuiRenderer<B> {
         let session_h = if panels[0] { 5u16 } else { 1u16 };
         let context_h = if panels[1] { 6u16 } else { 1u16 };
         let tasks_h = if panels[2] { 4u16 } else { 1u16 };
+        let todo_h = if panels[3] { 4u16 } else { 1u16 };
 
         if row < inner_y + header_h {
             return None; // Header area (VIM mode)
@@ -1522,10 +1756,16 @@ impl<B: Backend> TuiRenderer<B> {
         }
         cursor += tasks_h;
 
-        // Git panel (index 3) - takes remaining space above footer
+        // Todo panel (index 3)
+        if row >= cursor && row < cursor + todo_h {
+            return Some(3);
+        }
+        cursor += todo_h;
+
+        // Git panel (index 4) - takes remaining space above footer
         // If we're past all known panels and before footer, it's Git
         if row >= cursor && row < sidebar_height.saturating_sub(1) {
-            return Some(3);
+            return Some(4);
         }
 
         None
@@ -1918,6 +2158,8 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .focused(matches!(focused_component, FocusedComponent::Messages))
                 .focused_index(state.focused_message())
                 .focused_sub_index(state.focused_sub_index())
+                .message_cursor(state.message_cursor())
+                .message_selection(state.message_selection())
                 .scroll(state.messages_scroll_offset())
                 .vim_mode(state.vim_mode())
                 .diff_view_mode(state.diff_view_mode())
@@ -1925,6 +2167,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .streaming_thinking(streaming_thinking)
                 .streaming_lines(streaming_lines)
                 .thinking_lines(thinking_lines)
+                .thinking_max_lines(config.thinking_max_lines)
                 .processing(state.llm_processing())
                 .collapsed_tool_groups(&collapsed_groups);
             let (total_lines, viewport_height) = message_area.metrics(chunks[1]);
@@ -1947,7 +2190,8 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
             let input = InputWidget::new(&input_text, input_cursor, theme)
                 .focused(matches!(focused_component, FocusedComponent::Input))
                 .context_files(context_file_paths)
-                .selection(state.input_selection());
+                .selection(state.input_selection())
+                .paste_placeholders(state.paste_placeholders());
             frame.render_widget(input, chunks[3]);
 
             // Render command autocomplete dropdown if active
@@ -1956,6 +2200,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 let filter = state.autocomplete_filter();
                 ac_state.activate(&filter);
                 ac_state.selected = state.autocomplete_selected();
+                ac_state.scroll_offset = state.autocomplete_scroll_offset();
                 ac_state.matches = super::widgets::SlashCommand::find_matches(&filter);
 
                 let autocomplete = super::widgets::CommandAutocomplete::new(theme, &ac_state);
@@ -2197,10 +2442,17 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                         let files = state.file_picker_files();
                         let filter = state.file_picker_filter();
                         let selected = state.file_picker_selected();
+                        let selected_paths: Vec<String> = state
+                            .attachment_tokens()
+                            .into_iter()
+                            .map(|entry| entry.token.trim_start_matches('@').to_string())
+                            .collect();
                         let picker = FilePickerModal::new(theme)
                             .files(&files)
                             .filter(&filter)
-                            .selected(selected);
+                            .selected(selected)
+                            .selected_paths(&selected_paths)
+                            .current_dir("./");
                         frame.render_widget(picker, area);
                     }
                     ModalType::Approval => {
@@ -2412,26 +2664,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     return Ok(self.mouse_to_command(mouse, state));
                 }
                 Event::Paste(text) => {
-                    // Questionnaire takes priority for paste
-                    if let Some(q) = state.active_questionnaire() {
-                        use crate::ui_backend::questionnaire::QuestionType;
-                        // For FreeText: only paste if in edit mode
-                        // For Other: only paste if editing other
-                        if (q.question_type == QuestionType::FreeText && q.is_editing_free_text)
-                            || q.is_editing_other()
-                        {
-                            // Insert pasted text into questionnaire
-                            for c in text.chars() {
-                                state.questionnaire_insert_char(c);
-                            }
-                        }
-                        // Block paste from going to input
-                        return Ok(None);
-                    }
-                    // Paste should insert full text without submitting
-                    if matches!(state.focused_component(), FocusedComponent::Input) {
-                        return Ok(Some(Command::InsertText(text)));
-                    }
+                    return Ok(Self::handle_paste(state, text));
                 }
                 Event::Resize(_, _) => {
                     // Terminal resize handled automatically by ratatui
@@ -2507,7 +2740,72 @@ mod tests {
         assert_eq!(name.as_deref(), Some("Model A"));
     }
 
+    #[test]
+    fn test_handle_paste_inserts_text_when_input_focused() {
+        let state = SharedState::new();
+        state.set_focused_component(FocusedComponent::Input);
+
+        let cmd =
+            TuiRenderer::<ratatui::backend::TestBackend>::handle_paste(&state, "hello".to_string());
+
+        assert_eq!(cmd, Some(Command::InsertText("hello".to_string())));
+    }
+
+    #[test]
+    fn test_handle_paste_inserts_placeholder_for_multiline() {
+        let state = SharedState::new();
+        state.set_focused_component(FocusedComponent::Input);
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::handle_paste(
+            &state,
+            "line1\nline2".to_string(),
+        );
+
+        assert_eq!(
+            cmd,
+            Some(Command::InsertText("[pasted 2 lines]".to_string()))
+        );
+        let blocks = state.paste_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, "line1\nline2");
+    }
+
+    #[test]
+    fn test_handle_paste_routes_to_questionnaire() {
+        let state = SharedState::new();
+        let mut questionnaire = QuestionnaireState::new(
+            "q1".to_string(),
+            "Question".to_string(),
+            crate::ui_backend::questionnaire::QuestionType::FreeText,
+            Vec::new(),
+        );
+        questionnaire.is_editing_free_text = true;
+        state.set_active_questionnaire(Some(questionnaire));
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::handle_paste(
+            &state,
+            "first\nsecond".to_string(),
+        );
+
+        assert!(cmd.is_none());
+        let updated = state.active_questionnaire().expect("questionnaire");
+        assert_eq!(updated.free_text_answer, "first\nsecond");
+    }
+
     // ========== Vim Key Handling Tests ==========
+
+    #[test]
+    fn test_i_focuses_input_from_messages() {
+        let state = SharedState::new();
+        state.set_focused_component(FocusedComponent::Messages);
+
+        let cmd = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('i'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd, Some(Command::FocusInput));
+    }
 
     /// Helper to create a key event
     fn key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -2690,6 +2988,44 @@ mod tests {
 
         // FilePicker updates the filter directly in the key handler
         assert_eq!(state.file_picker_filter(), "testj");
+    }
+
+    #[test]
+    fn test_vim_keys_disabled_for_single_choice_with_other() {
+        let state = SharedState::new();
+        let q = QuestionnaireState::new(
+            "test-id".to_string(),
+            "Pick one".to_string(),
+            crate::ui_backend::questionnaire::QuestionType::SingleChoice,
+            vec![crate::ui_backend::questionnaire::QuestionOption {
+                text: "Option A".to_string(),
+                value: "a".to_string(),
+            }],
+        );
+        state.set_active_questionnaire(Some(q));
+
+        let cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(cmd_j, None);
+        let updated = state.active_questionnaire().unwrap();
+        assert_eq!(updated.focused_index, 0);
+    }
+
+    #[test]
+    fn test_vim_keys_disabled_in_task_edit_modal() {
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::TaskEdit));
+        state.set_editing_task_content(String::new());
+
+        let _cmd_j = TuiRenderer::<ratatui::backend::TestBackend>::key_to_command(
+            key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &state,
+        );
+
+        assert_eq!(state.editing_task_content(), "j");
     }
 
     // ========== FreeText Edit Mode Tests ==========

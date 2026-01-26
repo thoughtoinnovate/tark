@@ -13,6 +13,7 @@
 //! - **Auth Plugins**: Add OAuth/authentication for new providers
 //! - **Tool Plugins**: Add new tools the agent can use
 //! - **Provider Plugins**: Add new LLM providers
+//! - **Channel Plugins**: Add messaging channels (Slack, Discord, Signal)
 //!
 //! # Security
 //!
@@ -24,20 +25,24 @@
 
 pub mod host;
 mod manifest;
+mod oauth;
 mod registry;
 
 pub use host::{
-    AuthCredentials, AuthStatus, ChatResponse, ChatUsage, ModelInfo, PluginHost, PluginInstance,
-    ProviderAuthStatus, ProviderInfo,
+    AuthCredentials, AuthStatus, ChannelAuthStatus, ChannelInboundMessage, ChannelInfo,
+    ChannelSendRequest, ChannelSendResult, ChannelWebhookRequest, ChannelWebhookResponse,
+    ChatResponse, ChatUsage, ModelInfo, PluginHost, PluginInstance, ProviderAuthStatus,
+    ProviderInfo,
 };
 pub use manifest::{
-    OAuthConfig, OAuthFlowType, PluginCapabilities, PluginContributions, PluginManifest,
-    PluginType, ProviderContribution,
+    ChannelContribution, OAuthConfig, OAuthFlowType, PluginCapabilities, PluginContributions,
+    PluginManifest, PluginType, ProviderContribution,
 };
+pub use oauth::{run_oauth_flow_for_plugin, PluginOAuthResult};
 pub use registry::{InstalledPlugin, PluginRegistry};
 
 /// Current plugin API version
-pub const PLUGIN_API_VERSION: &str = "0.1.0";
+pub const PLUGIN_API_VERSION: &str = "0.2.0";
 
 use anyhow::Result;
 use std::path::PathBuf;

@@ -755,8 +755,7 @@ fn provider_is_plugin_oauth(provider_id: &str) -> bool {
 
 /// Run generic OAuth flow for a plugin-based provider
 async fn run_plugin_oauth_flow(provider_id: &str) -> Result<PathBuf> {
-    use crate::auth::OAuthHandler;
-    use crate::plugins::{PluginHost, PluginRegistry};
+    use crate::plugins::PluginRegistry;
 
     // Find the plugin with OAuth config
     let registry = PluginRegistry::new()?;
@@ -787,75 +786,8 @@ async fn run_plugin_oauth_flow(provider_id: &str) -> Result<PathBuf> {
     println!("Authenticating with {}...", provider_name.bold());
     println!();
 
-    // Create OAuth handler
-    let handler = OAuthHandler::new(oauth_config.clone());
-
-    // Execute OAuth flow
-    let tokens = handler.execute_pkce_flow().await?;
-
-    // Call plugin's token processor if defined
-    let final_tokens = if oauth_config.process_tokens_callback.is_some() {
-        println!("Processing tokens with plugin callback...");
-
-        // Load plugin instance
-        let mut plugin_host = PluginHost::new()?;
-        plugin_host.load(&plugin)?;
-
-        // Convert tokens to JSON
-        let tokens_json = serde_json::to_string(&tokens)?;
-
-        // Get mutable instance and call processor
-        if let Some(instance) = plugin_host.get_mut(plugin.id()) {
-            if let Some(processed_json) = instance.auth_process_tokens(&tokens_json)? {
-                tracing::debug!("Plugin processed tokens");
-                processed_json
-            } else {
-                // Plugin doesn't actually have the callback, use original
-                tokens_json
-            }
-        } else {
-            tokens_json
-        }
-    } else {
-        // No processor, serialize tokens with expires_at
-        let mut token_value = serde_json::to_value(&tokens)?;
-        if let Some(expires_in) = tokens.expires_in {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs();
-            token_value["expires_at"] = serde_json::json!(now + expires_in);
-        }
-        serde_json::to_string_pretty(&token_value)?
-    };
-
-    // Save credentials (either processed or original)
-    let creds_path = if let Some(path_str) = &oauth_config.credentials_path {
-        expand_path(path_str)
-    } else {
-        let config_dir = dirs::config_dir()
-            .context("Could not determine config directory")?
-            .join("tark");
-        config_dir.join(format!("{}_oauth.json", provider_id))
-    };
-
-    // Ensure parent directory exists
-    if let Some(parent) = creds_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Write credentials
-    std::fs::write(&creds_path, final_tokens)?;
-
-    // Set secure permissions (Unix only)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&creds_path)?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(&creds_path, perms)?;
-    }
-
-    Ok(creds_path)
+    let result = crate::plugins::run_oauth_flow_for_plugin(&plugin, &oauth_config).await?;
+    Ok(result.creds_path)
 }
 
 /// Expand ~ in path to home directory
@@ -989,7 +921,9 @@ pub async fn run_tui_new(
     use crate::tui_new::{TuiController, TuiRenderer};
     use crate::ui_backend::AppService;
     use crossterm::{
-        event::{DisableMouseCapture, EnableMouseCapture},
+        event::{
+            DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        },
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     };
@@ -1048,8 +982,13 @@ pub async fn run_tui_new(
     tracing::debug!("Raw mode enabled");
 
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("Failed to enter alternate screen. Terminal may not support this feature.")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("Failed to enter alternate screen. Terminal may not support this feature.")?;
     tracing::debug!("Entered alternate screen with mouse capture enabled");
 
     let backend = CrosstermBackend::new(stdout);
@@ -1098,7 +1037,12 @@ pub async fn run_tui_new(
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )?;
 
     result
 }

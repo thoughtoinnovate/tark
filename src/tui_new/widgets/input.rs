@@ -9,6 +9,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
+    symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
@@ -60,6 +61,8 @@ pub struct InputWidget<'a> {
     attachments: Vec<AttachmentBadge>,
     /// Selection range (byte offsets)
     selection: Option<(usize, usize)>,
+    /// Placeholder markers for pasted blocks
+    paste_placeholders: Vec<String>,
 }
 
 /// Attachment badge for display above input
@@ -89,6 +92,7 @@ impl<'a> InputWidget<'a> {
             context_files: Vec::new(),
             attachments: Vec::new(),
             selection: None,
+            paste_placeholders: Vec::new(),
         }
     }
 
@@ -119,6 +123,11 @@ impl<'a> InputWidget<'a> {
     /// Set selection range (byte offsets)
     pub fn selection(mut self, selection: Option<(usize, usize)>) -> Self {
         self.selection = selection;
+        self
+    }
+
+    pub fn paste_placeholders(mut self, placeholders: Vec<String>) -> Self {
+        self.paste_placeholders = placeholders;
         self
     }
 
@@ -233,6 +242,29 @@ impl<'a> InputWidget<'a> {
             .map(|(i, _)| i)
             .unwrap_or_else(|| s.len())
     }
+
+    fn placeholder_ranges(&self) -> Vec<(usize, usize)> {
+        if self.paste_placeholders.is_empty() || self.content.is_empty() {
+            return Vec::new();
+        }
+
+        let mut ranges = Vec::new();
+        let mut search_start = 0usize;
+        for placeholder in &self.paste_placeholders {
+            if placeholder.is_empty() {
+                continue;
+            }
+            if let Some(pos) = self.content[search_start..].find(placeholder) {
+                let byte_start = search_start + pos;
+                let byte_end = byte_start + placeholder.len();
+                let start_char = self.content[..byte_start].chars().count();
+                let end_char = start_char + placeholder.chars().count();
+                ranges.push((start_char, end_char));
+                search_start = byte_end;
+            }
+        }
+        ranges
+    }
 }
 
 impl Widget for InputWidget<'_> {
@@ -246,6 +278,7 @@ impl Widget for InputWidget<'_> {
         // Renamed from "Input" to "Prompt" - removed SHIFT+ENTER help text
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
             .border_style(Style::default().fg(border_color))
             .title(Line::from(vec![Span::styled(
                 " Prompt ",
@@ -332,6 +365,7 @@ impl Widget for InputWidget<'_> {
 
         let content_width = inner.width as usize;
         let cursor_visible = self.focused && get_cursor_visible();
+        let placeholder_ranges = self.placeholder_ranges();
 
         // Render content or placeholder with wrapping
         if self.content.is_empty() {
@@ -375,101 +409,83 @@ impl Widget for InputWidget<'_> {
                     continue;
                 }
 
-                let mut spans = vec![];
                 let line_text = &line_content.text;
                 let line_start = line_content.start_char;
-                let line_end = line_start + line_text.chars().count();
+                let selection_style = Style::default().fg(self.theme.bg_main).bg(self.theme.blue);
+                let placeholder_style = Style::default()
+                    .fg(self.theme.yellow)
+                    .add_modifier(Modifier::BOLD);
+                let default_style = Style::default().fg(self.theme.text_primary);
 
-                if line_idx == cursor_visual_line && self.focused {
-                    // This line contains the cursor
-                    let chars: Vec<char> = line_text.chars().collect();
+                let mut spans: Vec<Span> = Vec::new();
+                let mut current_style = default_style;
+                let mut current_text = String::new();
+                let mut placeholder_idx = 0;
+                let mut cursor_handled = false;
 
-                    if cursor_visual_col >= chars.len() {
-                        // Cursor at end of line
-                        spans.push(Span::styled(
-                            line_text.to_string(),
-                            Style::default().fg(self.theme.text_primary),
-                        ));
-                        if cursor_visible {
-                            spans.push(Span::styled(
-                                " ",
-                                Style::default().fg(self.theme.bg_main).bg(self.theme.cyan),
-                            ));
-                        }
-                    } else {
-                        // Cursor in middle of line
-                        let before: String = chars[..cursor_visual_col].iter().collect();
-                        let cursor_char = chars[cursor_visual_col];
-                        let after: String = chars[cursor_visual_col + 1..].iter().collect();
+                for (idx, ch) in line_text.chars().enumerate() {
+                    let global_idx = line_start + idx;
 
-                        if !before.is_empty() {
-                            spans.push(Span::styled(
-                                before,
-                                Style::default().fg(self.theme.text_primary),
-                            ));
-                        }
-
-                        if cursor_visible {
-                            spans.push(Span::styled(
-                                cursor_char.to_string(),
-                                Style::default().fg(self.theme.bg_main).bg(self.theme.cyan),
-                            ));
-                        } else {
-                            spans.push(Span::styled(
-                                cursor_char.to_string(),
-                                Style::default().fg(self.theme.text_primary),
-                            ));
-                        }
-
-                        if !after.is_empty() {
-                            spans.push(Span::styled(
-                                after,
-                                Style::default().fg(self.theme.text_primary),
-                            ));
-                        }
+                    while placeholder_idx < placeholder_ranges.len()
+                        && global_idx >= placeholder_ranges[placeholder_idx].1
+                    {
+                        placeholder_idx += 1;
                     }
-                } else {
-                    // Regular line without cursor
-                    if let Some((sel_start, sel_end)) = selection {
-                        if sel_start < line_end && sel_end > line_start {
-                            let local_start = sel_start.saturating_sub(line_start);
-                            let local_end = sel_end
-                                .saturating_sub(line_start)
-                                .min(line_text.chars().count());
-                            let start_byte = Self::char_to_byte(line_text, local_start);
-                            let end_byte = Self::char_to_byte(line_text, local_end);
-                            let (before, rest) = line_text.split_at(start_byte);
-                            let (selected, after) =
-                                rest.split_at(end_byte.saturating_sub(start_byte));
 
-                            if !before.is_empty() {
-                                spans.push(Span::styled(
-                                    before.to_string(),
-                                    Style::default().fg(self.theme.text_primary),
-                                ));
-                            }
-                            if !selected.is_empty() {
-                                spans.push(Span::styled(
-                                    selected.to_string(),
-                                    Style::default().fg(self.theme.bg_main).bg(self.theme.blue),
-                                ));
-                            }
-                            if !after.is_empty() {
-                                spans.push(Span::styled(
-                                    after.to_string(),
-                                    Style::default().fg(self.theme.text_primary),
-                                ));
-                            }
-                        } else {
-                            spans.push(Span::styled(
-                                line_text.to_string(),
-                                Style::default().fg(self.theme.text_primary),
-                            ));
-                        }
+                    let in_placeholder = placeholder_idx < placeholder_ranges.len()
+                        && global_idx >= placeholder_ranges[placeholder_idx].0
+                        && global_idx < placeholder_ranges[placeholder_idx].1;
+
+                    let in_selection = selection
+                        .map(|(sel_start, sel_end)| global_idx >= sel_start && global_idx < sel_end)
+                        .unwrap_or(false);
+
+                    let char_style = if in_selection {
+                        selection_style
+                    } else if in_placeholder {
+                        placeholder_style
                     } else {
+                        default_style
+                    };
+
+                    if line_idx == cursor_visual_line
+                        && self.focused
+                        && cursor_visible
+                        && cursor_visual_col == idx
+                        && !cursor_handled
+                    {
+                        if !current_text.is_empty() {
+                            spans.push(Span::styled(current_text.clone(), current_style));
+                            current_text.clear();
+                        }
                         spans.push(Span::styled(
-                            line_text.to_string(),
-                            Style::default().fg(self.theme.text_primary),
+                            ch.to_string(),
+                            Style::default().fg(self.theme.bg_main).bg(self.theme.cyan),
+                        ));
+                        current_style = char_style;
+                        cursor_handled = true;
+                        continue;
+                    }
+
+                    if char_style != current_style && !current_text.is_empty() {
+                        spans.push(Span::styled(current_text.clone(), current_style));
+                        current_text.clear();
+                    }
+
+                    current_style = char_style;
+                    current_text.push(ch);
+                }
+
+                if !current_text.is_empty() {
+                    spans.push(Span::styled(current_text.clone(), current_style));
+                }
+
+                if line_idx == cursor_visual_line && self.focused && cursor_visible {
+                    let line_len = line_text.chars().count();
+                    if cursor_visual_col >= line_len && !cursor_handled {
+                        spans.push(Span::styled(
+                            " ",
+                            Style::default().fg(self.theme.bg_main).bg(self.theme.cyan),
                         ));
                     }
                 }

@@ -426,9 +426,11 @@ impl LoopState {
 
         Box::new(move |event: StreamEvent| match event {
             StreamEvent::TextDelta(text) => {
-                // Accumulate for context
-                if let Ok(mut acc) = accumulated.lock() {
-                    acc.push_str(&text);
+                if !crate::agent::rate_limit::is_rate_limit_chunk(&text) {
+                    // Accumulate for context
+                    if let Ok(mut acc) = accumulated.lock() {
+                        acc.push_str(&text);
+                    }
                 }
                 // Forward to UI immediately
                 on_text(text);
