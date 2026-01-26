@@ -517,9 +517,17 @@ impl CloudCodeAssistProvider {
                             .unwrap_or(tool_call_id)
                             .to_string();
 
-                        // Parse the result as JSON if possible, otherwise wrap as string
-                        let response_value = serde_json::from_str(text)
-                            .unwrap_or_else(|_| serde_json::json!({ "result": text }));
+                        // Parse the result as JSON; Gemini requires function_response.response to be an object.
+                        let response_value = match serde_json::from_str::<serde_json::Value>(text) {
+                            Ok(value) => {
+                                if value.is_object() {
+                                    value
+                                } else {
+                                    serde_json::json!({ "result": value })
+                                }
+                            }
+                            Err(_) => serde_json::json!({ "result": text }),
+                        };
 
                         pending_tool_parts.push(GeminiPartRaw {
                             text: None,
@@ -1361,6 +1369,26 @@ mod tests {
                 .starts_with("sig_"),
             "expected synthesized thought_signature for tool use"
         );
+    }
+
+    #[test]
+    fn test_tool_response_wraps_non_object_json() {
+        let provider = CloudCodeAssistProvider::new("token".to_string(), "project".to_string());
+        let messages = vec![Message {
+            role: Role::Tool,
+            content: MessageContent::Text("3611".to_string()),
+            tool_call_id: Some("gemini_shell".to_string()),
+        }];
+
+        let (_system, contents) = provider.convert_messages(&messages);
+        let part = contents
+            .first()
+            .and_then(|c| c.parts.first())
+            .and_then(|p| p.function_response.as_ref())
+            .expect("expected function response part");
+
+        assert!(part.response.is_object());
+        assert_eq!(part.response["result"], serde_json::json!(3611));
     }
 
     #[test]

@@ -167,6 +167,8 @@ pub struct AppService {
     git: GitService,
     /// Default tool timeout in seconds (from config)
     tool_timeout_secs: u64,
+    plugin_widget_last_refresh: std::sync::Mutex<std::time::Instant>,
+    plugin_widget_inflight: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for AppService {
@@ -415,6 +417,8 @@ impl AppService {
             tools,
             git,
             tool_timeout_secs: global_config.tools.tool_timeout_secs,
+            plugin_widget_last_refresh: std::sync::Mutex::new(std::time::Instant::now()),
+            plugin_widget_inflight: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -3008,6 +3012,8 @@ impl AppService {
         let git_changes = crate::tui_new::git_info::get_git_changes(&self.working_dir);
         self.state.set_git_changes(git_changes);
 
+        self.refresh_plugin_widgets(false).await;
+
         // Update tasks from current state
         self.update_tasks();
 
@@ -3025,6 +3031,103 @@ impl AppService {
             panels[3] = true;
         }
         self.state.set_sidebar_expanded_panels(panels);
+    }
+
+    async fn refresh_plugin_widgets(&self, force: bool) {
+        use serde_json::Value;
+        use std::time::{Duration, Instant};
+
+        let poll_ms = crate::config::Config::load()
+            .unwrap_or_default()
+            .tui
+            .plugin_widget_poll_ms;
+        let now = Instant::now();
+        {
+            let mut last = self
+                .plugin_widget_last_refresh
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !force && now.duration_since(*last) < Duration::from_millis(poll_ms) {
+                return;
+            }
+            *last = now;
+        }
+
+        if self
+            .plugin_widget_inflight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return;
+        }
+
+        let project_root = self.storage.project_root().to_path_buf();
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::task::spawn_blocking(move || {
+                crate::plugins::collect_channel_widgets(&project_root)
+            }),
+        )
+        .await;
+
+        let widget_states = match result {
+            Ok(Ok(Ok(states))) => states,
+            Ok(Ok(Err(err))) => {
+                tracing::warn!("Plugin widgets refresh failed: {}", err);
+                Vec::new()
+            }
+            Ok(Err(err)) => {
+                tracing::warn!("Plugin widgets refresh task failed: {}", err);
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::warn!("Plugin widgets refresh timed out");
+                Vec::new()
+            }
+        };
+
+        let updated_at = chrono::Local::now().format("%H:%M:%S").to_string();
+        let mut widgets = Vec::new();
+        for state in widget_states {
+            let mut error = state.error;
+            let mut status = None;
+            let mut attributes = Value::Object(Default::default());
+
+            if let Some(payload) = state.payload {
+                match serde_json::from_str::<Value>(&payload) {
+                    Ok(Value::Object(map)) => {
+                        if let Some(Value::String(s)) = map.get("status") {
+                            status = Some(s.clone());
+                        }
+                        attributes = Value::Object(map);
+                    }
+                    Ok(value) => {
+                        error = Some("invalid_widget_shape".to_string());
+                        attributes = value;
+                    }
+                    Err(_) => {
+                        error = Some("invalid_widget_json".to_string());
+                    }
+                }
+            }
+
+            widgets.push(crate::ui_backend::types::PluginWidgetInfo {
+                plugin_id: state.plugin_id,
+                attributes,
+                status,
+                error,
+                updated_at: Some(updated_at.clone()),
+            });
+        }
+
+        self.state.set_plugin_widgets(widgets);
+        self.plugin_widget_inflight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Silently interrupt agent processing without adding a visible message

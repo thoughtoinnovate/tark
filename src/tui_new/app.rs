@@ -101,7 +101,7 @@ pub struct AppState {
     /// Sidebar state
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
-    pub sidebar_expanded_panels: [bool; 5],
+    pub sidebar_expanded_panels: [bool; 6],
 }
 
 // Re-export from ui_backend
@@ -154,7 +154,7 @@ impl Default for AppState {
             context_files: Vec::new(),
             sidebar_selected_panel: 0,
             sidebar_selected_item: None,
-            sidebar_expanded_panels: [true, true, false, false, false],
+            sidebar_expanded_panels: [true, true, false, false, false, false],
         }
     }
 }
@@ -272,14 +272,14 @@ impl AppState {
 
     /// Navigate to next panel in sidebar
     pub fn sidebar_next_panel(&mut self) {
-        self.sidebar_selected_panel = (self.sidebar_selected_panel + 1) % 4;
+        self.sidebar_selected_panel = (self.sidebar_selected_panel + 1) % 7;
         self.sidebar_selected_item = None;
     }
 
     /// Navigate to previous panel in sidebar
     pub fn sidebar_prev_panel(&mut self) {
         self.sidebar_selected_panel = if self.sidebar_selected_panel == 0 {
-            3
+            6
         } else {
             self.sidebar_selected_panel - 1
         };
@@ -296,7 +296,10 @@ impl AppState {
             0 => 2, // Session: cost info + tokens
             1 => self.context_files.len(),
             2 => 8, // Tasks (from mock data)
-            3 => 5, // Git changes (from mock data)
+            3 => 0, // Todo mock not implemented
+            4 => 5, // Git changes (from mock data)
+            5 => 0, // Plugin widgets mock not implemented
+            6 => 0, // Theme panel
             _ => 0,
         };
 
@@ -348,7 +351,7 @@ impl AppState {
 
     /// Toggle sidebar panel expansion
     pub fn sidebar_toggle_panel(&mut self, panel_idx: usize) {
-        if panel_idx < 5 {
+        if panel_idx < 6 {
             self.sidebar_expanded_panels[panel_idx] = !self.sidebar_expanded_panels[panel_idx];
             if !self.sidebar_expanded_panels[panel_idx] {
                 self.sidebar_selected_item = None;

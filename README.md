@@ -372,6 +372,11 @@ model = "codellama"
 [server]
 port = 8765
 
+[tui]
+theme = "catppuccin_mocha"
+plugin_widget_poll_ms = 2000
+session_usage_poll_ms = 1000
+
 [tools]
 shell_enabled = true
 tool_timeout_secs = 60

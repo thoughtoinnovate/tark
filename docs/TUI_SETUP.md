@@ -157,6 +157,14 @@ cp examples/tark-config/config.toml ~/.config/tark/config.toml
 vim ~/.config/tark/config.toml
 ```
 
+Optional TUI settings (polling + theme):
+```toml
+[tui]
+theme = "catppuccin_mocha"
+plugin_widget_poll_ms = 2000
+session_usage_poll_ms = 1000
+```
+
 ### Step 3: Run TUI
 ```bash
 cd /path/to/your/project

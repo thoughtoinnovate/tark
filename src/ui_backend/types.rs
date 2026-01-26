@@ -322,6 +322,19 @@ pub struct GitChangeInfo {
     pub deletions: usize,
 }
 
+/// Plugin widget information for sidebar display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginWidgetInfo {
+    pub plugin_id: String,
+    pub attributes: serde_json::Value,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
 /// Git file status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GitStatus {

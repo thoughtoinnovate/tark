@@ -194,6 +194,21 @@ impl UsageTracker {
         })
     }
 
+    /// Get total tokens and cost for a specific session
+    pub fn get_session_totals(&self, session_id: &str) -> Result<(u64, f64)> {
+        let conn = self.db.lock().unwrap();
+        let (total_tokens, total_cost): (i64, f64) = conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0),
+                    COALESCE(SUM(cost_usd), 0)
+             FROM usage_logs
+             WHERE session_id = ?1",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        Ok((total_tokens as u64, total_cost))
+    }
+
     /// Get usage by model
     pub fn get_usage_by_model(&self) -> Result<Vec<ModelUsage>> {
         let conn = self.db.lock().unwrap();
@@ -808,6 +823,33 @@ mod tests {
         assert_eq!(modes.len(), 2);
         assert!(modes.iter().any(|m| m.request_type == "chat"));
         assert!(modes.iter().any(|m| m.request_type == "fim"));
+    }
+
+    #[test]
+    fn test_get_session_totals() {
+        let tmp = TempDir::new().unwrap();
+        let tracker = UsageTracker::new(tmp.path()).unwrap();
+        let session = tracker
+            .create_session("host", "user", Some("test-project"))
+            .unwrap();
+
+        tracker
+            .log_usage(UsageLog {
+                session_id: session.id.clone(),
+                provider: "openai".into(),
+                model: "gpt-4o".into(),
+                mode: "agent-build".into(),
+                input_tokens: 120,
+                output_tokens: 80,
+                cost_usd: 0.002,
+                request_type: "chat".into(),
+                estimated: false,
+            })
+            .unwrap();
+
+        let (tokens, cost) = tracker.get_session_totals(&session.id).unwrap();
+        assert_eq!(tokens, 200);
+        assert!((cost - 0.002).abs() < f64::EPSILON);
     }
 
     #[tokio::test]

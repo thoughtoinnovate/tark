@@ -81,6 +81,8 @@ impl<B: Backend> TuiController<B> {
         self.service.refresh_sidebar_data().await;
 
         let state = self.service.state().clone();
+        let config = crate::config::Config::load().unwrap_or_default();
+        self.spawn_session_usage_poller(state.clone(), config.tui.session_usage_poll_ms);
         self.spawn_interaction_task(state.clone());
 
         loop {
@@ -114,6 +116,58 @@ impl<B: Backend> TuiController<B> {
         }
 
         Ok(())
+    }
+
+    fn spawn_session_usage_poller(&self, state: SharedState, poll_ms: u64) {
+        if poll_ms == 0 {
+            return;
+        }
+
+        let poll_ms = poll_ms.max(200);
+        let project_root = self.service.storage().project_root().to_path_buf();
+
+        tokio::task::spawn_blocking(move || {
+            let tracker = match crate::storage::usage::UsageTracker::new(&project_root) {
+                Ok(tracker) => tracker,
+                Err(err) => {
+                    tracing::warn!("Session usage poller disabled: {}", err);
+                    return;
+                }
+            };
+
+            let mut last_tokens: Option<usize> = None;
+            let mut last_cost: Option<f64> = None;
+
+            loop {
+                if state.should_quit() {
+                    break;
+                }
+
+                let session_id = state.session().map(|s| s.session_id);
+                if let Some(session_id) = session_id {
+                    match tracker.get_session_totals(&session_id) {
+                        Ok((tokens, cost)) => {
+                            let tokens = tokens as usize;
+                            let should_update = last_tokens != Some(tokens)
+                                || last_cost
+                                    .map(|prev| (prev - cost).abs() > f64::EPSILON)
+                                    .unwrap_or(true);
+                            if should_update {
+                                state.set_session_tokens_total(tokens);
+                                state.set_session_cost_total(cost);
+                                last_tokens = Some(tokens);
+                                last_cost = Some(cost);
+                            }
+                        }
+                        Err(err) => {
+                            tracing::debug!("Session usage poll failed: {}", err);
+                        }
+                    }
+                }
+
+                std::thread::sleep(Duration::from_millis(poll_ms));
+            }
+        });
     }
 
     fn tick_flash_bar(&mut self, state: &SharedState) {
@@ -1531,7 +1585,7 @@ impl<B: Backend> TuiController<B> {
             }
             Command::ToggleSidebarPanel(panel_idx) => {
                 // Toggle the expansion state of a sidebar panel
-                if *panel_idx < 5 {
+                if *panel_idx < 6 {
                     let mut panels = state.sidebar_expanded_panels();
                     panels[*panel_idx] = !panels[*panel_idx];
                     state.set_sidebar_expanded_panels(panels);
@@ -1555,7 +1609,7 @@ impl<B: Backend> TuiController<B> {
                     }
                 } else {
                     // At panel level - navigate to previous panel
-                    let new_panel = if panel_idx == 0 { 5 } else { panel_idx - 1 };
+                    let new_panel = if panel_idx == 0 { 6 } else { panel_idx - 1 };
                     state.set_sidebar_selected_panel(new_panel);
                 }
                 return Ok(());
@@ -1589,6 +1643,7 @@ impl<B: Backend> TuiController<B> {
                         2 => state.tasks().len(),
                         3 => todo_count,
                         4 => state.git_changes().len(),
+                        5 => state.plugin_widgets().len(),
                         _ => 0,
                     };
                     if let Some(item) = selected_item {
@@ -1598,7 +1653,7 @@ impl<B: Backend> TuiController<B> {
                     }
                 } else {
                     // At panel level - navigate to next panel
-                    let new_panel = (panel_idx + 1) % 6;
+                    let new_panel = (panel_idx + 1) % 7;
                     state.set_sidebar_selected_panel(new_panel);
                 }
                 return Ok(());
@@ -1607,7 +1662,7 @@ impl<B: Backend> TuiController<B> {
                 let panel_idx = state.sidebar_selected_panel();
                 let selected_item = state.sidebar_selected_item();
 
-                if panel_idx == 5 {
+                if panel_idx == 6 {
                     // Theme panel - open theme picker
                     state.set_theme_before_preview(Some(state.theme()));
                     state.set_active_modal(Some(crate::ui_backend::ModalType::ThemePicker));
@@ -1620,7 +1675,7 @@ impl<B: Backend> TuiController<B> {
                         state.set_theme_picker_selected(idx);
                     }
                     state.set_theme_picker_filter(String::new());
-                } else if selected_item.is_none() && panel_idx < 5 {
+                } else if selected_item.is_none() && panel_idx < 6 {
                     // At panel header - toggle expansion
                     let mut panels = state.sidebar_expanded_panels();
                     panels[panel_idx] = !panels[panel_idx];
@@ -1634,8 +1689,8 @@ impl<B: Backend> TuiController<B> {
                 let panel_idx = state.sidebar_selected_panel();
                 let panels = state.sidebar_expanded_panels();
 
-                // Theme panel (5) opens theme picker instead of entering
-                if panel_idx == 5 {
+                // Theme panel (6) opens theme picker instead of entering
+                if panel_idx == 6 {
                     state.set_theme_before_preview(Some(state.theme()));
                     state.set_active_modal(Some(crate::ui_backend::ModalType::ThemePicker));
                     state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
@@ -1646,7 +1701,7 @@ impl<B: Backend> TuiController<B> {
                         state.set_theme_picker_selected(idx);
                     }
                     state.set_theme_picker_filter(String::new());
-                } else if panel_idx < 5 && panels[panel_idx] {
+                } else if panel_idx < 6 && panels[panel_idx] {
                     // Panel is expanded - enter and select first item
                     let session_item_count = {
                         let mut count = 2usize + state.session_cost_by_model().len();
@@ -1670,12 +1725,13 @@ impl<B: Backend> TuiController<B> {
                         2 => state.tasks().len(),
                         3 => todo_count,
                         4 => state.git_changes().len(),
+                        5 => state.plugin_widgets().len(),
                         _ => 0,
                     };
                     if max_items > 0 {
                         state.set_sidebar_selected_item(Some(0));
                     }
-                } else if panel_idx < 5 {
+                } else if panel_idx < 6 {
                     // Panel is collapsed - expand it first
                     let mut panels = state.sidebar_expanded_panels();
                     panels[panel_idx] = true;

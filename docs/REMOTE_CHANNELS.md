@@ -9,20 +9,17 @@ Tark can run channel plugins (Discord/Slack/etc.) in remote mode so you can driv
 - Copy the Bot token
 - Copy the Application ID and Public Key
 
-2) Expose the webhook endpoint
-- Tark listens on: `http://<host>:<port>/channels/discord/webhook`
-- For local dev, tunnel it (ngrok/Cloudflare Tunnel) and set the public URL in Discord's Interactions endpoint
+2) Enable Message Content intent (for plain DM messages)
+- Discord app → Bot → **Privileged Gateway Intents**
+- Turn **Message Content Intent** ON
 
-3) Set env vars
+3) Configure the plugin (encrypted)
 
 ```bash
-export DISCORD_PUBLIC_KEY="<public-key>"
-export DISCORD_APPLICATION_ID="<app-id>"
-export DISCORD_BOT_TOKEN="<bot-token>"
-export DISCORD_PRIVATE_MODE="dm" # dm | ephemeral | off
+tark plugin auth discord
 ```
 
-4) Start remote mode
+4) Start remote mode (Gateway)
 
 ```bash
 # TUI + remote control
@@ -68,6 +65,16 @@ If `require_allowlist` is true, at least one allowlist must be populated or all 
 - Rolling logs are written to `.tark/logs/remote` (error-only by default)
 - Use `--remote-debug` to log full events
 
+## Plugin Widgets
+
+Channel plugins can expose a **widget JSON** that Tark renders in the sidebar (normal TUI) and in the remote TUI.
+The refresh interval is controlled by:
+
+```toml
+[tui]
+plugin_widget_poll_ms = 2000
+```
+
 ## Session Management
 
 ```bash
@@ -90,11 +97,16 @@ export DISCORD_REDIRECT_URI="http://localhost:8888/callback"
 tark plugin auth discord
 ```
 
-If you only need interactions + bot token, OAuth is not required.
+If you only need Gateway + bot token, OAuth is not required.
+
+When you run `tark plugin auth discord`, the CLI will prompt for:
+- Discord Application ID
+- Discord Public Key
+- (Optional) Bot Token
+- Storage scope (global or project-local `.tark`)
+
+Credentials are encrypted at rest. Set `TARK_PLUGIN_PASSPHRASE` to avoid prompts in headless environments.
 
 ## Private Mode
 
-`DISCORD_PRIVATE_MODE` controls privacy behavior for guild channels:
-- `dm` (default): Rejects guild requests and asks users to DM the bot.
-- `ephemeral`: Allows guild requests but responses are ephemeral (visible only to the user).
-- `off`: Allows normal guild responses (public).
+The Discord plugin runs in **DM-only** mode by default. Guild requests are rejected and users are asked to DM the bot instead.

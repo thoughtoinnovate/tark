@@ -15,6 +15,7 @@ use crate::plugins::{
     ChannelWebhookRequest, ChannelWebhookResponse, InstalledPlugin, PluginHost, PluginRegistry,
     PluginType,
 };
+use crate::secure_store;
 use crate::storage::usage::{UsageLog, UsageTracker};
 use crate::storage::{ChatSession, TarkStorage};
 use crate::tools::{ToolRegistry, TrustLevel};
@@ -91,9 +92,46 @@ impl ChannelManager {
             }
             let plugin = plugin.clone();
             let manager = self.clone();
-            tokio::task::spawn_blocking(move || manager.start_plugin(&plugin)).await??;
+            let plugin_for_start = plugin.clone();
+            tokio::task::spawn_blocking(move || manager.start_plugin(&plugin_for_start)).await??;
+
+            if self.remote.is_some() {
+                let manager = self.clone();
+                let plugin = plugin.clone();
+                tokio::spawn(async move {
+                    manager.spawn_poll_loop(plugin).await;
+                });
+            }
         }
         Ok(())
+    }
+
+    async fn spawn_poll_loop(&self, plugin: InstalledPlugin) {
+        if !self.plugin_supports_poll(&plugin) {
+            return;
+        }
+        let interval_ms = self.config.remote.channel_poll_ms;
+        let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+        loop {
+            ticker.tick().await;
+            let manager = self.clone();
+            let plugin_for_poll = plugin.clone();
+            let result =
+                tokio::task::spawn_blocking(move || manager.poll_plugin(&plugin_for_poll)).await;
+            if let Ok(Ok(Some(messages))) = result {
+                if !messages.is_empty() {
+                    let manager = self.clone();
+                    let plugin_id = plugin.id().to_string();
+                    tokio::spawn(async move {
+                        if let Err(err) =
+                            manager.process_inbound_messages(&plugin_id, messages).await
+                        {
+                            tracing::error!("Channel poll message processing failed: {}", err);
+                        }
+                    });
+                }
+            }
+        }
     }
 
     pub async fn handle_webhook(
@@ -122,6 +160,28 @@ impl ChannelManager {
         Ok(response)
     }
 
+    pub async fn handle_gateway_event(&self, plugin_id: &str, payload_json: &str) -> Result<()> {
+        let plugin = self.load_channel_plugin(plugin_id)?;
+        let payload = payload_json.to_string();
+        let messages = tokio::task::spawn_blocking({
+            let manager = self.clone();
+            move || manager.invoke_gateway_event(&plugin, &payload)
+        })
+        .await??;
+
+        if !messages.is_empty() {
+            let manager = self.clone();
+            let plugin_id = plugin_id.to_string();
+            tokio::spawn(async move {
+                if let Err(err) = manager.process_inbound_messages(&plugin_id, messages).await {
+                    tracing::error!("Channel gateway message processing failed: {}", err);
+                }
+            });
+        }
+
+        Ok(())
+    }
+
     fn start_plugin(&self, plugin: &InstalledPlugin) -> Result<()> {
         self.with_channel_instance(plugin, |instance| instance.channel_start())
     }
@@ -132,6 +192,34 @@ impl ChannelManager {
         request: &ChannelWebhookRequest,
     ) -> Result<ChannelWebhookResponse> {
         self.with_channel_instance(plugin, |instance| instance.channel_handle_webhook(request))
+    }
+
+    fn poll_plugin(&self, plugin: &InstalledPlugin) -> Result<Option<Vec<ChannelInboundMessage>>> {
+        self.with_channel_instance(plugin, |instance| {
+            if !instance.has_channel_poll() {
+                return Ok(None);
+            }
+            let messages = instance.channel_poll()?;
+            Ok(Some(messages))
+        })
+    }
+
+    fn plugin_supports_poll(&self, plugin: &InstalledPlugin) -> bool {
+        self.with_channel_instance(plugin, |instance| Ok(instance.has_channel_poll()))
+            .unwrap_or(false)
+    }
+
+    fn invoke_gateway_event(
+        &self,
+        plugin: &InstalledPlugin,
+        payload_json: &str,
+    ) -> Result<Vec<ChannelInboundMessage>> {
+        self.with_channel_instance(plugin, |instance| {
+            if !instance.has_channel_gateway_handler() {
+                anyhow::bail!("Plugin does not support gateway events");
+            }
+            instance.channel_handle_gateway_event(payload_json)
+        })
     }
 
     fn load_channel_plugin(&self, plugin_id: &str) -> Result<InstalledPlugin> {
@@ -162,7 +250,21 @@ impl ChannelManager {
         f: impl FnOnce(&mut crate::plugins::PluginInstance) -> Result<R>,
     ) -> Result<R> {
         let mut host = PluginHost::new()?;
-        host.load(plugin)?;
+        if let Some(local_dir) = self.local_plugin_data_dir(plugin.id()) {
+            if local_dir.exists()
+                || self
+                    .local_oauth_credentials_path(plugin.id())
+                    .as_ref()
+                    .map(|p| p.exists())
+                    .unwrap_or(false)
+            {
+                host.load_with_data_dir(plugin, local_dir)?;
+            } else {
+                host.load(plugin)?;
+            }
+        } else {
+            host.load(plugin)?;
+        }
         let instance = host
             .get_mut(plugin.id())
             .ok_or_else(|| anyhow::anyhow!("Failed to load plugin '{}'", plugin.id()))?;
@@ -182,6 +284,14 @@ impl ChannelManager {
             None => return Ok(None),
         };
 
+        if let Some(local_path) = self.local_oauth_credentials_path(plugin.id()) {
+            if local_path.exists() {
+                let content = std::fs::read_to_string(&local_path)
+                    .with_context(|| format!("Failed to read {}", local_path.display()))?;
+                return Ok(Some(content));
+            }
+        }
+
         let creds_path = if let Some(path) = &oauth.credentials_path {
             expand_path(path)
         } else {
@@ -192,9 +302,31 @@ impl ChannelManager {
             return Ok(None);
         }
 
-        let content = std::fs::read_to_string(&creds_path)
+        let content = secure_store::read_maybe_encrypted(&creds_path)
             .with_context(|| format!("Failed to read {}", creds_path.display()))?;
         Ok(Some(content))
+    }
+
+    fn local_plugin_data_dir(&self, plugin_id: &str) -> Option<PathBuf> {
+        let storage = self.storage.as_ref()?;
+        Some(
+            storage
+                .project_root()
+                .join("plugins")
+                .join(plugin_id)
+                .join("data"),
+        )
+    }
+
+    fn local_oauth_credentials_path(&self, plugin_id: &str) -> Option<PathBuf> {
+        let storage = self.storage.as_ref()?;
+        Some(
+            storage
+                .project_root()
+                .join("plugins")
+                .join(plugin_id)
+                .join("oauth.json"),
+        )
     }
 
     async fn process_inbound_messages(

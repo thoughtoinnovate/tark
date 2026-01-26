@@ -339,6 +339,7 @@ pub async fn run_http_server(
     port: u16,
     working_dir: PathBuf,
     remote: Option<Arc<crate::channels::remote::RemoteRuntime>>,
+    _remote_plugin_id: Option<String>,
 ) -> Result<()> {
     let config = Config::load().unwrap_or_default();
     let working_dir = working_dir.canonicalize().unwrap_or(working_dir);

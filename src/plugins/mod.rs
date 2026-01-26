@@ -27,6 +27,8 @@ pub mod host;
 mod manifest;
 mod oauth;
 mod registry;
+mod widget;
+mod ws_host;
 
 pub use host::{
     AuthCredentials, AuthStatus, ChannelAuthStatus, ChannelInboundMessage, ChannelInfo,
@@ -40,6 +42,10 @@ pub use manifest::{
 };
 pub use oauth::{run_oauth_flow_for_plugin, PluginOAuthResult};
 pub use registry::{InstalledPlugin, PluginRegistry};
+pub use widget::{collect_channel_widgets, PluginWidgetState};
+pub use ws_host::{
+    close as ws_close, connect as ws_connect, recv as ws_recv, send as ws_send, WsRecvResult,
+};
 
 /// Current plugin API version
 pub const PLUGIN_API_VERSION: &str = "0.2.0";

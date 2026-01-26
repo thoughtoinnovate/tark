@@ -20,6 +20,7 @@ pub mod llm;
 pub mod lsp;
 pub mod plugins;
 pub mod policy;
+pub mod secure_store;
 pub mod services;
 pub mod storage;
 pub mod tools;

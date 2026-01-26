@@ -1,10 +1,14 @@
 //! CLI commands for plugin management
 
 use crate::plugins::{InstalledPlugin, PluginManifest, PluginRegistry};
+use crate::secure_store;
+use crate::storage::TarkStorage;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use tabled::{settings::Style, Table, Tabled};
 
@@ -166,14 +170,81 @@ pub async fn run_plugin_auth(plugin_id: &str) -> Result<()> {
     );
     println!();
 
+    let storage_scope = prompt_storage_scope()?;
+    let mut oauth_config = oauth_config.clone();
+    if let Some(local_root) = storage_scope.project_root.as_ref() {
+        let creds_path = local_root
+            .join("plugins")
+            .join(plugin.id())
+            .join("oauth.json");
+        oauth_config.credentials_path = Some(creds_path.to_string_lossy().to_string());
+    }
+
+    let mut config_payload = Value::Null;
+    let mut skip_oauth = false;
+    if plugin.plugin_type() == crate::plugins::PluginType::Channel {
+        config_payload = build_channel_config_payload(plugin.id())?;
+        if plugin.id() == "discord" {
+            if let Some(cfg) = config_payload.get("config").and_then(Value::as_object) {
+                if let Some(app_id) = cfg.get("application_id").and_then(Value::as_str) {
+                    oauth_config.client_id = app_id.to_string();
+                }
+            }
+            let client_secret = prompt_optional("Discord Client Secret")?;
+            oauth_config.client_secret = client_secret;
+            skip_oauth = !prompt_yes_no_default("Run Discord OAuth flow", false)?;
+        }
+    }
+
+    if skip_oauth {
+        let creds_path = oauth_config
+            .credentials_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| default_oauth_credentials_path(plugin.id()).unwrap());
+        ensure_parent_dir(&creds_path)?;
+        let payload = if config_payload.is_null() {
+            "{}".to_string()
+        } else {
+            serde_json::to_string(&config_payload)?
+        };
+        std::fs::write(&creds_path, &payload)?;
+        encrypt_credentials(&creds_path)?;
+        let mut host = crate::plugins::PluginHost::new()?;
+        if let Some(local_root) = storage_scope.project_root.as_ref() {
+            let data_dir = local_root.join("plugins").join(plugin.id()).join("data");
+            host.load_with_data_dir(&plugin, data_dir)?;
+        } else {
+            host.load(&plugin)?;
+        }
+        if let Some(instance) = host.get_mut(plugin.id()) {
+            if instance.has_channel_auth_init() {
+                if let Err(err) = instance.channel_auth_init(&payload) {
+                    tracing::warn!("Failed to initialize channel auth: {}", err);
+                }
+            }
+        }
+        println!("✅ Saved credentials to {}", creds_path.display());
+        return Ok(());
+    }
+
     let result = crate::plugins::run_oauth_flow_for_plugin(&plugin, &oauth_config).await?;
 
     if plugin.plugin_type() == crate::plugins::PluginType::Channel {
+        ensure_parent_dir(&result.creds_path)?;
+        let merged_payload = merge_tokens_and_config(&result.tokens_json, config_payload)?;
+        std::fs::write(&result.creds_path, &merged_payload)?;
+        encrypt_credentials(&result.creds_path)?;
         let mut host = crate::plugins::PluginHost::new()?;
-        host.load(&plugin)?;
+        if let Some(local_root) = storage_scope.project_root.as_ref() {
+            let data_dir = local_root.join("plugins").join(plugin.id()).join("data");
+            host.load_with_data_dir(&plugin, data_dir)?;
+        } else {
+            host.load(&plugin)?;
+        }
         if let Some(instance) = host.get_mut(plugin.id()) {
             if instance.has_channel_auth_init() {
-                if let Err(err) = instance.channel_auth_init(&result.tokens_json) {
+                if let Err(err) = instance.channel_auth_init(&merged_payload) {
                     tracing::warn!("Failed to initialize channel auth: {}", err);
                 }
             }
@@ -507,6 +578,142 @@ impl PluginInstallSource {
             self.url.clone()
         }
     }
+}
+
+struct StorageScope {
+    project_root: Option<PathBuf>,
+}
+
+fn prompt_storage_scope() -> Result<StorageScope> {
+    println!("Store plugin credentials in:");
+    println!("  1) Global (default)");
+    println!("  2) Project .tark (current directory)");
+    print!("Choose [1-2]: ");
+    io::stdout().flush()?;
+
+    let mut choice = String::new();
+    io::stdin().read_line(&mut choice)?;
+    let choice = choice.trim();
+
+    if choice == "2" {
+        let cwd = std::env::current_dir()?;
+        let storage = TarkStorage::new(&cwd).context("Failed to initialize project storage")?;
+        return Ok(StorageScope {
+            project_root: Some(storage.project_root().to_path_buf()),
+        });
+    }
+
+    Ok(StorageScope { project_root: None })
+}
+
+fn prompt_required(label: &str) -> Result<String> {
+    loop {
+        print!("{}: ", label);
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let value = input.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+        println!("Value required.");
+    }
+}
+
+fn prompt_optional(label: &str) -> Result<Option<String>> {
+    print!("{} (optional): ", label);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let value = input.trim().to_string();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+fn prompt_yes_no_default(label: &str, default_yes: bool) -> Result<bool> {
+    let hint = if default_yes { "Y/n" } else { "y/N" };
+    print!("{} [{}]: ", label, hint);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let value = input.trim().to_lowercase();
+    if value.is_empty() {
+        return Ok(default_yes);
+    }
+    Ok(matches!(value.as_str(), "y" | "yes"))
+}
+
+fn build_channel_config_payload(plugin_id: &str) -> Result<Value> {
+    if plugin_id != "discord" {
+        return Ok(Value::Null);
+    }
+
+    println!();
+    println!("Discord configuration:");
+    let app_id = prompt_required("Discord Application ID")?;
+    let public_key = prompt_required("Discord Public Key")?;
+    let bot_token = prompt_optional("Discord Bot Token")?;
+
+    let mut config = serde_json::Map::new();
+    config.insert("application_id".to_string(), Value::String(app_id));
+    config.insert("public_key".to_string(), Value::String(public_key));
+    if let Some(token) = bot_token {
+        config.insert("bot_token".to_string(), Value::String(token));
+    }
+
+    Ok(Value::Object(
+        [("config".to_string(), Value::Object(config))]
+            .into_iter()
+            .collect(),
+    ))
+}
+
+fn merge_tokens_and_config(tokens_json: &str, config_payload: Value) -> Result<String> {
+    let tokens_value: Value = serde_json::from_str(tokens_json)
+        .unwrap_or_else(|_| Value::String(tokens_json.to_string()));
+
+    if config_payload.is_null() {
+        return Ok(serde_json::to_string(&tokens_value)?);
+    }
+
+    let mut merged = serde_json::Map::new();
+    merged.insert("tokens".to_string(), tokens_value);
+    if let Some(config) = config_payload.get("config") {
+        merged.insert("config".to_string(), config.clone());
+    }
+    Ok(serde_json::to_string(&Value::Object(merged))?)
+}
+
+fn encrypt_credentials(path: &PathBuf) -> Result<()> {
+    println!();
+    println!("Encrypting credentials with a passphrase.");
+    let passphrase = secure_store::prompt_new_passphrase()?;
+    secure_store::encrypt_file_in_place(path, &passphrase)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+fn ensure_parent_dir(path: &PathBuf) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn default_oauth_credentials_path(plugin_id: &str) -> Result<PathBuf> {
+    let config_dir = dirs::config_dir().context("Could not determine config directory")?;
+    Ok(config_dir
+        .join("tark")
+        .join(format!("{}_oauth.json", plugin_id)))
 }
 
 fn source_file_path(registry: &PluginRegistry, plugin_id: &str) -> PathBuf {

@@ -1956,13 +1956,13 @@ impl<B: Backend> TuiRenderer<B> {
             None
         }?;
 
-        let sidebar_height = sidebar_rect.height.saturating_sub(2);
+        let _sidebar_height = sidebar_rect.height.saturating_sub(2);
 
         // Footer is the last 1-2 lines of the sidebar
         // Check if click is in footer area (theme icon)
         let footer_row = sidebar_rect.y + sidebar_rect.height.saturating_sub(2);
         if row >= footer_row {
-            return Some(5); // Theme panel
+            return Some(6); // Theme panel
         }
 
         let inner_y = sidebar_rect.y + 1;
@@ -1978,6 +1978,7 @@ impl<B: Backend> TuiRenderer<B> {
         let context_h = if panels[1] { 6u16 } else { 1u16 };
         let tasks_h = if panels[2] { 4u16 } else { 1u16 };
         let todo_h = if panels[3] { 4u16 } else { 1u16 };
+        let plugins_h = if panels[5] { 4u16 } else { 1u16 };
 
         if row < inner_y + header_h {
             return None; // Header area (VIM mode)
@@ -2009,9 +2010,14 @@ impl<B: Backend> TuiRenderer<B> {
         }
         cursor += todo_h;
 
-        // Git panel (index 4) - takes remaining space above footer
-        // If we're past all known panels and before footer, it's Git
-        if row >= cursor && row < sidebar_height.saturating_sub(1) {
+        // Plugin panel sits just above footer
+        let plugin_start = footer_row.saturating_sub(plugins_h);
+        if row >= plugin_start && row < footer_row {
+            return Some(5);
+        }
+
+        // Git panel (index 4) - takes remaining space between panels and plugins
+        if row >= cursor && row < plugin_start {
             return Some(4);
         }
 
@@ -2613,6 +2619,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     .tasks(tasks_widget)
                     .todos(todo_items)
                     .git_changes(git_changes_widget)
+                    .plugin_widgets(state.plugin_widgets())
                     .git_branch(crate::tui_new::git_info::get_current_branch(
                         &self.working_dir,
                     ));

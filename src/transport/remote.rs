@@ -47,6 +47,7 @@ pub async fn run_remote_tui(working_dir: PathBuf, plugin_id: &str, debug_full: b
 
     let mut state = RemoteUiState::new(project_root)?;
     let mut last_refresh = Instant::now();
+    let config = Config::load().unwrap_or_default();
 
     loop {
         while let Ok(event) = rx.try_recv() {
@@ -57,12 +58,17 @@ pub async fn run_remote_tui(working_dir: PathBuf, plugin_id: &str, debug_full: b
             state.refresh_sessions()?;
             last_refresh = Instant::now();
         }
+        state.refresh_widgets(&config).await?;
 
         terminal.draw(|frame| {
             let size = frame.area();
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+                .constraints([
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(50),
+                    Constraint::Percentage(20),
+                ])
                 .split(size);
 
             let sessions = state.render_sessions();
@@ -70,6 +76,9 @@ pub async fn run_remote_tui(working_dir: PathBuf, plugin_id: &str, debug_full: b
 
             let events = state.render_events(remote.runtime_id());
             frame.render_widget(events, chunks[1]);
+
+            let widgets = state.render_widgets();
+            frame.render_widget(widgets, chunks[2]);
         })?;
 
         if event::poll(Duration::from_millis(200))? {
@@ -151,9 +160,18 @@ async fn start_remote_server(
 
     let host = config.server.host.clone();
     let port = config.server.port;
+    let plugin_id = plugin_id.to_string();
 
     let server_handle = tokio::spawn(async move {
-        if let Err(err) = run_http_server(&host, port, working_dir, Some(remote_for_server)).await {
+        if let Err(err) = run_http_server(
+            &host,
+            port,
+            working_dir,
+            Some(remote_for_server),
+            Some(plugin_id),
+        )
+        .await
+        {
             tracing::error!("Remote HTTP server failed: {}", err);
         }
     });
@@ -181,6 +199,9 @@ struct RemoteUiState {
     project_root: PathBuf,
     sessions: Vec<crate::channels::remote::RemoteSessionEntry>,
     events: VecDeque<RemoteEvent>,
+    plugin_widgets: Vec<crate::ui_backend::PluginWidgetInfo>,
+    last_widget_refresh: Instant,
+    widget_refresh_inflight: bool,
 }
 
 impl RemoteUiState {
@@ -190,6 +211,9 @@ impl RemoteUiState {
             project_root,
             sessions,
             events: VecDeque::with_capacity(EVENT_BUFFER),
+            plugin_widgets: Vec::new(),
+            last_widget_refresh: Instant::now() - Duration::from_secs(60),
+            widget_refresh_inflight: false,
         })
     }
 
@@ -202,6 +226,75 @@ impl RemoteUiState {
 
     fn refresh_sessions(&mut self) -> Result<()> {
         self.sessions = RemoteRegistry::snapshot(&self.project_root).unwrap_or_default();
+        Ok(())
+    }
+
+    async fn refresh_widgets(&mut self, config: &Config) -> Result<()> {
+        let poll_ms = config.tui.plugin_widget_poll_ms;
+        if self.last_widget_refresh.elapsed() < Duration::from_millis(poll_ms) {
+            return Ok(());
+        }
+        if self.widget_refresh_inflight {
+            return Ok(());
+        }
+        self.widget_refresh_inflight = true;
+        let project_root = self.project_root.clone();
+        let widget_states = match tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::task::spawn_blocking(move || {
+                crate::plugins::collect_channel_widgets(&project_root)
+            }),
+        )
+        .await
+        {
+            Ok(Ok(Ok(states))) => states,
+            Ok(Ok(Err(err))) => {
+                tracing::warn!("Plugin widgets refresh failed: {}", err);
+                Vec::new()
+            }
+            Ok(Err(err)) => {
+                tracing::warn!("Plugin widgets refresh task failed: {}", err);
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::warn!("Plugin widgets refresh timed out");
+                Vec::new()
+            }
+        };
+        let updated_at = Utc::now().format("%H:%M:%S").to_string();
+        let mut widgets = Vec::new();
+        for state in widget_states {
+            let mut error = state.error;
+            let mut status = None;
+            let mut attributes = serde_json::Value::Object(Default::default());
+            if let Some(payload) = state.payload {
+                match serde_json::from_str::<serde_json::Value>(&payload) {
+                    Ok(serde_json::Value::Object(map)) => {
+                        if let Some(serde_json::Value::String(s)) = map.get("status") {
+                            status = Some(s.clone());
+                        }
+                        attributes = serde_json::Value::Object(map);
+                    }
+                    Ok(value) => {
+                        error = Some("invalid_widget_shape".to_string());
+                        attributes = value;
+                    }
+                    Err(_) => {
+                        error = Some("invalid_widget_json".to_string());
+                    }
+                }
+            }
+            widgets.push(crate::ui_backend::PluginWidgetInfo {
+                plugin_id: state.plugin_id,
+                attributes,
+                status,
+                error,
+                updated_at: Some(updated_at.clone()),
+            });
+        }
+        self.plugin_widgets = widgets;
+        self.last_widget_refresh = Instant::now();
+        self.widget_refresh_inflight = false;
         Ok(())
     }
 
@@ -239,6 +332,58 @@ impl RemoteUiState {
         Paragraph::new(lines)
             .block(Block::default().title(title).borders(Borders::ALL))
             .style(Style::default().fg(Color::Gray))
+    }
+
+    fn render_widgets(&self) -> Paragraph<'_> {
+        let mut lines: Vec<Line<'_>> = Vec::new();
+        for widget in &self.plugin_widgets {
+            let status = widget.status.as_deref().unwrap_or("unknown");
+            lines.push(Line::from(Span::raw(format!(
+                "{} [{}]",
+                widget.plugin_id, status
+            ))));
+            if let Some(err) = widget.error.as_ref() {
+                lines.push(Line::from(Span::raw(format!("  error: {}", err))));
+                continue;
+            }
+            let mut fields = Vec::new();
+            flatten_json(&widget.attributes, "", &mut fields);
+            for (key, value) in fields {
+                lines.push(Line::from(Span::raw(format!("  {}: {}", key, value))));
+            }
+        }
+        Paragraph::new(lines)
+            .block(Block::default().title("Plugins").borders(Borders::ALL))
+            .style(Style::default().fg(Color::Gray))
+    }
+}
+
+fn flatten_json(value: &serde_json::Value, prefix: &str, out: &mut Vec<(String, String)>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map {
+                let next = if prefix.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{}.{}", prefix, key)
+                };
+                flatten_json(val, &next, out);
+            }
+        }
+        serde_json::Value::Array(list) => {
+            let mut rendered = Vec::new();
+            for item in list {
+                rendered.push(match item {
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => item.to_string(),
+                });
+            }
+            out.push((prefix.to_string(), rendered.join(", ")));
+        }
+        serde_json::Value::Null => out.push((prefix.to_string(), "null".to_string())),
+        serde_json::Value::Bool(b) => out.push((prefix.to_string(), b.to_string())),
+        serde_json::Value::Number(n) => out.push((prefix.to_string(), n.to_string())),
+        serde_json::Value::String(s) => out.push((prefix.to_string(), s.clone())),
     }
 }
 

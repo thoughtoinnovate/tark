@@ -11,7 +11,9 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use super::super::theme::Theme;
 use crate::core::context_tracker::ContextBreakdown;
 use crate::tools::builtin::{TodoItem, TodoStatus};
+use crate::ui_backend::PluginWidgetInfo;
 use crate::ui_backend::ThemePreset;
+use serde_json::Value;
 
 /// Sidebar panel type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +23,7 @@ pub enum SidebarPanel {
     Tasks,
     Todo,
     GitChanges,
+    Plugins,
     Theme,
 }
 
@@ -33,6 +36,7 @@ impl SidebarPanel {
             SidebarPanel::Tasks => "Tasks",
             SidebarPanel::Todo => "Todo",
             SidebarPanel::GitChanges => "Git Changes",
+            SidebarPanel::Plugins => "Plugins",
             SidebarPanel::Theme => "Theme",
         }
     }
@@ -45,6 +49,7 @@ impl SidebarPanel {
             SidebarPanel::Tasks => "✓",
             SidebarPanel::Todo => "📋",
             SidebarPanel::GitChanges => "⎇",
+            SidebarPanel::Plugins => "🔌",
             SidebarPanel::Theme => "🎨",
         }
     }
@@ -113,6 +118,8 @@ pub struct Sidebar<'a> {
     pub todos: Vec<TodoItem>,
     /// Git changes
     pub git_changes: Vec<GitChange>,
+    /// Plugin widgets
+    pub plugin_widgets: Vec<PluginWidgetInfo>,
     /// Current git branch
     pub git_branch: String,
     /// Theme
@@ -121,8 +128,8 @@ pub struct Sidebar<'a> {
     pub theme_preset: ThemePreset,
     /// Current theme name for display
     pub current_theme_name: String,
-    /// Which panels are expanded (Session, Context, Tasks, Todo, GitChanges)
-    pub expanded_panels: [bool; 5],
+    /// Which panels are expanded (Session, Context, Tasks, Todo, GitChanges, Plugins)
+    pub expanded_panels: [bool; 6],
     /// Currently selected panel index
     pub selected_panel: usize,
     /// Selected item within panel (None = panel header selected)
@@ -134,7 +141,7 @@ pub struct Sidebar<'a> {
     /// Scroll offset for sidebar content
     pub scroll_offset: usize,
     /// Per-panel scroll offsets
-    pub panel_scrolls: [usize; 5],
+    pub panel_scrolls: [usize; 6],
     /// Index of task being dragged for reordering (within queued tasks)
     pub dragging_task_index: Option<usize>,
     /// Target position for the dragged task
@@ -166,17 +173,18 @@ impl<'a> Sidebar<'a> {
             tasks: Vec::new(),
             todos: Vec::new(),
             git_changes: Vec::new(),
+            plugin_widgets: Vec::new(),
             git_branch: String::new(),
             theme,
             theme_preset: ThemePreset::default(),
             current_theme_name: "Catppuccin Mocha".to_string(),
-            expanded_panels: [true, true, true, true, true], // All expanded by default
+            expanded_panels: [true, true, true, true, true, true], // All expanded by default
             selected_panel: 0,
             selected_item: None,
             focused: false,
             vim_mode: crate::ui_backend::VimMode::Insert,
             scroll_offset: 0,
-            panel_scrolls: [0, 0, 0, 0, 0],
+            panel_scrolls: [0, 0, 0, 0, 0, 0],
             dragging_task_index: None,
             drag_target_index: None,
         }
@@ -204,7 +212,7 @@ impl<'a> Sidebar<'a> {
 
     pub fn expanded(mut self, panel: SidebarPanel, expanded: bool) -> Self {
         let idx = panel as usize;
-        if idx < 5 {
+        if idx < 6 {
             self.expanded_panels[idx] = expanded;
         }
         self
@@ -225,7 +233,7 @@ impl<'a> Sidebar<'a> {
         self
     }
 
-    pub fn panel_scrolls(mut self, scrolls: [usize; 5]) -> Self {
+    pub fn panel_scrolls(mut self, scrolls: [usize; 6]) -> Self {
         self.panel_scrolls = scrolls;
         self
     }
@@ -245,21 +253,21 @@ impl<'a> Sidebar<'a> {
 
     /// Toggle panel expansion
     pub fn toggle_panel(&mut self, panel_idx: usize) {
-        if panel_idx < 5 {
+        if panel_idx < 6 {
             self.expanded_panels[panel_idx] = !self.expanded_panels[panel_idx];
         }
     }
 
     /// Navigate to next panel
     pub fn next_panel(&mut self) {
-        self.selected_panel = (self.selected_panel + 1) % 6; // 6 panels: Session, Context, Tasks, Todo, GitChanges, Theme
+        self.selected_panel = (self.selected_panel + 1) % 7; // 7 panels: Session, Context, Tasks, Todo, GitChanges, Plugins, Theme
         self.selected_item = None;
     }
 
     /// Navigate to previous panel
     pub fn prev_panel(&mut self) {
         self.selected_panel = if self.selected_panel == 0 {
-            5
+            6
         } else {
             self.selected_panel - 1
         };
@@ -268,8 +276,8 @@ impl<'a> Sidebar<'a> {
 
     /// Navigate down within current panel
     pub fn next_item(&mut self) {
-        // Theme panel (index 5) doesn't have items to navigate
-        if self.selected_panel == 5 {
+        // Theme panel (index 6) doesn't have items to navigate
+        if self.selected_panel == 6 {
             return;
         }
 
@@ -283,7 +291,8 @@ impl<'a> Sidebar<'a> {
             2 => self.tasks.len(),
             3 => self.todos.len(), // Todo panel
             4 => self.git_changes.len(),
-            5 => 0, // Theme panel has no items
+            5 => self.plugin_widgets.len(),
+            6 => 0, // Theme panel has no items
             _ => 0,
         };
 
@@ -350,6 +359,11 @@ impl<'a> Sidebar<'a> {
 
     pub fn git_changes(mut self, changes: Vec<GitChange>) -> Self {
         self.git_changes = changes;
+        self
+    }
+
+    pub fn plugin_widgets(mut self, widgets: Vec<PluginWidgetInfo>) -> Self {
+        self.plugin_widgets = widgets;
         self
     }
 
@@ -439,6 +453,35 @@ impl<'a> Sidebar<'a> {
             format!("{}...", truncated)
         }
     }
+
+    fn flatten_json(value: &Value, prefix: &str, out: &mut Vec<(String, String)>) {
+        match value {
+            Value::Object(map) => {
+                for (key, val) in map {
+                    let next = if prefix.is_empty() {
+                        key.to_string()
+                    } else {
+                        format!("{}.{}", prefix, key)
+                    };
+                    Self::flatten_json(val, &next, out);
+                }
+            }
+            Value::Array(list) => {
+                let mut rendered = Vec::new();
+                for item in list {
+                    rendered.push(match item {
+                        Value::String(s) => s.clone(),
+                        _ => item.to_string(),
+                    });
+                }
+                out.push((prefix.to_string(), rendered.join(", ")));
+            }
+            Value::Null => out.push((prefix.to_string(), "null".to_string())),
+            Value::Bool(b) => out.push((prefix.to_string(), b.to_string())),
+            Value::Number(n) => out.push((prefix.to_string(), n.to_string())),
+            Value::String(s) => out.push((prefix.to_string(), s.clone())),
+        }
+    }
 }
 
 impl Widget for Sidebar<'_> {
@@ -475,7 +518,8 @@ impl Widget for Sidebar<'_> {
         let mut tasks_lines: Vec<Line> = vec![];
         let mut todo_lines: Vec<Line> = vec![];
         let mut git_lines: Vec<Line> = vec![];
-        let mut panel_item_lines: [Vec<usize>; 5] = std::array::from_fn(|_| Vec::new());
+        let mut plugin_lines: Vec<Line> = vec![];
+        let mut panel_item_lines: [Vec<usize>; 6] = std::array::from_fn(|_| Vec::new());
 
         // Available width for content (used for truncation)
         let content_width = inner.width;
@@ -1327,8 +1371,125 @@ impl Widget for Sidebar<'_> {
             // No truncation; rely on sidebar scroll
         }
 
+        // ======== PLUGINS SECTION ========
+        let plugins_expanded = self.expanded_panels[5];
+        let plugins_selected = self.selected_panel == 5 && self.selected_item.is_none();
+        let chevron = if plugins_expanded { "▼" } else { "▶" };
+
+        let plugins_header_style = if self.focused && plugins_selected {
+            Style::default()
+                .fg(self.theme.cyan)
+                .add_modifier(Modifier::BOLD)
+                .bg(self.theme.selection_bg)
+        } else {
+            Style::default()
+                .fg(self.theme.text_primary)
+                .add_modifier(Modifier::BOLD)
+        };
+
+        Self::push_line(
+            &mut plugin_lines,
+            &mut all_lines,
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", chevron),
+                    Style::default().fg(self.theme.text_muted),
+                ),
+                Span::styled("Plugins", plugins_header_style),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{}", self.plugin_widgets.len()),
+                    Style::default()
+                        .fg(self.theme.bg_main)
+                        .bg(self.theme.purple)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        );
+
+        if plugins_expanded {
+            if self.plugin_widgets.is_empty() {
+                Self::push_line(
+                    &mut plugin_lines,
+                    &mut all_lines,
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("(no widgets)", Style::default().fg(self.theme.text_muted)),
+                    ]),
+                );
+            } else {
+                for (i, widget) in self.plugin_widgets.iter().enumerate() {
+                    let item_selected =
+                        self.focused && self.selected_panel == 5 && self.selected_item == Some(i);
+                    let item_style = if item_selected {
+                        Style::default()
+                            .fg(self.theme.cyan)
+                            .bg(self.theme.selection_bg)
+                    } else {
+                        Style::default().fg(self.theme.text_primary)
+                    };
+
+                    let status = widget.status.as_deref().unwrap_or("unknown").to_string();
+                    let line_idx = plugin_lines.len();
+                    panel_item_lines[5].push(line_idx);
+                    Self::push_line(
+                        &mut plugin_lines,
+                        &mut all_lines,
+                        Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(&widget.plugin_id, item_style),
+                            Span::raw(" "),
+                            Span::styled(
+                                format!("[{}]", status),
+                                Style::default().fg(self.theme.text_muted),
+                            ),
+                        ]),
+                    );
+
+                    if let Some(err) = widget.error.as_ref() {
+                        let truncated = Self::truncate_text(err, content_width, 4);
+                        Self::push_line(
+                            &mut plugin_lines,
+                            &mut all_lines,
+                            Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled("error: ", Style::default().fg(self.theme.red)),
+                                Span::styled(truncated, Style::default().fg(self.theme.text_muted)),
+                            ]),
+                        );
+                        continue;
+                    }
+
+                    let mut fields = Vec::new();
+                    Self::flatten_json(&widget.attributes, "", &mut fields);
+                    for (key, value) in fields {
+                        let key_text = Self::truncate_text(&key, content_width, 6);
+                        let value_text =
+                            Self::truncate_text(&value, content_width, 6 + key_text.len());
+                        Self::push_line(
+                            &mut plugin_lines,
+                            &mut all_lines,
+                            Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    format!("{}: ", key_text),
+                                    Style::default().fg(self.theme.text_muted),
+                                ),
+                                Span::styled(
+                                    value_text,
+                                    Style::default().fg(self.theme.text_secondary),
+                                ),
+                            ]),
+                        );
+                    }
+                }
+            }
+        }
+
+        Self::push_line(&mut plugin_lines, &mut all_lines, Line::from(""));
+
         // Footer section: theme icon only, navigable
-        let footer_selected = self.focused && self.selected_panel == 5;
+        let footer_selected = self.focused && self.selected_panel == 6;
         let footer_style = if footer_selected {
             Style::default()
                 .fg(self.theme.cyan)
@@ -1367,6 +1528,11 @@ impl Widget for Sidebar<'_> {
         } else {
             1
         };
+        let plugins_height = if plugins_expanded {
+            plugin_lines.len() as u16
+        } else {
+            1
+        };
 
         let panel_constraints = [
             Constraint::Length(header_lines.len() as u16),
@@ -1375,6 +1541,7 @@ impl Widget for Sidebar<'_> {
             Constraint::Length(tasks_height),
             Constraint::Length(todo_height),
             Constraint::Min(1), // Git gets remaining space, scrolls if needed
+            Constraint::Length(plugins_height),
             Constraint::Length(footer_lines.len() as u16),
         ];
         let panel_chunks = Layout::default()
@@ -1388,13 +1555,14 @@ impl Widget for Sidebar<'_> {
         let tasks_area = panel_chunks[3];
         let todo_area = panel_chunks[4];
         let git_area = panel_chunks[5];
-        let footer_area = panel_chunks[6];
+        let plugins_area = panel_chunks[6];
+        let footer_area = panel_chunks[7];
 
-        let mut panel_selected_lines: [Option<usize>; 5] = [None, None, None, None, None];
+        let mut panel_selected_lines: [Option<usize>; 6] = [None, None, None, None, None, None];
         if self.focused {
             if let Some(selected_item) = self.selected_item {
                 let panel_idx = self.selected_panel;
-                if panel_idx < 5 {
+                if panel_idx < 6 {
                     let indices = &panel_item_lines[panel_idx];
                     panel_selected_lines[panel_idx] = indices
                         .get(selected_item)
@@ -1405,7 +1573,7 @@ impl Widget for Sidebar<'_> {
         }
 
         let panel_has_focus = self.focused
-            && self.selected_panel < 5
+            && self.selected_panel < 6
             && (self.selected_item.is_some() || self.expanded_panels[self.selected_panel]);
 
         Paragraph::new(header_lines).render(header_area, buf);
@@ -1447,6 +1615,14 @@ impl Widget for Sidebar<'_> {
             self.panel_scrolls[4],
             panel_selected_lines[4],
             panel_has_focus && self.selected_panel == 4,
+            buf,
+        );
+        self.render_panel(
+            plugins_area,
+            plugin_lines,
+            self.panel_scrolls[5],
+            panel_selected_lines[5],
+            panel_has_focus && self.selected_panel == 5,
             buf,
         );
         Paragraph::new(footer_lines).render(footer_area, buf);

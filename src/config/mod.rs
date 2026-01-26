@@ -267,12 +267,18 @@ impl Default for ToolsConfig {
 pub struct TuiConfig {
     /// Default theme preset (e.g., "catppuccin_mocha", "nord", "tokyo_night")
     pub theme: String,
+    /// Plugin widget refresh interval in milliseconds
+    pub plugin_widget_poll_ms: u64,
+    /// Session usage poll interval in milliseconds (0 to disable)
+    pub session_usage_poll_ms: u64,
 }
 
 impl Default for TuiConfig {
     fn default() -> Self {
         Self {
             theme: "catppuccin_mocha".to_string(),
+            plugin_widget_poll_ms: 2000,
+            session_usage_poll_ms: 1000,
         }
     }
 }
@@ -315,6 +321,7 @@ pub struct RemoteConfig {
     pub default_mode: String,
     pub default_trust_level: String,
     pub require_allowlist: bool,
+    pub channel_poll_ms: u64,
 }
 
 impl Default for RemoteConfig {
@@ -334,6 +341,7 @@ impl Default for RemoteConfig {
             default_mode: "ask".to_string(),
             default_trust_level: "manual".to_string(),
             require_allowlist: true,
+            channel_poll_ms: 200,
         }
     }
 }
@@ -512,6 +520,8 @@ mod tests {
         for (theme_str, expected_preset) in test_cases {
             let cfg = TuiConfig {
                 theme: theme_str.to_string(),
+                plugin_widget_poll_ms: 2000,
+                session_usage_poll_ms: 1000,
             };
             assert_eq!(
                 cfg.theme_preset(),
@@ -526,9 +536,13 @@ mod tests {
     fn tui_config_parses_case_insensitive() {
         let cfg_upper = TuiConfig {
             theme: "NORD".to_string(),
+            plugin_widget_poll_ms: 2000,
+            session_usage_poll_ms: 1000,
         };
         let cfg_mixed = TuiConfig {
             theme: "Tokyo_Night".to_string(),
+            plugin_widget_poll_ms: 2000,
+            session_usage_poll_ms: 1000,
         };
 
         assert_eq!(cfg_upper.theme_preset(), ThemePreset::Nord);
@@ -539,6 +553,8 @@ mod tests {
     fn tui_config_parses_invalid_theme() {
         let cfg = TuiConfig {
             theme: "invalid_theme".to_string(),
+            plugin_widget_poll_ms: 2000,
+            session_usage_poll_ms: 1000,
         };
         // Should fall back to default
         assert_eq!(cfg.theme_preset(), ThemePreset::default());

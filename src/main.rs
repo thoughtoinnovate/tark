@@ -383,7 +383,7 @@ async fn main() -> Result<()> {
                 port,
                 working_dir
             );
-            transport::http::run_http_server(&host, port, working_dir, None).await?;
+            transport::http::run_http_server(&host, port, working_dir, None, None).await?;
         }
         Commands::Start { port } => {
             tracing::info!("Starting LSP + HTTP servers");
@@ -391,7 +391,8 @@ async fn main() -> Result<()> {
             // Run HTTP server in background, LSP on stdio
             let http_handle = tokio::spawn(async move {
                 if let Err(e) =
-                    transport::http::run_http_server("127.0.0.1", port, working_dir, None).await
+                    transport::http::run_http_server("127.0.0.1", port, working_dir, None, None)
+                        .await
                 {
                     tracing::error!("HTTP server error: {}", e);
                 }

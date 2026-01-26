@@ -42,6 +42,11 @@ max_tokens = 4096
 port = 8765
 host = "127.0.0.1"
 
+[tui]
+theme = "catppuccin_mocha"
+plugin_widget_poll_ms = 2000
+session_usage_poll_ms = 1000
+
 [completion]
 cache_size = 100
 debounce_ms = 150

@@ -173,7 +173,7 @@ pub struct UiState {
     // Sidebar state
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
-    pub sidebar_expanded_panels: [bool; 5],
+    pub sidebar_expanded_panels: [bool; 6],
 }
 
 impl Default for UiState {
@@ -198,7 +198,7 @@ impl Default for UiState {
             session_picker_filter: String::new(),
             sidebar_selected_panel: 0,
             sidebar_selected_item: None,
-            sidebar_expanded_panels: [true, true, false, false, false],
+            sidebar_expanded_panels: [true, true, false, false, false, false],
         }
     }
 }
@@ -340,9 +340,10 @@ struct StateInner {
     // ========== Sidebar State ==========
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
-    pub sidebar_expanded_panels: [bool; 5],
+    pub sidebar_expanded_panels: [bool; 6],
     pub sidebar_scroll_offset: usize,
-    pub sidebar_panel_scrolls: [usize; 5],
+    pub sidebar_panel_scrolls: [usize; 6],
+    pub plugin_widgets: Vec<crate::ui_backend::types::PluginWidgetInfo>,
 
     // ========== Context ==========
     pub context_files: Vec<ContextFile>,
@@ -506,9 +507,10 @@ impl SharedState {
                 policy_modal: None,
                 sidebar_selected_panel: 0,
                 sidebar_selected_item: None,
-                sidebar_expanded_panels: [true, true, false, false, false],
+                sidebar_expanded_panels: [true, true, false, false, false, false],
                 sidebar_scroll_offset: 0,
-                sidebar_panel_scrolls: [0, 0, 0, 0, 0],
+                sidebar_panel_scrolls: [0, 0, 0, 0, 0, 0],
+                plugin_widgets: Vec::new(),
                 context_files: Vec::new(),
                 tokens_used: 0,
                 tokens_total: 1_000_000,
@@ -838,7 +840,7 @@ impl SharedState {
         self.read_inner().sidebar_selected_item
     }
 
-    pub fn sidebar_expanded_panels(&self) -> [bool; 5] {
+    pub fn sidebar_expanded_panels(&self) -> [bool; 6] {
         self.read_inner().sidebar_expanded_panels
     }
 
@@ -846,7 +848,7 @@ impl SharedState {
         self.read_inner().sidebar_scroll_offset
     }
 
-    pub fn sidebar_panel_scrolls(&self) -> [usize; 5] {
+    pub fn sidebar_panel_scrolls(&self) -> [usize; 6] {
         self.read_inner().sidebar_panel_scrolls
     }
 
@@ -2050,7 +2052,7 @@ impl SharedState {
         self.write_inner().sidebar_selected_item = item;
     }
 
-    pub fn set_sidebar_expanded_panels(&self, panels: [bool; 5]) {
+    pub fn set_sidebar_expanded_panels(&self, panels: [bool; 6]) {
         self.write_inner().sidebar_expanded_panels = panels;
     }
 
@@ -2059,7 +2061,7 @@ impl SharedState {
     }
 
     pub fn set_sidebar_panel_scroll(&self, panel: usize, offset: usize) {
-        if panel < 5 {
+        if panel < 6 {
             self.write_inner().sidebar_panel_scrolls[panel] = offset;
         }
     }
@@ -2134,6 +2136,14 @@ impl SharedState {
 
     pub fn set_git_changes(&self, changes: Vec<GitChangeInfo>) {
         self.write_inner().git_changes = changes;
+    }
+
+    pub fn plugin_widgets(&self) -> Vec<crate::ui_backend::types::PluginWidgetInfo> {
+        self.read_inner().plugin_widgets.clone()
+    }
+
+    pub fn set_plugin_widgets(&self, widgets: Vec<crate::ui_backend::types::PluginWidgetInfo>) {
+        self.write_inner().plugin_widgets = widgets;
     }
 
     pub fn set_tokens(&self, used: usize, total: usize) {

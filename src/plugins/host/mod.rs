@@ -556,6 +556,11 @@ impl PluginInstance {
         Ok(())
     }
 
+    /// Get channel widget state (JSON)
+    pub fn channel_widget_state(&mut self) -> Result<String> {
+        self.call_string_return_fn("channel_widget_state")
+    }
+
     /// Handle webhook request (JSON)
     pub fn channel_handle_webhook(
         &mut self,
@@ -564,6 +569,23 @@ impl PluginInstance {
         let json = serde_json::to_string(request)?;
         let response_json = self.call_string_param_return_fn("channel_handle_webhook", &json)?;
         serde_json::from_str(&response_json).context("Failed to parse webhook response JSON")
+    }
+
+    /// Handle gateway event payload (JSON)
+    pub fn channel_handle_gateway_event(
+        &mut self,
+        payload_json: &str,
+    ) -> Result<Vec<ChannelInboundMessage>> {
+        let response_json =
+            self.call_string_param_return_fn("channel_handle_gateway_event", payload_json)?;
+        serde_json::from_str(&response_json)
+            .context("Failed to parse gateway inbound messages JSON")
+    }
+
+    /// Poll channel for inbound messages (JSON)
+    pub fn channel_poll(&mut self) -> Result<Vec<ChannelInboundMessage>> {
+        let response_json = self.call_string_return_fn("channel_poll")?;
+        serde_json::from_str(&response_json).context("Failed to parse channel poll JSON")
     }
 
     /// Send outbound message (JSON)
@@ -577,6 +599,27 @@ impl PluginInstance {
     pub fn has_channel_auth_init(&mut self) -> bool {
         self.instance
             .get_typed_func::<(i32, i32), i32>(&mut self.store, "channel_auth_init")
+            .is_ok()
+    }
+
+    /// Check if channel widget state is supported
+    pub fn has_channel_widget_state(&mut self) -> bool {
+        self.instance
+            .get_typed_func::<i32, i32>(&mut self.store, "channel_widget_state")
+            .is_ok()
+    }
+
+    /// Check if gateway event handler is supported
+    pub fn has_channel_gateway_handler(&mut self) -> bool {
+        self.instance
+            .get_typed_func::<(i32, i32, i32), i32>(&mut self.store, "channel_handle_gateway_event")
+            .is_ok()
+    }
+
+    /// Check if channel poll is supported
+    pub fn has_channel_poll(&mut self) -> bool {
+        self.instance
+            .get_typed_func::<i32, i32>(&mut self.store, "channel_poll")
             .is_ok()
     }
 
@@ -1046,6 +1089,53 @@ impl PluginHost {
         Ok(())
     }
 
+    /// Load a plugin using a custom data directory (e.g., project-local storage)
+    pub fn load_with_data_dir(
+        &mut self,
+        plugin: &InstalledPlugin,
+        data_dir: std::path::PathBuf,
+    ) -> Result<()> {
+        tracing::info!(
+            "Loading plugin: {} (data dir: {})",
+            plugin.id(),
+            data_dir.display()
+        );
+
+        let wasm_bytes = std::fs::read(&plugin.wasm_path)
+            .with_context(|| format!("Failed to read WASM: {}", plugin.wasm_path.display()))?;
+
+        let module = Module::new(&self.engine, &wasm_bytes)
+            .with_context(|| format!("Failed to compile WASM: {}", plugin.id()))?;
+
+        let state = PluginState::new(plugin.id(), data_dir, plugin.manifest.capabilities.clone());
+
+        let mut store = Store::new(&self.engine, state);
+        store.set_epoch_deadline(DEFAULT_EPOCH_DEADLINE);
+
+        let mut linker = Linker::new(&self.engine);
+        wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |state: &mut PluginState| {
+            &mut state.wasi_ctx
+        })?;
+        Self::define_host_functions(&mut linker)?;
+
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .with_context(|| format!("Failed to instantiate plugin: {}", plugin.id()))?;
+
+        let plugin_instance = PluginInstance {
+            id: plugin.id().to_string(),
+            store,
+            instance,
+            capabilities: plugin.manifest.capabilities.clone(),
+        };
+
+        self.instances
+            .insert(plugin.id().to_string(), plugin_instance);
+
+        tracing::info!("Loaded plugin: {}", plugin.id());
+        Ok(())
+    }
+
     /// Unload a plugin
     pub fn unload(&mut self, plugin_id: &str) -> Result<()> {
         self.instances
@@ -1250,6 +1340,118 @@ impl PluginHost {
                 let response_str = http_post_impl(&client, &url, body, &headers_json);
 
                 write_string(&mut caller, ret_ptr, &response_str).unwrap_or(-1)
+            },
+        )?;
+
+        // =========================================================================
+        // WebSocket Functions
+        // =========================================================================
+
+        // ws.connect(url: string, headers_json: string) -> i32 (JSON response)
+        linker.func_wrap(
+            "tark:ws",
+            "connect",
+            |mut caller: Caller<'_, PluginState>,
+             url_ptr: i32,
+             url_len: i32,
+             headers_ptr: i32,
+             headers_len: i32,
+             ret_ptr: i32|
+             -> i32 {
+                let url = match read_string(&mut caller, url_ptr, url_len) {
+                    Ok(u) => u,
+                    Err(_) => return -1,
+                };
+                let headers_json = match read_string(&mut caller, headers_ptr, headers_len) {
+                    Ok(h) => h,
+                    Err(_) => return -1,
+                };
+
+                let plugin_id = caller.data().plugin_id.clone();
+                if !caller.data().is_http_allowed(&url) {
+                    tracing::warn!(
+                        "[plugin:{}] WS connect blocked - domain not in allowed list: {}",
+                        plugin_id,
+                        url
+                    );
+                    return -2;
+                }
+
+                let headers: Vec<(String, String)> =
+                    serde_json::from_str(&headers_json).unwrap_or_default();
+
+                let result =
+                    crate::plugins::ws_connect(&url, &headers, &caller.data().allowed_http_domains);
+                let payload = match result {
+                    Ok(handle) => serde_json::json!({ "ok": true, "handle": handle }),
+                    Err(err) => serde_json::json!({ "ok": false, "error": err.to_string() }),
+                };
+                write_string(&mut caller, ret_ptr, &payload.to_string()).unwrap_or(-1)
+            },
+        )?;
+
+        // ws.send(handle: u64, data: string) -> i32 (JSON response)
+        linker.func_wrap(
+            "tark:ws",
+            "send",
+            |mut caller: Caller<'_, PluginState>,
+             handle: i64,
+             data_ptr: i32,
+             data_len: i32,
+             ret_ptr: i32|
+             -> i32 {
+                let data = match read_string(&mut caller, data_ptr, data_len) {
+                    Ok(d) => d,
+                    Err(_) => return -1,
+                };
+                let result = crate::plugins::ws_send(handle as u64, &data);
+                let payload = match result {
+                    Ok(_) => serde_json::json!({ "ok": true }),
+                    Err(err) => serde_json::json!({ "ok": false, "error": err.to_string() }),
+                };
+                write_string(&mut caller, ret_ptr, &payload.to_string()).unwrap_or(-1)
+            },
+        )?;
+
+        // ws.recv(handle: u64, timeout_ms: u64, max_bytes: u64) -> i32 (JSON response)
+        linker.func_wrap(
+            "tark:ws",
+            "recv",
+            |mut caller: Caller<'_, PluginState>,
+             handle: i64,
+             timeout_ms: i64,
+             max_bytes: i64,
+             ret_ptr: i32|
+             -> i32 {
+                let result = crate::plugins::ws_recv(
+                    handle as u64,
+                    timeout_ms.max(0) as u64,
+                    max_bytes.max(0) as usize,
+                );
+                let payload = match result {
+                    Ok(res) => serde_json::json!({
+                        "ok": true,
+                        "message": res.message,
+                        "closed": res.closed,
+                        "error": res.error
+                    }),
+                    Err(err) => serde_json::json!({ "ok": false, "error": err.to_string() }),
+                };
+                write_string(&mut caller, ret_ptr, &payload.to_string()).unwrap_or(-1)
+            },
+        )?;
+
+        // ws.close(handle: u64) -> i32 (JSON response)
+        linker.func_wrap(
+            "tark:ws",
+            "close",
+            |mut caller: Caller<'_, PluginState>, handle: i64, ret_ptr: i32| -> i32 {
+                let result = crate::plugins::ws_close(handle as u64);
+                let payload = match result {
+                    Ok(_) => serde_json::json!({ "ok": true }),
+                    Err(err) => serde_json::json!({ "ok": false, "error": err.to_string() }),
+                };
+                write_string(&mut caller, ret_ptr, &payload.to_string()).unwrap_or(-1)
             },
         )?;
 

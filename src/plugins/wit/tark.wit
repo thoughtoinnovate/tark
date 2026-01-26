@@ -50,6 +50,22 @@ interface http {
           -> result<http-response, http-error>;
 }
 
+/// WebSocket client
+interface ws {
+    /// Connect to a WebSocket URL
+    /// headers are optional (JSON encoded in plugin implementations)
+    connect: func(url: string, headers-json: string) -> string;
+
+    /// Send a text message on a WebSocket
+    send: func(handle: s64, data: string) -> string;
+
+    /// Receive a text message on a WebSocket
+    recv: func(handle: s64, timeout-ms: s64, max-bytes: s64) -> string;
+
+    /// Close a WebSocket connection
+    close: func(handle: s64) -> string;
+}
+
 /// Environment variable access
 interface env {
     /// Get an environment variable
@@ -339,8 +355,18 @@ interface channel-plugin {
     /// Logout
     auth-logout: func() -> result<_, string>;
 
+    /// Optional widget state (JSON)
+    widget-state: func() -> result<string, string>;
+
     /// Handle inbound webhook request
     handle-webhook: func(request: webhook-request) -> result<webhook-response, string>;
+
+    /// Handle inbound gateway event (JSON payload)
+    /// Returns a list of inbound messages parsed from the event.
+    handle-gateway-event: func(payload-json: string) -> result<list<inbound-message>, string>;
+
+    /// Poll channel for new messages (optional)
+    poll: func() -> result<list<inbound-message>, string>;
 
     /// Send outbound message
     send: func(message: outbound-message) -> result<send-result, string>;
@@ -387,6 +413,7 @@ world provider-world {
 world channel-world {
     import storage;
     import http;
+    import ws;
     import env;
     import log;
     import fs;

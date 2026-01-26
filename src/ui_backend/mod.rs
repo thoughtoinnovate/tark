@@ -38,6 +38,7 @@ pub use commands::Command;
 pub use conversation::ConversationService;
 // Re-export canonical types from core
 pub use crate::core::types::{AgentMode, BuildMode};
+pub use types::PluginWidgetInfo;
 // Errors are kept internal for now
 // pub use errors::{CatalogError, ConversationError, StorageError, ToolError};
 pub use events::AppEvent;

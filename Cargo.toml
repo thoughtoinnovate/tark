@@ -39,6 +39,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 async-trait = "0.1"
 futures = "0.3"
 tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.23", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 # Concurrent data structures
 dashmap = "6"
@@ -94,6 +95,9 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 rand = "0.8"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+rpassword = "7"
 
 # OAuth and browser integration
 urlencoding = "2"
