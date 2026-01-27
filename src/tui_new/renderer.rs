@@ -302,6 +302,8 @@ impl<B: Backend> TuiRenderer<B> {
 
     /// Convert keyboard event to command
     fn key_to_command(key: event::KeyEvent, state: &SharedState) -> Option<Command> {
+        let force_quit_on_ctrl_c =
+            std::env::var("TARK_FORCE_QUIT_ON_CTRL_C").map_or(false, |v| v != "0");
         let vim_keys_enabled = state.is_vim_key_enabled();
         if key.code == KeyCode::Char('i')
             && key.modifiers == KeyModifiers::NONE
@@ -323,7 +325,7 @@ impl<B: Backend> TuiRenderer<B> {
             // Application control
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 // If LLM is processing, send interrupt instead of quit
-                if state.llm_processing() {
+                if state.llm_processing() && !force_quit_on_ctrl_c {
                     Some(Command::Interrupt)
                 } else {
                     Some(Command::Quit)
