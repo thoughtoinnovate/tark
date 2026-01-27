@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -18,6 +18,7 @@ use ratatui::{
 use std::collections::VecDeque;
 use std::io::stdout;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -61,8 +62,19 @@ pub async fn run_remote_tui(
     let mut state = RemoteUiState::new(project_root)?;
     let mut last_refresh = Instant::now();
     let config = Config::load().unwrap_or_default();
+    let exit_flag = Arc::new(AtomicBool::new(false));
+    let exit_flag_ctrlc = Arc::clone(&exit_flag);
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            exit_flag_ctrlc.store(true, Ordering::SeqCst);
+            request_channel_shutdown();
+        }
+    });
 
     loop {
+        if exit_flag.load(Ordering::SeqCst) {
+            break;
+        }
         while let Ok(event) = rx.try_recv() {
             state.push_event(event);
         }
@@ -98,6 +110,12 @@ pub async fn run_remote_tui(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
+                        exit_flag.store(true, Ordering::SeqCst);
+                        request_channel_shutdown();
+                        break;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        exit_flag.store(true, Ordering::SeqCst);
                         request_channel_shutdown();
                         break;
                     }
