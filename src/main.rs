@@ -381,6 +381,8 @@ async fn main() -> Result<()> {
                     }
                     RemoteUi::Main => {
                         std::env::set_var("TARK_FORCE_QUIT_ON_CTRL_C", "1");
+                        std::env::set_var("TARK_REMOTE_ENABLED", "1");
+                        std::env::set_var("TARK_REMOTE_PLUGIN", remote_plugin);
                         let (server_handle, _project_root) = transport::remote::start_remote_runtime(
                             working_dir.clone(),
                             remote_plugin,

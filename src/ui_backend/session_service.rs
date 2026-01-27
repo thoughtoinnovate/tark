@@ -161,7 +161,7 @@ impl SessionService {
         let messages = mgr
             .load_archive_chunk(filename)
             .map_err(|e| StorageError::Other(e.into()))?;
-        Ok(Self::messages_to_ui(&messages))
+        Ok(Self::messages_to_ui(&messages, false))
     }
 
     /// Delete a session
@@ -377,10 +377,14 @@ impl SessionService {
     /// This also sanitizes tool messages: any "⋯" (running) status is converted to "?" (interrupted)
     /// since tools cannot actually be running after a session restart.
     pub fn session_messages_to_ui(session: &crate::storage::ChatSession) -> Vec<Message> {
-        Self::messages_to_ui(&session.messages)
+        let is_remote_session = session.id.starts_with("channel_");
+        Self::messages_to_ui(&session.messages, is_remote_session)
     }
 
-    fn messages_to_ui(messages: &[crate::storage::SessionMessage]) -> Vec<Message> {
+    fn messages_to_ui(
+        messages: &[crate::storage::SessionMessage],
+        is_remote_session: bool,
+    ) -> Vec<Message> {
         messages
             .iter()
             .flat_map(|msg| {
@@ -404,6 +408,12 @@ impl SessionService {
                 } else {
                     msg.content.clone()
                 };
+                let content = if is_remote_session && role == MessageRole::User {
+                    format!("📡 {}", content)
+                } else {
+                    content
+                };
+                let mut remote_prefix_used = is_remote_session && role == MessageRole::User;
 
                 if msg.segments.is_empty() {
                     messages.push(Message {
@@ -424,7 +434,15 @@ impl SessionService {
                         match seg {
                             crate::storage::SegmentRecord::Text(text) => messages.push(Message {
                                 role,
-                                content: text.clone(),
+                                content: if is_remote_session
+                                    && role == MessageRole::User
+                                    && !remote_prefix_used
+                                {
+                                    remote_prefix_used = true;
+                                    format!("📡 {}", text)
+                                } else {
+                                    text.clone()
+                                },
                                 thinking: None,
                                 collapsed: false,
                                 timestamp: timestamp.clone(),

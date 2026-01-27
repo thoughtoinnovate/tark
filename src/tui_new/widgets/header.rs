@@ -10,6 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui_new::config::AppConfig;
 use crate::tui_new::theme::Theme;
@@ -20,13 +21,25 @@ pub struct Header<'a> {
     config: &'a AppConfig,
     /// Theme for styling
     theme: &'a Theme,
+    /// Optional remote status indicator
+    remote: Option<RemoteIndicator>,
 }
 
 impl<'a> Header<'a> {
     /// Create a new header widget
-    pub fn new(config: &'a AppConfig, theme: &'a Theme) -> Self {
-        Self { config, theme }
+    pub fn new(config: &'a AppConfig, theme: &'a Theme, remote: Option<RemoteIndicator>) -> Self {
+        Self {
+            config,
+            theme,
+            remote,
+        }
     }
+}
+
+#[derive(Clone)]
+pub struct RemoteIndicator {
+    pub label: String,
+    pub status_color: ratatui::style::Color,
 }
 
 impl Widget for Header<'_> {
@@ -35,8 +48,28 @@ impl Widget for Header<'_> {
             return;
         }
 
-        // Format: "🖥 Tark Terminal  ~/path/to/project"
-        let header_text = Line::from(vec![
+        // Format: "🖥 Tark  ~/path/to/project" + optional right-aligned remote indicator
+        let left_text = format!(
+            "{} {}  {}",
+            self.config.header_icon, self.config.agent_name, self.config.default_path
+        );
+
+        let right_text = self
+            .remote
+            .as_ref()
+            .map(|r| format!("⏺ {}", r.label))
+            .unwrap_or_default();
+
+        let left_width = left_text.width();
+        let right_width = right_text.width();
+        let total_width = area.width as usize;
+        let padding = if right_width > 0 && total_width > left_width + right_width {
+            total_width - left_width - right_width
+        } else {
+            1
+        };
+
+        let mut spans = vec![
             Span::styled(
                 format!("{} ", self.config.header_icon),
                 Style::default().fg(self.theme.cyan),
@@ -50,7 +83,26 @@ impl Widget for Header<'_> {
                 &self.config.default_path,
                 Style::default().fg(self.theme.text_muted),
             ),
-        ]);
+        ];
+
+        if !right_text.is_empty() {
+            spans.push(Span::raw(" ".repeat(padding)));
+            let color = self
+                .remote
+                .as_ref()
+                .map(|r| r.status_color)
+                .unwrap_or(self.theme.text_muted);
+            spans.push(Span::styled("⏺ ", Style::default().fg(color)));
+            spans.push(Span::styled(
+                self.remote
+                    .as_ref()
+                    .map(|r| r.label.clone())
+                    .unwrap_or_default(),
+                Style::default().fg(self.theme.text_muted),
+            ));
+        }
+
+        let header_text = Line::from(spans);
 
         let paragraph = Paragraph::new(header_text);
         paragraph.render(area, buf);
@@ -72,7 +124,7 @@ mod tests {
 
         terminal
             .draw(|f| {
-                let header = Header::new(&config, &theme);
+                let header = Header::new(&config, &theme, None);
                 f.render_widget(header, f.area());
             })
             .unwrap();
@@ -82,6 +134,6 @@ mod tests {
             .map(|x| buffer.cell((x, 0)).unwrap().symbol().to_string())
             .collect();
 
-        assert!(content.contains("Tark Terminal"));
+        assert!(content.contains("Tark"));
     }
 }

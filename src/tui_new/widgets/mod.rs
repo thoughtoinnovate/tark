@@ -4,7 +4,7 @@
 
 pub mod command_autocomplete;
 mod flash_bar;
-mod header;
+pub mod header;
 mod input;
 pub mod markdown;
 mod message_area;

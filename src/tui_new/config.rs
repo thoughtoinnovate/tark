@@ -33,7 +33,7 @@ impl Default for AppConfig {
             .unwrap_or_else(|_| "You".to_string());
 
         Self {
-            agent_name: "Tark Terminal".to_string(),
+            agent_name: "Tark".to_string(),
             agent_name_short: "Tark".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             default_path: std::env::current_dir()

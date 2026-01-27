@@ -731,7 +731,7 @@ impl<B: Backend> TuiApp<B> {
                 .split(main_area);
 
             // Render header
-            let header = Header::new(config, theme);
+            let header = Header::new(config, theme, None);
             frame.render_widget(header, chunks[0]);
 
             // Render message area

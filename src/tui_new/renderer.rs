@@ -2374,7 +2374,41 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 
             // Render header
             let config = super::config::AppConfig::default();
-            let header = Header::new(&config, theme);
+            let remote_indicator = if std::env::var("TARK_REMOTE_ENABLED")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
+                let plugin_id = std::env::var("TARK_REMOTE_PLUGIN").ok();
+                let widgets = state.plugin_widgets();
+                let status = plugin_id
+                    .as_ref()
+                    .and_then(|id| {
+                        widgets
+                            .iter()
+                            .find(|w| &w.plugin_id == id)
+                            .and_then(|w| w.status.clone())
+                    })
+                    .unwrap_or_else(|| "disconnected".to_string());
+                let label = if let Some(id) = plugin_id {
+                    format!("Remote: {} ({})", status, id)
+                } else {
+                    format!("Remote: {}", status)
+                };
+                let status_color = if status.eq_ignore_ascii_case("connected") {
+                    theme.green
+                } else if status.eq_ignore_ascii_case("disconnected") {
+                    theme.red
+                } else {
+                    theme.text_muted
+                };
+                Some(crate::tui_new::widgets::header::RemoteIndicator {
+                    label,
+                    status_color,
+                })
+            } else {
+                None
+            };
+            let header = Header::new(&config, theme, remote_indicator);
             frame.render_widget(header, chunks[0]);
 
             // Render message area
