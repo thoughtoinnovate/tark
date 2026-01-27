@@ -309,6 +309,8 @@ impl TuiConfig {
 pub struct RemoteConfig {
     /// Enable the local HTTP server in remote mode (default: false)
     pub http_enabled: bool,
+    /// Maximum outbound message length for remote channels (0 disables chunking)
+    pub max_message_chars: usize,
     pub allowed_plugins: Vec<String>,
     pub allowed_users: Vec<String>,
     pub allowed_channels: Vec<String>,
@@ -355,6 +357,7 @@ impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             http_enabled: false,
+            max_message_chars: 1800,
             allowed_plugins: Vec::new(),
             allowed_users: Vec::new(),
             allowed_channels: Vec::new(),

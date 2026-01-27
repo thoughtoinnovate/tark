@@ -1293,18 +1293,24 @@ impl ChatAgent {
                 let content = match &m.content {
                     MessageContent::Text(t) => t.clone(),
                     MessageContent::Parts(parts) => {
-                        // Extract text from parts
-                        parts
-                            .iter()
-                            .map(|p| match p {
-                                ContentPart::Text { text } => text.clone(),
-                                ContentPart::ToolUse { name, input, .. } => {
-                                    format!("[Tool: {} with {:?}]", name, input)
+                        // Extract text from parts (skip tool-use markers)
+                        let mut chunks = Vec::new();
+                        for part in parts {
+                            match part {
+                                ContentPart::Text { text } => {
+                                    if !text.trim().is_empty() {
+                                        chunks.push(text.clone());
+                                    }
                                 }
-                                ContentPart::ToolResult { content, .. } => content.clone(),
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
+                                ContentPart::ToolUse { .. } => {}
+                                ContentPart::ToolResult { content, .. } => {
+                                    if !content.trim().is_empty() {
+                                        chunks.push(content.clone());
+                                    }
+                                }
+                            }
+                        }
+                        chunks.join("\n")
                     }
                 };
 

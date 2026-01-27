@@ -47,6 +47,7 @@ Remote requests are gated by allowlists in `.tark/config.toml`.
 ```toml
 [remote]
 http_enabled = false
+max_message_chars = 1800
 allowed_plugins = ["discord"]
 allowed_users = ["1234567890"]
 allowed_guilds = ["0987654321"]
@@ -71,6 +72,10 @@ If `require_allowlist` is true, at least one allowlist must be populated or all 
 
 - When the agent is busy, incoming remote messages are queued (you'll get a queue position).
 - Use `/tark interrupt` to stop the current task at the next safe checkpoint.
+
+## Message Length
+
+- `remote.max_message_chars` controls outbound chunking for long responses (useful for Discord 2k limits).
 
 ## Plugin Widgets
 

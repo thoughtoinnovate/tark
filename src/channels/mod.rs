@@ -961,10 +961,9 @@ impl ChannelManager {
             let queued = remote.registry().drain_queue(&session_id);
             if !queued.is_empty() {
                 for queued in queued {
-                    if let Err(err) = Box::pin(
-                        self.process_inbound_message(&queued.plugin_id, &queued.message),
-                    )
-                    .await
+                    if let Err(err) =
+                        Box::pin(self.process_inbound_message(&queued.plugin_id, &queued.message))
+                            .await
                     {
                         tracing::error!(
                             "Failed to process queued remote message {}: {}",
@@ -1477,6 +1476,51 @@ impl ChannelManager {
         plugin_id: &str,
         request: &ChannelSendRequest,
     ) -> Result<ChannelSendResult> {
+        let max_len = self.config.remote.max_message_chars;
+        if request.is_final && max_len > 0 && request.text.len() > max_len {
+            return self
+                .send_channel_message_chunked(plugin_id, request, max_len)
+                .await;
+        }
+
+        self.send_channel_message_inner(plugin_id, request).await
+    }
+
+    async fn send_channel_message_chunked(
+        &self,
+        plugin_id: &str,
+        request: &ChannelSendRequest,
+        max_len: usize,
+    ) -> Result<ChannelSendResult> {
+        let chunks = split_message_by_chars(&request.text, max_len);
+        let mut message_id = request.message_id.clone();
+        let mut first_result: Option<ChannelSendResult> = None;
+
+        for (idx, chunk) in chunks.into_iter().enumerate() {
+            let mut chunk_request = request.clone();
+            chunk_request.text = chunk;
+            chunk_request.message_id = if idx == 0 { message_id.clone() } else { None };
+            let result = self
+                .send_channel_message_inner(plugin_id, &chunk_request)
+                .await?;
+            if idx == 0 {
+                message_id = result.message_id.clone();
+                first_result = Some(result);
+            }
+        }
+
+        Ok(first_result.unwrap_or(ChannelSendResult {
+            success: true,
+            message_id,
+            error: None,
+        }))
+    }
+
+    async fn send_channel_message_inner(
+        &self,
+        plugin_id: &str,
+        request: &ChannelSendRequest,
+    ) -> Result<ChannelSendResult> {
         let plugin = self.load_channel_plugin(plugin_id)?;
         let request = request.clone();
         let request_for_send = request.clone();
@@ -1953,6 +1997,32 @@ fn normalize_multiline(value: &str, max_len: usize) -> String {
         end -= 1;
     }
     format!("{}...", &trimmed[..end])
+}
+
+fn split_message_by_chars(text: &str, max_len: usize) -> Vec<String> {
+    if max_len == 0 || text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = std::cmp::min(start + max_len, text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            break;
+        }
+        chunks.push(text[start..end].to_string());
+        start = end;
+    }
+
+    if chunks.is_empty() {
+        chunks.push(text.to_string());
+    }
+
+    chunks
 }
 
 fn finalize_response_text(
@@ -2726,5 +2796,17 @@ mod tests {
         assert!(was_empty);
         assert!(text.contains("fallback"));
         assert!(text.contains("Tools used: 0 call(s)."));
+    }
+
+    #[test]
+    fn test_split_message_by_chars_chunks_ascii() {
+        let chunks = split_message_by_chars("abcdef", 2);
+        assert_eq!(chunks, vec!["ab", "cd", "ef"]);
+    }
+
+    #[test]
+    fn test_split_message_by_chars_zero_limit() {
+        let chunks = split_message_by_chars("abcdef", 0);
+        assert_eq!(chunks, vec!["abcdef"]);
     }
 }

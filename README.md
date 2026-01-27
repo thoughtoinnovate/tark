@@ -563,6 +563,7 @@ Remote access is gated by allowlists in `.tark/config.toml`:
 ```toml
 [remote]
 http_enabled = false
+max_message_chars = 1800
 allowed_plugins = ["discord"]
 allowed_users = ["1234567890"]
 allowed_guilds = ["0987654321"]

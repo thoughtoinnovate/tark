@@ -63,6 +63,7 @@ In `.tark/config.toml`:
 ```toml
 [remote]
 http_enabled = false
+max_message_chars = 1800
 allowed_plugins = ["discord"]
 allowed_users = ["<your-discord-user-id>"]
 require_allowlist = true
