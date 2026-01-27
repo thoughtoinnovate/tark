@@ -1430,6 +1430,13 @@ impl Widget for Sidebar<'_> {
                     };
 
                     let status = widget.status.as_deref().unwrap_or("unknown").to_string();
+                    let status_color = if status.eq_ignore_ascii_case("connected") {
+                        self.theme.green
+                    } else if status.eq_ignore_ascii_case("disconnected") {
+                        self.theme.red
+                    } else {
+                        self.theme.text_muted
+                    };
                     let line_idx = plugin_lines.len();
                     panel_item_lines[5].push(line_idx);
                     Self::push_line(
@@ -1437,6 +1444,7 @@ impl Widget for Sidebar<'_> {
                         &mut all_lines,
                         Line::from(vec![
                             Span::raw("  "),
+                            Span::styled("● ", Style::default().fg(status_color)),
                             Span::styled(&widget.plugin_id, item_style),
                             Span::raw(" "),
                             Span::styled(
@@ -1528,6 +1536,11 @@ impl Widget for Sidebar<'_> {
         } else {
             1
         };
+        let git_height = if git_expanded {
+            git_lines.len() as u16
+        } else {
+            1
+        };
         let plugins_height = if plugins_expanded {
             plugin_lines.len() as u16
         } else {
@@ -1540,7 +1553,7 @@ impl Widget for Sidebar<'_> {
             Constraint::Length(context_height),
             Constraint::Length(tasks_height),
             Constraint::Length(todo_height),
-            Constraint::Min(1), // Git gets remaining space, scrolls if needed
+            Constraint::Length(git_height),
             Constraint::Length(plugins_height),
             Constraint::Length(footer_lines.len() as u16),
         ];
