@@ -38,6 +38,8 @@ pub struct FlashBar<'a> {
     kind: FlashBarState,
     /// Animation frame (0-4) for working state
     animation_frame: u8,
+    /// Whether working state should use remote accent styling
+    remote_working: bool,
     theme: &'a Theme,
 }
 
@@ -47,6 +49,7 @@ impl<'a> FlashBar<'a> {
             message: None,
             kind: FlashBarState::Idle,
             animation_frame: 0,
+            remote_working: false,
             theme,
         }
     }
@@ -66,6 +69,11 @@ impl<'a> FlashBar<'a> {
         self
     }
 
+    pub fn remote_working(mut self, remote_working: bool) -> Self {
+        self.remote_working = remote_working;
+        self
+    }
+
     /// Get the default message for a state
     fn default_message(&self) -> &'static str {
         match self.kind {
@@ -79,7 +87,7 @@ impl<'a> FlashBar<'a> {
     fn state_style(&self) -> Style {
         let fg = match self.kind {
             FlashBarState::Idle => self.theme.text_muted,
-            FlashBarState::Working => self.theme.cyan,
+            FlashBarState::Working => self.working_accent(),
             FlashBarState::Error => self.theme.red,
             FlashBarState::Warning => self.theme.yellow,
         };
@@ -190,6 +198,9 @@ impl FlashBar<'_> {
         let base_strength = 0.18;
         let pulse_strength = 0.45 + 0.55 * t;
 
+        let accent = self.working_accent();
+        let cap = blend_color(accent, self.theme.text_primary, 0.45);
+
         for x in area.left()..area.right() {
             let dist = ((x as f32) - center).abs();
             let falloff = if radius <= 0.0 {
@@ -206,10 +217,9 @@ impl FlashBar<'_> {
                 WORKING_BAR_THIN
             };
             let fg = if dist <= 0.5 {
-                let cap = blend_color(self.theme.cyan, self.theme.text_primary, 0.45);
                 blend_color(self.theme.bg_dark, cap, strength.max(0.9))
             } else {
-                blend_color(self.theme.bg_dark, self.theme.cyan, strength)
+                blend_color(self.theme.bg_dark, accent, strength)
             };
             let style = Style::default().fg(fg).bg(self.theme.bg_dark);
             buf[(x, center_y)].set_char(ch).set_style(style);
@@ -264,6 +274,16 @@ impl FlashBar<'_> {
             if x < area.right() {
                 buf[(x, y)].set_char(ch).set_style(state_style);
             }
+        }
+    }
+}
+
+impl FlashBar<'_> {
+    fn working_accent(&self) -> ratatui::style::Color {
+        if self.remote_working {
+            blend_color(self.theme.red, self.theme.text_primary, 0.35)
+        } else {
+            self.theme.cyan
         }
     }
 }

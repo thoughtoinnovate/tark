@@ -7,8 +7,11 @@
 pub mod remote;
 
 use crate::agent::{ChatAgent, ToolCallLog};
-use crate::channels::remote::{normalize_message_preview, RemoteEvent, RemoteRuntime};
+use crate::channels::remote::{
+    normalize_message_preview, QueuedRemoteMessage, RemoteEvent, RemoteRuntime,
+};
 use crate::config::Config;
+use crate::core::attachments::{base64_encode, format_size, AttachmentContent, MessageAttachment};
 use crate::core::types::AgentMode;
 use crate::llm;
 use crate::plugins::{
@@ -19,25 +22,57 @@ use crate::plugins::{
 use crate::secure_store;
 use crate::storage::usage::{UsageLog, UsageTracker};
 use crate::storage::{ChatSession, TarkStorage};
-use crate::tools::{ToolRegistry, TrustLevel};
+use crate::tools::questionnaire::{AnswerValue, Questionnaire, UserResponse};
+use crate::tools::{
+    interaction_channel, ApprovalChoice, ApprovalPattern, ApprovalRequest, ApprovalResponse,
+    InteractionRequest, MatchType, ToolRegistry, TrustLevel,
+};
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
+use reqwest::Url;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::time::{Duration, Instant};
 
 const STREAM_DEBOUNCE: Duration = Duration::from_millis(250);
 const STREAM_MIN_CHARS: usize = 200;
 const METADATA_RAW_LIMIT: usize = 2048;
 static CHANNEL_POLL_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+const REMOTE_INTERACTION_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[derive(Debug)]
+enum PendingInteraction {
+    Questionnaire {
+        data: Questionnaire,
+        responder: oneshot::Sender<UserResponse>,
+        created_at: Instant,
+    },
+    Approval {
+        request: ApprovalRequest,
+        responder: oneshot::Sender<ApprovalResponse>,
+        created_at: Instant,
+    },
+}
+
+impl PendingInteraction {
+    fn is_expired(&self) -> bool {
+        let created_at = match self {
+            PendingInteraction::Questionnaire { created_at, .. }
+            | PendingInteraction::Approval { created_at, .. } => *created_at,
+        };
+        created_at.elapsed() > REMOTE_INTERACTION_TIMEOUT
+    }
+}
 
 pub fn request_channel_shutdown() {
     CHANNEL_POLL_SHUTDOWN.store(true, Ordering::SeqCst);
@@ -67,6 +102,67 @@ pub struct ChannelManager {
     storage: Option<Arc<TarkStorage>>,
     usage_tracker: Option<Arc<UsageTracker>>,
     remote: Option<Arc<RemoteRuntime>>,
+    remote_provider_override: Option<String>,
+    remote_model_override: Option<String>,
+    pending_interactions:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, PendingInteraction>>>,
+}
+
+struct RemoteRunGuard {
+    remote: Option<Arc<RemoteRuntime>>,
+    session_id: String,
+    plugin_id: String,
+    conversation_id: String,
+    active: bool,
+}
+
+impl RemoteRunGuard {
+    fn new(
+        remote: Option<Arc<RemoteRuntime>>,
+        session_id: String,
+        plugin_id: String,
+        conversation_id: String,
+    ) -> Self {
+        Self {
+            remote,
+            session_id,
+            plugin_id,
+            conversation_id,
+            active: false,
+        }
+    }
+
+    fn activate(&mut self) {
+        self.active = true;
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for RemoteRunGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(remote) = &self.remote {
+            let _ = remote.registry().mark_status(
+                &self.session_id,
+                remote.runtime_id(),
+                &self.plugin_id,
+                &self.conversation_id,
+                "idle",
+            );
+            remote.emit(RemoteEvent::new(
+                "agent_done",
+                &self.plugin_id,
+                &self.session_id,
+                &self.conversation_id,
+                remote.runtime_id(),
+            ));
+        }
+    }
 }
 
 impl ChannelManager {
@@ -76,6 +172,8 @@ impl ChannelManager {
         storage: Option<Arc<TarkStorage>>,
         usage_tracker: Option<Arc<UsageTracker>>,
         remote: Option<Arc<RemoteRuntime>>,
+        remote_provider_override: Option<String>,
+        remote_model_override: Option<String>,
     ) -> Self {
         Self {
             config,
@@ -83,6 +181,9 @@ impl ChannelManager {
             storage,
             usage_tracker,
             remote,
+            remote_provider_override,
+            remote_model_override,
+            pending_interactions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -394,6 +495,37 @@ impl ChannelManager {
         )
     }
 
+    fn insert_pending_interaction(&self, conversation_id: String, pending: PendingInteraction) {
+        if let Ok(mut guard) = self.pending_interactions.lock() {
+            guard.insert(conversation_id, pending);
+        }
+    }
+
+    fn take_pending_interaction(&self, conversation_id: &str) -> Option<PendingInteraction> {
+        if let Ok(mut guard) = self.pending_interactions.lock() {
+            if let Some(pending) = guard.remove(conversation_id) {
+                if pending.is_expired() {
+                    return None;
+                }
+                return Some(pending);
+            }
+        }
+        None
+    }
+
+    fn has_pending_interaction(&self, conversation_id: &str) -> bool {
+        if let Ok(mut guard) = self.pending_interactions.lock() {
+            if let Some(pending) = guard.get(conversation_id) {
+                if pending.is_expired() {
+                    guard.remove(conversation_id);
+                    return false;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     async fn process_inbound_messages(
         &self,
         plugin_id: &str,
@@ -457,10 +589,34 @@ impl ChannelManager {
             }
         }
 
+        if let Some(pending) = self.take_pending_interaction(&message.conversation_id) {
+            self.handle_pending_interaction_response(plugin_id, message, pending, &remote_ctx)
+                .await?;
+            return Ok(());
+        }
+
+        let cmd = parse_remote_command(message, &remote_ctx);
         let mut session = self.load_session(&session_id)?;
+        if let Some(storage) = &self.storage {
+            if let Ok(current) = storage.load_current_session() {
+                if !current.mode.is_empty() {
+                    session.mode = current.mode.clone();
+                }
+            }
+        }
+        if let Some(cmd) = cmd.clone() {
+            let handled = self
+                .handle_remote_command(plugin_id, message, &mut session, cmd, &remote_ctx)
+                .await?;
+            if handled {
+                self.save_session(&session)?;
+                return Ok(());
+            }
+        }
         if session.name.is_empty() {
             session.set_name_from_prompt(&message.text);
         }
+        let previous_messages = session.messages.clone();
 
         let default_mode = self.default_remote_mode();
         if session.mode.is_empty()
@@ -478,19 +634,6 @@ impl ChannelManager {
         }
 
         if let Some(remote) = &self.remote {
-            let _ = remote.registry().update_context(
-                &session_id,
-                remote.runtime_id(),
-                plugin_id,
-                &message.conversation_id,
-                Some(session.provider.clone()),
-                Some(session.model.clone()),
-                Some(session.mode.clone()),
-                Some(trust_level.label().to_lowercase()),
-                remote_ctx.user_id.clone(),
-                remote_ctx.channel_id.clone(),
-                remote_ctx.guild_id.clone(),
-            );
             remote.emit(
                 RemoteEvent::new(
                     "inbound",
@@ -511,14 +654,125 @@ impl ChannelManager {
             );
         }
 
-        if let Some(cmd) = parse_remote_command(message, &remote_ctx) {
-            let handled = self
-                .handle_remote_command(plugin_id, message, &mut session, cmd, &remote_ctx)
-                .await?;
-            if handled {
-                self.save_session(&session)?;
-                return Ok(());
+        let mut remote_guard = RemoteRunGuard::new(
+            self.remote.clone(),
+            session_id.clone(),
+            plugin_id.to_string(),
+            message.conversation_id.clone(),
+        );
+        if let Some(remote) = &self.remote {
+            if cmd.is_none() {
+                let started = remote.registry().try_mark_running(
+                    &session_id,
+                    remote.runtime_id(),
+                    plugin_id,
+                    &message.conversation_id,
+                )?;
+                if !started {
+                    let preview = normalize_message_preview(&message.text);
+                    let queued = remote.registry().enqueue_message(
+                        &session_id,
+                        QueuedRemoteMessage {
+                            plugin_id: plugin_id.to_string(),
+                            message: message.clone(),
+                            received_at: Utc::now().to_rfc3339(),
+                        },
+                    )?;
+                    remote.emit(
+                        RemoteEvent::new(
+                            "queued",
+                            plugin_id,
+                            &session_id,
+                            &message.conversation_id,
+                            remote.runtime_id(),
+                        )
+                        .with_user(remote_ctx.user_id.clone())
+                        .with_message(preview.clone())
+                        .with_metadata(serde_json::json!({
+                            "count": queued,
+                            "preview": preview,
+                        })),
+                    );
+                    let queue_text = format!(
+                        "⏳ Busy... queued at position {}. Use `/tark interrupt` to cancel the current task.",
+                        queued
+                    );
+                    let _ = self
+                        .send_channel_message(
+                            plugin_id,
+                            &ChannelSendRequest {
+                                conversation_id: message.conversation_id.clone(),
+                                text: queue_text,
+                                message_id: None,
+                                is_final: true,
+                                metadata_json: message.metadata_json.clone(),
+                            },
+                        )
+                        .await?;
+                    return Ok(());
+                }
+
+                remote_guard.activate();
+                let _ = remote.registry().clear_interrupt(&session_id);
+                remote.emit(RemoteEvent::new(
+                    "agent_start",
+                    plugin_id,
+                    &session_id,
+                    &message.conversation_id,
+                    remote.runtime_id(),
+                ));
             }
+        }
+
+        if previous_messages.is_empty() {
+            let header = format!(
+                "── Session: {} · {} ──",
+                if session.name.is_empty() {
+                    "New session"
+                } else {
+                    session.name.as_str()
+                },
+                Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+            );
+            let _ = self
+                .send_channel_message(
+                    plugin_id,
+                    &ChannelSendRequest {
+                        conversation_id: message.conversation_id.clone(),
+                        text: header,
+                        message_id: None,
+                        is_final: true,
+                        metadata_json: message.metadata_json.clone(),
+                    },
+                )
+                .await;
+        }
+
+        if let Some(provider) = &self.remote_provider_override {
+            if self.provider_allowed(provider) {
+                session.provider = provider.clone();
+            }
+        }
+        if let Some(model) = &self.remote_model_override {
+            if self.model_allowed(model) {
+                session.model = model.clone();
+            }
+        }
+
+        if let Some(remote) = &self.remote {
+            let _ = remote.registry().update_context(
+                &session_id,
+                remote.runtime_id(),
+                plugin_id,
+                &message.conversation_id,
+                Some(session.provider.clone()),
+                Some(session.model.clone()),
+                Some(session.mode.clone()),
+                Some(trust_level.label().to_lowercase()),
+                remote_ctx.user_id.clone(),
+                remote_ctx.channel_id.clone(),
+                remote_ctx.guild_id.clone(),
+            );
         }
 
         let provider_name = if session.provider.is_empty() {
@@ -533,14 +787,20 @@ impl ChannelManager {
             Some(session.model.as_str())
         };
 
+        let agent_mode: AgentMode = session.mode.parse().unwrap_or(AgentMode::Ask);
+        let (interaction_tx, interaction_rx) = interaction_channel();
+
         let provider = llm::create_provider_with_options(&provider_name, true, model_override)?;
         let provider: Arc<dyn llm::LlmProvider> = Arc::from(provider);
 
-        let mut tools =
-            ToolRegistry::with_defaults(self.working_dir.clone(), self.config.tools.shell_enabled);
+        let mut tools = ToolRegistry::for_mode_with_interaction(
+            self.working_dir.clone(),
+            agent_mode,
+            self.config.tools.shell_enabled,
+            Some(interaction_tx),
+        );
         tools.set_tool_timeout_secs(self.config.tools.tool_timeout_secs);
 
-        let agent_mode: AgentMode = session.mode.parse().unwrap_or(AgentMode::Ask);
         let mut agent = ChatAgent::with_mode(provider, tools, agent_mode)
             .with_max_iterations(self.config.agent.max_iterations);
         agent.set_thinking_config(self.config.thinking.clone());
@@ -548,49 +808,119 @@ impl ChannelManager {
         agent.set_trust_level(trust_level).await;
         agent.restore_from_session(&session);
 
-        if let Some(remote) = &self.remote {
-            let _ = remote.registry().mark_status(
-                &session_id,
-                remote.runtime_id(),
-                plugin_id,
-                &message.conversation_id,
-                "running",
-            );
-            remote.emit(RemoteEvent::new(
-                "agent_start",
-                plugin_id,
-                &session_id,
-                &message.conversation_id,
-                remote.runtime_id(),
-            ));
+        let attachments = parse_remote_attachments(&message.metadata_json);
+        let (attachment_prompt, attachment_display) = build_remote_attachment_context(
+            &attachments,
+            &self.config.remote.attachments,
+            &provider_name,
+            model_override,
+        )
+        .await;
+        let user_text = message.text.trim().to_string();
+        let base_prompt = if user_text.is_empty() && !attachment_prompt.is_empty() {
+            "Please analyze the attachment.".to_string()
+        } else {
+            message.text.clone()
+        };
+        let prompt_text = if attachment_prompt.is_empty() {
+            base_prompt.clone()
+        } else if base_prompt.trim().is_empty() {
+            attachment_prompt.clone()
+        } else {
+            format!("{}\n\n{}", base_prompt, attachment_prompt)
+        };
+
+        let manager = self.clone();
+        let plugin_id_owned = plugin_id.to_string();
+        let conversation_id = message.conversation_id.clone();
+        let metadata_json = message.metadata_json.clone();
+        let remote_ctx = remote_ctx.clone();
+        tokio::spawn(async move {
+            manager
+                .handle_interactions(
+                    plugin_id_owned,
+                    conversation_id,
+                    interaction_rx,
+                    metadata_json,
+                    remote_ctx,
+                )
+                .await;
+        });
+
+        let mut initial_message_id = None;
+        if channel_info.supports_streaming || channel_info.supports_edits {
+            let working_request = ChannelSendRequest {
+                conversation_id: message.conversation_id.clone(),
+                text: "⏳ Working...".to_string(),
+                message_id: None,
+                is_final: false,
+                metadata_json: message.metadata_json.clone(),
+            };
+            if let Ok(result) = self.send_channel_message(plugin_id, &working_request).await {
+                initial_message_id = result.message_id;
+            }
         }
 
         let response = if channel_info.supports_streaming {
             Some(
-                self.respond_streaming(plugin_id, message, &mut agent)
-                    .await?,
+                self.respond_streaming(
+                    plugin_id,
+                    message,
+                    &mut agent,
+                    &prompt_text,
+                    initial_message_id,
+                    true,
+                )
+                .await?,
             )
         } else {
-            Some(agent.chat(&message.text).await?)
+            Some(
+                self.respond_streaming(
+                    plugin_id,
+                    message,
+                    &mut agent,
+                    &prompt_text,
+                    initial_message_id,
+                    false,
+                )
+                .await?,
+            )
         };
 
+        let mut response_text_override: Option<String> = None;
         if let Some(response) = response.as_ref() {
             let summary = build_tool_summary(response.tool_calls_made, &response.tool_call_log);
-            let send_request = ChannelSendRequest {
-                conversation_id: message.conversation_id.clone(),
-                text: append_tool_summary(response.text.clone(), summary.as_ref()),
-                message_id: None,
-                is_final: true,
-                metadata_json: build_metadata_json(
-                    &message.metadata_json,
-                    response.tool_calls_made,
-                    &response.tool_call_log,
-                ),
+            let fallback_text = if !response.tool_call_log.is_empty() {
+                "Tool activity sent below.".to_string()
+            } else {
+                "I’m ready when you are. Please ask a specific question.".to_string()
             };
-            let _ = self.send_channel_message(plugin_id, &send_request).await?;
+            let (response_text, _was_empty) =
+                finalize_response_text(&response.text, &fallback_text, summary.as_ref());
+            if response.text.trim().is_empty() {
+                if let Some(tool_text) = format_tool_log_for_remote(&response.tool_call_log) {
+                    response_text_override = Some(format!("Tool result:\n{}", tool_text));
+                } else {
+                    response_text_override = Some(response_text.clone());
+                }
+            }
         }
 
-        session.messages = agent.get_messages_for_session();
+        let mut new_messages = agent.get_messages_for_session();
+        sanitize_last_user_message(&mut new_messages, &base_prompt, &attachment_display);
+        if let Some(override_text) = response_text_override {
+            if let Some(last_assistant) = new_messages
+                .iter_mut()
+                .rev()
+                .find(|msg| msg.role == "assistant")
+            {
+                if last_assistant.content.trim().is_empty() {
+                    last_assistant.content = override_text;
+                }
+            }
+        }
+        apply_remote_flags(&mut new_messages, &previous_messages, true);
+        session.messages = new_messages;
         session.updated_at = Utc::now();
         session.provider = provider_name.clone();
         session.mode = agent_mode.to_string();
@@ -624,9 +954,232 @@ impl ChannelManager {
             ));
         }
 
+        remote_guard.disarm();
         self.save_session(&session)?;
 
+        if let Some(remote) = &self.remote {
+            let queued = remote.registry().drain_queue(&session_id);
+            if !queued.is_empty() {
+                for queued in queued {
+                    if let Err(err) = Box::pin(
+                        self.process_inbound_message(&queued.plugin_id, &queued.message),
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            "Failed to process queued remote message {}: {}",
+                            queued.message.conversation_id,
+                            err
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    async fn handle_pending_interaction_response(
+        &self,
+        plugin_id: &str,
+        message: &ChannelInboundMessage,
+        pending: PendingInteraction,
+        remote_ctx: &RemoteContext,
+    ) -> Result<()> {
+        match pending {
+            PendingInteraction::Questionnaire {
+                data, responder, ..
+            } => {
+                let response = parse_questionnaire_response(&data, &message.text);
+                let _ = responder.send(response);
+                let ack = ChannelSendRequest {
+                    conversation_id: message.conversation_id.clone(),
+                    text: "✅ Response received.".to_string(),
+                    message_id: None,
+                    is_final: true,
+                    metadata_json: message.metadata_json.clone(),
+                };
+                let _ = self.send_channel_message(plugin_id, &ack).await;
+                if let Some(remote) = &self.remote {
+                    remote.emit(
+                        RemoteEvent::new(
+                            "ask_user_answer",
+                            plugin_id,
+                            channel_session_id(plugin_id, &message.conversation_id),
+                            &message.conversation_id,
+                            remote.runtime_id(),
+                        )
+                        .with_user(remote_ctx.user_id.clone())
+                        .with_message(normalize_message_preview(&message.text)),
+                    );
+                }
+            }
+            PendingInteraction::Approval {
+                request, responder, ..
+            } => {
+                let response = parse_approval_response(&request, &message.text);
+                let _ = responder.send(response);
+                let ack = ChannelSendRequest {
+                    conversation_id: message.conversation_id.clone(),
+                    text: "✅ Approval response received.".to_string(),
+                    message_id: None,
+                    is_final: true,
+                    metadata_json: message.metadata_json.clone(),
+                };
+                let _ = self.send_channel_message(plugin_id, &ack).await;
+                if let Some(remote) = &self.remote {
+                    remote.emit(
+                        RemoteEvent::new(
+                            "approval_answer",
+                            plugin_id,
+                            channel_session_id(plugin_id, &message.conversation_id),
+                            &message.conversation_id,
+                            remote.runtime_id(),
+                        )
+                        .with_user(remote_ctx.user_id.clone())
+                        .with_message(normalize_message_preview(&message.text)),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_interactions(
+        &self,
+        plugin_id: String,
+        conversation_id: String,
+        mut rx: crate::tools::InteractionReceiver,
+        metadata_json: String,
+        remote_ctx: RemoteContext,
+    ) {
+        while let Some(request) = rx.recv().await {
+            match request {
+                InteractionRequest::Questionnaire { data, responder } => {
+                    if self.has_pending_interaction(&conversation_id) {
+                        let _ = responder.send(UserResponse::cancelled());
+                        let _ = self
+                            .send_channel_message(
+                                &plugin_id,
+                                &ChannelSendRequest {
+                                    conversation_id: conversation_id.clone(),
+                                    text: "A question is already pending. Reply to it first."
+                                        .to_string(),
+                                    message_id: None,
+                                    is_final: true,
+                                    metadata_json: metadata_json.clone(),
+                                },
+                            )
+                            .await;
+                        continue;
+                    }
+
+                    let prompt = format_questionnaire_for_remote(&data);
+                    let send = self
+                        .send_channel_message(
+                            &plugin_id,
+                            &ChannelSendRequest {
+                                conversation_id: conversation_id.clone(),
+                                text: prompt.clone(),
+                                message_id: None,
+                                is_final: true,
+                                metadata_json: metadata_json.clone(),
+                            },
+                        )
+                        .await;
+
+                    if send.is_err() {
+                        let _ = responder.send(UserResponse::cancelled());
+                        continue;
+                    }
+
+                    if let Some(remote) = &self.remote {
+                        remote.emit(
+                            RemoteEvent::new(
+                                "ask_user",
+                                &plugin_id,
+                                channel_session_id(&plugin_id, &conversation_id),
+                                &conversation_id,
+                                remote.runtime_id(),
+                            )
+                            .with_user(remote_ctx.user_id.clone())
+                            .with_message(normalize_message_preview(&prompt)),
+                        );
+                    }
+
+                    self.insert_pending_interaction(
+                        conversation_id.clone(),
+                        PendingInteraction::Questionnaire {
+                            data,
+                            responder,
+                            created_at: Instant::now(),
+                        },
+                    );
+                }
+                InteractionRequest::Approval { request, responder } => {
+                    if self.has_pending_interaction(&conversation_id) {
+                        let _ = responder.send(ApprovalResponse::deny());
+                        let _ = self
+                            .send_channel_message(
+                                &plugin_id,
+                                &ChannelSendRequest {
+                                    conversation_id: conversation_id.clone(),
+                                    text:
+                                        "An approval request is already pending. Reply to it first."
+                                            .to_string(),
+                                    message_id: None,
+                                    is_final: true,
+                                    metadata_json: metadata_json.clone(),
+                                },
+                            )
+                            .await;
+                        continue;
+                    }
+
+                    let prompt = format_approval_for_remote(&request);
+                    let send = self
+                        .send_channel_message(
+                            &plugin_id,
+                            &ChannelSendRequest {
+                                conversation_id: conversation_id.clone(),
+                                text: prompt.clone(),
+                                message_id: None,
+                                is_final: true,
+                                metadata_json: metadata_json.clone(),
+                            },
+                        )
+                        .await;
+
+                    if send.is_err() {
+                        let _ = responder.send(ApprovalResponse::deny());
+                        continue;
+                    }
+
+                    if let Some(remote) = &self.remote {
+                        remote.emit(
+                            RemoteEvent::new(
+                                "approval_request",
+                                &plugin_id,
+                                channel_session_id(&plugin_id, &conversation_id),
+                                &conversation_id,
+                                remote.runtime_id(),
+                            )
+                            .with_user(remote_ctx.user_id.clone())
+                            .with_message(normalize_message_preview(&prompt)),
+                        );
+                    }
+
+                    self.insert_pending_interaction(
+                        conversation_id.clone(),
+                        PendingInteraction::Approval {
+                            request,
+                            responder,
+                            created_at: Instant::now(),
+                        },
+                    );
+                }
+            }
+        }
     }
 
     async fn respond_streaming(
@@ -634,84 +1187,240 @@ impl ChannelManager {
         plugin_id: &str,
         message: &ChannelInboundMessage,
         agent: &mut ChatAgent,
+        prompt_text: &str,
+        initial_message_id: Option<String>,
+        stream_to_channel: bool,
     ) -> Result<crate::agent::AgentResponse> {
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let tx_stream = tx.clone();
         let final_text = Arc::new(std::sync::Mutex::new(String::new()));
         let final_text_clone = Arc::clone(&final_text);
-        let message_id = Arc::new(std::sync::Mutex::new(None::<String>));
+        let message_id = Arc::new(std::sync::Mutex::new(initial_message_id));
         let message_id_clone = Arc::clone(&message_id);
         let manager = self.clone();
         let plugin_id = plugin_id.to_string();
         let plugin_id_clone = plugin_id.clone();
         let conversation_id = message.conversation_id.clone();
+        let sender_conversation_id = conversation_id.clone();
+        let stream_conversation_id = conversation_id.clone();
+        let stream_plugin_id = plugin_id.clone();
         let metadata_json = message.metadata_json.clone();
+        let remote_runtime = self.remote.clone();
+        let remote_runtime_text = remote_runtime.clone();
+        let remote_runtime_tool = remote_runtime.clone();
+        let remote_runtime_tool_complete = remote_runtime.clone();
+        let session_id = channel_session_id(&plugin_id, &conversation_id);
+        let session_id_text = session_id.clone();
+        let session_id_tool = session_id.clone();
+        let session_id_tool_complete = session_id.clone();
+        let tool_events_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tool_events_sent_call = Arc::clone(&tool_events_sent);
+        let tool_events_sent_complete = Arc::clone(&tool_events_sent);
+        let tool_plugin_id = plugin_id.clone();
+        let tool_plugin_id_call = tool_plugin_id.clone();
+        let tool_plugin_id_complete = tool_plugin_id.clone();
+        let tool_conversation_id = conversation_id.clone();
+        let tool_conversation_id_call = tool_conversation_id.clone();
+        let tool_conversation_id_complete = tool_conversation_id.clone();
+        let tool_metadata_json = metadata_json.clone();
+        let tool_metadata_json_call = tool_metadata_json.clone();
+        let tool_metadata_json_complete = tool_metadata_json.clone();
+        let tool_manager = self.clone();
+        let tool_manager_call = tool_manager.clone();
+        let tool_manager_complete = tool_manager.clone();
+        let interrupt_flag = Arc::new(AtomicBool::new(false));
+        let interrupt_flag_check = Arc::clone(&interrupt_flag);
+        let interrupt_session_id = session_id.clone();
+        let interrupt_remote = self.remote.clone();
 
-        let sender = tokio::spawn(async move {
-            let mut accumulated = String::new();
-            let mut last_sent = Instant::now();
-            let mut message_id_local: Option<String> = None;
+        let sender = if stream_to_channel {
+            Some(tokio::spawn(async move {
+                let mut accumulated = String::new();
+                let mut last_sent = Instant::now();
+                let mut message_id_local =
+                    message_id_clone.lock().ok().and_then(|guard| guard.clone());
 
-            while let Some(chunk) = rx.recv().await {
-                accumulated.push_str(&chunk);
-                let should_send =
-                    accumulated.len() >= STREAM_MIN_CHARS || last_sent.elapsed() >= STREAM_DEBOUNCE;
-                if !should_send {
-                    continue;
+                while let Some(chunk) = rx.recv().await {
+                    accumulated.push_str(&chunk);
+                    let should_send = accumulated.len() >= STREAM_MIN_CHARS
+                        || last_sent.elapsed() >= STREAM_DEBOUNCE;
+                    if !should_send {
+                        continue;
+                    }
+
+                    let send_request = ChannelSendRequest {
+                        conversation_id: sender_conversation_id.clone(),
+                        text: accumulated.clone(),
+                        message_id: message_id_local.clone(),
+                        is_final: false,
+                        metadata_json: metadata_json.clone(),
+                    };
+                    if let Ok(result) = manager
+                        .send_channel_message(&plugin_id_clone, &send_request)
+                        .await
+                    {
+                        if message_id_local.is_none() {
+                            message_id_local = result.message_id;
+                        }
+                    }
+
+                    last_sent = Instant::now();
                 }
-
-                let send_request = ChannelSendRequest {
-                    conversation_id: conversation_id.clone(),
-                    text: accumulated.clone(),
-                    message_id: message_id_local.clone(),
-                    is_final: false,
-                    metadata_json: metadata_json.clone(),
-                };
-                if let Ok(result) = manager
-                    .send_channel_message(&plugin_id_clone, &send_request)
-                    .await
-                {
-                    if message_id_local.is_none() {
-                        message_id_local = result.message_id;
+                if let Ok(mut guard) = message_id_clone.lock() {
+                    if guard.is_none() {
+                        *guard = message_id_local;
                     }
                 }
-
-                last_sent = Instant::now();
-            }
-            if let Ok(mut guard) = message_id_clone.lock() {
-                if guard.is_none() {
-                    *guard = message_id_local;
-                }
-            }
-        });
+            }))
+        } else {
+            None
+        };
 
         let response = agent
             .chat_streaming(
-                &message.text,
-                || false,
+                prompt_text,
+                move || {
+                    if let Some(remote) = &interrupt_remote {
+                        if remote.registry().is_interrupted(&interrupt_session_id) {
+                            interrupt_flag_check.store(true, Ordering::SeqCst);
+                            return true;
+                        }
+                    }
+                    false
+                },
                 move |chunk| {
                     if let Ok(mut guard) = final_text_clone.lock() {
                         guard.push_str(&chunk);
                     }
-                    let _ = tx_stream.send(chunk);
+                    if let Some(remote) = &remote_runtime_text {
+                        remote.emit(
+                            RemoteEvent::new(
+                                "stream_chunk",
+                                &stream_plugin_id,
+                                &session_id_text,
+                                &stream_conversation_id,
+                                remote.runtime_id(),
+                            )
+                            .with_message(chunk.clone()),
+                        );
+                    }
+                    if stream_to_channel {
+                        let _ = tx_stream.send(chunk);
+                    }
                 },
                 |_| {},
-                |_, _| {},
-                |_, _, _| {},
+                move |tool_name, args| {
+                    tool_events_sent_call.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(remote) = &remote_runtime_tool {
+                        remote.emit(
+                            RemoteEvent::new(
+                                "tool_started",
+                                &tool_plugin_id_call,
+                                &session_id_tool,
+                                &tool_conversation_id_call,
+                                remote.runtime_id(),
+                            )
+                            .with_metadata(serde_json::json!({
+                                "name": tool_name,
+                                "args": args,
+                            })),
+                        );
+                    }
+                    let args_preview = if args.len() > 300 {
+                        format!("{}…", crate::core::truncate_at_char_boundary(&args, 300))
+                    } else {
+                        args.clone()
+                    };
+                    let tool_text = if args_preview.is_empty() {
+                        format!("🔧 Running `{}`", tool_name)
+                    } else {
+                        format!("🔧 Running `{}`\nArgs: {}", tool_name, args_preview)
+                    };
+                    let request = ChannelSendRequest {
+                        conversation_id: tool_conversation_id_call.clone(),
+                        text: tool_text,
+                        message_id: None,
+                        is_final: true,
+                        metadata_json: tool_metadata_json_call.clone(),
+                    };
+                    let manager = tool_manager_call.clone();
+                    let tool_plugin_id = tool_plugin_id_call.clone();
+                    tokio::spawn(async move {
+                        let _ = manager
+                            .send_channel_message(&tool_plugin_id, &request)
+                            .await;
+                    });
+                },
+                move |tool_name, result, success| {
+                    tool_events_sent_complete.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(remote) = &remote_runtime_tool_complete {
+                        remote.emit(
+                            RemoteEvent::new(
+                                if success {
+                                    "tool_completed"
+                                } else {
+                                    "tool_failed"
+                                },
+                                &tool_plugin_id_complete,
+                                &session_id_tool_complete,
+                                &tool_conversation_id_complete,
+                                remote.runtime_id(),
+                            )
+                            .with_metadata(serde_json::json!({
+                                "name": tool_name,
+                                "result": result,
+                                "success": success,
+                            })),
+                        );
+                    }
+                    let result_preview = if result.len() > 400 {
+                        format!("{}…", crate::core::truncate_at_char_boundary(&result, 400))
+                    } else {
+                        result.clone()
+                    };
+                    let tool_text = if success {
+                        format!("✅ Completed `{}`\n{}", tool_name, result_preview)
+                    } else {
+                        format!("❌ Failed `{}`\n{}", tool_name, result_preview)
+                    };
+                    let request = ChannelSendRequest {
+                        conversation_id: tool_conversation_id_complete.clone(),
+                        text: tool_text,
+                        message_id: None,
+                        is_final: true,
+                        metadata_json: tool_metadata_json_complete.clone(),
+                    };
+                    let manager = tool_manager_complete.clone();
+                    let tool_plugin_id = tool_plugin_id_complete.clone();
+                    tokio::spawn(async move {
+                        let _ = manager
+                            .send_channel_message(&tool_plugin_id, &request)
+                            .await;
+                    });
+                },
                 |_| {},
             )
             .await?;
 
         drop(tx);
-        let _ = sender.await;
+        if let Some(sender) = sender {
+            let _ = sender.await;
+        }
 
         let summary = build_tool_summary(response.tool_calls_made, &response.tool_call_log);
         let fallback_text = final_text
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let (response_text, response_was_empty) =
+        let (mut response_text, response_was_empty) =
             finalize_response_text(&response.text, &fallback_text, summary.as_ref());
+        let mut send_tool_log = !tool_events_sent.load(std::sync::atomic::Ordering::Relaxed);
+        if response.text.trim().is_empty() {
+            if let Some(tool_text) = format_tool_log_for_remote(&response.tool_call_log) {
+                response_text = format!("Tool result:\n{}", tool_text);
+                send_tool_log = false;
+            }
+        }
         let response_message_id = message_id.lock().ok().and_then(|guard| guard.clone());
         let final_request = ChannelSendRequest {
             conversation_id: message.conversation_id.clone(),
@@ -728,6 +1437,25 @@ impl ChannelManager {
             .send_channel_message(&plugin_id, &final_request)
             .await?;
 
+        if send_tool_log {
+            if let Some(tool_text) = format_tool_log_for_remote(&response.tool_call_log) {
+                let tool_request = ChannelSendRequest {
+                    conversation_id: message.conversation_id.clone(),
+                    text: tool_text,
+                    message_id: None,
+                    is_final: true,
+                    metadata_json: message.metadata_json.clone(),
+                };
+                let _ = self.send_channel_message(&plugin_id, &tool_request).await?;
+            }
+        }
+
+        if interrupt_flag.load(Ordering::SeqCst) {
+            if let Some(remote) = &self.remote {
+                let _ = remote.registry().clear_interrupt(&session_id);
+            }
+        }
+
         if response_was_empty {
             tracing::warn!("Streaming response was empty");
         }
@@ -735,7 +1463,7 @@ impl ChannelManager {
         Ok(response)
     }
 
-    async fn channel_info(&self, plugin_id: &str) -> Result<ChannelInfo> {
+    pub async fn channel_info(&self, plugin_id: &str) -> Result<ChannelInfo> {
         let plugin = self.load_channel_plugin(plugin_id)?;
         tokio::task::spawn_blocking({
             let manager = self.clone();
@@ -744,7 +1472,7 @@ impl ChannelManager {
         .await?
     }
 
-    async fn send_channel_message(
+    pub async fn send_channel_message(
         &self,
         plugin_id: &str,
         request: &ChannelSendRequest,
@@ -888,26 +1616,35 @@ impl ChannelManager {
 
         let mut response = match cmd {
             RemoteCommand::Help => Some(
-                "Commands: /tark status | /tark mode <ask|plan|build> | /tark model <id> | /tark provider <id> | /tark trust <manual|careful|balanced> | /tark usage | /tark stop | /tark resume".to_string(),
+                "Commands: /tark status | /tark mode <ask|plan|build> | /tark model <id> | /tark provider <id> | /tark trust <manual|careful|balanced> | /tark usage | /tark stop | /tark resume | /tark interrupt".to_string(),
             ),
-            RemoteCommand::Status => Some(format!(
-                "session={} mode={} trust={} provider={} model={}",
-                session.id,
-                session.mode,
-                trust_from_approval_mode(&session.approval_mode)
-                    .unwrap_or(self.default_remote_trust())
-                    .label(),
-                if session.provider.is_empty() {
-                    self.config.llm.default_provider.clone()
+            RemoteCommand::Status => {
+                let queued = remote.registry().queued_count(&session.id);
+                let queued_suffix = if queued > 0 {
+                    format!(" queued={}", queued)
                 } else {
-                    session.provider.clone()
-                },
-                if session.model.is_empty() {
-                    "(default)".to_string()
-                } else {
-                    session.model.clone()
-                }
-            )),
+                    String::new()
+                };
+                Some(format!(
+                    "session={} mode={} trust={} provider={} model={}{}",
+                    session.id,
+                    session.mode,
+                    trust_from_approval_mode(&session.approval_mode)
+                        .unwrap_or(self.default_remote_trust())
+                        .label(),
+                    if session.provider.is_empty() {
+                        self.config.llm.default_provider.clone()
+                    } else {
+                        session.provider.clone()
+                    },
+                    if session.model.is_empty() {
+                        "(default)".to_string()
+                    } else {
+                        session.model.clone()
+                    },
+                    queued_suffix
+                ))
+            }
             RemoteCommand::Stop => {
                 remote.registry().stop_session(&session.id)?;
                 Some("Session stopped.".to_string())
@@ -915,6 +1652,10 @@ impl ChannelManager {
             RemoteCommand::Resume => {
                 remote.registry().resume_session(&session.id)?;
                 Some("Session resumed.".to_string())
+            }
+            RemoteCommand::Interrupt => {
+                remote.registry().interrupt_session(&session.id)?;
+                Some("⏹ Interrupt requested. Current task will stop shortly.".to_string())
             }
             RemoteCommand::Mode(mode) => {
                 if !self.config.remote.allow_mode_change {
@@ -1184,6 +1925,36 @@ fn append_tool_summary(text: String, summary: Option<&ToolSummary>) -> String {
     }
 }
 
+fn format_tool_log_for_remote(tool_log: &[ToolCallLog]) -> Option<String> {
+    if tool_log.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    lines.push(format!("Tool activity ({}):", tool_log.len()));
+    for (idx, entry) in tool_log.iter().enumerate() {
+        let args = serde_json::to_string_pretty(&entry.args).unwrap_or_default();
+        let result = entry.result_preview.trim();
+        lines.push(format!("{}. {}", idx + 1, entry.tool));
+        lines.push(format!("   Args: {}", normalize_multiline(&args, 2000)));
+        if !result.is_empty() {
+            lines.push(format!("   Result: {}", normalize_multiline(result, 2000)));
+        }
+    }
+    Some(lines.join("\n"))
+}
+
+fn normalize_multiline(value: &str, max_len: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() <= max_len {
+        return trimmed.to_string();
+    }
+    let mut end = max_len;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &trimmed[..end])
+}
+
 fn finalize_response_text(
     response_text: &str,
     fallback_text: &str,
@@ -1251,12 +2022,245 @@ fn tool_log_is_empty(log: &[ToolCallLog]) -> bool {
     log.is_empty()
 }
 
+fn apply_remote_flags(
+    new_messages: &mut [crate::storage::SessionMessage],
+    previous: &[crate::storage::SessionMessage],
+    mark_new_as_remote: bool,
+) {
+    for (idx, msg) in new_messages.iter_mut().enumerate() {
+        if let Some(prev) = previous.get(idx) {
+            msg.remote = prev.remote;
+            continue;
+        }
+        if mark_new_as_remote {
+            let role = msg.role.as_str();
+            if matches!(role, "user" | "assistant") {
+                msg.remote = true;
+            }
+        }
+    }
+}
+
+pub(crate) fn format_questionnaire_for_remote(questionnaire: &Questionnaire) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("Question: {}", questionnaire.title));
+    if let Some(desc) = &questionnaire.description {
+        if !desc.trim().is_empty() {
+            lines.push(desc.trim().to_string());
+        }
+    }
+    for (idx, question) in questionnaire.questions.iter().enumerate() {
+        lines.push(format!("{}. {} ({})", idx + 1, question.text, question.id));
+        match &question.kind {
+            crate::tools::questionnaire::QuestionType::SingleSelect { options, .. } => {
+                let opts = options
+                    .iter()
+                    .map(|o| format!("{} ({})", o.label, o.value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("   Options: {}", opts));
+            }
+            crate::tools::questionnaire::QuestionType::MultiSelect { options, .. } => {
+                let opts = options
+                    .iter()
+                    .map(|o| format!("{} ({})", o.label, o.value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("   Options (multi): {}", opts));
+            }
+            crate::tools::questionnaire::QuestionType::FreeText { placeholder, .. } => {
+                if let Some(placeholder) = placeholder {
+                    if !placeholder.trim().is_empty() {
+                        lines.push(format!("   Hint: {}", placeholder.trim()));
+                    }
+                }
+            }
+        }
+    }
+
+    if questionnaire.questions.len() == 1 {
+        lines.push("Reply with your answer.".to_string());
+    } else {
+        lines.push(
+            "Reply with one line per question: <id>: <answer> (or send a JSON object).".to_string(),
+        );
+    }
+
+    lines.join("\n")
+}
+
+fn parse_questionnaire_response(questionnaire: &Questionnaire, text: &str) -> UserResponse {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("cancel") {
+        return UserResponse::cancelled();
+    }
+
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(obj) = json.as_object() {
+            let mut answers = std::collections::HashMap::new();
+            for question in &questionnaire.questions {
+                if let Some(value) = obj.get(&question.id) {
+                    let answer = match value {
+                        serde_json::Value::Array(values) => {
+                            let vals = values.iter().filter_map(json_value_to_string).collect();
+                            AnswerValue::Multi(vals)
+                        }
+                        _ => AnswerValue::Single(json_value_to_string(value).unwrap_or_default()),
+                    };
+                    answers.insert(question.id.clone(), answer);
+                }
+            }
+            if !answers.is_empty() {
+                return UserResponse::with_answers(answers);
+            }
+        }
+    }
+
+    let mut answers = std::collections::HashMap::new();
+    let keyed = parse_keyed_answers(trimmed);
+
+    if questionnaire.questions.len() == 1 {
+        let question = &questionnaire.questions[0];
+        let answer = answer_for_question(question, trimmed);
+        answers.insert(question.id.clone(), answer);
+        return UserResponse::with_answers(answers);
+    }
+
+    if !keyed.is_empty() {
+        for question in &questionnaire.questions {
+            if let Some(value) = keyed.get(&question.id) {
+                answers.insert(question.id.clone(), answer_for_question(question, value));
+            }
+        }
+    }
+
+    if answers.is_empty() {
+        if let Some(question) = questionnaire.questions.first() {
+            answers.insert(question.id.clone(), answer_for_question(question, trimmed));
+        }
+    }
+
+    UserResponse::with_answers(answers)
+}
+
+fn parse_keyed_answers(text: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim();
+            let value = value.trim();
+            if !key.is_empty() && !value.is_empty() {
+                map.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+    map
+}
+
+fn answer_for_question(
+    question: &crate::tools::questionnaire::Question,
+    text: &str,
+) -> AnswerValue {
+    let trimmed = text.trim();
+    match &question.kind {
+        crate::tools::questionnaire::QuestionType::SingleSelect { options, .. } => {
+            AnswerValue::Single(match_option(trimmed, options))
+        }
+        crate::tools::questionnaire::QuestionType::MultiSelect { options, .. } => {
+            let values = split_multi_values(trimmed)
+                .into_iter()
+                .map(|value| match_option(&value, options))
+                .collect();
+            AnswerValue::Multi(values)
+        }
+        crate::tools::questionnaire::QuestionType::FreeText { .. } => {
+            AnswerValue::Single(trimmed.to_string())
+        }
+    }
+}
+
+fn split_multi_values(text: &str) -> Vec<String> {
+    text.split([',', ';', '|'])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn match_option(input: &str, options: &[crate::tools::questionnaire::OptionItem]) -> String {
+    for opt in options {
+        if opt.value.eq_ignore_ascii_case(input) || opt.label.eq_ignore_ascii_case(input) {
+            return opt.value.clone();
+        }
+    }
+    input.to_string()
+}
+
+fn json_value_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn format_approval_for_remote(request: &ApprovalRequest) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("Approval needed: {}", request.tool));
+    lines.push(format!("Command: {}", request.command));
+    lines.push(format!("Risk: {:?}", request.risk_level));
+    lines.push("Reply with: y/1 (approve once), s/2 (approve session), p/3 (approve always), n/4 (deny), N/5 (deny always).".to_string());
+    lines.join("\n")
+}
+
+fn parse_approval_response(request: &ApprovalRequest, text: &str) -> ApprovalResponse {
+    let normalized = text.trim().to_lowercase();
+    let choice = match normalized.as_str() {
+        "y" | "yes" | "1" | "approve" | "allow" => ApprovalChoice::ApproveOnce,
+        "s" | "2" | "session" => ApprovalChoice::ApproveSession,
+        "p" | "3" | "always" => ApprovalChoice::ApproveAlways,
+        "n" | "4" | "deny" | "no" => ApprovalChoice::Deny,
+        "n/5" | "5" | "deny_always" | "never" | "deny always" => ApprovalChoice::DenyAlways,
+        _ => ApprovalChoice::Deny,
+    };
+
+    match choice {
+        ApprovalChoice::ApproveOnce => ApprovalResponse::approve_once(),
+        ApprovalChoice::Deny => ApprovalResponse::deny(),
+        ApprovalChoice::ApproveSession => {
+            ApprovalResponse::approve_session(suggested_pattern(request))
+        }
+        ApprovalChoice::ApproveAlways => {
+            ApprovalResponse::approve_always(suggested_pattern(request))
+        }
+        ApprovalChoice::DenyAlways => ApprovalResponse::deny_always(suggested_pattern(request)),
+    }
+}
+
+fn suggested_pattern(request: &ApprovalRequest) -> ApprovalPattern {
+    if let Some(first) = request.suggested_patterns.first() {
+        ApprovalPattern::new(
+            request.tool.clone(),
+            first.pattern.clone(),
+            first.match_type,
+        )
+        .with_description(first.description.clone())
+    } else {
+        ApprovalPattern::new(
+            request.tool.clone(),
+            request.command.clone(),
+            MatchType::Exact,
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 enum RemoteCommand {
     Help,
     Status,
     Stop,
     Resume,
+    Interrupt,
     Mode(AgentMode),
     Model(String),
     Provider(String),
@@ -1344,6 +2348,250 @@ fn parse_remote_context(metadata_json: &str) -> RemoteContext {
     ctx
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RemoteAttachmentMeta {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    filename: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    width: Option<u64>,
+    #[serde(default)]
+    height: Option<u64>,
+}
+
+impl RemoteAttachmentMeta {
+    fn is_image(&self) -> bool {
+        if self
+            .content_type
+            .as_deref()
+            .map(|v| v.starts_with("image/"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        let lower = self.filename.to_lowercase();
+        [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
+    }
+
+    fn display_name(&self) -> Cow<'_, str> {
+        if !self.filename.is_empty() {
+            Cow::Borrowed(self.filename.as_str())
+        } else if !self.id.is_empty() {
+            Cow::Borrowed(self.id.as_str())
+        } else {
+            Cow::Borrowed("attachment")
+        }
+    }
+
+    fn mime_display(&self) -> &str {
+        self.content_type
+            .as_deref()
+            .unwrap_or("application/octet-stream")
+    }
+}
+
+fn parse_remote_attachments(metadata_json: &str) -> Vec<RemoteAttachmentMeta> {
+    let Ok(value) = serde_json::from_str::<Value>(metadata_json) else {
+        return Vec::new();
+    };
+    let mut attachments = Vec::new();
+    let sources = [
+        value
+            .get("discord")
+            .and_then(|d| d.get("attachments"))
+            .cloned(),
+        value.get("attachments").cloned(),
+    ];
+    for src in sources.into_iter().flatten() {
+        match src {
+            Value::Array(items) => {
+                for item in items {
+                    if let Ok(meta) = serde_json::from_value::<RemoteAttachmentMeta>(item) {
+                        if !meta.url.is_empty() {
+                            attachments.push(meta);
+                        }
+                    }
+                }
+            }
+            Value::Object(map) => {
+                for (_, item) in map {
+                    if let Ok(meta) = serde_json::from_value::<RemoteAttachmentMeta>(item) {
+                        if !meta.url.is_empty() {
+                            attachments.push(meta);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    attachments
+}
+
+fn format_remote_attachment_metadata(attachments: &[RemoteAttachmentMeta]) -> String {
+    let mut lines = Vec::new();
+    lines.push("[Attachments]".to_string());
+    for att in attachments {
+        let size = att
+            .size
+            .map(format_size)
+            .unwrap_or_else(|| "unknown size".to_string());
+        lines.push(format!(
+            "- {} ({}, {})",
+            att.display_name(),
+            att.mime_display(),
+            size
+        ));
+    }
+    lines.push("[/Attachments]".to_string());
+    lines.join("\n")
+}
+
+fn format_attachments_for_prompt(attachments: &[MessageAttachment]) -> String {
+    let mut sections = Vec::new();
+    sections.push("[Attachments]".to_string());
+    for attachment in attachments {
+        sections.push(format!(
+            "- {} ({})",
+            attachment.filename, attachment.mime_type
+        ));
+        match &attachment.content {
+            AttachmentContent::Base64(encoded) => {
+                sections.push(encoded.clone());
+            }
+            AttachmentContent::Text(text) => {
+                sections.push(text.clone());
+            }
+            AttachmentContent::Path(path) => {
+                sections.push(format!("(file: {})", path.display()));
+            }
+        }
+    }
+    sections.push("[/Attachments]".to_string());
+    sections.join("\n")
+}
+
+fn is_allowed_attachment_url(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.ends_with("discordapp.com")
+        || host.ends_with("discordapp.net")
+        || host.ends_with("discord.com")
+        || host.ends_with("discord.gg")
+}
+
+async fn download_attachment_bytes(url: &str, max_size: u64) -> Result<Vec<u8>> {
+    let response = reqwest::get(url).await?;
+    if !response.status().is_success() {
+        anyhow::bail!("attachment download failed with {}", response.status());
+    }
+    if let Some(len) = response.content_length() {
+        if len > max_size {
+            anyhow::bail!("attachment too large ({} bytes)", len);
+        }
+    }
+    let bytes = response.bytes().await?;
+    if bytes.len() as u64 > max_size {
+        anyhow::bail!("attachment too large ({} bytes)", bytes.len());
+    }
+    Ok(bytes.to_vec())
+}
+
+async fn build_remote_attachment_context(
+    attachments: &[RemoteAttachmentMeta],
+    config: &crate::config::RemoteAttachmentConfig,
+    provider: &str,
+    model: Option<&str>,
+) -> (String, String) {
+    if attachments.is_empty() {
+        return (String::new(), String::new());
+    }
+    let display = format_remote_attachment_metadata(attachments);
+    if config.mode == "disabled" {
+        return (String::new(), display);
+    }
+
+    let mut prompt_attachments = Vec::new();
+    if config.analyze_images {
+        let max_size = config.max_image_size_mb.saturating_mul(1024 * 1024);
+        let model_id = model.unwrap_or_default();
+        let supports_vision = if model_id.is_empty() {
+            matches!(
+                provider.to_lowercase().as_str(),
+                "openai" | "claude" | "gemini" | "openrouter"
+            )
+        } else {
+            llm::models_db().supports_vision(provider, model_id).await
+        };
+        if supports_vision {
+            for att in attachments {
+                if !att.is_image() || att.url.is_empty() {
+                    continue;
+                }
+                if !is_allowed_attachment_url(&att.url) {
+                    continue;
+                }
+                if let Some(size) = att.size {
+                    if size > max_size {
+                        continue;
+                    }
+                }
+                if let Ok(bytes) = download_attachment_bytes(&att.url, max_size).await {
+                    let encoded = base64_encode(&bytes);
+                    let mime = att.mime_display().to_string();
+                    prompt_attachments.push(MessageAttachment {
+                        filename: att.display_name().to_string(),
+                        mime_type: mime,
+                        content: AttachmentContent::Base64(encoded),
+                    });
+                }
+            }
+        }
+    }
+
+    let prompt = if prompt_attachments.is_empty() {
+        display.clone()
+    } else {
+        format_attachments_for_prompt(&prompt_attachments)
+    };
+
+    (prompt, display)
+}
+
+fn sanitize_last_user_message(
+    messages: &mut [crate::storage::SessionMessage],
+    user_text: &str,
+    attachment_display: &str,
+) {
+    if attachment_display.trim().is_empty() {
+        return;
+    }
+    if let Some(last_user) = messages.iter_mut().rev().find(|msg| msg.role == "user") {
+        let base = if user_text.trim().is_empty() {
+            "Attachment received.".to_string()
+        } else {
+            user_text.to_string()
+        };
+        last_user.content = format!("{}\n\n{}", base, attachment_display);
+    }
+}
+
 fn parse_roles(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::Array(items)) => items
@@ -1395,6 +2643,7 @@ fn parse_command_tokens(cmd: &str, arg: Option<&str>) -> Option<RemoteCommand> {
         "status" | "info" => Some(RemoteCommand::Status),
         "stop" => Some(RemoteCommand::Stop),
         "resume" => Some(RemoteCommand::Resume),
+        "interrupt" | "cancel" | "abort" => Some(RemoteCommand::Interrupt),
         "mode" => arg
             .and_then(|v| v.parse::<AgentMode>().ok())
             .map(RemoteCommand::Mode),

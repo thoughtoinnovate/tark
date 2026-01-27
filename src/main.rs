@@ -71,6 +71,14 @@ struct Cli {
     #[arg(long, global = true)]
     remote_debug: bool,
 
+    /// LLM provider to use (openai, claude, copilot, gemini, openrouter, ollama)
+    #[arg(long, global = true)]
+    provider: Option<String>,
+
+    /// Model to use (e.g., gpt-4o, claude-sonnet-4, gemini-2.0-flash-exp)
+    #[arg(long, global = true)]
+    model: Option<String>,
+
     /// Remote UI mode: monitor (default) or main
     #[arg(long, global = true, default_value = "monitor")]
     remote_ui: RemoteUi,
@@ -123,14 +131,6 @@ enum Commands {
         #[arg(long)]
         socket: Option<String>,
 
-        /// LLM provider to use (openai, claude, copilot, gemini, openrouter, ollama)
-        #[arg(short, long)]
-        provider: Option<String>,
-
-        /// Model to use (e.g., gpt-4o, claude-sonnet-4, gemini-2.0-flash-exp)
-        #[arg(short, long)]
-        model: Option<String>,
-
         /// Enable debug logging to tark-debug.log
         #[arg(long)]
         debug: bool,
@@ -141,14 +141,6 @@ enum Commands {
         /// Working directory for file operations
         #[arg(short, long)]
         cwd: Option<String>,
-
-        /// LLM provider to use
-        #[arg(short, long)]
-        provider: Option<String>,
-
-        /// Model to use
-        #[arg(short, long)]
-        model: Option<String>,
 
         /// Enable debug logging
         #[arg(long)]
@@ -359,55 +351,64 @@ async fn main() -> Result<()> {
         anyhow::bail!("--headless requires --remote");
     }
 
-    if cli.command.is_none() {
-        if let Some(remote_plugin) = cli.remote.as_deref() {
-            let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            if cli.headless {
-                transport::remote::run_remote_headless(
-                    working_dir,
-                    remote_plugin,
-                    cli.remote_debug,
-                )
-                .await?;
-            } else {
-                match cli.remote_ui {
-                    RemoteUi::Monitor => {
-                        transport::remote::run_remote_tui(
-                            working_dir,
-                            remote_plugin,
-                            cli.remote_debug,
-                        )
-                        .await?;
-                    }
-                    RemoteUi::Main => {
-                        std::env::set_var("TARK_FORCE_QUIT_ON_CTRL_C", "1");
-                        std::env::set_var("TARK_REMOTE_ENABLED", "1");
-                        std::env::set_var("TARK_REMOTE_PLUGIN", remote_plugin);
-                        let (server_handle, _project_root) =
-                            transport::remote::start_remote_runtime(
-                                working_dir.clone(),
-                                remote_plugin,
-                                cli.remote_debug,
-                            )
-                            .await?;
-                        let result = transport::cli::run_tui_new(
-                            &working_dir.to_string_lossy(),
-                            None,
-                            None,
-                            false,
-                        )
-                        .await;
-                        server_handle.abort();
-                        result?;
-                    }
-                }
-            }
-            return Ok(());
+    if let Some(remote_plugin) = cli.remote.as_deref() {
+        let wants_full_tui = matches!(
+            cli.command,
+            None | Some(Commands::Tui { .. } | Commands::Chat { .. })
+        );
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        if cli.headless {
+            transport::remote::run_remote_headless(
+                working_dir,
+                remote_plugin,
+                cli.remote_debug,
+                cli.provider.clone(),
+                cli.model.clone(),
+            )
+            .await?;
+        } else if wants_full_tui {
+            std::env::set_var("TARK_FORCE_QUIT_ON_CTRL_C", "1");
+            std::env::set_var("TARK_REMOTE_ENABLED", "1");
+            std::env::set_var("TARK_REMOTE_PLUGIN", remote_plugin);
+            let (server_handle, _project_root) = transport::remote::start_remote_runtime(
+                working_dir.clone(),
+                remote_plugin,
+                cli.remote_debug,
+                cli.provider.clone(),
+                cli.model.clone(),
+            )
+            .await?;
+            let result = transport::cli::run_tui_new(
+                &working_dir.to_string_lossy(),
+                cli.provider.clone(),
+                cli.model.clone(),
+                false,
+            )
+            .await;
+            server_handle.abort();
+            result?;
+        } else {
+            transport::remote::run_remote_tui(
+                working_dir,
+                remote_plugin,
+                cli.remote_debug,
+                cli.provider.clone(),
+                cli.model.clone(),
+            )
+            .await?;
         }
+        return Ok(());
+    }
+
+    if cli.command.is_none() {
         anyhow::bail!("No command specified. Use --help for options.");
     }
 
-    match cli.command.unwrap() {
+    let global_provider = cli.provider.clone();
+    let global_model = cli.model.clone();
+    let command = cli.command;
+
+    match command.unwrap() {
         Commands::Lsp => {
             tracing::info!("Starting LSP server on stdio");
             lsp::run_lsp_server().await?;
@@ -422,16 +423,24 @@ async fn main() -> Result<()> {
                 port,
                 working_dir
             );
-            transport::http::run_http_server(&host, port, working_dir, None, None).await?;
+            transport::http::run_http_server(&host, port, working_dir, None, None, None, None)
+                .await?;
         }
         Commands::Start { port } => {
             tracing::info!("Starting LSP + HTTP servers");
             let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
             // Run HTTP server in background, LSP on stdio
             let http_handle = tokio::spawn(async move {
-                if let Err(e) =
-                    transport::http::run_http_server("127.0.0.1", port, working_dir, None, None)
-                        .await
+                if let Err(e) = transport::http::run_http_server(
+                    "127.0.0.1",
+                    port,
+                    working_dir,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
                 {
                     tracing::error!("HTTP server error: {}", e);
                 }
@@ -444,8 +453,6 @@ async fn main() -> Result<()> {
             message,
             cwd,
             socket,
-            provider,
-            model,
             debug,
         } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());
@@ -464,8 +471,15 @@ async fn main() -> Result<()> {
             }
 
             // Run the TUI application
-            transport::cli::run_tui_chat(message, &working_dir, socket, provider, model, debug)
-                .await?;
+            transport::cli::run_tui_chat(
+                message,
+                &working_dir,
+                socket,
+                global_provider.clone(),
+                global_model.clone(),
+                debug,
+            )
+            .await?;
         }
         Commands::Complete { file, line, col } => {
             transport::cli::run_complete(&file, line, col).await?;
@@ -541,18 +555,19 @@ async fn main() -> Result<()> {
                 transport::cli::run_policy_verify(&working_dir, fix).await?;
             }
         },
-        Commands::Tui {
-            cwd,
-            provider,
-            model,
-            debug,
-        } => {
+        Commands::Tui { cwd, debug } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());
             tracing::debug!(
                 "Starting NEW TUI (TDD implementation), cwd: {}",
                 working_dir
             );
-            transport::cli::run_tui_new(&working_dir, provider, model, debug).await?;
+            transport::cli::run_tui_new(
+                &working_dir,
+                global_provider.clone(),
+                global_model.clone(),
+                debug,
+            )
+            .await?;
         }
     }
 

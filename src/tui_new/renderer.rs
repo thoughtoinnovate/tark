@@ -2375,10 +2375,8 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 
             // Render header
             let config = super::config::AppConfig::default();
-            let remote_indicator = if std::env::var("TARK_REMOTE_ENABLED")
-                .map(|v| v == "1")
-                .unwrap_or(false)
-            {
+            let remote_enabled = crate::channels::remote::global_runtime().is_some();
+            let remote_indicator = if remote_enabled {
                 let plugin_id = std::env::var("TARK_REMOTE_PLUGIN").ok();
                 let widgets = state.plugin_widgets();
                 let status = plugin_id
@@ -2484,9 +2482,15 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 
             // Render status message strip
             let (flash_state, message) = build_status_message(state);
+            let processing_remote = state.llm_processing()
+                && state
+                    .processing_session_id()
+                    .map(|id| id.starts_with("channel_"))
+                    .unwrap_or(false);
             let mut status_strip = FlashBar::new(theme)
                 .kind(flash_state)
-                .animation_frame(state.flash_bar_animation_frame());
+                .animation_frame(state.flash_bar_animation_frame())
+                .remote_working(processing_remote);
             if let Some(message) = message.as_deref() {
                 status_strip = status_strip.message(message);
             }
@@ -2552,11 +2556,12 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 let session_total_tokens = state.session_tokens_total();
 
                 // Get real session info from state
+                let remote_enabled = crate::channels::remote::global_runtime().is_some();
                 let session_info = state
                     .session()
                     .map(|s| SessionInfo {
                         name: s.session_name.clone(),
-                        is_remote: s.session_id.starts_with("channel_"),
+                        is_remote: remote_enabled && s.session_id.starts_with("channel_"),
                         total_cost: session_total_cost.max(s.total_cost),
                         model_count: session_costs.len().max(s.model_count),
                         model_costs: session_costs.clone(),
@@ -2579,7 +2584,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 
                         SessionInfo {
                             name: session_name,
-                            is_remote: messages.iter().any(|m| m.remote),
+                            is_remote: remote_enabled && messages.iter().any(|m| m.remote),
                             total_cost: session_total_cost,
                             model_count: session_costs.len(),
                             model_costs: session_costs.clone(),

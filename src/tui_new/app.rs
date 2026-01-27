@@ -744,7 +744,9 @@ impl<B: Backend> TuiApp<B> {
             frame.render_widget(message_area, chunks[1]);
 
             // Render status message strip
-            let mut status_strip = FlashBar::new(theme).kind(state.status_message_kind);
+            let mut status_strip = FlashBar::new(theme)
+                .kind(state.status_message_kind)
+                .remote_working(false);
             if let Some(message) = state.status_message.as_deref() {
                 status_strip = status_strip.message(message);
             }

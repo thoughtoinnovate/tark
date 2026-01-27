@@ -605,11 +605,7 @@ impl Widget for Sidebar<'_> {
                         Style::default().fg(self.theme.text_muted),
                     ));
                 }
-                Self::push_line(
-                    &mut session_lines,
-                    &mut all_lines,
-                    Line::from(name_spans),
-                );
+                Self::push_line(&mut session_lines, &mut all_lines, Line::from(name_spans));
                 session_item_idx += 1;
             }
             let item_selected = self.focused

@@ -55,6 +55,10 @@ pub struct ConversationService {
     interrupt_flag: Arc<AtomicBool>,
     /// Processing flag
     is_processing: Arc<AtomicBool>,
+    /// Current session ID (for remote mirroring)
+    session_id: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Optional remote mirror for streaming to channels
+    remote_mirror: Option<Arc<crate::ui_backend::remote_mirror::RemoteMirror>>,
 }
 
 impl ConversationService {
@@ -70,6 +74,8 @@ impl ConversationService {
             interaction_tx: None,
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             is_processing: Arc::new(AtomicBool::new(false)),
+            session_id: Arc::new(tokio::sync::RwLock::new(None)),
+            remote_mirror: None,
         }
     }
 
@@ -83,6 +89,32 @@ impl ConversationService {
         Self {
             interaction_tx,
             ..service
+        }
+    }
+
+    /// Set remote mirror for streaming to channel sessions
+    pub fn set_remote_mirror(
+        &mut self,
+        mirror: Option<Arc<crate::ui_backend::remote_mirror::RemoteMirror>>,
+    ) {
+        self.remote_mirror = mirror;
+    }
+
+    pub fn remote_mirror(&self) -> Option<Arc<crate::ui_backend::remote_mirror::RemoteMirror>> {
+        self.remote_mirror.clone()
+    }
+
+    pub async fn mirror_questionnaire(&self, prompt: String) {
+        let session_id = self.session_id.read().await.clone();
+        if let (Some(mirror), Some(session_id)) = (self.remote_mirror.clone(), session_id) {
+            mirror.ask_user(session_id, prompt);
+        }
+    }
+
+    pub async fn mirror_approval(&self, prompt: String) {
+        let session_id = self.session_id.read().await.clone();
+        if let (Some(mirror), Some(session_id)) = (self.remote_mirror.clone(), session_id) {
+            mirror.approval_request(session_id, prompt);
         }
     }
 
@@ -228,10 +260,16 @@ impl ConversationService {
             }
         }
 
+        let session_id = self.session_id.read().await.clone();
+
         // Add user message
         {
             let mut conv = self.conversation_mgr.write().await;
             conv.add_user_message(content.to_string());
+        }
+
+        if let (Some(mirror), Some(session_id)) = (self.remote_mirror.clone(), session_id.clone()) {
+            mirror.user_message(session_id, content.to_string());
         }
 
         // Start streaming
@@ -245,6 +283,10 @@ impl ConversationService {
         // Emit started event
         let _ = self.event_tx.send(AppEvent::LlmStarted);
 
+        if let (Some(mirror), Some(session_id)) = (self.remote_mirror.clone(), session_id.clone()) {
+            mirror.llm_start(session_id);
+        }
+
         // Create streaming callbacks
         let event_tx_text = self.event_tx.clone();
         let event_tx_thinking = self.event_tx.clone();
@@ -254,7 +296,14 @@ impl ConversationService {
 
         let check_interrupt = move || interrupt_flag.load(Ordering::SeqCst);
 
+        let mirror_for_text = self.remote_mirror.clone();
+        let session_for_text = session_id.clone();
         let on_text = move |chunk: String| {
+            if let (Some(mirror), Some(session_id)) =
+                (mirror_for_text.as_ref(), session_for_text.as_ref())
+            {
+                mirror.llm_chunk(session_id.clone(), chunk.clone());
+            }
             let _ = event_tx_text.send(AppEvent::LlmTextChunk(chunk));
         };
 
@@ -270,32 +319,43 @@ impl ConversationService {
         };
 
         let correlation_id_tool_start = correlation_id.clone();
+        let mirror_for_tool_start = self.remote_mirror.clone();
+        let session_for_tool_start = session_id.clone();
         let on_tool_call = move |tool_name: String, tool_args: String| {
-            if let Ok(args_json) = serde_json::from_str::<serde_json::Value>(&tool_args) {
-                // Log tool invocation (fast-path check for zero-cost when disabled)
-                if crate::is_debug_logging_enabled() {
-                    if let Some(logger) = crate::debug_logger() {
-                        let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
-                            correlation_id_tool_start.clone(),
-                            crate::LogCategory::Service,
-                            "tool_invocation",
-                        )
-                        .with_data(serde_json::json!({
-                            "tool": tool_name.clone(),
-                            "args": args_json.clone()
-                        }));
-                        logger.log(entry);
-                    }
+            let args_json = serde_json::from_str::<serde_json::Value>(&tool_args)
+                .unwrap_or_else(|_| serde_json::Value::String(tool_args.clone()));
+            // Log tool invocation (fast-path check for zero-cost when disabled)
+            if crate::is_debug_logging_enabled() {
+                if let Some(logger) = crate::debug_logger() {
+                    let entry: crate::DebugLogEntry = crate::DebugLogEntry::new(
+                        correlation_id_tool_start.clone(),
+                        crate::LogCategory::Service,
+                        "tool_invocation",
+                    )
+                    .with_data(serde_json::json!({
+                        "tool": tool_name.clone(),
+                        "args": args_json.clone()
+                    }));
+                    logger.log(entry);
                 }
-
-                let _ = event_tx_tool_start.send(AppEvent::ToolStarted {
-                    name: tool_name,
-                    args: args_json,
-                });
             }
+
+            if let (Some(mirror), Some(session_id)) = (
+                mirror_for_tool_start.as_ref(),
+                session_for_tool_start.as_ref(),
+            ) {
+                mirror.tool_started(session_id.clone(), tool_name.clone(), args_json.clone());
+            }
+
+            let _ = event_tx_tool_start.send(AppEvent::ToolStarted {
+                name: tool_name,
+                args: args_json,
+            });
         };
 
         let correlation_id_tool_complete = correlation_id.clone();
+        let mirror_for_tool_complete = self.remote_mirror.clone();
+        let session_for_tool_complete = session_id.clone();
         let on_tool_complete = move |tool_name: String, result: String, success: bool| {
             // Log tool response (fast-path check for zero-cost when disabled)
             if crate::is_debug_logging_enabled() {
@@ -326,14 +386,21 @@ impl ConversationService {
 
             if success {
                 let _ = event_tx_tool_complete.send(AppEvent::ToolCompleted {
-                    name: tool_name,
-                    result,
+                    name: tool_name.clone(),
+                    result: result.clone(),
                 });
             } else {
                 let _ = event_tx_tool_complete.send(AppEvent::ToolFailed {
-                    name: tool_name,
-                    error: result,
+                    name: tool_name.clone(),
+                    error: result.clone(),
                 });
+            }
+
+            if let (Some(mirror), Some(session_id)) = (
+                mirror_for_tool_complete.as_ref(),
+                session_for_tool_complete.as_ref(),
+            ) {
+                mirror.tool_completed(session_id.clone(), tool_name, result, success);
             }
         };
 
@@ -381,6 +448,8 @@ impl ConversationService {
                     conv.add_assistant_message(response.text.clone(), None);
                     conv.clear_streaming();
 
+                    let response_text = response.text.clone();
+
                     // Emit completion event
                     let (input_tokens, output_tokens) = response
                         .usage
@@ -388,11 +457,17 @@ impl ConversationService {
                         .unwrap_or((0, 0));
 
                     let _ = self.event_tx.send(AppEvent::LlmCompleted {
-                        text: response.text,
+                        text: response_text.clone(),
                         thinking: response.thinking,
                         input_tokens,
                         output_tokens,
                     });
+
+                    if let (Some(mirror), Some(session_id)) =
+                        (self.remote_mirror.clone(), session_id.clone())
+                    {
+                        mirror.llm_done(session_id, response_text);
+                    }
                 }
                 Err(e) => {
                     // Log LLM error with full context (fast-path check for zero-cost when disabled)
@@ -423,6 +498,12 @@ impl ConversationService {
                     conv.handle_error(e.to_string(), false);
                     conv.clear_streaming();
                     let _ = self.event_tx.send(AppEvent::LlmError(e.to_string()));
+
+                    if let (Some(mirror), Some(session_id)) =
+                        (self.remote_mirror.clone(), session_id.clone())
+                    {
+                        mirror.llm_error(session_id, e.to_string());
+                    }
                 }
             }
         }
@@ -615,12 +696,14 @@ impl ConversationService {
         // Sync session ID to ToolRegistry for pattern tracking
         let mut agent = self.chat_agent.write().await;
         agent.set_session_id(session.id.clone());
+        *self.session_id.write().await = Some(session.id.clone());
     }
 
     /// Set the session ID for tool pattern tracking
     pub async fn set_session_id(&self, session_id: String) {
         let mut agent = self.chat_agent.write().await;
-        agent.set_session_id(session_id);
+        agent.set_session_id(session_id.clone());
+        *self.session_id.write().await = Some(session_id);
     }
 
     /// Clear conversation history

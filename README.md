@@ -553,12 +553,16 @@ tark show all
 tark show <session-id>
 tark stop <session-id>
 tark resume <session-id>
+
 ```
+
+From your channel (Discord/Slack/etc.), you can also run `/tark interrupt` to cancel a running task.
 
 Remote access is gated by allowlists in `.tark/config.toml`:
 
 ```toml
 [remote]
+http_enabled = false
 allowed_plugins = ["discord"]
 allowed_users = ["1234567890"]
 allowed_guilds = ["0987654321"]

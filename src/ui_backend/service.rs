@@ -187,6 +187,24 @@ impl AppService {
         &self.working_dir
     }
 
+    pub fn remote_mirror(&self) -> Option<Arc<crate::ui_backend::remote_mirror::RemoteMirror>> {
+        self.conversation_svc
+            .as_ref()
+            .and_then(|conv| conv.remote_mirror())
+    }
+
+    pub async fn mirror_remote_questionnaire(&self, prompt: String) {
+        if let Some(conv) = &self.conversation_svc {
+            conv.mirror_questionnaire(prompt).await;
+        }
+    }
+
+    pub async fn mirror_remote_approval(&self, prompt: String) {
+        if let Some(conv) = &self.conversation_svc {
+            conv.mirror_approval(prompt).await;
+        }
+    }
+
     fn default_model_for_provider(
         config: &crate::config::Config,
         provider: &str,
@@ -316,11 +334,25 @@ impl AppService {
         let (conversation_svc, session_svc) = match chat_agent_result {
             Ok(chat_agent) => {
                 // Initialize ConversationService
-                let conv_svc = Arc::new(ConversationService::new_with_interaction(
+                let mut conv_svc = ConversationService::new_with_interaction(
                     chat_agent,
                     event_tx.clone(),
                     Some(interaction_tx.clone()),
-                ));
+                );
+
+                if let Some(remote) = crate::channels::remote::global_runtime() {
+                    let mirror_storage = TarkStorage::new(&working_dir).ok();
+                    let mirror = crate::ui_backend::remote_mirror::RemoteMirror::new(
+                        global_config.clone(),
+                        working_dir.clone(),
+                        mirror_storage,
+                        None,
+                        remote,
+                    );
+                    conv_svc.set_remote_mirror(Some(mirror));
+                }
+
+                let conv_svc = Arc::new(conv_svc);
 
                 // Note: Trust level was already set on ToolRegistry above (line 153).
                 // ToolRegistry is what PolicyEngine uses for approval checks.
@@ -3132,6 +3164,33 @@ impl AppService {
                 error,
                 updated_at: Some(updated_at.clone()),
             });
+        }
+
+        if std::env::var("TARK_REMOTE_ENABLED").ok().as_deref() == Some("1") {
+            if let Ok(remote_plugin) = std::env::var("TARK_REMOTE_PLUGIN") {
+                let mut existing_remote = self
+                    .state
+                    .plugin_widgets()
+                    .into_iter()
+                    .find(|w| w.plugin_id == remote_plugin);
+                if let Some(existing) = existing_remote.take() {
+                    if let Some(current) = widgets.iter_mut().find(|w| w.plugin_id == remote_plugin)
+                    {
+                        if current.status.is_none() {
+                            current.status = existing.status.clone();
+                        }
+                        let is_empty = matches!(
+                            &current.attributes,
+                            Value::Object(map) if map.is_empty()
+                        );
+                        if is_empty {
+                            current.attributes = existing.attributes.clone();
+                        }
+                    } else {
+                        widgets.push(existing);
+                    }
+                }
+            }
         }
 
         self.state.set_plugin_widgets(widgets);

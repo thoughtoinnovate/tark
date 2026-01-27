@@ -277,6 +277,7 @@ impl ConversationManager {
                 role: msg.role.clone(),
                 content: msg.content.clone(),
                 timestamp: msg.timestamp,
+                remote: false,
                 provider: None,
                 model: None,
                 context_transient: false,

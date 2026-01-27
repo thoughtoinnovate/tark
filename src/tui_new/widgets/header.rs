@@ -48,11 +48,13 @@ impl Widget for Header<'_> {
             return;
         }
 
-        // Format: "🖥 Tark  ~/path/to/project" + optional right-aligned remote indicator
-        let left_text = format!(
-            "{} {}  {}",
-            self.config.header_icon, self.config.agent_name, self.config.default_path
-        );
+        // Format: "Tark  ~/path/to/project" + optional right-aligned remote indicator
+        let agent_label = if self.remote.is_some() {
+            format!("📡 {}", self.config.agent_name)
+        } else {
+            self.config.agent_name.clone()
+        };
+        let left_text = format!("{}  {}", agent_label, self.config.default_path);
 
         let right_text = self
             .remote
@@ -70,14 +72,7 @@ impl Widget for Header<'_> {
         };
 
         let mut spans = vec![
-            Span::styled(
-                format!("{} ", self.config.header_icon),
-                Style::default().fg(self.theme.cyan),
-            ),
-            Span::styled(
-                &self.config.agent_name,
-                Style::default().fg(self.theme.text_primary),
-            ),
+            Span::styled(agent_label, Style::default().fg(self.theme.text_primary)),
             Span::styled("  ", Style::default()),
             Span::styled(
                 &self.config.default_path,

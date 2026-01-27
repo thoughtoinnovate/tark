@@ -6,18 +6,22 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
 
 use crate::debug_logger::SensitiveDataRedactor;
+use crate::plugins::ChannelInboundMessage;
 
 const REMOTE_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const REMOTE_LOG_PREFIX: &str = "remote";
+
+static REMOTE_RUNTIME: OnceLock<Arc<RemoteRuntime>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteEvent {
@@ -100,6 +104,10 @@ pub struct RemoteSessionEntry {
     pub last_event: Option<String>,
     #[serde(default)]
     pub last_message: Option<String>,
+    #[serde(default)]
+    pub queued_count: usize,
+    #[serde(default)]
+    pub last_queued_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -107,11 +115,21 @@ struct RemoteRegistryData {
     sessions: HashMap<String, RemoteSessionEntry>,
 }
 
+#[derive(Debug, Clone)]
+pub struct QueuedRemoteMessage {
+    pub plugin_id: String,
+    pub message: ChannelInboundMessage,
+    pub received_at: String,
+}
+
 #[derive(Clone)]
 pub struct RemoteRegistry {
     path: PathBuf,
     stop_dir: PathBuf,
     stop_all_path: PathBuf,
+    interrupt_dir: PathBuf,
+    interrupt_all_path: PathBuf,
+    queues: Arc<Mutex<HashMap<String, VecDeque<QueuedRemoteMessage>>>>,
     state: Arc<Mutex<RemoteRegistryData>>,
 }
 
@@ -119,14 +137,20 @@ impl RemoteRegistry {
     pub fn new(project_root: &Path) -> Result<Self> {
         let remote_dir = project_root.join("remote");
         let stop_dir = remote_dir.join("stops");
+        let interrupt_dir = remote_dir.join("interrupts");
         std::fs::create_dir_all(&stop_dir)?;
+        std::fs::create_dir_all(&interrupt_dir)?;
         let path = remote_dir.join("registry.json");
         let stop_all_path = remote_dir.join("stop_all");
+        let interrupt_all_path = remote_dir.join("interrupt_all");
         let data = load_registry(&path)?;
         Ok(Self {
             path,
             stop_dir,
             stop_all_path,
+            interrupt_dir,
+            interrupt_all_path,
+            queues: Arc::new(Mutex::new(HashMap::new())),
             state: Arc::new(Mutex::new(data)),
         })
     }
@@ -142,6 +166,13 @@ impl RemoteRegistry {
             data.sessions.insert(entry.session_id.clone(), entry);
             Ok(())
         })
+    }
+
+    pub fn get(&self, session_id: &str) -> Option<RemoteSessionEntry> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|data| data.sessions.get(session_id).cloned())
     }
 
     pub fn mark_status(
@@ -172,6 +203,8 @@ impl RemoteRegistry {
                     last_event_at: None,
                     last_event: None,
                     last_message: None,
+                    queued_count: 0,
+                    last_queued_message: None,
                 });
 
             entry.status = status.to_string();
@@ -179,6 +212,51 @@ impl RemoteRegistry {
             entry.last_event_at = Some(Utc::now().to_rfc3339());
             entry.last_event = Some(format!("status:{}", status));
             Ok(entry.clone())
+        })
+    }
+
+    pub fn try_mark_running(
+        &self,
+        session_id: &str,
+        runtime_id: &str,
+        plugin_id: &str,
+        conversation_id: &str,
+    ) -> Result<bool> {
+        self.with_locked_registry(|data| {
+            let entry = data
+                .sessions
+                .entry(session_id.to_string())
+                .or_insert_with(|| RemoteSessionEntry {
+                    session_id: session_id.to_string(),
+                    runtime_id: runtime_id.to_string(),
+                    plugin_id: plugin_id.to_string(),
+                    conversation_id: conversation_id.to_string(),
+                    status: "idle".to_string(),
+                    user_id: None,
+                    channel_id: None,
+                    guild_id: None,
+                    provider: None,
+                    model: None,
+                    mode: None,
+                    trust_level: None,
+                    last_event_at: None,
+                    last_event: None,
+                    last_message: None,
+                    queued_count: 0,
+                    last_queued_message: None,
+                });
+
+            if entry.status == "running" {
+                return Ok(false);
+            }
+
+            entry.status = "running".to_string();
+            entry.runtime_id = runtime_id.to_string();
+            entry.plugin_id = plugin_id.to_string();
+            entry.conversation_id = conversation_id.to_string();
+            entry.last_event_at = Some(Utc::now().to_rfc3339());
+            entry.last_event = Some("status:running".to_string());
+            Ok(true)
         })
     }
 
@@ -210,6 +288,8 @@ impl RemoteRegistry {
                     last_event_at: None,
                     last_event: None,
                     last_message: None,
+                    queued_count: 0,
+                    last_queued_message: None,
                 });
 
             entry.last_message = message;
@@ -254,6 +334,8 @@ impl RemoteRegistry {
                     last_event_at: None,
                     last_event: None,
                     last_message: None,
+                    queued_count: 0,
+                    last_queued_message: None,
                 });
 
             if provider.is_some() {
@@ -321,6 +403,124 @@ impl RemoteRegistry {
 
     pub fn is_stopped(&self, session_id: &str) -> bool {
         self.stop_all_path.exists() || self.stop_dir.join(session_id).exists()
+    }
+
+    pub fn interrupt_session(&self, session_id: &str) -> Result<()> {
+        std::fs::create_dir_all(&self.interrupt_dir)?;
+        std::fs::write(self.interrupt_dir.join(session_id), "")?;
+        let _ = self.with_locked_registry(|data| {
+            if let Some(entry) = data.sessions.get_mut(session_id) {
+                entry.last_event_at = Some(Utc::now().to_rfc3339());
+                entry.last_event = Some("interrupt".to_string());
+            }
+            Ok(())
+        });
+        Ok(())
+    }
+
+    pub fn clear_interrupt(&self, session_id: &str) -> Result<()> {
+        let interrupt_path = self.interrupt_dir.join(session_id);
+        if interrupt_path.exists() {
+            std::fs::remove_file(interrupt_path)?;
+        }
+        Ok(())
+    }
+
+    pub fn interrupt_all(&self) -> Result<()> {
+        std::fs::write(&self.interrupt_all_path, "")?;
+        Ok(())
+    }
+
+    pub fn clear_interrupt_all(&self) -> Result<()> {
+        if self.interrupt_all_path.exists() {
+            std::fs::remove_file(&self.interrupt_all_path)?;
+        }
+        Ok(())
+    }
+
+    pub fn is_interrupted(&self, session_id: &str) -> bool {
+        self.interrupt_all_path.exists() || self.interrupt_dir.join(session_id).exists()
+    }
+
+    pub fn enqueue_message(&self, session_id: &str, message: QueuedRemoteMessage) -> Result<usize> {
+        let preview = normalize_message_preview(&message.message.text);
+        let count = {
+            let mut queues = self
+                .queues
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Remote queue lock poisoned"))?;
+            let entry = queues.entry(session_id.to_string()).or_default();
+            entry.push_back(message);
+            entry.len()
+        };
+
+        let _ = self.with_locked_registry(|data| {
+            let entry = data
+                .sessions
+                .entry(session_id.to_string())
+                .or_insert_with(|| RemoteSessionEntry {
+                    session_id: session_id.to_string(),
+                    runtime_id: String::new(),
+                    plugin_id: String::new(),
+                    conversation_id: String::new(),
+                    status: "idle".to_string(),
+                    user_id: None,
+                    channel_id: None,
+                    guild_id: None,
+                    provider: None,
+                    model: None,
+                    mode: None,
+                    trust_level: None,
+                    last_event_at: None,
+                    last_event: None,
+                    last_message: None,
+                    queued_count: 0,
+                    last_queued_message: None,
+                });
+            entry.queued_count = count;
+            entry.last_queued_message = Some(preview);
+            entry.last_event_at = Some(Utc::now().to_rfc3339());
+            entry.last_event = Some("queued".to_string());
+            Ok(())
+        });
+
+        Ok(count)
+    }
+
+    pub fn drain_queue(&self, session_id: &str) -> Vec<QueuedRemoteMessage> {
+        let drained = {
+            let mut queues = match self.queues.lock() {
+                Ok(guard) => guard,
+                Err(_) => return Vec::new(),
+            };
+            queues
+                .remove(session_id)
+                .unwrap_or_else(VecDeque::new)
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+
+        if !drained.is_empty() {
+            let _ = self.with_locked_registry(|data| {
+                if let Some(entry) = data.sessions.get_mut(session_id) {
+                    entry.queued_count = 0;
+                    entry.last_queued_message = None;
+                    entry.last_event_at = Some(Utc::now().to_rfc3339());
+                    entry.last_event = Some("queue_drained".to_string());
+                }
+                Ok(())
+            });
+        }
+
+        drained
+    }
+
+    pub fn queued_count(&self, session_id: &str) -> usize {
+        self.queues
+            .lock()
+            .ok()
+            .and_then(|queues| queues.get(session_id).map(|q| q.len()))
+            .unwrap_or(0)
     }
 
     fn with_locked_registry<T>(
@@ -539,6 +739,14 @@ impl RemoteRuntime {
     }
 }
 
+pub fn set_global_runtime(runtime: Arc<RemoteRuntime>) {
+    let _ = REMOTE_RUNTIME.set(runtime);
+}
+
+pub fn global_runtime() -> Option<Arc<RemoteRuntime>> {
+    REMOTE_RUNTIME.get().cloned()
+}
+
 pub fn normalize_message_preview(text: &str) -> String {
     const MAX_LEN: usize = 512;
     let trimmed = text.trim();
@@ -550,4 +758,50 @@ pub fn normalize_message_preview(text: &str) -> String {
         end -= 1;
     }
     format!("{}...", &trimmed[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn interrupt_flags_toggle() -> Result<()> {
+        let dir = tempdir()?;
+        let registry = RemoteRegistry::new(dir.path())?;
+        let session_id = "sess-1";
+        assert!(!registry.is_interrupted(session_id));
+        registry.interrupt_session(session_id)?;
+        assert!(registry.is_interrupted(session_id));
+        registry.clear_interrupt(session_id)?;
+        assert!(!registry.is_interrupted(session_id));
+        Ok(())
+    }
+
+    #[test]
+    fn queue_enqueue_and_drain() -> Result<()> {
+        let dir = tempdir()?;
+        let registry = RemoteRegistry::new(dir.path())?;
+        let session_id = "sess-queue";
+        let msg = ChannelInboundMessage {
+            conversation_id: "conv-1".to_string(),
+            user_id: "user-1".to_string(),
+            text: "hello world".to_string(),
+            metadata_json: String::new(),
+        };
+        let queued = registry.enqueue_message(
+            session_id,
+            QueuedRemoteMessage {
+                plugin_id: "discord".to_string(),
+                message: msg,
+                received_at: Utc::now().to_rfc3339(),
+            },
+        )?;
+        assert_eq!(queued, 1);
+        assert_eq!(registry.queued_count(session_id), 1);
+        let drained = registry.drain_queue(session_id);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(registry.queued_count(session_id), 0);
+        Ok(())
+    }
 }

@@ -161,7 +161,7 @@ impl SessionService {
         let messages = mgr
             .load_archive_chunk(filename)
             .map_err(|e| StorageError::Other(e.into()))?;
-        Ok(Self::messages_to_ui(&messages, false))
+        Ok(Self::messages_to_ui(&messages))
     }
 
     /// Delete a session
@@ -216,6 +216,7 @@ impl SessionService {
             role: role.to_string(),
             content: message.content.clone(),
             timestamp: chrono::Utc::now(),
+            remote: message.remote,
             provider: message.provider.clone(),
             model: message.model.clone(),
             context_transient: message.context_transient,
@@ -377,14 +378,10 @@ impl SessionService {
     /// This also sanitizes tool messages: any "⋯" (running) status is converted to "?" (interrupted)
     /// since tools cannot actually be running after a session restart.
     pub fn session_messages_to_ui(session: &crate::storage::ChatSession) -> Vec<Message> {
-        let is_remote_session = session.id.starts_with("channel_");
-        Self::messages_to_ui(&session.messages, is_remote_session)
+        Self::messages_to_ui(&session.messages)
     }
 
-    fn messages_to_ui(
-        messages: &[crate::storage::SessionMessage],
-        is_remote_session: bool,
-    ) -> Vec<Message> {
+    fn messages_to_ui(messages: &[crate::storage::SessionMessage]) -> Vec<Message> {
         messages
             .iter()
             .flat_map(|msg| {
@@ -408,8 +405,20 @@ impl SessionService {
                 } else {
                     msg.content.clone()
                 };
+                let content_trimmed = content.trim();
+                if content_trimmed.is_empty()
+                    && msg.segments.is_empty()
+                    && msg.tool_calls.is_empty()
+                    && msg
+                        .thinking_content
+                        .as_ref()
+                        .map(|v| v.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return messages;
+                }
                 let is_remote_message =
-                    is_remote_session && matches!(role, MessageRole::User | MessageRole::Assistant);
+                    msg.remote && matches!(role, MessageRole::User | MessageRole::Assistant);
 
                 if msg.segments.is_empty() {
                     messages.push(Message {

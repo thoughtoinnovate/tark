@@ -62,6 +62,7 @@ export TARK_PLUGIN_PASSPHRASE="your-passphrase"
 In `.tark/config.toml`:
 ```toml
 [remote]
+http_enabled = false
 allowed_plugins = ["discord"]
 allowed_users = ["<your-discord-user-id>"]
 require_allowlist = true
@@ -79,6 +80,7 @@ Open a DM with the bot and run:
 ```
 /tark status
 /tark usage
+/tark interrupt
 ```
 
 ---

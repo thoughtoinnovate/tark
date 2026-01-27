@@ -29,9 +29,21 @@ use crate::transport::http::run_http_server;
 
 const EVENT_BUFFER: usize = 300;
 
-pub async fn run_remote_tui(working_dir: PathBuf, plugin_id: &str, debug_full: bool) -> Result<()> {
-    let (remote, server_handle, project_root) =
-        start_remote_server(working_dir.clone(), plugin_id, debug_full).await?;
+pub async fn run_remote_tui(
+    working_dir: PathBuf,
+    plugin_id: &str,
+    debug_full: bool,
+    remote_provider_override: Option<String>,
+    remote_model_override: Option<String>,
+) -> Result<()> {
+    let (remote, server_handle, project_root) = start_remote_server(
+        working_dir.clone(),
+        plugin_id,
+        debug_full,
+        remote_provider_override,
+        remote_model_override,
+    )
+    .await?;
 
     let mut rx = remote.events().subscribe();
 
@@ -108,9 +120,17 @@ pub async fn run_remote_headless(
     working_dir: PathBuf,
     plugin_id: &str,
     debug_full: bool,
+    remote_provider_override: Option<String>,
+    remote_model_override: Option<String>,
 ) -> Result<()> {
-    let (remote, server_handle, _project_root) =
-        start_remote_server(working_dir.clone(), plugin_id, debug_full).await?;
+    let (remote, server_handle, _project_root) = start_remote_server(
+        working_dir.clone(),
+        plugin_id,
+        debug_full,
+        remote_provider_override,
+        remote_model_override,
+    )
+    .await?;
     let mut rx = remote.events().subscribe();
 
     println!(
@@ -147,6 +167,8 @@ async fn start_remote_server(
     working_dir: PathBuf,
     plugin_id: &str,
     debug_full: bool,
+    remote_provider_override: Option<String>,
+    remote_model_override: Option<String>,
 ) -> Result<(Arc<RemoteRuntime>, tokio::task::JoinHandle<()>, PathBuf)> {
     let config = Config::load().unwrap_or_default();
     let storage = TarkStorage::new(&working_dir).context("Failed to initialize tark storage")?;
@@ -163,23 +185,31 @@ async fn start_remote_server(
         allowed_plugins,
         debug_full,
     )?);
+    crate::channels::remote::set_global_runtime(Arc::clone(&remote));
     let remote_for_server = Arc::clone(&remote);
 
     let host = config.server.host.clone();
     let port = config.server.port;
+    let http_enabled = config.remote.http_enabled;
     let plugin_id = plugin_id.to_string();
 
     let server_handle = tokio::spawn(async move {
-        if let Err(err) = run_http_server(
-            &host,
-            port,
-            working_dir,
-            Some(remote_for_server),
-            Some(plugin_id),
-        )
-        .await
-        {
-            tracing::error!("Remote HTTP server failed: {}", err);
+        if http_enabled {
+            if let Err(err) = run_http_server(
+                &host,
+                port,
+                working_dir,
+                Some(remote_for_server),
+                Some(plugin_id),
+                remote_provider_override,
+                remote_model_override,
+            )
+            .await
+            {
+                tracing::error!("Remote HTTP server failed: {}", err);
+            }
+        } else {
+            tracing::info!("Remote HTTP server disabled (remote.http_enabled=false)");
         }
     });
 
@@ -190,9 +220,17 @@ pub async fn start_remote_runtime(
     working_dir: PathBuf,
     plugin_id: &str,
     debug_full: bool,
+    remote_provider_override: Option<String>,
+    remote_model_override: Option<String>,
 ) -> Result<(tokio::task::JoinHandle<()>, PathBuf)> {
-    let (_remote, server_handle, project_root) =
-        start_remote_server(working_dir, plugin_id, debug_full).await?;
+    let (_remote, server_handle, project_root) = start_remote_server(
+        working_dir,
+        plugin_id,
+        debug_full,
+        remote_provider_override,
+        remote_model_override,
+    )
+    .await?;
     Ok((server_handle, project_root))
 }
 

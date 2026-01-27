@@ -212,6 +212,7 @@ fn test_sidebar_session_model_line_highlights_when_selected() {
     let theme = Theme::default();
     let session_info = SessionInfo {
         name: "Session A".to_string(),
+        is_remote: false,
         total_cost: 1.234,
         model_count: 2,
         model_costs: vec![("ZMODEL".to_string(), 0.123), ("Other".to_string(), 1.111)],

@@ -1312,6 +1312,7 @@ impl ChatAgent {
                     role: role.to_string(),
                     content,
                     timestamp: chrono::Utc::now(),
+                    remote: false,
                     provider: None,
                     model: None,
                     context_transient: false,

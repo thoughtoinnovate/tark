@@ -307,6 +307,8 @@ impl TuiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RemoteConfig {
+    /// Enable the local HTTP server in remote mode (default: false)
+    pub http_enabled: bool,
     pub allowed_plugins: Vec<String>,
     pub allowed_users: Vec<String>,
     pub allowed_channels: Vec<String>,
@@ -320,13 +322,39 @@ pub struct RemoteConfig {
     pub allow_trust_change: bool,
     pub default_mode: String,
     pub default_trust_level: String,
+    /// UI behavior for remote ask_user/approval prompts: "mirror", "modal", "off"
+    pub ask_user_ui: String,
+    /// Remote attachment handling policy
+    pub attachments: RemoteAttachmentConfig,
     pub require_allowlist: bool,
     pub channel_poll_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteAttachmentConfig {
+    /// Storage mode: "metadata" or "disabled"
+    pub mode: String,
+    /// Allow ephemeral image analysis (download to memory, no retention)
+    pub analyze_images: bool,
+    /// Maximum image size in MB for remote analysis
+    pub max_image_size_mb: u64,
+}
+
+impl Default for RemoteAttachmentConfig {
+    fn default() -> Self {
+        Self {
+            mode: "metadata".to_string(),
+            analyze_images: true,
+            max_image_size_mb: 10,
+        }
+    }
 }
 
 impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
+            http_enabled: false,
             allowed_plugins: Vec::new(),
             allowed_users: Vec::new(),
             allowed_channels: Vec::new(),
@@ -340,8 +368,10 @@ impl Default for RemoteConfig {
             allow_trust_change: false,
             default_mode: "ask".to_string(),
             default_trust_level: "manual".to_string(),
+            ask_user_ui: "mirror".to_string(),
+            attachments: RemoteAttachmentConfig::default(),
             require_allowlist: true,
-            channel_poll_ms: 200,
+            channel_poll_ms: 100,
         }
     }
 }

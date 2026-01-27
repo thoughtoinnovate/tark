@@ -1906,6 +1906,7 @@ impl ChatSession {
             role: role.to_string(),
             content: content.to_string(),
             timestamp: Utc::now(),
+            remote: false,
             provider: None,
             model: None,
             context_transient: false,
@@ -1928,6 +1929,7 @@ impl ChatSession {
             role: role.to_string(),
             content: content.to_string(),
             timestamp: Utc::now(),
+            remote: false,
             provider: None,
             model: None,
             context_transient: false,
@@ -1951,6 +1953,7 @@ impl ChatSession {
             role: "assistant".to_string(),
             content: content.to_string(),
             timestamp: Utc::now(),
+            remote: false,
             provider: None,
             model: None,
             context_transient: false,
@@ -1968,6 +1971,7 @@ impl ChatSession {
             role: "tool".to_string(),
             content: content.to_string(),
             timestamp: Utc::now(),
+            remote: false,
             provider: None,
             model: None,
             context_transient: false,
@@ -2039,6 +2043,8 @@ pub struct SessionMessage {
     pub role: String,
     pub content: String,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub remote: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

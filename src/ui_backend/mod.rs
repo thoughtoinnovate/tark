@@ -22,6 +22,7 @@ mod events;
 mod git_service;
 pub mod middleware;
 pub mod questionnaire;
+mod remote_mirror;
 mod service;
 pub mod session_service;
 mod state;

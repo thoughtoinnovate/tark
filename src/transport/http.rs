@@ -340,6 +340,8 @@ pub async fn run_http_server(
     working_dir: PathBuf,
     remote: Option<Arc<crate::channels::remote::RemoteRuntime>>,
     _remote_plugin_id: Option<String>,
+    remote_provider_override: Option<String>,
+    remote_model_override: Option<String>,
 ) -> Result<()> {
     let config = Config::load().unwrap_or_default();
     let working_dir = working_dir.canonicalize().unwrap_or(working_dir);
@@ -469,6 +471,8 @@ pub async fn run_http_server(
         storage.clone(),
         usage_tracker.clone(),
         remote,
+        remote_provider_override,
+        remote_model_override,
     );
     if let Err(e) = channel_manager.start_all().await {
         tracing::warn!("Failed to start channel plugins: {}", e);

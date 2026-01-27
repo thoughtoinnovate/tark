@@ -11,12 +11,14 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::llm::models_db;
+use crate::storage::TarkStorage;
 use crate::tools::questionnaire::{
     AnswerValue, ApprovalChoice, ApprovalResponse, InteractionRequest, UserResponse,
 };
 use crate::tui_new::widgets::FlashBarState;
 use crate::ui_backend::approval::ApprovalCardState;
 use crate::ui_backend::questionnaire::QuestionnaireState;
+use crate::ui_backend::session_service::SessionService;
 use crate::ui_backend::UiRenderer;
 use crate::ui_backend::{AppEvent, AppService, Command, SharedState};
 
@@ -84,6 +86,7 @@ impl<B: Backend> TuiController<B> {
         let config = crate::config::Config::load().unwrap_or_default();
         self.spawn_session_usage_poller(state.clone(), config.tui.session_usage_poll_ms);
         self.spawn_interaction_task(state.clone());
+        self.spawn_remote_mirror_task(state.clone(), &config);
 
         loop {
             // 1. Render current state
@@ -201,6 +204,7 @@ impl<B: Backend> TuiController<B> {
         let questionnaire_responder = self.questionnaire_responder.clone();
         let approval_responder = self.approval_responder.clone();
         let pending_questionnaire = self.pending_questionnaire.clone();
+        let remote_mirror = self.service.remote_mirror();
 
         tokio::spawn(async move {
             while let Some(request) = interaction_rx.recv().await {
@@ -210,6 +214,13 @@ impl<B: Backend> TuiController<B> {
                             let _ = responder.send(UserResponse::cancelled());
                             continue;
                         };
+
+                        if let (Some(mirror), Some(session)) =
+                            (remote_mirror.clone(), state.session())
+                        {
+                            let prompt = crate::channels::format_questionnaire_for_remote(&data);
+                            mirror.ask_user(session.session_id, prompt);
+                        }
 
                         let total_questions = data.questions.len();
                         let title = data.title.clone();
@@ -295,6 +306,17 @@ impl<B: Backend> TuiController<B> {
                         state.set_active_questionnaire(Some(question_state));
                     }
                     InteractionRequest::Approval { request, responder } => {
+                        if let (Some(mirror), Some(session)) =
+                            (remote_mirror.clone(), state.session())
+                        {
+                            let approval_prompt = format!(
+                                "**Approval required**\n\nTool: `{}`\nRisk: `{}`\nCommand: `{}`",
+                                request.tool,
+                                request.risk_level.label(),
+                                request.command
+                            );
+                            mirror.approval_request(session.session_id, approval_prompt);
+                        }
                         let risk_level = match request.risk_level {
                             crate::tools::risk::RiskLevel::ReadOnly => {
                                 crate::ui_backend::approval::RiskLevel::Safe
@@ -345,6 +367,401 @@ impl<B: Backend> TuiController<B> {
                         let mut guard = approval_responder.lock().await;
                         *guard = Some(responder);
                     }
+                }
+            }
+        });
+    }
+
+    fn spawn_remote_mirror_task(&self, state: SharedState, config: &crate::config::Config) {
+        if std::env::var("TARK_REMOTE_ENABLED").ok().as_deref() != Some("1") {
+            return;
+        }
+        let Some(remote) = crate::channels::remote::global_runtime() else {
+            return;
+        };
+        let plugin_id =
+            std::env::var("TARK_REMOTE_PLUGIN").unwrap_or_else(|_| "remote".to_string());
+        let mirror_ui = config.remote.ask_user_ui == "mirror";
+        let mut rx = remote.events().subscribe();
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let storage = TarkStorage::new(&working_dir).ok();
+        tokio::spawn(async move {
+            let mut messages_received = 0usize;
+            let mut messages_sent = 0usize;
+            let mut has_activity = false;
+            let mut last_status_update = Instant::now();
+            let mut pending_reload: Option<(String, Instant)> = None;
+            let mut pending_sessions_refresh = false;
+            let mut status = "disconnected".to_string();
+            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        let Ok(event) = event else { break; };
+                        has_activity = true;
+                        match event.event.as_str() {
+                            "inbound" => {
+                                messages_received = messages_received.saturating_add(1);
+                                if let Some(preview) = event.message.clone() {
+                                    let is_active = state
+                                        .session()
+                                        .map(|s| s.session_id == event.session_id)
+                                        .unwrap_or(false);
+                                    let content = if is_active {
+                                        if state.llm_processing() {
+                                            format!(
+                                                "📡 Remote message queued:\n{}",
+                                                preview
+                                            )
+                                        } else {
+                                            format!(
+                                                "📡 Remote message received:\n{}",
+                                                preview
+                                            )
+                                        }
+                                    } else {
+                                        format!(
+                                            "📡 Remote message received:\n{}\n\nUse /sessions to open the remote thread.",
+                                            preview
+                                        )
+                                    };
+                                    state.add_message(crate::ui_backend::Message {
+                                        role: crate::ui_backend::MessageRole::System,
+                                        content,
+                                        timestamp: chrono::Local::now()
+                                            .format("%H:%M:%S")
+                                            .to_string(),
+                                        remote: true,
+                                        provider: None,
+                                        model: None,
+                                        collapsed: false,
+                                        thinking: None,
+                                        context_transient: true,
+                                        tool_calls: Vec::new(),
+                                        segments: Vec::new(),
+                                        tool_args: None,
+                                    });
+                                    state.scroll_to_bottom();
+                                }
+                            }
+                            "outbound" => messages_sent = messages_sent.saturating_add(1),
+                            "agent_start" => status = "working".to_string(),
+                            "agent_done" => status = "connected".to_string(),
+                            "stream_chunk" => {
+                                if state
+                                    .session()
+                                    .map(|s| s.session_id == event.session_id)
+                                    .unwrap_or(false)
+                                {
+                                    if let Some(chunk) = event.message.clone() {
+                                        state.append_streaming_content(&chunk);
+                                    }
+                                }
+                            }
+                            "tool_started" | "tool_completed" | "tool_failed" => {
+                                if state
+                                    .session()
+                                    .map(|s| s.session_id == event.session_id)
+                                    .unwrap_or(false)
+                                {
+                                    let metadata = event.metadata.clone().unwrap_or_default();
+                                    let name = metadata
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("tool")
+                                        .to_string();
+                                    let args_value = metadata
+                                        .get("args")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null);
+                                    let args_value = match args_value {
+                                        serde_json::Value::String(s) => {
+                                            serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s))
+                                        }
+                                        other => other,
+                                    };
+                                    let risk_group = "Remote";
+
+                                    match event.event.as_str() {
+                                        "tool_started" => {
+                                            let tool_info =
+                                                crate::ui_backend::ActiveToolInfo::new(
+                                                    name.clone(),
+                                                    args_value.clone(),
+                                                );
+                                            let description = tool_info.description.clone();
+                                            state.add_active_tool(tool_info);
+                                            state.collapse_all_tools_except_last();
+
+                                            let msg = crate::ui_backend::Message {
+                                                role: crate::ui_backend::MessageRole::Tool,
+                                                content: format!(
+                                                    "⋯|{}|{}|{}",
+                                                    name, risk_group, description
+                                                ),
+                                                thinking: None,
+                                                collapsed: false,
+                                                timestamp: chrono::Local::now()
+                                                    .format("%H:%M:%S")
+                                                    .to_string(),
+                                                remote: true,
+                                                provider: None,
+                                                model: None,
+                                                context_transient: true,
+                                                tool_calls: Vec::new(),
+                                                segments: Vec::new(),
+                                                tool_args: Some(args_value),
+                                            };
+                                            state.add_message(msg);
+                                            state.scroll_to_bottom();
+                                        }
+                                        "tool_completed" => {
+                                            let result = metadata
+                                                .get("result")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            let result_preview = if result.len() > 500 {
+                                                format!(
+                                                    "{}…",
+                                                    crate::core::truncate_at_char_boundary(
+                                                        &result, 500
+                                                    )
+                                                )
+                                            } else {
+                                                result.clone()
+                                            };
+                                            state.complete_active_tool(&name, result.clone(), true);
+                                            state.cleanup_completed_tools();
+                                            let new_content = format!(
+                                                "✓|{}|{}|{}",
+                                                name, risk_group, result_preview
+                                            );
+                                            state.update_tool_message(&name, new_content, true);
+                                            state.collapse_all_tools_except_last();
+                                            state.scroll_to_bottom();
+                                        }
+                                        "tool_failed" => {
+                                            let result = metadata
+                                                .get("result")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            let error_preview = if result.len() > 500 {
+                                                format!(
+                                                    "{}…",
+                                                    crate::core::truncate_at_char_boundary(
+                                                        &result, 500
+                                                    )
+                                                )
+                                            } else {
+                                                result.clone()
+                                            };
+                                            state.complete_active_tool(&name, result.clone(), false);
+                                            state.cleanup_completed_tools();
+                                            let new_content = format!(
+                                                "✗|{}|{}|{}",
+                                                name, risk_group, error_preview
+                                            );
+                                            state.update_tool_message(&name, new_content, true);
+                                            state.collapse_all_tools_except_last();
+                                            state.scroll_to_bottom();
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            "queued" => {
+                                if let Some(preview) = event.message.clone() {
+                                    let count = event
+                                        .metadata
+                                        .as_ref()
+                                        .and_then(|meta| meta.get("count"))
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    let content = if count > 0 {
+                                        format!(
+                                            "⏳ Remote queue: position {}.\n{}",
+                                            count, preview
+                                        )
+                                    } else {
+                                        format!("⏳ Remote message queued:\n{}", preview)
+                                    };
+                                    state.add_message(crate::ui_backend::Message {
+                                        role: crate::ui_backend::MessageRole::System,
+                                        content,
+                                        timestamp: chrono::Local::now()
+                                            .format("%H:%M:%S")
+                                            .to_string(),
+                                        remote: true,
+                                        provider: None,
+                                        model: None,
+                                        collapsed: false,
+                                        thinking: None,
+                                        context_transient: true,
+                                        tool_calls: Vec::new(),
+                                        segments: Vec::new(),
+                                        tool_args: None,
+                                    });
+                                    state.scroll_to_bottom();
+                                }
+                            }
+                            _ => {}
+                        }
+
+                        if event.event == "agent_start"
+                            && state
+                                .session()
+                                .map(|s| s.session_id == event.session_id)
+                                .unwrap_or(false)
+                        {
+                            state.set_llm_processing(true);
+                            state.set_processing_session_id(Some(event.session_id.clone()));
+                            state.clear_streaming();
+                        }
+                        if event.event == "agent_done"
+                            && state
+                                .session()
+                                .map(|s| s.session_id == event.session_id)
+                                .unwrap_or(false)
+                        {
+                            state.set_llm_processing(false);
+                            state.set_processing_session_id(None);
+                            state.set_processing_correlation_id(None);
+                            state.clear_streaming();
+                        }
+
+                        if mirror_ui {
+                            let content = match event.event.as_str() {
+                                "ask_user" => {
+                                    let prompt =
+                                        event.message.unwrap_or_else(|| "Remote question".to_string());
+                                    format!(
+                                        "📡 Remote ask_user pending:\n{}\n\nReply in Discord to continue.",
+                                        prompt
+                                    )
+                                }
+                                "approval_request" => {
+                                    let prompt =
+                                        event.message.unwrap_or_else(|| "Remote approval request".to_string());
+                                    format!(
+                                        "📡 Remote approval pending:\n{}\n\nReply in Discord to continue.",
+                                        prompt
+                                    )
+                                }
+                                "ask_user_answer" => "✅ Remote response received.".to_string(),
+                                "approval_answer" => "✅ Remote approval received.".to_string(),
+                                _ => String::new(),
+                            };
+
+                            if !content.is_empty() {
+                                state.add_message(crate::ui_backend::Message {
+                                    role: crate::ui_backend::MessageRole::System,
+                                    content,
+                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                    remote: false,
+                                    provider: None,
+                                    model: None,
+                                    collapsed: false,
+                                    thinking: None,
+                                    context_transient: true,
+                                    tool_calls: Vec::new(),
+                                    segments: Vec::new(),
+                                    tool_args: None,
+                                });
+                                state.scroll_to_bottom();
+                            }
+                        }
+
+                        if matches!(
+                            event.event.as_str(),
+                            "inbound" | "outbound" | "agent_done"
+                        ) {
+                            pending_reload = Some((
+                                event.session_id.clone(),
+                                Instant::now() + Duration::from_millis(50),
+                            ));
+                            pending_sessions_refresh = true;
+                        }
+                    }
+                    _ = tick.tick() => {
+                        if let Some((session_id, ready_at)) = &pending_reload {
+                            if Instant::now() >= *ready_at {
+                                if let Some(storage) = storage.as_ref() {
+                                    if state
+                                        .session()
+                                        .map(|s| s.session_id == *session_id)
+                                        .unwrap_or(false)
+                                    {
+                                        if let Ok(session) = storage.load_session(session_id) {
+                                            let messages = SessionService::session_messages_to_ui(&session);
+                                            state.set_messages(messages);
+                                            state.scroll_to_bottom();
+                                            state.set_session_cost_total(session.total_cost);
+                                            state.set_session_tokens_total(
+                                                session.input_tokens + session.output_tokens,
+                                            );
+                                            state.set_session_cost_by_model(session.cost_by_model.clone());
+                                            state.set_session_tokens_by_model(
+                                                session.tokens_by_model.clone(),
+                                            );
+                                            if !session.provider.is_empty() {
+                                                state.set_provider(Some(session.provider.clone()));
+                                            }
+                                            if !session.model.is_empty() {
+                                                state.set_model(Some(session.model.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                                pending_reload = None;
+                            }
+                        }
+                        if pending_sessions_refresh {
+                            if let Some(storage) = storage.as_ref() {
+                                if let Ok(mut sessions) = storage.list_sessions() {
+                                    let current_id = state.session().map(|s| s.session_id);
+                                    for session in &mut sessions {
+                                        session.is_current = current_id
+                                            .as_ref()
+                                            .map(|id| id == &session.id)
+                                            .unwrap_or(false);
+                                        if let Some(entry) = remote.registry().get(&session.id) {
+                                            session.agent_running = matches!(
+                                                entry.status.as_str(),
+                                                "running" | "working"
+                                            );
+                                        }
+                                    }
+                                    state.set_available_sessions(sessions);
+                                }
+                            }
+                            pending_sessions_refresh = false;
+                        }
+                    }
+                }
+
+                if has_activity && status != "connected" {
+                    status = "connected".to_string();
+                }
+
+                if last_status_update.elapsed() > Duration::from_millis(500) {
+                    let attributes = serde_json::json!({
+                        "messages_received": messages_received,
+                        "messages_sent": messages_sent,
+                        "status": status,
+                    });
+                    let mut widgets = state.plugin_widgets();
+                    widgets.retain(|w| w.plugin_id != plugin_id);
+                    widgets.push(crate::ui_backend::PluginWidgetInfo {
+                        plugin_id: plugin_id.clone(),
+                        attributes,
+                        status: Some(status.to_string()),
+                        error: None,
+                        updated_at: Some(chrono::Local::now().format("%H:%M:%S").to_string()),
+                    });
+                    state.set_plugin_widgets(widgets);
+                    last_status_update = Instant::now();
                 }
             }
         });
