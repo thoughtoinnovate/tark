@@ -84,6 +84,12 @@ struct ToolSummary {
     tools_used: Vec<String>,
 }
 
+#[derive(Copy, Clone)]
+enum RemoteResponseLabel {
+    Answer,
+    ToolOutput,
+}
+
 #[derive(Debug, Serialize)]
 struct ChannelToolMetadata<'a> {
     tool_calls_made: usize,
@@ -1231,10 +1237,19 @@ impl ChannelManager {
         let interrupt_flag_check = Arc::clone(&interrupt_flag);
         let interrupt_session_id = session_id.clone();
         let interrupt_remote = self.remote.clone();
+        let add_prefix = stream_to_channel && remote_runtime.is_some();
+        let prefix_text = if add_prefix {
+            Some(format!(
+                "**{}**\n\n",
+                remote_response_label(RemoteResponseLabel::Answer)
+            ))
+        } else {
+            None
+        };
 
         let sender = if stream_to_channel {
             Some(tokio::spawn(async move {
-                let mut accumulated = String::new();
+                let mut accumulated = prefix_text.unwrap_or_default();
                 let mut last_sent = Instant::now();
                 let mut message_id_local =
                     message_id_clone.lock().ok().and_then(|guard| guard.clone());
@@ -1413,12 +1428,17 @@ impl ChannelManager {
             .unwrap_or_default();
         let (mut response_text, response_was_empty) =
             finalize_response_text(&response.text, &fallback_text, summary.as_ref());
+        let mut response_label = RemoteResponseLabel::Answer;
         let mut send_tool_log = !tool_events_sent.load(std::sync::atomic::Ordering::Relaxed);
         if response.text.trim().is_empty() {
             if let Some(tool_text) = format_tool_log_for_remote(&response.tool_call_log) {
                 response_text = format!("Tool result:\n{}", tool_text);
                 send_tool_log = false;
+                response_label = RemoteResponseLabel::ToolOutput;
             }
+        }
+        if remote_runtime.is_some() {
+            response_text = prefix_remote_response(response_text, response_label);
         }
         let response_message_id = message_id.lock().ok().and_then(|guard| guard.clone());
         let final_request = ChannelSendRequest {
@@ -1997,6 +2017,22 @@ fn normalize_multiline(value: &str, max_len: usize) -> String {
         end -= 1;
     }
     format!("{}...", &trimmed[..end])
+}
+
+fn remote_response_label(label: RemoteResponseLabel) -> &'static str {
+    match label {
+        RemoteResponseLabel::Answer => "🧠 Answer",
+        RemoteResponseLabel::ToolOutput => "🔧 Tool Output",
+    }
+}
+
+fn prefix_remote_response(text: String, label: RemoteResponseLabel) -> String {
+    let header = remote_response_label(label);
+    if text.trim().is_empty() {
+        format!("**{}**", header)
+    } else {
+        format!("**{}**\n\n{}", header, text)
+    }
 }
 
 fn split_message_by_chars(text: &str, max_len: usize) -> Vec<String> {
@@ -2808,5 +2844,12 @@ mod tests {
     fn test_split_message_by_chars_zero_limit() {
         let chunks = split_message_by_chars("abcdef", 0);
         assert_eq!(chunks, vec!["abcdef"]);
+    }
+
+    #[test]
+    fn test_prefix_remote_response_adds_label() {
+        let text = prefix_remote_response("hello".to_string(), RemoteResponseLabel::Answer);
+        assert!(text.contains("**🧠 Answer**"));
+        assert!(text.contains("hello"));
     }
 }
