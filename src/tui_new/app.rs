@@ -790,6 +790,7 @@ impl<B: Backend> TuiApp<B> {
                     .selected_panel(state.sidebar_selected_panel)
                     .session_info(SessionInfo {
                         name: "Session".to_string(),
+                        is_remote: false,
                         total_cost: 0.015,
                         model_count: 3,
                         model_costs: vec![],

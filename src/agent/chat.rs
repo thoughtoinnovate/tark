@@ -544,6 +544,9 @@ For multi-step tasks (3+ steps), USE THE `todo` TOOL to show progress:
 - Bug fixes requiring investigation then fixes
 - Any task where you'll make multiple changes
 
+**WHEN NOT TO USE:**
+- Single-step or trivial requests (unless the user asks for tracking)
+
 **HOW TO USE (SEQUENTIAL WORKFLOW):**
 
 1. **At task start** - Create all todos with status "pending":
@@ -558,10 +561,10 @@ For multi-step tasks (3+ steps), USE THE `todo` TOOL to show progress:
 }
 ```
 
-2. **Before starting each step** - Mark it "in_progress":
+2. **Before starting each step** - Mark it "inprogress":
 ```json
 {
-  "todos": [{"id": "step-1", "content": "Add User model", "status": "in_progress"}],
+  "todos": [{"id": "step-1", "content": "Add User model", "status": "inprogress"}],
   "merge": true
 }
 ```
@@ -571,7 +574,7 @@ For multi-step tasks (3+ steps), USE THE `todo` TOOL to show progress:
 {
   "todos": [
     {"id": "step-1", "content": "Add User model", "status": "completed"},
-    {"id": "step-2", "content": "Create API endpoints", "status": "in_progress"}
+    {"id": "step-2", "content": "Create API endpoints", "status": "inprogress"}
   ],
   "merge": true
 }
@@ -579,8 +582,16 @@ For multi-step tasks (3+ steps), USE THE `todo` TOOL to show progress:
 
 **RULES:**
 - Work through todos SEQUENTIALLY (don't skip ahead)
-- Only ONE todo should be "in_progress" at a time
+- Only ONE todo should be "inprogress" at a time
 - Mark completed IMMEDIATELY when done, before moving to next
+- If a step is no longer needed, mark it "cancelled" (update content with reason if helpful)
+- When all steps are done/cancelled, CLEAR the list:
+```json
+{
+  "todos": [],
+  "merge": false
+}
+```
 - User sees progress in sidebar (e.g., "📋 Todo 2/4")
 
 🔬 CODE UNDERSTANDING (use before modifying):

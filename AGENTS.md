@@ -423,6 +423,15 @@ The todo list:
 - Returns full current state so you know what todos exist
 - Persists during the session, cleared when session ends
 - Supports merge (update by id) and replace (new list) modes
+- Valid `status` values: `pending`, `inprogress`, `completed`, `cancelled` (note: no underscore, so **not** `in_progress`)
+
+Operational rules (for agents):
+- Create a todo list **once** at the start of any multi-step task (3+ steps) or when the user explicitly asks for tracking.
+- Do **not** create todos for trivial requests (single-step answers) unless the user requests it.
+- Use `status: "inprogress"` only for the **single** step you are actively working on.
+- Mark a step `completed` immediately after it is done; never leave finished items `inprogress`.
+- If a step becomes irrelevant, mark it `cancelled` with a short reason in the item `content` (update text via merge).
+- When all steps are `completed` (or `cancelled`), **clear** the list by sending an empty list with `merge: false`.
 
 Example usage:
 ```rust
@@ -440,6 +449,18 @@ todo({
 todo({
   "todos": [{"id": "read", "status": "completed"}],
   "merge": true   // Merge with existing (default)
+})
+
+// Mark a task in progress (use "inprogress", not "in_progress")
+todo({
+  "todos": [{"id": "impl", "status": "inprogress"}],
+  "merge": true
+})
+
+// Clear all todos after finishing
+todo({
+  "todos": [],
+  "merge": false
 })
 ```
 

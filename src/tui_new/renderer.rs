@@ -303,7 +303,7 @@ impl<B: Backend> TuiRenderer<B> {
     /// Convert keyboard event to command
     fn key_to_command(key: event::KeyEvent, state: &SharedState) -> Option<Command> {
         let force_quit_on_ctrl_c =
-            std::env::var("TARK_FORCE_QUIT_ON_CTRL_C").map_or(false, |v| v != "0");
+            std::env::var("TARK_FORCE_QUIT_ON_CTRL_C").is_ok_and(|v| v != "0");
         let vim_keys_enabled = state.is_vim_key_enabled();
         if key.code == KeyCode::Char('i')
             && key.modifiers == KeyModifiers::NONE
@@ -1605,6 +1605,7 @@ impl<B: Backend> TuiRenderer<B> {
                     UiMessageRole::Thinking => super::widgets::MessageRole::Thinking,
                 },
                 content: m.content.clone(),
+                remote: m.remote,
                 provider: m.provider.clone(),
                 model: m.model.clone(),
                 collapsed: m.collapsed,
@@ -2555,6 +2556,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     .session()
                     .map(|s| SessionInfo {
                         name: s.session_name.clone(),
+                        is_remote: s.session_id.starts_with("channel_"),
                         total_cost: session_total_cost.max(s.total_cost),
                         model_count: session_costs.len().max(s.model_count),
                         model_costs: session_costs.clone(),
@@ -2577,6 +2579,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 
                         SessionInfo {
                             name: session_name,
+                            is_remote: messages.iter().any(|m| m.remote),
                             total_cost: session_total_cost,
                             model_count: session_costs.len(),
                             model_costs: session_costs.clone(),

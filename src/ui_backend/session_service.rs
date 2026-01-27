@@ -408,12 +408,8 @@ impl SessionService {
                 } else {
                     msg.content.clone()
                 };
-                let content = if is_remote_session && role == MessageRole::User {
-                    format!("📡 {}", content)
-                } else {
-                    content
-                };
-                let mut remote_prefix_used = is_remote_session && role == MessageRole::User;
+                let is_remote_message =
+                    is_remote_session && matches!(role, MessageRole::User | MessageRole::Assistant);
 
                 if msg.segments.is_empty() {
                     messages.push(Message {
@@ -422,6 +418,7 @@ impl SessionService {
                         thinking: msg.thinking_content.clone(),
                         collapsed: false,
                         timestamp: timestamp.clone(),
+                        remote: is_remote_message,
                         provider: msg.provider.clone(),
                         model: msg.model.clone(),
                         context_transient: msg.context_transient,
@@ -434,18 +431,11 @@ impl SessionService {
                         match seg {
                             crate::storage::SegmentRecord::Text(text) => messages.push(Message {
                                 role,
-                                content: if is_remote_session
-                                    && role == MessageRole::User
-                                    && !remote_prefix_used
-                                {
-                                    remote_prefix_used = true;
-                                    format!("📡 {}", text)
-                                } else {
-                                    text.clone()
-                                },
+                                content: text.clone(),
                                 thinking: None,
                                 collapsed: false,
                                 timestamp: timestamp.clone(),
+                                remote: is_remote_message,
                                 provider: msg.provider.clone(),
                                 model: msg.model.clone(),
                                 context_transient: msg.context_transient,
@@ -478,6 +468,7 @@ impl SessionService {
                                         thinking: None,
                                         collapsed: true,
                                         timestamp: timestamp.clone(),
+                                        remote: false,
                                         provider: msg.provider.clone(),
                                         model: msg.model.clone(),
                                         context_transient: msg.context_transient,
@@ -499,6 +490,7 @@ impl SessionService {
                             thinking: None,
                             collapsed: true,
                             timestamp: timestamp.clone(),
+                            remote: false,
                             provider: msg.provider.clone(),
                             model: msg.model.clone(),
                             context_transient: msg.context_transient,

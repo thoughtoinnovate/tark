@@ -224,9 +224,11 @@ impl Tool for TodoTool {
     fn description(&self) -> &str {
         "Track progress on multi-step tasks with a visible todo list in the sidebar. \
          WORKFLOW: 1) Create todos at start of task (status: pending), \
-         2) Mark current item 'in_progress' before working on it, \
+         2) Mark current item 'inprogress' before working on it, \
          3) Mark 'completed' when done, then move to next. \
-         4) Work through todos SEQUENTIALLY - don't skip ahead. \
+         4) If a step is no longer needed, mark 'cancelled'. \
+         5) Clear all todos at the end by sending an empty list with merge=false. \
+         6) Work through todos SEQUENTIALLY - don't skip ahead. \
          Returns full state so you always know what todos exist."
     }
 
@@ -251,7 +253,7 @@ impl Tool for TodoTool {
                             },
                             "status": {
                                 "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "cancelled"],
+                                "enum": ["pending", "inprogress", "completed", "cancelled"],
                                 "description": "Task status. Defaults to 'pending' for new items."
                             }
                         },

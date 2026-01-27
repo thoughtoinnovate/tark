@@ -521,6 +521,7 @@ impl<B: Backend> TuiController<B> {
                 role: crate::ui_backend::MessageRole::User,
                 content: summary,
                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                remote: false,
                 provider: None,
                 model: None,
                 collapsed: false,
@@ -666,6 +667,7 @@ impl<B: Backend> TuiController<B> {
                             role: crate::ui_backend::MessageRole::System,
                             content: "ℹ️ Operation skipped by user".to_string(),
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            remote: false,
                             provider: None,
                             model: None,
                             collapsed: false,
@@ -804,6 +806,7 @@ impl<B: Backend> TuiController<B> {
                     tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    remote: false,
                 };
                 state.add_message(msg);
                 return Ok(());
@@ -1767,6 +1770,7 @@ impl<B: Backend> TuiController<B> {
                         role: crate::ui_backend::MessageRole::System,
                         content: "ℹ️ Question skipped by user".to_string(),
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        remote: false,
                         provider: None,
                         model: None,
                         collapsed: false,
@@ -1976,12 +1980,20 @@ impl<B: Backend> TuiController<B> {
                     use crate::ui_backend::{Message, MessageRole};
                     let provider = state.current_provider();
                     let model = state.current_model();
+                    let remote = state
+                        .messages()
+                        .iter()
+                        .rev()
+                        .find(|msg| msg.role == MessageRole::User)
+                        .map(|msg| msg.remote)
+                        .unwrap_or(false);
                     let msg = Message {
                         role: MessageRole::Assistant,
                         content, // Moved directly, no clone
                         thinking: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        remote,
                         provider,
                         model,
                         context_transient: false,
@@ -2062,12 +2074,20 @@ impl<B: Backend> TuiController<B> {
                         }
                     }
 
+                    let remote = state
+                        .messages()
+                        .iter()
+                        .rev()
+                        .find(|msg| msg.role == MessageRole::User)
+                        .map(|msg| msg.remote)
+                        .unwrap_or(false);
                     let msg = Message {
                         role: MessageRole::Assistant,
                         content: text.clone(),
                         thinking: thinking_content.clone(),
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        remote,
                         provider: provider.clone(),
                         model: model.clone(),
                         context_transient: false,
@@ -2087,6 +2107,7 @@ impl<B: Backend> TuiController<B> {
                                 thinking: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                remote,
                                 provider: provider.clone(),
                                 model: model.clone(),
                                 context_transient: false,
@@ -2175,6 +2196,7 @@ impl<B: Backend> TuiController<B> {
                         thinking: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        remote: false,
                         provider: None,
                         model: None,
                         context_transient: true,
@@ -2244,6 +2266,7 @@ impl<B: Backend> TuiController<B> {
                         segments: Vec::new(),
                         collapsed: false, // Running tools are expanded (renderer also forces this)
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        remote: false,
                         tool_args: Some(args.clone()), // Store original args for rich rendering
                     };
 
@@ -2463,6 +2486,7 @@ impl<B: Backend> TuiController<B> {
                         tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        remote: false,
                     };
                     state.add_message(msg);
                     state.scroll_to_bottom();
@@ -2719,6 +2743,7 @@ impl<B: Backend> TuiController<B> {
                     tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    remote: false,
                 };
                 state.add_message(msg);
                 state.clear_input();
@@ -2751,6 +2776,7 @@ impl<B: Backend> TuiController<B> {
                     tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    remote: false,
                 };
                 state.add_message(msg);
                 state.clear_input();
@@ -2790,6 +2816,7 @@ impl<B: Backend> TuiController<B> {
                                 tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                remote: false,
                             };
                             state.add_message(success_msg);
                         }
@@ -2807,6 +2834,7 @@ impl<B: Backend> TuiController<B> {
                                 tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                remote: false,
                             };
                             state.add_message(error_msg);
                         }
@@ -2837,6 +2865,7 @@ impl<B: Backend> TuiController<B> {
                     tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    remote: false,
                 };
                 state.add_message(clear_msg);
                 state.clear_input();
@@ -2873,6 +2902,7 @@ impl<B: Backend> TuiController<B> {
                     tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    remote: false,
                 };
                 state.add_message(msg);
                 state.clear_input();
@@ -2904,6 +2934,7 @@ impl<B: Backend> TuiController<B> {
                     tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    remote: false,
                 };
                 state.add_message(msg);
                 state.clear_input();
@@ -2942,6 +2973,7 @@ impl<B: Backend> TuiController<B> {
                     tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    remote: false,
                 };
                 state.add_message(msg);
                 state.clear_input();
@@ -2981,6 +3013,7 @@ impl<B: Backend> TuiController<B> {
                     tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    remote: false,
                 };
                 state.add_message(msg);
                 state.clear_input();
@@ -3015,6 +3048,7 @@ impl<B: Backend> TuiController<B> {
                             tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            remote: false,
                         };
                         state.add_message(msg);
                         // Refresh sidebar to show updated context usage
@@ -3033,6 +3067,7 @@ impl<B: Backend> TuiController<B> {
                             tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            remote: false,
                         };
                         state.add_message(msg);
                     }
@@ -3065,6 +3100,7 @@ impl<B: Backend> TuiController<B> {
                         tool_args: None,
                         collapsed: false,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        remote: false,
                         provider: None,
                         model: None,
                     };
@@ -3151,6 +3187,7 @@ impl<B: Backend> TuiController<B> {
                             tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            remote: false,
                             provider: None,
                             model: None,
                         };
@@ -3196,6 +3233,7 @@ impl<B: Backend> TuiController<B> {
                             tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            remote: false,
                             provider: None,
                             model: None,
                         };
@@ -3234,6 +3272,7 @@ impl<B: Backend> TuiController<B> {
                                 tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                remote: false,
                                 provider: None,
                                 model: None,
                             };
@@ -3251,6 +3290,7 @@ impl<B: Backend> TuiController<B> {
                                 tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                remote: false,
                                 provider: None,
                                 model: None,
                             };
@@ -3285,6 +3325,7 @@ impl<B: Backend> TuiController<B> {
                             tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            remote: false,
                             provider: None,
                             model: None,
                         };
@@ -3302,6 +3343,7 @@ impl<B: Backend> TuiController<B> {
                             tool_args: None,
                             collapsed: false,
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            remote: false,
                             provider: None,
                             model: None,
                         };
@@ -3338,6 +3380,7 @@ impl<B: Backend> TuiController<B> {
                                 tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                remote: false,
                                 provider: None,
                                 model: None,
                             };
@@ -3355,6 +3398,7 @@ impl<B: Backend> TuiController<B> {
                                 tool_args: None,
                                 collapsed: false,
                                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                remote: false,
                                 provider: None,
                                 model: None,
                             };
@@ -3381,6 +3425,7 @@ impl<B: Backend> TuiController<B> {
                     tool_args: None,
                     collapsed: false,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    remote: false,
                     provider: None,
                     model: None,
                 };

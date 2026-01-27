@@ -481,6 +481,8 @@ pub struct Message {
     pub role: MessageRole,
     /// Message content
     pub content: String,
+    /// Whether this message originated from a remote channel
+    pub remote: bool,
     /// Provider ID for assistant messages
     pub provider: Option<String>,
     /// Model ID for assistant messages
@@ -501,6 +503,7 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            remote: false,
             provider: None,
             model: None,
             collapsed: false,
@@ -531,6 +534,7 @@ impl Message {
         Self {
             role: MessageRole::Question,
             content,
+            remote: false,
             provider: None,
             model: None,
             collapsed: false,
@@ -1883,6 +1887,13 @@ impl Widget for MessageArea<'_> {
                         label,
                         Style::default().fg(self.theme.text_secondary),
                     ));
+                    if msg.remote {
+                        header_spans.push(Span::raw(" · "));
+                        header_spans.push(Span::styled(
+                            "📡",
+                            Style::default().fg(self.theme.text_muted),
+                        ));
+                    }
                     if !msg.timestamp.is_empty() {
                         header_spans.push(Span::raw(" · "));
                         header_spans.push(Span::styled(
@@ -2142,6 +2153,12 @@ impl Widget for MessageArea<'_> {
                         Style::default().fg(self.theme.text_muted),
                     ));
                     spans.push(Span::raw(" "));
+                    if msg.remote {
+                        spans.push(Span::styled(
+                            "📡 ",
+                            Style::default().fg(self.theme.text_muted),
+                        ));
+                    }
                     if !msg.timestamp.is_empty() {
                         spans.push(Span::styled(
                             format!("{} ", msg.timestamp),
@@ -2154,6 +2171,9 @@ impl Widget for MessageArea<'_> {
                     prefix_width += icon.chars().count() + 1; // "icon "
                     prefix_width += label.chars().count();
                     prefix_width += 1; // " "
+                    if msg.remote {
+                        prefix_width += "📡 ".chars().count();
+                    }
                     if !msg.timestamp.is_empty() {
                         prefix_width += msg.timestamp.chars().count() + 1; // "time "
                     }

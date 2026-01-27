@@ -152,6 +152,7 @@ pub struct Sidebar<'a> {
 #[derive(Debug, Default)]
 pub struct SessionInfo {
     pub name: String,
+    pub is_remote: bool,
     pub total_cost: f64,
     pub model_count: usize,
     pub model_costs: Vec<(String, f64)>,
@@ -593,13 +594,21 @@ impl Widget for Sidebar<'_> {
                 };
                 let line_idx = session_lines.len();
                 panel_item_lines[0].push(line_idx);
+                let mut name_spans = vec![
+                    Span::raw("  "),
+                    Span::styled(&self.session_info.name, name_style),
+                ];
+                if self.session_info.is_remote {
+                    name_spans.push(Span::raw(" "));
+                    name_spans.push(Span::styled(
+                        "📡",
+                        Style::default().fg(self.theme.text_muted),
+                    ));
+                }
                 Self::push_line(
                     &mut session_lines,
                     &mut all_lines,
-                    Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(&self.session_info.name, name_style),
-                    ]),
+                    Line::from(name_spans),
                 );
                 session_item_idx += 1;
             }

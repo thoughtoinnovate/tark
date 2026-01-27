@@ -852,7 +852,7 @@ fn test_flash_bar_working_single_line() {
 fn test_header_renders() {
     let theme = Theme::default();
     let config = AppConfig::default();
-    let widget = Header::new(&config, &theme);
+    let widget = Header::new(&config, &theme, None);
     let output = render_widget(widget, 80, 1);
 
     assert!(

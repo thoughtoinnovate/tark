@@ -383,15 +383,20 @@ async fn main() -> Result<()> {
                         std::env::set_var("TARK_FORCE_QUIT_ON_CTRL_C", "1");
                         std::env::set_var("TARK_REMOTE_ENABLED", "1");
                         std::env::set_var("TARK_REMOTE_PLUGIN", remote_plugin);
-                        let (server_handle, _project_root) = transport::remote::start_remote_runtime(
-                            working_dir.clone(),
-                            remote_plugin,
-                            cli.remote_debug,
+                        let (server_handle, _project_root) =
+                            transport::remote::start_remote_runtime(
+                                working_dir.clone(),
+                                remote_plugin,
+                                cli.remote_debug,
+                            )
+                            .await?;
+                        let result = transport::cli::run_tui_new(
+                            &working_dir.to_string_lossy(),
+                            None,
+                            None,
+                            false,
                         )
-                        .await?;
-                        let result =
-                            transport::cli::run_tui_new(&working_dir.to_string_lossy(), None, None, false)
-                                .await;
+                        .await;
                         server_handle.abort();
                         result?;
                     }

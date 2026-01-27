@@ -188,6 +188,8 @@ pub struct Message {
     pub thinking: Option<String>,
     pub collapsed: bool,
     pub timestamp: String,
+    #[serde(default)]
+    pub remote: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
