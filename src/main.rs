@@ -70,6 +70,16 @@ struct Cli {
     /// Enable full remote debug logging (otherwise error-only)
     #[arg(long, global = true)]
     remote_debug: bool,
+
+    /// Remote UI mode: monitor (default) or main
+    #[arg(long, global = true, default_value = "monitor")]
+    remote_ui: RemoteUi,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum RemoteUi {
+    Monitor,
+    Main,
 }
 
 #[derive(Subcommand)]
@@ -360,8 +370,29 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             } else {
-                transport::remote::run_remote_tui(working_dir, remote_plugin, cli.remote_debug)
-                    .await?;
+                match cli.remote_ui {
+                    RemoteUi::Monitor => {
+                        transport::remote::run_remote_tui(
+                            working_dir,
+                            remote_plugin,
+                            cli.remote_debug,
+                        )
+                        .await?;
+                    }
+                    RemoteUi::Main => {
+                        let (server_handle, _project_root) = transport::remote::start_remote_runtime(
+                            working_dir.clone(),
+                            remote_plugin,
+                            cli.remote_debug,
+                        )
+                        .await?;
+                        let result =
+                            transport::cli::run_tui_new(&working_dir.to_string_lossy(), None, None, false)
+                                .await;
+                        server_handle.abort();
+                        result?;
+                    }
+                }
             }
             return Ok(());
         }

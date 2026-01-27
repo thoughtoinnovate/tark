@@ -186,6 +186,16 @@ async fn start_remote_server(
     Ok((remote, server_handle, project_root))
 }
 
+pub async fn start_remote_runtime(
+    working_dir: PathBuf,
+    plugin_id: &str,
+    debug_full: bool,
+) -> Result<(tokio::task::JoinHandle<()>, PathBuf)> {
+    let (_remote, server_handle, project_root) =
+        start_remote_server(working_dir, plugin_id, debug_full).await?;
+    Ok((server_handle, project_root))
+}
+
 fn print_event(event: &RemoteEvent) {
     let ts = &event.timestamp;
     let msg = event.message.as_deref().unwrap_or("");
