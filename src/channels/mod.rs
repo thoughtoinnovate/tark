@@ -853,8 +853,9 @@ impl ChannelManager {
                 .await;
         });
 
+        let can_stream = channel_info.supports_streaming && channel_info.supports_edits;
         let mut initial_message_id = None;
-        if channel_info.supports_streaming || channel_info.supports_edits {
+        if channel_info.supports_edits {
             let working_request = ChannelSendRequest {
                 conversation_id: message.conversation_id.clone(),
                 text: "⏳ Working...".to_string(),
@@ -867,7 +868,7 @@ impl ChannelManager {
             }
         }
 
-        let response = if channel_info.supports_streaming {
+        let response = if can_stream {
             Some(
                 self.respond_streaming(
                     plugin_id,
