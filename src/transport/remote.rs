@@ -23,8 +23,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::channels::remote::{RemoteEvent, RemoteRegistry, RemoteRuntime};
-use crate::channels::request_channel_shutdown;
+use crate::channels::{request_channel_shutdown, ChannelManager};
 use crate::config::Config;
+use crate::storage::usage::UsageTracker;
 use crate::storage::TarkStorage;
 use crate::transport::http::run_http_server;
 
@@ -210,6 +211,26 @@ async fn start_remote_server(
     let port = config.server.port;
     let http_enabled = config.remote.http_enabled;
     let plugin_id = plugin_id.to_string();
+
+    if !http_enabled {
+        let storage = TarkStorage::new(&working_dir).ok().map(Arc::new);
+        let usage_tracker = storage
+            .as_ref()
+            .and_then(|storage| UsageTracker::new(storage.project_root()).ok())
+            .map(Arc::new);
+        let channel_manager = ChannelManager::new(
+            config.clone(),
+            working_dir.clone(),
+            storage,
+            usage_tracker,
+            Some(Arc::clone(&remote_for_server)),
+            remote_provider_override.clone(),
+            remote_model_override.clone(),
+        );
+        if let Err(err) = channel_manager.start_all().await {
+            tracing::warn!("Failed to start remote channel plugins: {}", err);
+        }
+    }
 
     let server_handle = tokio::spawn(async move {
         if http_enabled {

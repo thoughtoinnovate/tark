@@ -210,9 +210,13 @@ impl ChannelManager {
                 }
             }
             let plugin = plugin.clone();
-            let manager = self.clone();
-            let plugin_for_start = plugin.clone();
-            tokio::task::spawn_blocking(move || manager.start_plugin(&plugin_for_start)).await??;
+            let supports_poll = self.remote.is_some() && self.plugin_supports_poll(&plugin);
+            if !supports_poll {
+                let manager = self.clone();
+                let plugin_for_start = plugin.clone();
+                tokio::task::spawn_blocking(move || manager.start_plugin(&plugin_for_start))
+                    .await??;
+            }
 
             if self.remote.is_some() {
                 let manager = self.clone();
@@ -276,6 +280,10 @@ impl ChannelManager {
                         tracing::warn!("Channel poll auth init failed: {}", err);
                     }
                 }
+            }
+
+            if let Err(err) = instance.channel_start() {
+                tracing::warn!("Channel poll start failed: {}", err);
             }
 
             if !instance.has_channel_poll() {
