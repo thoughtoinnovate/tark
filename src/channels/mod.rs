@@ -1437,26 +1437,29 @@ impl ChannelManager {
                             })),
                         );
                     }
-                    let args_preview = if args.len() > 300 {
-                        format!("{}…", crate::core::truncate_at_char_boundary(&args, 300))
-                    } else {
-                        args.clone()
-                    };
-                    let tool_text = if args_preview.is_empty() {
-                        format!("🔧 Running `{}`", tool_name)
-                    } else {
-                        format!("🔧 Running `{}`\nArgs: {}", tool_name, args_preview)
-                    };
-                    let request = ChannelSendRequest {
-                        conversation_id: tool_conversation_id_call.clone(),
-                        text: tool_text,
-                        message_id: None,
-                        is_final: true,
-                        metadata_json: tool_metadata_json_call.clone(),
-                    };
                     let manager = tool_manager_call.clone();
                     let tool_plugin_id = tool_plugin_id_call.clone();
+                    let conversation_id = tool_conversation_id_call.clone();
+                    let metadata_json = tool_metadata_json_call.clone();
+                    let tool_name = tool_name.to_string();
                     tokio::spawn(async move {
+                        let args_preview = if args.len() > 300 {
+                            format!("{}…", crate::core::truncate_at_char_boundary(&args, 300))
+                        } else {
+                            args.clone()
+                        };
+                        let tool_text = if args_preview.is_empty() {
+                            format!("🔧 Running `{}`", tool_name)
+                        } else {
+                            format!("🔧 Running `{}`\nArgs: {}", tool_name, args_preview)
+                        };
+                        let request = ChannelSendRequest {
+                            conversation_id,
+                            text: tool_text,
+                            message_id: None,
+                            is_final: true,
+                            metadata_json,
+                        };
                         let _ = manager
                             .send_channel_message(&tool_plugin_id, &request)
                             .await;
@@ -1484,26 +1487,29 @@ impl ChannelManager {
                             })),
                         );
                     }
-                    let result_preview = if result.len() > 400 {
-                        format!("{}…", crate::core::truncate_at_char_boundary(&result, 400))
-                    } else {
-                        result.clone()
-                    };
-                    let tool_text = if success {
-                        format!("✅ Completed `{}`\n{}", tool_name, result_preview)
-                    } else {
-                        format!("❌ Failed `{}`\n{}", tool_name, result_preview)
-                    };
-                    let request = ChannelSendRequest {
-                        conversation_id: tool_conversation_id_complete.clone(),
-                        text: tool_text,
-                        message_id: None,
-                        is_final: true,
-                        metadata_json: tool_metadata_json_complete.clone(),
-                    };
                     let manager = tool_manager_complete.clone();
                     let tool_plugin_id = tool_plugin_id_complete.clone();
+                    let conversation_id = tool_conversation_id_complete.clone();
+                    let metadata_json = tool_metadata_json_complete.clone();
+                    let tool_name = tool_name.to_string();
                     tokio::spawn(async move {
+                        let result_preview = if result.len() > 400 {
+                            format!("{}…", crate::core::truncate_at_char_boundary(&result, 400))
+                        } else {
+                            result.clone()
+                        };
+                        let tool_text = if success {
+                            format!("✅ Completed `{}`\n{}", tool_name, result_preview)
+                        } else {
+                            format!("❌ Failed `{}`\n{}", tool_name, result_preview)
+                        };
+                        let request = ChannelSendRequest {
+                            conversation_id,
+                            text: tool_text,
+                            message_id: None,
+                            is_final: true,
+                            metadata_json,
+                        };
                         let _ = manager
                             .send_channel_message(&tool_plugin_id, &request)
                             .await;
@@ -1601,6 +1607,46 @@ impl ChannelManager {
         }
 
         self.send_channel_message_inner(plugin_id, request).await
+    }
+
+    async fn send_tool_status_discord(
+        &self,
+        plugin_id: &str,
+        conversation_id: &str,
+        tool_log: &[ToolCallLog],
+        metadata_json: &str,
+    ) -> Result<()> {
+        let Some(label) = tool_status_label(tool_log) else {
+            return Ok(());
+        };
+        let running = ChannelSendRequest {
+            conversation_id: conversation_id.to_string(),
+            text: format!("🔧 Running {}", label),
+            message_id: None,
+            is_final: false,
+            metadata_json: metadata_json.to_string(),
+        };
+        let running_result = self.send_channel_message(plugin_id, &running).await?;
+        if let Some(message_id) = running_result.message_id {
+            let completed = ChannelSendRequest {
+                conversation_id: conversation_id.to_string(),
+                text: format!("✅ Completed {}", label),
+                message_id: Some(message_id),
+                is_final: true,
+                metadata_json: metadata_json.to_string(),
+            };
+            let _ = self.send_channel_message(plugin_id, &completed).await?;
+        } else {
+            let completed = ChannelSendRequest {
+                conversation_id: conversation_id.to_string(),
+                text: format!("✅ Completed {}", label),
+                message_id: None,
+                is_final: true,
+                metadata_json: metadata_json.to_string(),
+            };
+            let _ = self.send_channel_message(plugin_id, &completed).await?;
+        }
+        Ok(())
     }
 
     async fn send_channel_message_chunked(
@@ -2102,6 +2148,20 @@ fn format_tool_log_for_remote(tool_log: &[ToolCallLog]) -> Option<String> {
         }
     }
     Some(lines.join("\n"))
+}
+
+fn tool_status_label(tool_log: &[ToolCallLog]) -> Option<String> {
+    if tool_log.is_empty() {
+        return None;
+    }
+    let mut tools: Vec<String> = tool_log.iter().map(|t| t.tool.clone()).collect();
+    tools.sort();
+    tools.dedup();
+    if tools.len() == 1 {
+        Some(tools[0].clone())
+    } else {
+        Some(format!("tools: {}", tools.join(", ")))
+    }
 }
 
 fn normalize_multiline(value: &str, max_len: usize) -> String {
