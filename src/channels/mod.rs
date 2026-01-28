@@ -616,7 +616,8 @@ impl ChannelManager {
             return Ok(());
         }
 
-        let remote_ctx = parse_remote_context(&message.metadata_json);
+        let mut remote_ctx = parse_remote_context(&message.metadata_json);
+        fill_remote_context_from_message(&mut remote_ctx, message);
         if let Some(remote) = &self.remote {
             if remote.registry().is_stopped(&session_id) {
                 let send_request = ChannelSendRequest {
@@ -2603,6 +2604,15 @@ fn parse_remote_context(metadata_json: &str) -> RemoteContext {
     ctx
 }
 
+fn fill_remote_context_from_message(ctx: &mut RemoteContext, message: &ChannelInboundMessage) {
+    if ctx.user_id.is_none() && !message.user_id.is_empty() {
+        ctx.user_id = Some(message.user_id.clone());
+    }
+    if ctx.channel_id.is_none() && !message.conversation_id.is_empty() {
+        ctx.channel_id = Some(message.conversation_id.clone());
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct RemoteAttachmentMeta {
     #[serde(default)]
@@ -3021,6 +3031,20 @@ mod tests {
         let key = inbound_dedupe_key(&msg);
         assert!(key.starts_with("id:"));
         assert!(key.contains("abc123"));
+    }
+
+    #[test]
+    fn test_fill_remote_context_from_message_sets_user_and_channel() {
+        let mut ctx = RemoteContext::default();
+        let msg = ChannelInboundMessage {
+            conversation_id: "conv-1".to_string(),
+            user_id: "user-1".to_string(),
+            text: "hello".to_string(),
+            metadata_json: String::new(),
+        };
+        fill_remote_context_from_message(&mut ctx, &msg);
+        assert_eq!(ctx.user_id.as_deref(), Some("user-1"));
+        assert_eq!(ctx.channel_id.as_deref(), Some("conv-1"));
     }
 
     #[test]

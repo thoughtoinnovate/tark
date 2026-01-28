@@ -588,6 +588,18 @@ impl<B: Backend> TuiController<B> {
                                             .message
                                             .clone()
                                             .unwrap_or_else(|| "Remote question".to_string());
+                                        if let Some(storage) = storage.as_ref() {
+                                            if let Err(err) = Self::append_remote_prompt_to_session(
+                                                storage,
+                                                &event.session_id,
+                                                &prompt,
+                                            ) {
+                                                tracing::warn!(
+                                                    "Failed to store remote question: {}",
+                                                    err
+                                                );
+                                            }
+                                        }
                                         if is_active {
                                             format!(
                                                 "📡 Remote ask_user pending:\n{}\n\nReply in Discord to continue.",
@@ -605,6 +617,18 @@ impl<B: Backend> TuiController<B> {
                                             .message
                                             .clone()
                                             .unwrap_or_else(|| "Remote approval request".to_string());
+                                        if let Some(storage) = storage.as_ref() {
+                                            if let Err(err) = Self::append_remote_prompt_to_session(
+                                                storage,
+                                                &event.session_id,
+                                                &prompt,
+                                            ) {
+                                                tracing::warn!(
+                                                    "Failed to store remote approval request: {}",
+                                                    err
+                                                );
+                                            }
+                                        }
                                         if is_active {
                                             format!(
                                                 "📡 Remote approval pending:\n{}\n\nReply in Discord to continue.",
@@ -822,6 +846,39 @@ impl<B: Backend> TuiController<B> {
                 }
             }
         });
+    }
+
+    fn append_remote_prompt_to_session(
+        storage: &TarkStorage,
+        session_id: &str,
+        prompt: &str,
+    ) -> Result<()> {
+        use crate::storage::SessionMessage;
+        let mut session = storage.load_session(session_id)?;
+        if session
+            .messages
+            .last()
+            .map(|msg| msg.role == "system" && msg.content == prompt)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        session.messages.push(SessionMessage {
+            role: "system".to_string(),
+            content: prompt.to_string(),
+            timestamp: chrono::Utc::now(),
+            remote: true,
+            provider: None,
+            model: None,
+            context_transient: false,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            thinking_content: None,
+            segments: Vec::new(),
+        });
+        session.updated_at = chrono::Utc::now();
+        storage.save_session(&session)?;
+        Ok(())
     }
 
     async fn send_approval_response(&self, choice: ApprovalChoice) {

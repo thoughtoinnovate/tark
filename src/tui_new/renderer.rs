@@ -2486,6 +2486,10 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 && state
                     .processing_session_id()
                     .map(|id| id.starts_with("channel_"))
+                    .unwrap_or(false)
+                && state
+                    .session()
+                    .map(|s| s.session_id.starts_with("channel_"))
                     .unwrap_or(false);
             let mut status_strip = FlashBar::new(theme)
                 .kind(flash_state)
