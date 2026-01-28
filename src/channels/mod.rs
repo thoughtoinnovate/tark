@@ -78,6 +78,10 @@ pub fn request_channel_shutdown() {
     CHANNEL_POLL_SHUTDOWN.store(true, Ordering::SeqCst);
 }
 
+pub fn reset_channel_shutdown() {
+    CHANNEL_POLL_SHUTDOWN.store(false, Ordering::SeqCst);
+}
+
 #[derive(Debug, Serialize)]
 struct ToolSummary {
     tool_calls: usize,
@@ -194,6 +198,7 @@ impl ChannelManager {
     }
 
     pub async fn start_all(&self) -> Result<()> {
+        reset_channel_shutdown();
         let registry = PluginRegistry::new()?;
         for plugin in registry.by_type(PluginType::Channel) {
             if !plugin.enabled {
@@ -2852,5 +2857,13 @@ mod tests {
         let text = prefix_remote_response("hello".to_string(), RemoteResponseLabel::Answer);
         assert!(text.contains("**🧠 Answer**"));
         assert!(text.contains("hello"));
+    }
+
+    #[test]
+    fn test_channel_shutdown_reset() {
+        request_channel_shutdown();
+        assert!(CHANNEL_POLL_SHUTDOWN.load(Ordering::SeqCst));
+        reset_channel_shutdown();
+        assert!(!CHANNEL_POLL_SHUTDOWN.load(Ordering::SeqCst));
     }
 }
