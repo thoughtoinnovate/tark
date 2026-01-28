@@ -68,8 +68,13 @@ struct StreamState {
     conversation_id: String,
     message_id: Option<String>,
     supports_edits: bool,
+    supports_streaming: bool,
     accumulated: String,
     last_sent: Instant,
+}
+
+fn mirror_streaming_enabled(supports_streaming: bool, message_id: Option<&str>) -> bool {
+    supports_streaming && message_id.is_some()
 }
 
 #[derive(Clone)]
@@ -132,11 +137,16 @@ impl RemoteMirror {
                             if remote.registry().is_stopped(&session_id) {
                                 continue;
                             }
-                            let supports_edits = channel_manager
+                            let (supports_edits, supports_streaming) = channel_manager
                                 .channel_info(&entry.plugin_id)
                                 .await
-                                .map(|info| info.supports_streaming || info.supports_edits)
-                                .unwrap_or(false);
+                                .map(|info| {
+                                    (
+                                        info.supports_edits,
+                                        info.supports_streaming && info.supports_edits,
+                                    )
+                                })
+                                .unwrap_or((false, false));
                             streams.insert(
                                 session_id.clone(),
                                 StreamState {
@@ -144,6 +154,7 @@ impl RemoteMirror {
                                     conversation_id: entry.conversation_id.clone(),
                                     message_id: None,
                                     supports_edits,
+                                    supports_streaming,
                                     accumulated: String::new(),
                                     last_sent: Instant::now(),
                                 },
@@ -160,15 +171,24 @@ impl RemoteMirror {
                                 is_final: false,
                                 metadata_json,
                             };
-                            if let Ok(result) = channel_manager
-                                .send_channel_message(&entry.plugin_id, &request)
-                                .await
-                            {
-                                if let Some(state) = streams.get_mut(&session_id) {
-                                    if state.message_id.is_none() {
-                                        state.message_id = result.message_id;
+                            if supports_edits {
+                                if let Ok(result) = channel_manager
+                                    .send_channel_message(&entry.plugin_id, &request)
+                                    .await
+                                {
+                                    if let Some(state) = streams.get_mut(&session_id) {
+                                        if state.message_id.is_none() {
+                                            state.message_id = result.message_id;
+                                        }
+                                        if state.message_id.is_none() {
+                                            state.supports_streaming = false;
+                                        }
                                     }
+                                } else if let Some(state) = streams.get_mut(&session_id) {
+                                    state.supports_streaming = false;
                                 }
+                            } else if let Some(state) = streams.get_mut(&session_id) {
+                                state.supports_streaming = false;
                             }
 
                             let _ = remote.registry().mark_status(
@@ -191,6 +211,12 @@ impl RemoteMirror {
                         let Some(state) = streams.get_mut(&session_id) else {
                             continue;
                         };
+                        if !mirror_streaming_enabled(
+                            state.supports_streaming,
+                            state.message_id.as_deref(),
+                        ) {
+                            continue;
+                        }
                         state.accumulated.push_str(&chunk);
                         let should_send = state.accumulated.len() >= STREAM_MIN_CHARS
                             || state.last_sent.elapsed() >= STREAM_DEBOUNCE;
@@ -524,4 +550,16 @@ impl RemoteMirror {
 
 fn lookup_entry(remote: &RemoteRuntime, session_id: &str) -> Option<RemoteSessionEntry> {
     remote.registry().get(session_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mirror_streaming_enabled;
+
+    #[test]
+    fn test_mirror_streaming_requires_message_id() {
+        assert!(!mirror_streaming_enabled(true, None));
+        assert!(!mirror_streaming_enabled(false, Some("id")));
+        assert!(mirror_streaming_enabled(true, Some("id")));
+    }
 }

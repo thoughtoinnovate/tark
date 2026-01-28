@@ -858,7 +858,6 @@ impl ChannelManager {
                 .await;
         });
 
-        let can_stream = channel_info.supports_streaming && channel_info.supports_edits;
         let mut initial_message_id = None;
         if channel_info.supports_edits {
             let working_request = ChannelSendRequest {
@@ -872,6 +871,11 @@ impl ChannelManager {
                 initial_message_id = result.message_id;
             }
         }
+        let can_stream = allow_remote_streaming(
+            channel_info.supports_streaming,
+            channel_info.supports_edits,
+            initial_message_id.as_deref(),
+        );
 
         let response = if can_stream {
             Some(
@@ -2067,6 +2071,14 @@ fn split_message_by_chars(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+fn allow_remote_streaming(
+    supports_streaming: bool,
+    supports_edits: bool,
+    message_id: Option<&str>,
+) -> bool {
+    supports_streaming && supports_edits && message_id.is_some()
+}
+
 fn finalize_response_text(
     response_text: &str,
     fallback_text: &str,
@@ -2857,6 +2869,14 @@ mod tests {
         let text = prefix_remote_response("hello".to_string(), RemoteResponseLabel::Answer);
         assert!(text.contains("**🧠 Answer**"));
         assert!(text.contains("hello"));
+    }
+
+    #[test]
+    fn test_allow_remote_streaming_requires_message_id() {
+        assert!(!allow_remote_streaming(true, true, None));
+        assert!(!allow_remote_streaming(true, false, Some("id")));
+        assert!(!allow_remote_streaming(false, true, Some("id")));
+        assert!(allow_remote_streaming(true, true, Some("id")));
     }
 
     #[test]
