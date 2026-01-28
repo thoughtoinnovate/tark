@@ -573,11 +573,11 @@ impl<B: Backend> TuiController<B> {
                             }
                             "ask_user" | "approval_request" => {
                                 status = "waiting".to_string();
-                                if state
+                                let is_active = state
                                     .session()
                                     .map(|s| s.session_id == event.session_id)
-                                    .unwrap_or(false)
-                                {
+                                    .unwrap_or(false);
+                                if is_active {
                                     state.set_llm_processing(false);
                                     state.set_processing_session_id(None);
                                     state.clear_streaming();
@@ -588,20 +588,34 @@ impl<B: Backend> TuiController<B> {
                                             .message
                                             .clone()
                                             .unwrap_or_else(|| "Remote question".to_string());
-                                        format!(
-                                            "📡 Remote ask_user pending:\n{}\n\nReply in Discord to continue.",
-                                            prompt
-                                        )
+                                        if is_active {
+                                            format!(
+                                                "📡 Remote ask_user pending:\n{}\n\nReply in Discord to continue.",
+                                                prompt
+                                            )
+                                        } else {
+                                            format!(
+                                                "📡 Remote ask_user pending:\n{}\n\nUse /sessions to open the remote thread.",
+                                                prompt
+                                            )
+                                        }
                                     }
                                     "approval_request" => {
                                         let prompt = event
                                             .message
                                             .clone()
                                             .unwrap_or_else(|| "Remote approval request".to_string());
-                                        format!(
-                                            "📡 Remote approval pending:\n{}\n\nReply in Discord to continue.",
-                                            prompt
-                                        )
+                                        if is_active {
+                                            format!(
+                                                "📡 Remote approval pending:\n{}\n\nReply in Discord to continue.",
+                                                prompt
+                                            )
+                                        } else {
+                                            format!(
+                                                "📡 Remote approval pending:\n{}\n\nUse /sessions to open the remote thread.",
+                                                prompt
+                                            )
+                                        }
                                     }
                                     _ => String::new(),
                                 };
@@ -718,7 +732,7 @@ impl<B: Backend> TuiController<B> {
 
                         if matches!(
                             event.event.as_str(),
-                            "inbound" | "outbound" | "agent_done"
+                            "inbound" | "outbound" | "agent_done" | "ask_user" | "approval_request"
                         ) {
                             pending_reload = Some((
                                 event.session_id.clone(),

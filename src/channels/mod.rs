@@ -1070,6 +1070,13 @@ impl ChannelManager {
                 };
                 let _ = self.send_channel_message(plugin_id, &ack).await;
                 if let Some(remote) = &self.remote {
+                    let _ = remote.registry().mark_status(
+                        &channel_session_id(plugin_id, &message.conversation_id),
+                        remote.runtime_id(),
+                        plugin_id,
+                        &message.conversation_id,
+                        "working",
+                    );
                     remote.emit(
                         RemoteEvent::new(
                             "ask_user_answer",
@@ -1097,6 +1104,13 @@ impl ChannelManager {
                 };
                 let _ = self.send_channel_message(plugin_id, &ack).await;
                 if let Some(remote) = &self.remote {
+                    let _ = remote.registry().mark_status(
+                        &channel_session_id(plugin_id, &message.conversation_id),
+                        remote.runtime_id(),
+                        plugin_id,
+                        &message.conversation_id,
+                        "working",
+                    );
                     remote.emit(
                         RemoteEvent::new(
                             "approval_answer",
@@ -1144,6 +1158,15 @@ impl ChannelManager {
                     }
 
                     let prompt = format_questionnaire_for_remote(&data);
+                    if let Some(remote) = &self.remote {
+                        let _ = remote.registry().mark_status(
+                            &channel_session_id(&plugin_id, &conversation_id),
+                            remote.runtime_id(),
+                            &plugin_id,
+                            &conversation_id,
+                            "waiting",
+                        );
+                    }
                     let send = self
                         .send_channel_message(
                             &plugin_id,
@@ -1206,6 +1229,15 @@ impl ChannelManager {
                     }
 
                     let prompt = format_approval_for_remote(&request);
+                    if let Some(remote) = &self.remote {
+                        let _ = remote.registry().mark_status(
+                            &channel_session_id(&plugin_id, &conversation_id),
+                            remote.runtime_id(),
+                            &plugin_id,
+                            &conversation_id,
+                            "waiting",
+                        );
+                    }
                     let send = self
                         .send_channel_message(
                             &plugin_id,
