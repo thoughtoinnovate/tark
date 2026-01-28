@@ -2482,14 +2482,15 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
 
             // Render status message strip
             let (flash_state, message) = build_status_message(state);
-            let processing_remote = state.llm_processing()
+            let remote_enabled = std::env::var("TARK_REMOTE_ENABLED").ok().as_deref() == Some("1");
+            let processing_remote = remote_enabled
+                && state.llm_processing()
                 && state
                     .processing_session_id()
-                    .map(|id| id.starts_with("channel_"))
-                    .unwrap_or(false)
-                && state
-                    .session()
-                    .map(|s| s.session_id.starts_with("channel_"))
+                    .zip(state.session().map(|s| s.session_id))
+                    .map(|(processing_id, session_id)| {
+                        processing_id == session_id && session_id.starts_with("channel_")
+                    })
                     .unwrap_or(false);
             let mut status_strip = FlashBar::new(theme)
                 .kind(flash_state)
