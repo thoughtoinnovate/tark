@@ -571,6 +571,91 @@ impl<B: Backend> TuiController<B> {
                                     }
                                 }
                             }
+                            "ask_user" | "approval_request" => {
+                                status = "waiting".to_string();
+                                if state
+                                    .session()
+                                    .map(|s| s.session_id == event.session_id)
+                                    .unwrap_or(false)
+                                {
+                                    state.set_llm_processing(false);
+                                    state.set_processing_session_id(None);
+                                    state.clear_streaming();
+                                }
+                                let content = match event.event.as_str() {
+                                    "ask_user" => {
+                                        let prompt = event
+                                            .message
+                                            .clone()
+                                            .unwrap_or_else(|| "Remote question".to_string());
+                                        format!(
+                                            "📡 Remote ask_user pending:\n{}\n\nReply in Discord to continue.",
+                                            prompt
+                                        )
+                                    }
+                                    "approval_request" => {
+                                        let prompt = event
+                                            .message
+                                            .clone()
+                                            .unwrap_or_else(|| "Remote approval request".to_string());
+                                        format!(
+                                            "📡 Remote approval pending:\n{}\n\nReply in Discord to continue.",
+                                            prompt
+                                        )
+                                    }
+                                    _ => String::new(),
+                                };
+                                if !content.is_empty() {
+                                    state.add_message(crate::ui_backend::Message {
+                                        role: crate::ui_backend::MessageRole::System,
+                                        content,
+                                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                        remote: true,
+                                        provider: None,
+                                        model: None,
+                                        collapsed: false,
+                                        thinking: None,
+                                        context_transient: true,
+                                        tool_calls: Vec::new(),
+                                        segments: Vec::new(),
+                                        tool_args: None,
+                                    });
+                                    state.scroll_to_bottom();
+                                }
+                            }
+                            "ask_user_answer" | "approval_answer" => {
+                                status = "working".to_string();
+                                if state
+                                    .session()
+                                    .map(|s| s.session_id == event.session_id)
+                                    .unwrap_or(false)
+                                {
+                                    state.set_llm_processing(true);
+                                    state.set_processing_session_id(Some(event.session_id.clone()));
+                                }
+                                let content = match event.event.as_str() {
+                                    "ask_user_answer" => "✅ Remote response received.".to_string(),
+                                    "approval_answer" => "✅ Remote approval received.".to_string(),
+                                    _ => String::new(),
+                                };
+                                if mirror_ui && !content.is_empty() {
+                                    state.add_message(crate::ui_backend::Message {
+                                        role: crate::ui_backend::MessageRole::System,
+                                        content,
+                                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                        remote: true,
+                                        provider: None,
+                                        model: None,
+                                        collapsed: false,
+                                        thinking: None,
+                                        context_transient: true,
+                                        tool_calls: Vec::new(),
+                                        segments: Vec::new(),
+                                        tool_args: None,
+                                    });
+                                    state.scroll_to_bottom();
+                                }
+                            }
                             "queued" => {
                                 if let Some(preview) = event.message.clone() {
                                     let count = event
@@ -629,48 +714,6 @@ impl<B: Backend> TuiController<B> {
                             state.set_processing_session_id(None);
                             state.set_processing_correlation_id(None);
                             state.clear_streaming();
-                        }
-
-                        if mirror_ui {
-                            let content = match event.event.as_str() {
-                                "ask_user" => {
-                                    let prompt =
-                                        event.message.unwrap_or_else(|| "Remote question".to_string());
-                                    format!(
-                                        "📡 Remote ask_user pending:\n{}\n\nReply in Discord to continue.",
-                                        prompt
-                                    )
-                                }
-                                "approval_request" => {
-                                    let prompt =
-                                        event.message.unwrap_or_else(|| "Remote approval request".to_string());
-                                    format!(
-                                        "📡 Remote approval pending:\n{}\n\nReply in Discord to continue.",
-                                        prompt
-                                    )
-                                }
-                                "ask_user_answer" => "✅ Remote response received.".to_string(),
-                                "approval_answer" => "✅ Remote approval received.".to_string(),
-                                _ => String::new(),
-                            };
-
-                            if !content.is_empty() {
-                                state.add_message(crate::ui_backend::Message {
-                                    role: crate::ui_backend::MessageRole::System,
-                                    content,
-                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                                    remote: false,
-                                    provider: None,
-                                    model: None,
-                                    collapsed: false,
-                                    thinking: None,
-                                    context_transient: true,
-                                    tool_calls: Vec::new(),
-                                    segments: Vec::new(),
-                                    tool_args: None,
-                                });
-                                state.scroll_to_bottom();
-                            }
                         }
 
                         if matches!(

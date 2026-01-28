@@ -36,10 +36,11 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant as StdInstant;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::{Duration, Instant};
@@ -49,6 +50,8 @@ const STREAM_MIN_CHARS: usize = 200;
 const METADATA_RAW_LIMIT: usize = 2048;
 static CHANNEL_POLL_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 const REMOTE_INTERACTION_TIMEOUT: Duration = Duration::from_secs(300);
+const INBOUND_DEDUPE_TTL: Duration = Duration::from_secs(6);
+const INBOUND_DEDUPE_MAX: usize = 64;
 
 #[derive(Debug)]
 enum PendingInteraction {
@@ -116,6 +119,14 @@ pub struct ChannelManager {
     remote_model_override: Option<String>,
     pending_interactions:
         Arc<std::sync::Mutex<std::collections::HashMap<String, PendingInteraction>>>,
+    recent_inbound:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, VecDeque<InboundMarker>>>>,
+}
+
+#[derive(Clone, Debug)]
+struct InboundMarker {
+    key: String,
+    seen_at: StdInstant,
 }
 
 struct RemoteRunGuard {
@@ -194,6 +205,7 @@ impl ChannelManager {
             remote_provider_override,
             remote_model_override,
             pending_interactions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            recent_inbound: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -545,6 +557,32 @@ impl ChannelManager {
         false
     }
 
+    fn is_duplicate_inbound(&self, session_id: &str, message: &ChannelInboundMessage) -> bool {
+        let key = inbound_dedupe_key(message);
+        let now = StdInstant::now();
+        let mut guard = match self.recent_inbound.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        let entries = guard.entry(session_id.to_string()).or_default();
+        let ttl = INBOUND_DEDUPE_TTL;
+        while let Some(front) = entries.front() {
+            if now.duration_since(front.seen_at) > ttl {
+                entries.pop_front();
+            } else {
+                break;
+            }
+        }
+        if entries.iter().any(|entry| entry.key == key) {
+            return true;
+        }
+        entries.push_back(InboundMarker { key, seen_at: now });
+        if entries.len() > INBOUND_DEDUPE_MAX {
+            entries.pop_front();
+        }
+        false
+    }
+
     async fn process_inbound_messages(
         &self,
         plugin_id: &str,
@@ -569,6 +607,14 @@ impl ChannelManager {
     ) -> Result<()> {
         let channel_info = self.channel_info(plugin_id).await?;
         let session_id = channel_session_id(plugin_id, &message.conversation_id);
+        if self.is_duplicate_inbound(&session_id, message) {
+            tracing::debug!(
+                "Skipping duplicate inbound message {}: {}",
+                message.conversation_id,
+                normalize_message_preview(&message.text)
+            );
+            return Ok(());
+        }
 
         let remote_ctx = parse_remote_context(&message.metadata_json);
         if let Some(remote) = &self.remote {
@@ -2154,6 +2200,51 @@ fn tool_log_is_empty(log: &[ToolCallLog]) -> bool {
     log.is_empty()
 }
 
+fn inbound_dedupe_key(message: &ChannelInboundMessage) -> String {
+    if !message.metadata_json.trim().is_empty() {
+        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&message.metadata_json) {
+            if let Some(id) = extract_message_id(&map) {
+                return format!("id:{}", id);
+            }
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(message.conversation_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(message.user_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(message.text.as_bytes());
+    let hash = URL_SAFE_NO_PAD.encode(hasher.finalize());
+    format!("hash:{}", hash)
+}
+
+fn extract_message_id(map: &Map<String, Value>) -> Option<String> {
+    if let Some(id) = extract_string(map.get("message_id")) {
+        return Some(id);
+    }
+    if let Some(id) = extract_string(map.get("id")) {
+        return Some(id);
+    }
+    if let Some(Value::Object(discord)) = map.get("discord") {
+        if let Some(id) = extract_string(discord.get("message_id")) {
+            return Some(id);
+        }
+        if let Some(id) = extract_string(discord.get("id")) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn extract_string(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Number(num)) => Some(num.to_string()),
+        _ => None,
+    }
+}
+
 fn apply_remote_flags(
     new_messages: &mut [crate::storage::SessionMessage],
     previous: &[crate::storage::SessionMessage],
@@ -2885,6 +2976,19 @@ mod tests {
         assert!(!allow_remote_streaming(true, false, Some("id")));
         assert!(!allow_remote_streaming(false, true, Some("id")));
         assert!(allow_remote_streaming(true, true, Some("id")));
+    }
+
+    #[test]
+    fn test_inbound_dedupe_key_uses_metadata_id() {
+        let msg = ChannelInboundMessage {
+            conversation_id: "c1".to_string(),
+            user_id: "u1".to_string(),
+            text: "hello".to_string(),
+            metadata_json: r#"{"message_id":"abc123"}"#.to_string(),
+        };
+        let key = inbound_dedupe_key(&msg);
+        assert!(key.starts_with("id:"));
+        assert!(key.contains("abc123"));
     }
 
     #[test]
