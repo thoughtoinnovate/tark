@@ -42,6 +42,9 @@ pub use plugin_provider::{list_plugin_providers, try_create_plugin_provider};
 pub use types::*;
 
 pub use raw_log::append_raw_line as append_llm_raw_line;
+pub(crate) fn normalize_gemini_oauth_model(model: &str) -> String {
+    gemini::normalize_cloud_code_assist_model(model)
+}
 
 use anyhow::Result;
 use async_trait::async_trait;

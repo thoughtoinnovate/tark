@@ -53,8 +53,8 @@ pub use git_service::GitService;
 pub use service::AppService;
 pub use session_service::SessionService;
 pub use state::{
-    DeviceFlowSession, ErrorLevel, ErrorNotification, FocusedComponent, ModalType, SharedState,
-    VimMode,
+    DeviceFlowSession, ErrorLevel, ErrorNotification, FocusedComponent, ModalType,
+    PendingRemoteInteraction, RemoteInteractionKind, SharedState, VimMode,
 };
 pub use storage_facade::StorageFacade;
 pub use tool_execution::ToolExecutionService;

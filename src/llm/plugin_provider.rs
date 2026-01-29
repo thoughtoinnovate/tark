@@ -463,12 +463,23 @@ fn try_create_native_provider_from_auth_plugin(
                 }
             };
 
+            let requested_model = model.unwrap_or("gemini-2.0-flash");
+            let normalized_model =
+                super::gemini::normalize_cloud_code_assist_model(requested_model);
+            if normalized_model != requested_model {
+                tracing::warn!(
+                    "Cloud Code Assist does not support experimental/exp models; using '{}' instead of '{}'",
+                    normalized_model,
+                    requested_model
+                );
+            }
+
             let provider = GeminiProvider::with_cloud_code_assist(creds.access_token, project_id)
-                .with_model(model.unwrap_or("gemini-2.0-flash"));
+                .with_model(&normalized_model);
 
             tracing::info!(
                 "Created GeminiProvider with Cloud Code Assist mode, model={}",
-                model.unwrap_or("gemini-2.0-flash")
+                normalized_model
             );
 
             Some(Box::new(provider))

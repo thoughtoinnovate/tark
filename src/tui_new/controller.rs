@@ -87,6 +87,8 @@ impl<B: Backend> TuiController<B> {
         self.spawn_session_usage_poller(state.clone(), config.tui.session_usage_poll_ms);
         self.spawn_interaction_task(state.clone());
         self.spawn_remote_mirror_task(state.clone(), &config);
+        Self::sync_remote_overrides(&state);
+        self.apply_remote_startup_overrides(&state).await?;
 
         loop {
             // 1. Render current state
@@ -99,6 +101,7 @@ impl<B: Backend> TuiController<B> {
 
             // 3. Process async events (non-blocking)
             self.poll_events(&state).await?;
+            self.maybe_switch_to_remote_session(&state).await?;
 
             // 3b. Advance flash bar animation on tick
             self.tick_flash_bar(&state);
@@ -296,6 +299,12 @@ impl<B: Backend> TuiController<B> {
                         let mut guard = questionnaire_responder.lock().await;
                         *guard = Some(responder);
                         drop(guard);
+                        crate::channels::remote::set_local_interaction(
+                            crate::channels::remote::LocalInteraction::Questionnaire {
+                                data: data.clone(),
+                                responder: questionnaire_responder.clone(),
+                            },
+                        );
 
                         // Store full questionnaire for multi-question navigation
                         let mut pending_guard = pending_questionnaire.lock().await;
@@ -332,6 +341,7 @@ impl<B: Backend> TuiController<B> {
                             }
                         };
 
+                        let request_clone = request.clone();
                         let suggested_patterns: Vec<
                             crate::ui_backend::approval::ApprovalPatternOption,
                         > = request
@@ -366,6 +376,13 @@ impl<B: Backend> TuiController<B> {
 
                         let mut guard = approval_responder.lock().await;
                         *guard = Some(responder);
+                        drop(guard);
+                        crate::channels::remote::set_local_interaction(
+                            crate::channels::remote::LocalInteraction::Approval {
+                                request: request_clone,
+                                responder: approval_responder.clone(),
+                            },
+                        );
                     }
                 }
             }
@@ -382,6 +399,9 @@ impl<B: Backend> TuiController<B> {
         let plugin_id =
             std::env::var("TARK_REMOTE_PLUGIN").unwrap_or_else(|_| "remote".to_string());
         let mirror_ui = config.remote.ask_user_ui == "mirror";
+        let pending_questionnaire = self.pending_questionnaire.clone();
+        let questionnaire_responder = self.questionnaire_responder.clone();
+        let approval_responder = self.approval_responder.clone();
         let mut rx = remote.events().subscribe();
         let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let storage = TarkStorage::new(&working_dir).ok();
@@ -403,50 +423,53 @@ impl<B: Backend> TuiController<B> {
                             "inbound" => {
                                 messages_received = messages_received.saturating_add(1);
                                 if let Some(preview) = event.message.clone() {
-                                    let is_active = state
-                                        .session()
-                                        .map(|s| s.session_id == event.session_id)
-                                        .unwrap_or(false);
-                                    let content = if is_active {
-                                        if state.llm_processing() {
-                                            format!(
-                                                "📡 Remote message queued:\n{}",
-                                                preview
-                                            )
-                                        } else {
-                                            format!(
-                                                "📡 Remote message received:\n{}",
-                                                preview
-                                            )
-                                        }
-                                    } else {
-                                        format!(
-                                            "📡 Remote message received:\n{}\n\nUse /sessions to open the remote thread.",
-                                            preview
-                                        )
-                                    };
-                                    state.add_message(crate::ui_backend::Message {
-                                        role: crate::ui_backend::MessageRole::System,
-                                        content,
-                                        timestamp: chrono::Local::now()
-                                            .format("%H:%M:%S")
-                                            .to_string(),
-                                        remote: true,
-                                        provider: None,
-                                        model: None,
-                                        collapsed: false,
-                                        thinking: None,
-                                        context_transient: true,
-                                        tool_calls: Vec::new(),
-                                        segments: Vec::new(),
-                                        tool_args: None,
-                                    });
-                                    state.scroll_to_bottom();
+                                    let content = preview.trim();
+                                    if !content.is_empty() {
+                                        state.add_message(crate::ui_backend::Message {
+                                            role: crate::ui_backend::MessageRole::User,
+                                            content: content.to_string(),
+                                            timestamp: chrono::Local::now()
+                                                .format("%H:%M:%S")
+                                                .to_string(),
+                                            remote: true,
+                                            provider: None,
+                                            model: None,
+                                            collapsed: false,
+                                            thinking: None,
+                                            context_transient: true,
+                                            tool_calls: Vec::new(),
+                                            segments: Vec::new(),
+                                            tool_args: None,
+                                        });
+                                        state.scroll_to_bottom();
+                                    }
+                                }
+                                let is_mirror = event
+                                    .metadata
+                                    .as_ref()
+                                    .and_then(|meta| meta.get("tark"))
+                                    .and_then(|tark| tark.get("mirror"))
+                                    .and_then(|val| val.as_bool())
+                                    .unwrap_or(false);
+                                if !is_mirror {
+                                    let current_id =
+                                        state.session().map(|s| s.session_id.clone());
+                                    if current_id.as_deref() != Some(&event.session_id) {
+                                        state.set_pending_remote_session_switch(Some(
+                                            event.session_id.clone(),
+                                        ));
+                                    }
                                 }
                             }
                             "outbound" => messages_sent = messages_sent.saturating_add(1),
-                            "agent_start" => status = "working".to_string(),
-                            "agent_done" => status = "connected".to_string(),
+                            "agent_start" => {
+                                status = "working".to_string();
+                                state.set_flash_bar_state(FlashBarState::Working);
+                            }
+                            "agent_done" => {
+                                status = "connected".to_string();
+                                state.set_flash_bar_state(FlashBarState::Idle);
+                            }
                             "stream_chunk" => {
                                 if state
                                     .session()
@@ -600,17 +623,10 @@ impl<B: Backend> TuiController<B> {
                                                 );
                                             }
                                         }
-                                        if is_active {
-                                            format!(
-                                                "📡 Remote ask_user pending:\n{}\n\nReply in Discord to continue.",
-                                                prompt
-                                            )
-                                        } else {
-                                            format!(
-                                                "📡 Remote ask_user pending:\n{}\n\nUse /sessions to open the remote thread.",
-                                                prompt
-                                            )
-                                        }
+                                        format!(
+                                            "📡 Remote ask_user pending:\n{}\n\nReply here or in Discord to continue.",
+                                            prompt
+                                        )
                                     }
                                     "approval_request" => {
                                         let prompt = event
@@ -629,20 +645,26 @@ impl<B: Backend> TuiController<B> {
                                                 );
                                             }
                                         }
-                                        if is_active {
-                                            format!(
-                                                "📡 Remote approval pending:\n{}\n\nReply in Discord to continue.",
-                                                prompt
-                                            )
-                                        } else {
-                                            format!(
-                                                "📡 Remote approval pending:\n{}\n\nUse /sessions to open the remote thread.",
-                                                prompt
-                                            )
-                                        }
+                                        format!(
+                                            "📡 Remote approval pending:\n{}\n\nReply here or in Discord to continue.",
+                                            prompt
+                                        )
                                     }
                                     _ => String::new(),
                                 };
+                                let kind = match event.event.as_str() {
+                                    "ask_user" => crate::ui_backend::RemoteInteractionKind::AskUser,
+                                    "approval_request" => {
+                                        crate::ui_backend::RemoteInteractionKind::Approval
+                                    }
+                                    _ => crate::ui_backend::RemoteInteractionKind::AskUser,
+                                };
+                                state.set_pending_remote_interaction(Some(
+                                    crate::ui_backend::PendingRemoteInteraction {
+                                        session_id: event.session_id.clone(),
+                                        kind,
+                                    },
+                                ));
                                 if !content.is_empty() {
                                     state.add_message(crate::ui_backend::Message {
                                         role: crate::ui_backend::MessageRole::System,
@@ -670,6 +692,36 @@ impl<B: Backend> TuiController<B> {
                                 {
                                     state.set_llm_processing(true);
                                     state.set_processing_session_id(Some(event.session_id.clone()));
+                                }
+                                if let Some(pending) = state.pending_remote_interaction() {
+                                    if pending.session_id == event.session_id {
+                                        state.set_pending_remote_interaction(None);
+                                    }
+                                }
+                                if event.event == "ask_user_answer"
+                                    && state.active_questionnaire().is_some()
+                                {
+                                    state.set_active_questionnaire(None);
+                                    let mut pending_guard = pending_questionnaire.lock().await;
+                                    *pending_guard = None;
+                                    drop(pending_guard);
+                                    let mut guard = questionnaire_responder.lock().await;
+                                    *guard = None;
+                                    state.set_active_modal(None);
+                                    state.set_focused_component(
+                                        crate::ui_backend::FocusedComponent::Input,
+                                    );
+                                }
+                                if event.event == "approval_answer"
+                                    && state.pending_approval().is_some()
+                                {
+                                    state.set_pending_approval(None);
+                                    let mut guard = approval_responder.lock().await;
+                                    *guard = None;
+                                    state.set_active_modal(None);
+                                    state.set_focused_component(
+                                        crate::ui_backend::FocusedComponent::Input,
+                                    );
                                 }
                                 let content = match event.event.as_str() {
                                     "ask_user_answer" => "✅ Remote response received.".to_string(),
@@ -732,22 +784,12 @@ impl<B: Backend> TuiController<B> {
                             _ => {}
                         }
 
-                        if event.event == "agent_start"
-                            && state
-                                .session()
-                                .map(|s| s.session_id == event.session_id)
-                                .unwrap_or(false)
-                        {
+                        if event.event == "agent_start" {
                             state.set_llm_processing(true);
                             state.set_processing_session_id(Some(event.session_id.clone()));
                             state.clear_streaming();
                         }
-                        if event.event == "agent_done"
-                            && state
-                                .session()
-                                .map(|s| s.session_id == event.session_id)
-                                .unwrap_or(false)
-                        {
+                        if event.event == "agent_done" {
                             state.set_llm_processing(false);
                             state.set_processing_session_id(None);
                             state.set_processing_correlation_id(None);
@@ -764,6 +806,7 @@ impl<B: Backend> TuiController<B> {
                             ));
                             pending_sessions_refresh = true;
                         }
+                        Self::refresh_remote_tasks(&state, &remote);
                     }
                     _ = tick.tick() => {
                         if let Some((session_id, ready_at)) = &pending_reload {
@@ -819,6 +862,7 @@ impl<B: Backend> TuiController<B> {
                             }
                             pending_sessions_refresh = false;
                         }
+                        Self::refresh_remote_tasks(&state, &remote);
                     }
                 }
 
@@ -846,6 +890,222 @@ impl<B: Backend> TuiController<B> {
                 }
             }
         });
+    }
+
+    fn refresh_remote_tasks(state: &SharedState, remote: &crate::channels::remote::RemoteRuntime) {
+        use crate::ui_backend::{TaskInfo, TaskStatus};
+
+        let mut tasks = Vec::new();
+        let processing_session_id = state.processing_session_id();
+        let processing_is_remote = processing_session_id
+            .as_deref()
+            .map(|id| id.starts_with("channel_"))
+            .unwrap_or(false);
+
+        if state.llm_processing() && !processing_is_remote {
+            if let Some(last_user_msg) = state
+                .messages()
+                .iter()
+                .rev()
+                .find(|m| m.role == crate::ui_backend::MessageRole::User && !m.remote)
+            {
+                let task_name = if last_user_msg.content.len() > 50 {
+                    format!(
+                        "{}...",
+                        crate::core::truncate_at_char_boundary(&last_user_msg.content, 47)
+                    )
+                } else {
+                    last_user_msg.content.clone()
+                };
+                tasks.push(TaskInfo {
+                    id: "active_local".to_string(),
+                    name: task_name,
+                    status: TaskStatus::Active,
+                    created_at: last_user_msg.timestamp.clone(),
+                });
+            }
+        }
+
+        for (idx, msg) in state.queued_messages().iter().enumerate() {
+            let task_name = if msg.len() > 50 {
+                format!("{}...", crate::core::truncate_at_char_boundary(msg, 47))
+            } else {
+                msg.clone()
+            };
+            tasks.push(TaskInfo {
+                id: format!("queued_local_{}", idx),
+                name: task_name,
+                status: TaskStatus::Queued,
+                created_at: chrono::Local::now().format("%H:%M:%S").to_string(),
+            });
+        }
+
+        let current_session_id = state.session().map(|s| s.session_id);
+        let current_is_remote = current_session_id
+            .as_deref()
+            .map(|id| id.starts_with("channel_"))
+            .unwrap_or(false);
+        let focus_session_id = if processing_is_remote {
+            processing_session_id.clone()
+        } else if current_is_remote {
+            current_session_id.clone()
+        } else {
+            None
+        };
+
+        let entries = remote.registry().sessions();
+
+        let mut push_remote_entry = |entry: &crate::channels::remote::RemoteSessionEntry,
+                                     include_prefix: bool| {
+            let short_id = entry
+                .session_id
+                .strip_prefix("channel_")
+                .unwrap_or(&entry.session_id)
+                .chars()
+                .take(8)
+                .collect::<String>();
+            let prefix = if include_prefix {
+                format!("Remote {}: ", short_id)
+            } else {
+                String::new()
+            };
+
+            let is_active = matches!(entry.status.as_str(), "running" | "working");
+            if is_active {
+                let label = entry
+                    .last_message
+                    .clone()
+                    .unwrap_or_else(|| "Remote request running".to_string());
+                let task_name = if label.len() > 50 {
+                    format!("{}...", crate::core::truncate_at_char_boundary(&label, 47))
+                } else {
+                    label
+                };
+                tasks.push(TaskInfo {
+                    id: format!("active_remote_{}", entry.session_id),
+                    name: format!("{}{}", prefix, task_name),
+                    status: TaskStatus::Active,
+                    created_at: chrono::Local::now().format("%H:%M:%S").to_string(),
+                });
+            }
+
+            if entry.queued_count > 0 {
+                let label = entry
+                    .last_queued_message
+                    .clone()
+                    .unwrap_or_else(|| "Remote message queued".to_string());
+                let task_name = if entry.queued_count > 1 {
+                    format!("{} ({} queued)", label, entry.queued_count)
+                } else {
+                    label
+                };
+                let task_name = if task_name.len() > 50 {
+                    format!(
+                        "{}...",
+                        crate::core::truncate_at_char_boundary(&task_name, 47)
+                    )
+                } else {
+                    task_name
+                };
+                tasks.push(TaskInfo {
+                    id: format!("queued_remote_{}", entry.session_id),
+                    name: format!("{}{}", prefix, task_name),
+                    status: TaskStatus::Queued,
+                    created_at: chrono::Local::now().format("%H:%M:%S").to_string(),
+                });
+            }
+        };
+
+        if let Some(focus_id) = focus_session_id.as_deref() {
+            if let Some(entry) = entries.iter().find(|e| e.session_id == focus_id) {
+                push_remote_entry(entry, false);
+            }
+        }
+
+        for entry in entries {
+            if focus_session_id
+                .as_ref()
+                .map(|id| id == &entry.session_id)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if entry.queued_count > 0 || matches!(entry.status.as_str(), "running" | "working") {
+                push_remote_entry(&entry, true);
+            }
+        }
+
+        state.set_tasks(tasks);
+    }
+
+    fn sync_remote_overrides(state: &SharedState) {
+        if crate::channels::remote::global_runtime().is_none() {
+            return;
+        }
+        if let Some(provider) = state.current_provider() {
+            std::env::set_var("TARK_REMOTE_PROVIDER_OVERRIDE", provider);
+        }
+        if let Some(model) = state.current_model() {
+            std::env::set_var("TARK_REMOTE_MODEL_OVERRIDE", model);
+        }
+    }
+
+    async fn apply_remote_startup_overrides(&mut self, _state: &SharedState) -> Result<()> {
+        if std::env::var("TARK_REMOTE_ENABLED").ok().as_deref() != Some("1") {
+            return Ok(());
+        }
+        let mode = std::env::var("TARK_REMOTE_MODE_OVERRIDE")
+            .ok()
+            .and_then(|value| match value.to_lowercase().as_str() {
+                "ask" => Some(crate::core::types::AgentMode::Ask),
+                "plan" => Some(crate::core::types::AgentMode::Plan),
+                "build" => Some(crate::core::types::AgentMode::Build),
+                _ => None,
+            });
+        if let Some(mode) = mode {
+            self.service
+                .handle_command(Command::SetAgentMode(mode))
+                .await?;
+        }
+
+        let trust = std::env::var("TARK_REMOTE_TRUST_OVERRIDE")
+            .ok()
+            .and_then(|value| match value.to_lowercase().as_str() {
+                "manual" => Some(crate::tools::TrustLevel::Manual),
+                "balanced" => Some(crate::tools::TrustLevel::Balanced),
+                "careful" => Some(crate::tools::TrustLevel::Careful),
+                _ => None,
+            });
+        if let Some(trust) = trust {
+            self.service
+                .handle_command(Command::SetTrustLevel(trust))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn maybe_switch_to_remote_session(&mut self, state: &SharedState) -> Result<()> {
+        let Some(session_id) = state.take_pending_remote_session_switch() else {
+            return Ok(());
+        };
+
+        if state.llm_processing() || state.active_modal().is_some() {
+            state.set_pending_remote_session_switch(Some(session_id));
+            return Ok(());
+        }
+
+        if state
+            .session()
+            .map(|s| s.session_id == session_id)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        self.service
+            .handle_command(Command::SwitchSession(session_id))
+            .await?;
+        Ok(())
     }
 
     fn append_remote_prompt_to_session(
@@ -912,6 +1172,7 @@ impl<B: Backend> TuiController<B> {
             }
         };
         let _ = responder.send(response);
+        crate::channels::remote::clear_local_interaction();
     }
 
     async fn selected_approval_pattern(&self) -> Option<crate::tools::ApprovalPattern> {
@@ -1091,6 +1352,7 @@ impl<B: Backend> TuiController<B> {
             if let Some(responder) = guard.take() {
                 let _ = responder.send(response);
             }
+            crate::channels::remote::clear_local_interaction();
         }
     }
 
@@ -1224,6 +1486,35 @@ impl<B: Backend> TuiController<B> {
 
         // Intercept SendMessage to check for slash commands
         if let Command::SendMessage(ref text) = command {
+            if !text.starts_with('/') {
+                let state = self.service.state();
+                if let Some(pending) = state.pending_remote_interaction() {
+                    if let Some(remote_mirror) = self.service.remote_mirror() {
+                        remote_mirror.respond_to_remote_interaction(
+                            pending.session_id.clone(),
+                            text.to_string(),
+                        );
+                        state.set_pending_remote_interaction(None);
+                        use crate::ui_backend::{Message, MessageRole};
+                        state.add_message(Message {
+                            role: MessageRole::System,
+                            content: "✅ Sent response to remote prompt.".to_string(),
+                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            remote: true,
+                            provider: None,
+                            model: None,
+                            collapsed: false,
+                            thinking: None,
+                            context_transient: true,
+                            tool_calls: Vec::new(),
+                            segments: Vec::new(),
+                            tool_args: None,
+                        });
+                        state.clear_input();
+                        return Ok(());
+                    }
+                }
+            }
             if text.starts_with('/') {
                 return self.handle_slash_command(text).await;
             }
@@ -2295,6 +2586,7 @@ impl<B: Backend> TuiController<B> {
                     if let Some(responder) = guard.take() {
                         let _ = responder.send(UserResponse::cancelled());
                     }
+                    crate::channels::remote::clear_local_interaction();
 
                     // Add a message showing the user skipped
                     state.add_message(crate::ui_backend::Message {
@@ -3110,22 +3402,52 @@ impl<B: Backend> TuiController<B> {
                                 session.input_tokens + session.output_tokens,
                             );
 
-                            // Restore trust level and build mode from approval_mode
-                            let trust_level = match session.approval_mode.as_str() {
-                                "zero_trust" => crate::tools::TrustLevel::Manual,
-                                "only_reads" => crate::tools::TrustLevel::Careful,
-                                _ => crate::tools::TrustLevel::Balanced, // "ask_risky" default
+                            let is_remote_session = session.id.starts_with("channel_");
+                            let trust_override = if is_remote_session {
+                                std::env::var("TARK_REMOTE_TRUST_OVERRIDE")
+                                    .ok()
+                                    .and_then(|value| match value.to_lowercase().as_str() {
+                                        "manual" => Some(crate::tools::TrustLevel::Manual),
+                                        "balanced" => Some(crate::tools::TrustLevel::Balanced),
+                                        "careful" => Some(crate::tools::TrustLevel::Careful),
+                                        _ => None,
+                                    })
+                            } else {
+                                None
                             };
+
+                            // Restore trust level and build mode from approval_mode (or override)
+                            let trust_level =
+                                trust_override.unwrap_or(match session.approval_mode.as_str() {
+                                    "zero_trust" => crate::tools::TrustLevel::Manual,
+                                    "only_reads" => crate::tools::TrustLevel::Careful,
+                                    _ => crate::tools::TrustLevel::Balanced, // "ask_risky" default
+                                });
                             self.service.set_trust_level(trust_level).await;
 
-                            // Restore agent mode from session
-                            if !session.mode.is_empty() {
-                                let mode = session
+                            let mode_override = if is_remote_session {
+                                std::env::var("TARK_REMOTE_MODE_OVERRIDE")
+                                    .ok()
+                                    .and_then(|value| match value.to_lowercase().as_str() {
+                                        "ask" => Some(crate::core::types::AgentMode::Ask),
+                                        "plan" => Some(crate::core::types::AgentMode::Plan),
+                                        "build" => Some(crate::core::types::AgentMode::Build),
+                                        _ => None,
+                                    })
+                            } else {
+                                None
+                            };
+
+                            // Restore agent mode from session (or override)
+                            let mode = mode_override.unwrap_or_else(|| {
+                                session
                                     .mode
                                     .parse::<crate::core::types::AgentMode>()
-                                    .unwrap_or_default();
-                                state.set_agent_mode(mode);
-                            }
+                                    .unwrap_or_default()
+                            });
+                            self.service
+                                .handle_command(Command::SetAgentMode(mode))
+                                .await?;
 
                             // Update LLM provider for conversation
                             if !session.provider.is_empty() {
@@ -4227,8 +4549,12 @@ mod tests {
         append_error_log, is_rate_limit_message, parse_error_code, parse_rate_limit_delay_secs,
         summarize_error_for_flash_bar,
     };
+    use crate::channels::remote::{QueuedRemoteMessage, RemoteRuntime};
     use crate::core::types::AgentMode;
-    use crate::ui_backend::{AppService, Command};
+    use crate::plugins::ChannelInboundMessage;
+    use crate::ui_backend::{
+        AppService, Command, Message, MessageRole, SessionInfo, SharedState, TaskStatus,
+    };
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use tokio::sync::mpsc;
@@ -4297,6 +4623,68 @@ mod tests {
         let contents = std::fs::read_to_string(log_path).expect("read err.log");
         assert!(contents.contains("correlation_id=corr-123"));
         assert!(contents.contains("error=boom"));
+    }
+
+    #[test]
+    fn refresh_remote_tasks_includes_active_and_queued() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let remote = RemoteRuntime::new(tempdir.path(), None, false).expect("remote runtime");
+        let state = SharedState::new();
+
+        state.set_session(Some(SessionInfo {
+            session_id: "channel_test".to_string(),
+            session_name: "remote".to_string(),
+            total_cost: 0.0,
+            model_count: 0,
+            created_at: "now".to_string(),
+        }));
+
+        state.add_message(Message {
+            role: MessageRole::User,
+            content: "hello".to_string(),
+            thinking: None,
+            collapsed: false,
+            timestamp: "12:00:00".to_string(),
+            remote: true,
+            provider: None,
+            model: None,
+            context_transient: true,
+            tool_calls: Vec::new(),
+            segments: Vec::new(),
+            tool_args: None,
+        });
+
+        remote
+            .registry()
+            .mark_status(
+                "channel_test",
+                remote.runtime_id(),
+                "discord",
+                "conv",
+                "working",
+            )
+            .expect("mark status");
+
+        let queued = QueuedRemoteMessage {
+            plugin_id: "discord".to_string(),
+            message: ChannelInboundMessage {
+                conversation_id: "conv".to_string(),
+                user_id: "user".to_string(),
+                text: "queued".to_string(),
+                metadata_json: String::new(),
+            },
+            received_at: chrono::Utc::now().to_rfc3339(),
+        };
+        remote
+            .registry()
+            .enqueue_message("channel_test", queued)
+            .expect("enqueue");
+
+        super::TuiController::<TestBackend>::refresh_remote_tasks(&state, &remote);
+
+        let tasks = state.tasks();
+        assert!(tasks.iter().any(|t| t.status == TaskStatus::Active));
+        assert!(tasks.iter().any(|t| t.status == TaskStatus::Queued));
     }
 
     #[tokio::test]

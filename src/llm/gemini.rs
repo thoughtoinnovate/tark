@@ -59,6 +59,33 @@ const GEMINI_OPENAI_URL: &str =
 /// Cloud Code Assist API endpoint (OAuth mode) - uses native Gemini format
 const CLOUD_CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 
+/// Normalize model IDs for Cloud Code Assist (OAuth) requests.
+///
+/// Cloud Code Assist rejects some experimental model suffixes.
+/// Preview models are allowed to pass through unchanged when requested.
+pub(crate) fn normalize_cloud_code_assist_model(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return "gemini-2.5-flash".to_string();
+    }
+
+    let lower = trimmed.to_lowercase();
+    if lower.contains("preview") {
+        return trimmed.to_string();
+    }
+    for marker in ["-exp", "-experimental"] {
+        if let Some(idx) = lower.find(marker) {
+            let base = trimmed[..idx].trim_end_matches('-').to_string();
+            if base.is_empty() {
+                return "gemini-2.5-flash".to_string();
+            }
+            return base;
+        }
+    }
+
+    trimmed.to_string()
+}
+
 /// API mode for Gemini provider
 #[derive(Debug, Clone)]
 pub enum GeminiApiMode {

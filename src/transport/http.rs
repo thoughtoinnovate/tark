@@ -94,7 +94,7 @@ struct AppState {
     storage: Option<Arc<TarkStorage>>,
     usage_tracker: Option<Arc<UsageTracker>>,
     session_id: String,
-    channel_manager: ChannelManager,
+    channel_manager: Arc<ChannelManager>,
     /// Current chat session for multi-session management
     current_chat_session: RwLock<Option<crate::storage::ChatSession>>,
     /// Flag to interrupt current agent operation
@@ -465,7 +465,7 @@ pub async fn run_http_server(
         None
     };
 
-    let channel_manager = ChannelManager::new(
+    let channel_manager = Arc::new(ChannelManager::new(
         config.clone(),
         working_dir.clone(),
         storage.clone(),
@@ -473,7 +473,8 @@ pub async fn run_http_server(
         remote,
         remote_provider_override,
         remote_model_override,
-    );
+    ));
+    crate::channels::remote::set_global_channel_manager(Arc::clone(&channel_manager));
     if let Err(e) = channel_manager.start_all().await {
         tracing::warn!("Failed to start channel plugins: {}", e);
     }

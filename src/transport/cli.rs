@@ -1051,7 +1051,7 @@ pub async fn run_tui_new(
     // LLM call is made, avoiding UI "freeze" during supports_native_thinking_async().
     crate::llm::models_db().preload_blocking().await;
 
-    if debug {
+    if debug && !crate::is_debug_logging_enabled() {
         // Initialize debug logger
         let debug_config = crate::DebugLoggerConfig {
             log_dir: working_dir.join(".tark").join("debug"),

@@ -48,6 +48,19 @@ pub fn debug_log(entry: DebugLogEntry) {
     }
 }
 
+fn maybe_init_debug_logger(working_dir: &std::path::Path) -> anyhow::Result<()> {
+    if tark_cli::is_debug_logging_enabled() {
+        return Ok(());
+    }
+    let debug_config = tark_cli::DebugLoggerConfig {
+        log_dir: working_dir.join(".tark").join("debug"),
+        max_file_size: 10 * 1024 * 1024,
+        max_rotated_files: 3,
+    };
+    tark_cli::init_debug_logger(debug_config)?;
+    Ok(())
+}
+
 #[derive(Parser)]
 #[command(name = "tark")]
 #[command(author, version, about = "Tark - AI-powered CLI agent with LSP server", long_about = None)]
@@ -59,13 +72,29 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    /// Enable remote channel mode for a plugin (e.g., discord)
+    /// Enable debug logging (writes to .tark/debug)
     #[arg(long, global = true)]
+    debug: bool,
+
+    /// Enable remote channel mode for a plugin (e.g., discord). Can be used as a flag with --plugin.
+    #[arg(long, global = true, num_args(0..=1), value_name = "PLUGIN", default_missing_value = "__flag__")]
     remote: Option<String>,
 
-    /// Run remote mode without the TUI (prints live events to stdout)
-    #[arg(long, global = true)]
-    headless: bool,
+    /// Remote plugin ID (alias for --remote <plugin>)
+    #[arg(long, global = true, value_name = "PLUGIN")]
+    plugin: Option<String>,
+
+    /// Start in a specific agent mode for remote sessions
+    #[arg(long, global = true, value_name = "MODE")]
+    mode: Option<RemoteModeArg>,
+
+    /// Start with a specific trust level for remote sessions (build mode only)
+    #[arg(long, global = true, value_name = "TRUST")]
+    trust: Option<RemoteTrustArg>,
+
+    /// Remote interface: tui (main), cli (headless), dash (remote monitor)
+    #[arg(long, global = true, value_name = "INTERFACE")]
+    interface: Option<RemoteInterface>,
 
     /// Enable full remote debug logging (otherwise error-only)
     #[arg(long, global = true)]
@@ -78,16 +107,47 @@ struct Cli {
     /// Model to use (e.g., gpt-4o, claude-sonnet-4, gemini-2.0-flash-exp)
     #[arg(long, global = true)]
     model: Option<String>,
+}
 
-    /// Remote UI mode: monitor (default) or main
-    #[arg(long, global = true, default_value = "monitor")]
-    remote_ui: RemoteUi,
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Eq)]
+enum RemoteInterface {
+    Tui,
+    Cli,
+    Dash,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
-enum RemoteUi {
-    Monitor,
-    Main,
+enum RemoteModeArg {
+    Ask,
+    Plan,
+    Build,
+}
+
+impl RemoteModeArg {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Plan => "plan",
+            Self::Build => "build",
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum RemoteTrustArg {
+    Manual,
+    Balanced,
+    Careful,
+}
+
+impl RemoteTrustArg {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Balanced => "balanced",
+            Self::Careful => "careful",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -117,34 +177,11 @@ enum Commands {
         port: u16,
     },
 
-    /// Interactive chat mode with the AI agent (TUI)
-    Chat {
-        /// Initial message to send
-        message: Option<String>,
-
-        /// Working directory for file operations
-        #[arg(short, long)]
-        cwd: Option<String>,
-
-        /// Unix socket path for Neovim integration
-        /// When provided, connects to Neovim for editor features
-        #[arg(long)]
-        socket: Option<String>,
-
-        /// Enable debug logging to tark-debug.log
-        #[arg(long)]
-        debug: bool,
-    },
-
     /// NEW: Interactive TUI mode (TDD implementation)
     Tui {
         /// Working directory for file operations
         #[arg(short, long)]
         cwd: Option<String>,
-
-        /// Enable debug logging
-        #[arg(long)]
-        debug: bool,
     },
 
     /// Get a one-shot completion for a file position
@@ -314,10 +351,10 @@ async fn main() -> Result<()> {
     // Initialize logging
     // For TUI/Chat modes, default to quieter logging to avoid cluttering the interface
     // For other modes (LSP, Serve), use info level for debugging
-    let is_tui_mode = matches!(
-        cli.command,
-        Some(Commands::Tui { .. } | Commands::Chat { .. })
-    ) || (cli.command.is_none() && cli.remote.is_some() && !cli.headless);
+    let is_tui_mode = matches!(cli.command, Some(Commands::Tui { .. }))
+        || (cli.command.is_none()
+            && cli.remote.is_some()
+            && cli.interface.as_ref() == Some(&RemoteInterface::Tui));
 
     let filter = if cli.verbose {
         "tark_cli=debug,tower_lsp=debug"
@@ -347,17 +384,41 @@ async fn main() -> Result<()> {
         }
     }
 
-    if cli.headless && cli.remote.is_none() && cli.command.is_none() {
-        anyhow::bail!("--headless requires --remote");
+    let remote_flag = cli.remote.as_deref() == Some("__flag__");
+    let mut remote_plugin = cli
+        .remote
+        .as_deref()
+        .filter(|val| *val != "__flag__")
+        .map(|val| val.to_string());
+    if let Some(plugin) = cli.plugin.as_ref() {
+        if let Some(existing) = remote_plugin.as_ref() {
+            if existing != plugin {
+                anyhow::bail!("--remote {} and --plugin {} conflict", existing, plugin);
+            }
+        }
+        remote_plugin = Some(plugin.clone());
+    }
+    if remote_flag && remote_plugin.is_none() {
+        anyhow::bail!("--remote requires --plugin <id> (or use --remote <plugin>)");
     }
 
-    if let Some(remote_plugin) = cli.remote.as_deref() {
-        let wants_full_tui = matches!(
-            cli.command,
-            None | Some(Commands::Tui { .. } | Commands::Chat { .. })
-        );
+    if let Some(remote_plugin) = remote_plugin.as_deref() {
+        let interface = cli
+            .interface
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--remote requires --interface <tui|cli|dash>"))?;
+
+        if let Some(mode) = cli.mode.as_ref() {
+            std::env::set_var("TARK_REMOTE_MODE_OVERRIDE", mode.as_str());
+        }
+        if let Some(trust) = cli.trust.as_ref() {
+            std::env::set_var("TARK_REMOTE_TRUST_OVERRIDE", trust.as_str());
+        }
         let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        if cli.headless {
+        if cli.debug {
+            maybe_init_debug_logger(&working_dir)?;
+        }
+        if matches!(interface, RemoteInterface::Cli) {
             transport::remote::run_remote_headless(
                 working_dir,
                 remote_plugin,
@@ -366,7 +427,7 @@ async fn main() -> Result<()> {
                 cli.model.clone(),
             )
             .await?;
-        } else if wants_full_tui {
+        } else if matches!(interface, RemoteInterface::Tui) {
             std::env::set_var("TARK_FORCE_QUIT_ON_CTRL_C", "1");
             std::env::set_var("TARK_REMOTE_ENABLED", "1");
             std::env::set_var("TARK_REMOTE_PLUGIN", remote_plugin);
@@ -382,7 +443,7 @@ async fn main() -> Result<()> {
                 &working_dir.to_string_lossy(),
                 cli.provider.clone(),
                 cli.model.clone(),
-                false,
+                cli.debug,
             )
             .await;
             server_handle.abort();
@@ -448,38 +509,6 @@ async fn main() -> Result<()> {
 
             lsp::run_lsp_server().await?;
             http_handle.abort();
-        }
-        Commands::Chat {
-            message,
-            cwd,
-            socket,
-            debug,
-        } => {
-            let working_dir = cwd.unwrap_or_else(|| ".".to_string());
-
-            // Determine if we're running in standalone mode or connected to Neovim
-            let is_standalone = socket.is_none();
-
-            if is_standalone {
-                tracing::debug!("Starting TUI chat in standalone mode, cwd: {}", working_dir);
-            } else {
-                tracing::debug!(
-                    "Starting TUI chat with Neovim integration, socket: {:?}, cwd: {}",
-                    socket,
-                    working_dir
-                );
-            }
-
-            // Run the TUI application
-            transport::cli::run_tui_chat(
-                message,
-                &working_dir,
-                socket,
-                global_provider.clone(),
-                global_model.clone(),
-                debug,
-            )
-            .await?;
         }
         Commands::Complete { file, line, col } => {
             transport::cli::run_complete(&file, line, col).await?;
@@ -555,8 +584,11 @@ async fn main() -> Result<()> {
                 transport::cli::run_policy_verify(&working_dir, fix).await?;
             }
         },
-        Commands::Tui { cwd, debug } => {
+        Commands::Tui { cwd } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());
+            if cli.debug {
+                maybe_init_debug_logger(&std::path::PathBuf::from(&working_dir))?;
+            }
             tracing::debug!(
                 "Starting NEW TUI (TDD implementation), cwd: {}",
                 working_dir
@@ -565,7 +597,7 @@ async fn main() -> Result<()> {
                 &working_dir,
                 global_provider.clone(),
                 global_model.clone(),
-                debug,
+                cli.debug,
             )
             .await?;
         }

@@ -557,6 +557,7 @@ tark resume <session-id>
 ```
 
 From your channel (Discord/Slack/etc.), you can also run `/tark interrupt` to cancel a running task.
+If a remote prompt requires input, the local TUI will surface it and you can reply from the TUI prompt or from the remote channel.
 
 Remote access is gated by allowlists in `.tark/config.toml`:
 

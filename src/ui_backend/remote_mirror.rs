@@ -60,6 +60,10 @@ enum MirrorEvent {
         session_id: String,
         prompt: String,
     },
+    RemoteInteractionResponse {
+        session_id: String,
+        content: String,
+    },
 }
 
 #[derive(Debug)]
@@ -93,7 +97,7 @@ impl RemoteMirror {
         let (tx, mut rx) = mpsc::unbounded_channel::<MirrorEvent>();
         let mirror = Arc::new(Self { tx });
 
-        let channel_manager = ChannelManager::new(
+        let channel_manager = Arc::new(ChannelManager::new(
             config,
             working_dir,
             storage.map(Arc::new),
@@ -101,7 +105,7 @@ impl RemoteMirror {
             Some(remote.clone()),
             None,
             None,
-        );
+        ));
 
         tokio::spawn(async move {
             let mut streams: HashMap<String, StreamState> = HashMap::new();
@@ -490,6 +494,38 @@ impl RemoteMirror {
                             );
                         }
                     }
+                    MirrorEvent::RemoteInteractionResponse {
+                        session_id,
+                        content,
+                    } => {
+                        if let Some(entry) = lookup_entry(&remote, &session_id) {
+                            let metadata_json = serde_json::json!({
+                                "tark": { "mirror": true, "source": "local", "kind": "response" }
+                            })
+                            .to_string();
+                            if let Some(global_manager) =
+                                crate::channels::remote::global_channel_manager()
+                            {
+                                let _ = global_manager
+                                    .respond_to_pending_interaction(
+                                        &entry.plugin_id,
+                                        &entry.conversation_id,
+                                        &content,
+                                        metadata_json,
+                                    )
+                                    .await;
+                            } else {
+                                let _ = channel_manager
+                                    .respond_to_pending_interaction(
+                                        &entry.plugin_id,
+                                        &entry.conversation_id,
+                                        &content,
+                                        metadata_json,
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -545,6 +581,13 @@ impl RemoteMirror {
         let _ = self
             .tx
             .send(MirrorEvent::ApprovalRequest { session_id, prompt });
+    }
+
+    pub fn respond_to_remote_interaction(&self, session_id: String, content: String) {
+        let _ = self.tx.send(MirrorEvent::RemoteInteractionResponse {
+            session_id,
+            content,
+        });
     }
 }
 

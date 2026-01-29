@@ -177,6 +177,20 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Reload the current session from storage, discarding in-memory changes
+    ///
+    /// Use this when the session can be updated out-of-band (e.g., remote channels).
+    pub fn reload_current(&mut self) -> Result<&ChatSession, SessionError> {
+        let session_id = self.current_session.id.clone();
+        let session = self
+            .storage
+            .load_session(&session_id)
+            .map_err(|e| SessionError::Storage(e.to_string()))?;
+        self.current_session = session;
+        self.dirty = false;
+        Ok(&self.current_session)
+    }
+
     /// Auto-save if dirty
     pub fn auto_save_if_needed(&mut self) -> Result<(), SessionError> {
         if self.dirty {
@@ -352,6 +366,33 @@ mod tests {
         assert_eq!(mgr.current().provider, "openai");
         assert_eq!(mgr.current().model, "gpt-4");
         assert_eq!(mgr.current().mode, "build");
+    }
+
+    #[test]
+    fn test_reload_current_refreshes_from_storage() {
+        let (temp, storage) = create_test_storage();
+        let mut mgr = SessionManager::new(storage);
+        let session_id = mgr.current().id.clone();
+
+        mgr.update_metadata(
+            "local".to_string(),
+            "local-model".to_string(),
+            AgentMode::Ask,
+        );
+        assert!(mgr.is_dirty());
+
+        let external = TarkStorage::new(temp.path()).unwrap();
+        let mut session = external.load_session(&session_id).unwrap();
+        session.provider = "openai".to_string();
+        session.model = "gpt-4".to_string();
+        session.mode = "plan".to_string();
+        external.save_session(&session).unwrap();
+
+        mgr.reload_current().unwrap();
+        assert!(!mgr.is_dirty());
+        assert_eq!(mgr.current().provider, "openai");
+        assert_eq!(mgr.current().model, "gpt-4");
+        assert_eq!(mgr.current().mode, "plan");
     }
 
     #[test]

@@ -14,14 +14,34 @@ use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
+use tokio::sync::oneshot;
 
 use crate::debug_logger::SensitiveDataRedactor;
 use crate::plugins::ChannelInboundMessage;
+use crate::tools::questionnaire::{ApprovalRequest, ApprovalResponse, Questionnaire, UserResponse};
 
 const REMOTE_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const REMOTE_LOG_PREFIX: &str = "remote";
 
 static REMOTE_RUNTIME: OnceLock<Arc<RemoteRuntime>> = OnceLock::new();
+static LOCAL_INTERACTION: OnceLock<Arc<Mutex<Option<LocalInteraction>>>> = OnceLock::new();
+static REMOTE_CHANNEL_MANAGER: OnceLock<Arc<crate::channels::ChannelManager>> = OnceLock::new();
+
+#[derive(Clone)]
+pub enum LocalInteraction {
+    Questionnaire {
+        data: Questionnaire,
+        responder: Arc<tokio::sync::Mutex<Option<oneshot::Sender<UserResponse>>>>,
+    },
+    Approval {
+        request: ApprovalRequest,
+        responder: Arc<tokio::sync::Mutex<Option<oneshot::Sender<ApprovalResponse>>>>,
+    },
+}
+
+fn local_interaction_state() -> &'static Arc<Mutex<Option<LocalInteraction>>> {
+    LOCAL_INTERACTION.get_or_init(|| Arc::new(Mutex::new(None)))
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteEvent {
@@ -173,6 +193,14 @@ impl RemoteRegistry {
             .lock()
             .ok()
             .and_then(|data| data.sessions.get(session_id).cloned())
+    }
+
+    pub fn sessions(&self) -> Vec<RemoteSessionEntry> {
+        self.state
+            .lock()
+            .ok()
+            .map(|data| data.sessions.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn mark_status(
@@ -745,6 +773,33 @@ pub fn set_global_runtime(runtime: Arc<RemoteRuntime>) {
 
 pub fn global_runtime() -> Option<Arc<RemoteRuntime>> {
     REMOTE_RUNTIME.get().cloned()
+}
+
+pub fn set_global_channel_manager(manager: Arc<crate::channels::ChannelManager>) {
+    let _ = REMOTE_CHANNEL_MANAGER.set(manager);
+}
+
+pub fn global_channel_manager() -> Option<Arc<crate::channels::ChannelManager>> {
+    REMOTE_CHANNEL_MANAGER.get().cloned()
+}
+
+pub fn set_local_interaction(interaction: LocalInteraction) {
+    if let Ok(mut guard) = local_interaction_state().lock() {
+        *guard = Some(interaction);
+    }
+}
+
+pub fn clear_local_interaction() {
+    if let Ok(mut guard) = local_interaction_state().lock() {
+        *guard = None;
+    }
+}
+
+pub fn take_local_interaction() -> Option<LocalInteraction> {
+    local_interaction_state()
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
 }
 
 pub fn normalize_message_preview(text: &str) -> String {

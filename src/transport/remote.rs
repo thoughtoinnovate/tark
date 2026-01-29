@@ -218,7 +218,7 @@ async fn start_remote_server(
             .as_ref()
             .and_then(|storage| UsageTracker::new(storage.project_root()).ok())
             .map(Arc::new);
-        let channel_manager = ChannelManager::new(
+        let channel_manager = Arc::new(ChannelManager::new(
             config.clone(),
             working_dir.clone(),
             storage,
@@ -226,7 +226,8 @@ async fn start_remote_server(
             Some(Arc::clone(&remote_for_server)),
             remote_provider_override.clone(),
             remote_model_override.clone(),
-        );
+        ));
+        crate::channels::remote::set_global_channel_manager(Arc::clone(&channel_manager));
         if let Err(err) = channel_manager.start_all().await {
             tracing::warn!("Failed to start remote channel plugins: {}", err);
         }

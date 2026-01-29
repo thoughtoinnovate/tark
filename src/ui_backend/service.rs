@@ -486,6 +486,18 @@ impl AppService {
         &self.storage
     }
 
+    fn sync_remote_overrides(&self) {
+        if crate::channels::remote::global_runtime().is_none() {
+            return;
+        }
+        if let Some(provider) = self.state.current_provider() {
+            std::env::set_var("TARK_REMOTE_PROVIDER_OVERRIDE", provider);
+        }
+        if let Some(model) = self.state.current_model() {
+            std::env::set_var("TARK_REMOTE_MODEL_OVERRIDE", model);
+        }
+    }
+
     /// Handle a user command
     pub async fn handle_command(&mut self, command: Command) -> Result<()> {
         match command {
@@ -2131,6 +2143,14 @@ impl AppService {
                 // Emergency stop for ongoing agent work (double-ESC)
                 // Uses the async interrupt to properly reset streaming state
                 if self.state.llm_processing() {
+                    if let Some(session_id) = self.state.processing_session_id() {
+                        if session_id.starts_with("channel_") {
+                            if let Some(remote) = crate::channels::remote::global_runtime() {
+                                let _ = remote.registry().interrupt_session(&session_id);
+                                let _ = remote.registry().drain_queue(&session_id);
+                            }
+                        }
+                    }
                     if let Some(ref conv_svc) = self.conversation_svc {
                         conv_svc.interrupt_and_reset().await;
                     }
@@ -2739,6 +2759,7 @@ impl AppService {
                                 }
                             }
                         }
+                        self.sync_remote_overrides();
                     }
                 }
                 Err(e) => {
@@ -2789,17 +2810,32 @@ impl AppService {
 
     /// Set the active model
     pub async fn set_model(&mut self, model: &str) -> Result<()> {
+        let current_provider = self.state.current_provider();
+        let mut effective_model = model.to_string();
+        if let Some(provider) = current_provider.as_deref() {
+            if provider == "gemini-oauth" {
+                let normalized = crate::llm::normalize_gemini_oauth_model(&effective_model);
+                if normalized != effective_model {
+                    let msg = format!(
+                        "Gemini OAuth does not support experimental/exp models; using {}",
+                        normalized
+                    );
+                    self.state.set_status_message(Some(msg.clone()));
+                    let _ = self.event_tx.send(AppEvent::StatusChanged(msg));
+                    effective_model = normalized;
+                }
+            }
+        }
         if self.state.llm_processing() {
-            self.state.set_pending_model(Some(model.to_string()));
+            self.state.set_pending_model(Some(effective_model.clone()));
             self.state.set_status_message(Some(format!(
                 "Model switch to {} queued (will apply after current response)",
-                model
+                effective_model
             )));
             return Ok(());
         }
         let previous_model = self.state.current_model();
-        let current_provider = self.state.current_provider();
-        self.state.set_model(Some(model.to_string()));
+        self.state.set_model(Some(effective_model.clone()));
 
         if let (Some(conv_svc), Some(provider)) = (
             self.conversation_svc.as_ref(),
@@ -2807,7 +2843,7 @@ impl AppService {
         ) {
             // Look up context limit from models.dev
             let context_limit = crate::llm::models_db()
-                .get_context_limit(&provider, model)
+                .get_context_limit(&provider, &effective_model)
                 .await;
             let context_limit_opt = if context_limit > 0 {
                 Some(context_limit as usize)
@@ -2815,7 +2851,11 @@ impl AppService {
                 None
             };
 
-            match crate::llm::create_provider_with_options(provider.as_str(), true, Some(model)) {
+            match crate::llm::create_provider_with_options(
+                provider.as_str(),
+                true,
+                Some(&effective_model),
+            ) {
                 Ok(llm_provider) => {
                     if let Err(e) = conv_svc
                         .update_llm_provider_with_context(
@@ -2845,7 +2885,7 @@ impl AppService {
                             if let Some(provider) = self.state.current_provider() {
                                 let mode = self.state.agent_mode();
                                 session_svc
-                                    .update_metadata(provider, model.to_string(), mode)
+                                    .update_metadata(provider, effective_model.clone(), mode)
                                     .await;
                                 if let Some(logger) = crate::debug_logger() {
                                     let correlation_id = self
@@ -2859,13 +2899,14 @@ impl AppService {
                                     )
                                     .with_data(serde_json::json!({
                                         "provider": self.state.current_provider(),
-                                        "model": model,
+                                        "model": effective_model,
                                         "agent_mode": format!("{:?}", mode)
                                     }));
                                     logger.log(entry);
                                 }
                             }
                         }
+                        self.sync_remote_overrides();
                     }
                 }
                 Err(e) => {
@@ -2894,7 +2935,7 @@ impl AppService {
                 crate::DebugLogEntry::new(correlation_id, crate::LogCategory::Service, "model_set")
                     .with_data(serde_json::json!({
                         "previous_model": previous_model,
-                        "new_model": model,
+                        "new_model": effective_model,
                         "current_provider": current_provider,
                         "session_id": session_id,
                         "agent_mode": format!("{:?}", self.state.agent_mode())
@@ -2903,7 +2944,7 @@ impl AppService {
         }
 
         self.event_tx
-            .send(AppEvent::ModelChanged(model.to_string()))
+            .send(AppEvent::ModelChanged(effective_model))
             .ok();
         Ok(())
     }

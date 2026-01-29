@@ -302,7 +302,19 @@ impl SessionService {
     /// Update session metadata (provider, model, mode)
     pub async fn update_metadata(&self, provider: String, model: String, mode: AgentMode) {
         let mut mgr = self.session_mgr.write().await;
+        let is_remote_session = mgr.current().id.starts_with("channel_");
+        if is_remote_session && !mgr.is_dirty() {
+            if let Err(err) = mgr.reload_current() {
+                tracing::warn!(
+                    "Failed to reload remote session before metadata update: {}",
+                    err
+                );
+            }
+        }
         mgr.update_metadata(provider, model, mode);
+        if let Err(err) = mgr.auto_save_if_needed() {
+            tracing::warn!("Failed to persist session metadata: {}", err);
+        }
     }
 
     /// Update session usage stats (cost and tokens) and save
@@ -418,7 +430,7 @@ impl SessionService {
                     return messages;
                 }
                 let is_remote_message =
-                    msg.remote && matches!(role, MessageRole::User | MessageRole::Assistant);
+                    msg.remote && !matches!(role, MessageRole::Tool | MessageRole::Thinking);
 
                 if msg.segments.is_empty() {
                     messages.push(Message {
@@ -524,5 +536,45 @@ impl From<crate::storage::ArchiveChunkMeta> for ArchiveChunkInfo {
             sequence: meta.sequence,
             message_count: meta.message_count,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::ChatAgent;
+    use crate::llm::tark_sim::TarkSimProvider;
+    use crate::storage::TarkStorage;
+    use crate::tools::ToolRegistry;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn test_update_metadata_persists_to_storage() {
+        let temp = TempDir::new().unwrap();
+        let storage = TarkStorage::new(temp.path()).unwrap();
+        let session_mgr = SessionManager::new(storage);
+
+        let tools = ToolRegistry::new(temp.path().to_path_buf());
+        let llm = Arc::new(TarkSimProvider::new());
+        let chat_agent = ChatAgent::new(llm, tools);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let conversation_svc = Arc::new(ConversationService::new(chat_agent, event_tx));
+        let session_svc = SessionService::new(session_mgr, conversation_svc);
+
+        session_svc
+            .update_metadata("openai".to_string(), "gpt-4".to_string(), AgentMode::Build)
+            .await;
+
+        let session_info = session_svc.get_current().await;
+        let reload_storage = TarkStorage::new(temp.path()).unwrap();
+        let session = reload_storage
+            .load_session(&session_info.session_id)
+            .unwrap();
+
+        assert_eq!(session.provider, "openai");
+        assert_eq!(session.model, "gpt-4");
+        assert_eq!(session.mode, "build");
     }
 }

@@ -212,6 +212,18 @@ pub struct SharedState {
     inner: Arc<RwLock<StateInner>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingRemoteInteraction {
+    pub session_id: String,
+    pub kind: RemoteInteractionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteInteractionKind {
+    AskUser,
+    Approval,
+}
+
 #[derive(Debug)]
 struct StateInner {
     // ========== Application State ==========
@@ -318,6 +330,10 @@ struct StateInner {
     pub session_picker_filter: String,
     /// Pending session ID when awaiting user confirmation to switch (agent is processing)
     pub pending_session_switch: Option<String>,
+    /// Pending remote session ID for auto-switch (set by remote events)
+    pub pending_remote_session_switch: Option<String>,
+    /// Pending remote interaction (ask_user/approval) awaiting a response
+    pub pending_remote_interaction: Option<PendingRemoteInteraction>,
     /// Selected option in session switch confirm dialog (0 = Wait, 1 = Abort & Switch)
     pub session_switch_confirm_selected: usize,
 
@@ -496,6 +512,8 @@ impl SharedState {
                 session_picker_selected: 0,
                 session_picker_filter: String::new(),
                 pending_session_switch: None,
+                pending_remote_session_switch: None,
+                pending_remote_interaction: None,
                 session_switch_confirm_selected: 0,
                 file_picker_files: Vec::new(),
                 file_picker_filter: String::new(),
@@ -890,6 +908,22 @@ impl SharedState {
 
     pub fn pending_session_switch(&self) -> Option<String> {
         self.read_inner().pending_session_switch.clone()
+    }
+
+    pub fn pending_remote_session_switch(&self) -> Option<String> {
+        self.read_inner().pending_remote_session_switch.clone()
+    }
+
+    pub fn take_pending_remote_session_switch(&self) -> Option<String> {
+        self.write_inner().pending_remote_session_switch.take()
+    }
+
+    pub fn pending_remote_interaction(&self) -> Option<PendingRemoteInteraction> {
+        self.read_inner().pending_remote_interaction.clone()
+    }
+
+    pub fn set_pending_remote_interaction(&self, pending: Option<PendingRemoteInteraction>) {
+        self.write_inner().pending_remote_interaction = pending;
     }
 
     pub fn session_switch_confirm_selected(&self) -> usize {
@@ -2094,6 +2128,10 @@ impl SharedState {
         self.write_inner().pending_session_switch = session_id;
     }
 
+    pub fn set_pending_remote_session_switch(&self, session_id: Option<String>) {
+        self.write_inner().pending_remote_session_switch = session_id;
+    }
+
     pub fn set_session_switch_confirm_selected(&self, selected: usize) {
         self.write_inner().session_switch_confirm_selected = selected;
     }
@@ -2951,6 +2989,26 @@ mod tests {
         state.navigate_history_next();
         assert_eq!(state.input_text(), "current");
         assert_eq!(state.history_index(), None);
+    }
+
+    #[test]
+    fn pending_remote_interaction_round_trip() {
+        let state = SharedState::new();
+        assert!(state.pending_remote_interaction().is_none());
+
+        state.set_pending_remote_interaction(Some(PendingRemoteInteraction {
+            session_id: "session-1".to_string(),
+            kind: RemoteInteractionKind::AskUser,
+        }));
+
+        let pending = state
+            .pending_remote_interaction()
+            .expect("pending remote interaction");
+        assert_eq!(pending.session_id, "session-1");
+        assert_eq!(pending.kind, RemoteInteractionKind::AskUser);
+
+        state.set_pending_remote_interaction(None);
+        assert!(state.pending_remote_interaction().is_none());
     }
 
     #[test]

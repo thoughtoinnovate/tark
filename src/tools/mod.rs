@@ -411,6 +411,10 @@ impl ToolRegistry {
         registry
     }
 
+    pub fn disable_mode_switch(&mut self) {
+        self.tools.remove("switch_mode");
+    }
+
     /// Register a tool
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
