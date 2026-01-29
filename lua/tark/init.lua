@@ -3,7 +3,7 @@
 
 local M = {}
 
-M.version = '0.11.0'
+M.version = '0.11.1'
 
 -- Default configuration
 M.config = {
