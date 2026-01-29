@@ -257,7 +257,7 @@ impl Tool for ShellTool {
                                 while let Ok(Some(l)) = stderr_reader.next_line().await {
                                     stderr_lines.push(l);
                                     // Yield periodically to keep TUI responsive
-                                    if stderr_lines.len().is_multiple_of(50) {
+                        if stderr_lines.len() % 50 == 0 {
                                         tokio::task::yield_now().await;
                                     }
                                 }
@@ -281,7 +281,7 @@ impl Tool for ShellTool {
                 }
 
                 // Yield periodically to keep TUI responsive during long output
-                if (stdout_lines.len() + stderr_lines.len()).is_multiple_of(50) {
+                if (stdout_lines.len() + stderr_lines.len()) % 50 == 0 {
                     tokio::task::yield_now().await;
                 }
             }
