@@ -116,6 +116,11 @@ impl ShellTool {
     }
 }
 
+#[allow(clippy::manual_is_multiple_of)]
+fn is_multiple_of_50(value: usize) -> bool {
+    value % 50 == 0
+}
+
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
@@ -257,7 +262,7 @@ impl Tool for ShellTool {
                                 while let Ok(Some(l)) = stderr_reader.next_line().await {
                                     stderr_lines.push(l);
                                     // Yield periodically to keep TUI responsive
-                        if stderr_lines.len() % 50 == 0 {
+                        if is_multiple_of_50(stderr_lines.len()) {
                                         tokio::task::yield_now().await;
                                     }
                                 }
@@ -281,7 +286,7 @@ impl Tool for ShellTool {
                 }
 
                 // Yield periodically to keep TUI responsive during long output
-                if (stdout_lines.len() + stderr_lines.len()) % 50 == 0 {
+                if is_multiple_of_50(stdout_lines.len() + stderr_lines.len()) {
                     tokio::task::yield_now().await;
                 }
             }
