@@ -42,7 +42,7 @@ tests/visual/sandbox/
 .kiro/
 
 # Local plugins (plugins should be installed from external repos)
-plugins/
+/plugins/
 
 # Web/Node.js
 node_modules/
