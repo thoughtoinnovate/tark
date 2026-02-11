@@ -16,6 +16,7 @@ pub mod config;
 pub mod core;
 pub mod debug_logger;
 pub mod diagnostics;
+pub mod editor_adapter;
 pub mod llm;
 pub mod lsp;
 pub mod plugins;

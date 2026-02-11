@@ -5,7 +5,7 @@ AI-powered CLI agent with TUI chat interface and Neovim integration.
 ## Features
 
 - **TUI Chat Interface**: Interactive terminal chat with AI assistant
-- **Neovim Integration**: Socket-based communication with your editor
+- **Editor Adapters**: Neovim adapter now lives in the plugins monorepo and uses editor adapter APIs
 - **File Operations**: Read, write, and search files through chat
 - **Shell Commands**: Execute commands directly from chat
 - **Image Attachments**: Paste images from clipboard with `Ctrl-v`
@@ -84,13 +84,16 @@ tark auth copilot
 ollama serve
 ```
 
-### 3. Install Neovim Plugin
+### 3. Install Neovim Adapter Plugin
 
-#### lazy.nvim (Recommended)
+Neovim adapter source has moved to the plugins monorepo:
+`../plugins/tark/editors/neovim` (repository path `thoughtoinnovate/plugins/tark/editors/neovim`).
+
+#### Local checkout (Recommended for now)
 
 ```lua
 return {
-    "thoughtoinnovate/tark",
+    dir = "~/code/plugins/tark/editors/neovim",
     lazy = false,
     keys = {
         { "<leader>tc", "<cmd>TarkToggle<cr>", desc = "Toggle tark chat" },
@@ -98,13 +101,28 @@ return {
 }
 ```
 
-The plugin automatically downloads the correct binary for your platform.
+The adapter plugin automatically downloads the correct binary for your platform.
+
+#### Lazy.nvim from monorepo (recommended for most users)
+
+```lua
+return {
+    url = "https://github.com/thoughtoinnovate/plugins",
+    dir = "tark/editors/neovim",
+    lazy = false,
+    keys = {
+        { "<leader>tc", "<cmd>TarkToggle<cr>", desc = "Toggle tark chat" },
+    },
+}
+```
+
+Note: Lazy.nvim will clone the monorepo, but it will only load the Neovim adapter from `tark/editors/neovim`.
 
 #### Full Config (all options)
 
 ```lua
 return {
-    "thoughtoinnovate/tark",
+    dir = "~/code/plugins/tark/editors/neovim",
     lazy = false,
     keys = {
         { "<leader>tc", "<cmd>TarkToggle<cr>", desc = "Toggle tark chat" },
@@ -454,7 +472,7 @@ vim.o.statusline = "%f %m %= " .. require('tark.statusline').status_with_hl()
 ### Development
 - [TUI Modal Design Guide](docs/TUI_MODAL_DESIGN_GUIDE.md) - Design patterns for modals
 - [Contributing Guide](CONTRIBUTING.md)
-- [Neovim Plugin Tests](tests/README.md)
+- [Neovim Adapter Tests](../plugins/tark/editors/neovim/tests/README.md)
 
 ## Architecture
 

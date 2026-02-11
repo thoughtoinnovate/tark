@@ -4,6 +4,7 @@ use crate::agent::ChatAgent;
 use crate::channels::ChannelManager;
 use crate::completion::{CompletionEngine, CompletionRequest};
 use crate::config::Config;
+use crate::editor_adapter::EditorContextV1;
 use crate::llm::{self, LlmProvider};
 use crate::storage::usage::UsageTracker;
 use crate::storage::TarkStorage;
@@ -182,9 +183,9 @@ struct ChatRequest {
     /// Agent mode: plan (read-only), build (all tools), review (approval required)
     #[serde(default)]
     mode: Option<String>,
-    /// LSP proxy port from Neovim plugin (dynamic port)
+    /// Optional editor adapter context (v1)
     #[serde(default)]
-    lsp_proxy_port: Option<u16>,
+    editor: Option<EditorContextV1>,
 }
 
 /// Response for chat
@@ -893,8 +894,18 @@ async fn handle_chat(
 ) -> impl IntoResponse {
     use crate::tools::AgentMode;
 
-    // Set LSP proxy port for tools to use (if provided by Neovim plugin)
-    crate::tools::set_lsp_proxy_port(req.lsp_proxy_port);
+    if let Some(editor) = req.editor.as_ref() {
+        if let Err(err) = editor.validate_api_version() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    }
+
+    // Make editor context available to tool execution for this request only.
+    let _editor_context_guard = crate::editor_adapter::scoped_editor_context(req.editor.clone());
 
     // Determine working directory: use request cwd if provided, otherwise server's working dir
     let working_dir = req
@@ -2036,5 +2047,47 @@ async fn usage_export(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .body(Body::from("Usage tracking not initialized"))
             .unwrap(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_request_deserializes_editor_context_v1() {
+        let raw = serde_json::json!({
+            "message": "hello",
+            "editor": {
+                "adapter_id": "tark.nvim",
+                "adapter_version": "0.11.4",
+                "api_version": "v1",
+                "endpoint": { "base_url": "http://127.0.0.1:8787" },
+                "capabilities": { "definition": true }
+            }
+        });
+
+        let req: ChatRequest = serde_json::from_value(raw).expect("chat request parse");
+        let editor = req.editor.expect("editor context");
+        assert_eq!(editor.api_version, "v1");
+        assert!(editor.validate_api_version().is_ok());
+    }
+
+    #[test]
+    fn chat_request_rejects_unsupported_editor_api_version() {
+        let raw = serde_json::json!({
+            "message": "hello",
+            "editor": {
+                "adapter_id": "tark.nvim",
+                "adapter_version": "0.11.4",
+                "api_version": "v2",
+                "endpoint": { "base_url": "http://127.0.0.1:8787" },
+                "capabilities": { "definition": true }
+            }
+        });
+
+        let req: ChatRequest = serde_json::from_value(raw).expect("chat request parse");
+        let editor = req.editor.expect("editor context");
+        assert!(editor.validate_api_version().is_err());
     }
 }

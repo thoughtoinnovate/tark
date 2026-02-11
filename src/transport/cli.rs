@@ -7,6 +7,7 @@ use crate::agent::ChatAgent;
 use crate::channels::remote::RemoteRegistry;
 use crate::completion::{CompletionEngine, CompletionRequest};
 use crate::config::Config;
+use crate::editor_adapter::EditorContextV1;
 use crate::llm;
 use crate::policy::{IntegrityVerifier, VerificationResult};
 use crate::storage::usage::{CleanupRequest, UsageTracker};
@@ -21,6 +22,8 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tabled::{settings::Style, Table, Tabled};
+
+const TARK_EDITOR_CONTEXT_ENV: &str = "TARK_EDITOR_CONTEXT_JSON";
 
 /// Run TUI chat mode
 ///
@@ -1046,6 +1049,25 @@ pub async fn run_tui_new(
 
     let working_dir = PathBuf::from(working_dir).canonicalize()?;
 
+    // If launched from an editor plugin, allow it to pass an editor-adapter
+    // context that tools can use during this entire TUI session.
+    let editor_context = std::env::var(TARK_EDITOR_CONTEXT_ENV).ok().and_then(|raw| {
+        match serde_json::from_str::<EditorContextV1>(&raw) {
+            Ok(ctx) => match ctx.validate_api_version() {
+                Ok(()) => Some(ctx),
+                Err(err) => {
+                    tracing::warn!("Ignoring invalid editor context api_version: {}", err);
+                    None
+                }
+            },
+            Err(err) => {
+                tracing::warn!("Ignoring malformed editor context JSON: {}", err);
+                None
+            }
+        }
+    });
+    let _editor_context_guard = crate::editor_adapter::scoped_editor_context(editor_context);
+
     // Eagerly preload models.dev cache before TUI setup.
     // This ensures model capabilities are available immediately when the first
     // LLM call is made, avoiding UI "freeze" during supports_native_thinking_async().
@@ -1308,4 +1330,33 @@ pub async fn run_policy_verify(working_dir: &std::path::Path, fix: bool) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod editor_context_tests {
+    use super::TARK_EDITOR_CONTEXT_ENV;
+    use crate::editor_adapter::EditorContextV1;
+
+    #[test]
+    fn parses_editor_context_from_env_json() {
+        let raw = r#"{
+            "adapter_id":"tark.nvim",
+            "adapter_version":"0.11.4",
+            "api_version":"v1",
+            "endpoint":{"base_url":"http://127.0.0.1:8787"},
+            "capabilities":{"definition":true}
+        }"#;
+
+        std::env::set_var(TARK_EDITOR_CONTEXT_ENV, raw);
+        let parsed = std::env::var(TARK_EDITOR_CONTEXT_ENV)
+            .ok()
+            .and_then(|value| serde_json::from_str::<EditorContextV1>(&value).ok());
+
+        std::env::remove_var(TARK_EDITOR_CONTEXT_ENV);
+
+        let context = parsed.expect("expected valid editor context");
+        assert_eq!(context.adapter_id, "tark.nvim");
+        assert!(context.capabilities.definition);
+        assert!(context.validate_api_version().is_ok());
+    }
 }

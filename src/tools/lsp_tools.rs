@@ -7,10 +7,13 @@
 //! - Get function signatures
 //! - Trace call hierarchy
 //!
-//! When an LSP proxy port is available (from Neovim plugin), tools will
-//! try the proxy first for richer results, falling back to tree-sitter.
+//! When an editor adapter context is available, tools first try adapter-backed
+//! code intelligence and then fall back to tree-sitter on failures/timeouts.
 
 use super::{Tool, ToolResult};
+use crate::editor_adapter::{
+    current_editor_context, AdapterLocation, AdapterSymbol, EditorAdapterClient,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -18,158 +21,16 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 
-/// Global LSP proxy port (set by chat handler when Neovim provides it)
-static LSP_PROXY_PORT: AtomicU16 = AtomicU16::new(0);
-
-/// Set the LSP proxy port (called when chat request includes port)
-pub fn set_lsp_proxy_port(port: Option<u16>) {
-    LSP_PROXY_PORT.store(port.unwrap_or(0), Ordering::SeqCst);
-}
-
-/// Get the current LSP proxy port (0 = not set)
-pub fn get_lsp_proxy_port() -> Option<u16> {
-    let port = LSP_PROXY_PORT.load(Ordering::SeqCst);
-    if port > 0 {
-        Some(port)
-    } else {
-        None
-    }
-}
-
-/// LSP proxy client for calling Neovim's LSP
-struct LspProxyClient {
-    port: u16,
-    client: reqwest::Client,
-}
-
-impl LspProxyClient {
-    fn new(port: u16) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(50)) // Fast timeout for fallback
-            .build()
-            .unwrap_or_default();
-        Self { port, client }
-    }
-
-    async fn definition(&self, file: &str, line: usize, col: usize) -> Option<Vec<LspLocation>> {
-        let url = format!("http://127.0.0.1:{}/lsp/definition", self.port);
-        let body = json!({ "file": file, "line": line, "col": col });
-
-        let resp = self.client.post(&url).json(&body).send().await.ok()?;
-        let data: serde_json::Value = resp.json().await.ok()?;
-
-        let locations = data.get("locations")?.as_array()?;
-        let result: Vec<LspLocation> = locations
-            .iter()
-            .filter_map(|loc| {
-                Some(LspLocation {
-                    file: loc.get("file")?.as_str()?.to_string(),
-                    line: loc.get("line")?.as_u64()? as usize,
-                    col: loc.get("col")?.as_u64().unwrap_or(0) as usize,
-                    preview: loc
-                        .get("preview")
-                        .and_then(|p| p.as_str())
-                        .map(|s| s.to_string()),
-                })
-            })
-            .collect();
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-
-    async fn references(&self, file: &str, line: usize, col: usize) -> Option<Vec<LspLocation>> {
-        let url = format!("http://127.0.0.1:{}/lsp/references", self.port);
-        let body = json!({ "file": file, "line": line, "col": col });
-
-        let resp = self.client.post(&url).json(&body).send().await.ok()?;
-        let data: serde_json::Value = resp.json().await.ok()?;
-
-        let refs = data.get("references")?.as_array()?;
-        let result: Vec<LspLocation> = refs
-            .iter()
-            .filter_map(|loc| {
-                Some(LspLocation {
-                    file: loc.get("file")?.as_str()?.to_string(),
-                    line: loc.get("line")?.as_u64()? as usize,
-                    col: loc.get("col")?.as_u64().unwrap_or(0) as usize,
-                    preview: loc
-                        .get("preview")
-                        .and_then(|p| p.as_str())
-                        .map(|s| s.to_string()),
-                })
-            })
-            .collect();
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-
-    async fn hover(&self, file: &str, line: usize, col: usize) -> Option<String> {
-        let url = format!("http://127.0.0.1:{}/lsp/hover", self.port);
-        let body = json!({ "file": file, "line": line, "col": col });
-
-        let resp = self.client.post(&url).json(&body).send().await.ok()?;
-        let data: serde_json::Value = resp.json().await.ok()?;
-
-        data.get("hover")?.as_str().map(|s| s.to_string())
-    }
-
-    async fn symbols(&self, file: &str) -> Option<Vec<LspSymbol>> {
-        let url = format!("http://127.0.0.1:{}/lsp/symbols", self.port);
-        let body = json!({ "file": file });
-
-        let resp = self.client.post(&url).json(&body).send().await.ok()?;
-        let data: serde_json::Value = resp.json().await.ok()?;
-
-        let symbols = data.get("symbols")?.as_array()?;
-        let result: Vec<LspSymbol> = symbols
-            .iter()
-            .filter_map(|sym| {
-                Some(LspSymbol {
-                    name: sym.get("name")?.as_str()?.to_string(),
-                    kind: sym.get("kind")?.as_str()?.to_string(),
-                    line: sym.get("line")?.as_u64()? as usize,
-                    detail: sym
-                        .get("detail")
-                        .and_then(|d| d.as_str())
-                        .map(|s| s.to_string()),
-                })
-            })
-            .collect();
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-}
-
-#[derive(Debug)]
-struct LspLocation {
-    file: String,
-    line: usize,
-    col: usize,
-    preview: Option<String>,
-}
-
-#[derive(Debug)]
-struct LspSymbol {
-    name: String,
-    kind: String,
-    line: usize,
-    detail: Option<String>,
+fn adapter_client() -> Option<(
+    EditorAdapterClient,
+    crate::editor_adapter::EditorCapabilities,
+)> {
+    let context = current_editor_context()?;
+    let client = EditorAdapterClient::from_context(&context, Duration::from_millis(75))?;
+    Some((client, context.capabilities))
 }
 
 /// Symbol information extracted from code
@@ -623,6 +484,15 @@ impl ListSymbolsTool {
             analyzer: CodeAnalyzer::new(working_dir),
         }
     }
+
+    async fn try_editor_adapter_file_symbols(&self, target: &Path) -> Option<Vec<AdapterSymbol>> {
+        let (client, caps) = adapter_client()?;
+        if !caps.symbols {
+            return None;
+        }
+        let file = target.to_str()?;
+        client.symbols(file).await.ok()
+    }
 }
 
 #[async_trait]
@@ -662,6 +532,28 @@ impl Tool for ListSymbolsTool {
         let kind_filter = params["kind"].as_str();
 
         let target_path = self.analyzer.working_dir.join(path);
+
+        if target_path.is_file() {
+            if let Some(symbols) = self.try_editor_adapter_file_symbols(&target_path).await {
+                let mut output = format!(
+                    "Found {} symbols in {} (via editor adapter):\n\n",
+                    symbols.len(),
+                    path
+                );
+                for s in symbols {
+                    output.push_str(&format!(
+                        "  {:10} {:30} L{}\n",
+                        format!("[{}]", s.kind),
+                        s.name,
+                        s.line + 1
+                    ));
+                    if let Some(detail) = s.detail {
+                        output.push_str(&format!("            {}\n", detail));
+                    }
+                }
+                return Ok(ToolResult::success(output));
+            }
+        }
 
         let files = if target_path.is_file() {
             vec![target_path]
@@ -750,9 +642,16 @@ impl GoToDefinitionTool {
         }
     }
 
-    /// Try LSP proxy first (50ms timeout), returns None if unavailable
-    async fn try_lsp_proxy(&self, file_hint: Option<&str>, symbol: &str) -> Option<ToolResult> {
-        let port = get_lsp_proxy_port()?;
+    /// Try editor adapter first (fast timeout), returns None if unavailable.
+    async fn try_editor_adapter(
+        &self,
+        file_hint: Option<&str>,
+        symbol: &str,
+    ) -> Option<ToolResult> {
+        let (client, caps) = adapter_client()?;
+        if !caps.definition {
+            return None;
+        }
         let file = file_hint?;
 
         // For go_to_definition, we need the cursor position
@@ -762,10 +661,12 @@ impl GoToDefinitionTool {
         // Find the symbol in the file
         for (line_num, line) in content.lines().enumerate() {
             if let Some(col) = line.find(symbol) {
-                let client = LspProxyClient::new(port);
-                if let Some(locations) = client.definition(file, line_num, col).await {
+                if let Ok(locations) = client.definition(file, line_num, col).await {
+                    if locations.is_empty() {
+                        return None;
+                    }
                     let mut output = format!(
-                        "Found {} definition(s) for '{}' (via LSP):\n\n",
+                        "Found {} definition(s) for '{}' (via editor adapter):\n\n",
                         locations.len(),
                         symbol
                     );
@@ -834,8 +735,8 @@ impl Tool for GoToDefinitionTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'symbol' parameter"))?;
         let file_hint = params["file_hint"].as_str();
 
-        // Try LSP proxy first (fast timeout, falls back automatically)
-        if let Some(result) = self.try_lsp_proxy(file_hint, symbol).await {
+        // Try editor adapter first (fast timeout, falls back automatically).
+        if let Some(result) = self.try_editor_adapter(file_hint, symbol).await {
             return Ok(result);
         }
 
@@ -896,6 +797,55 @@ impl FindAllReferencesTool {
             analyzer: CodeAnalyzer::new(working_dir),
         }
     }
+
+    async fn try_editor_adapter(&self, symbol: &str) -> Option<ToolResult> {
+        let (client, caps) = adapter_client()?;
+        if !(caps.references && caps.cursor) {
+            return None;
+        }
+
+        let cursor = client.cursor().await.ok()?;
+        let refs = client
+            .references(
+                &cursor.path,
+                cursor.line.saturating_sub(1),
+                cursor.col.saturating_sub(1),
+            )
+            .await
+            .ok()?;
+
+        if refs.is_empty() {
+            return None;
+        }
+
+        let mut output = format!(
+            "## References for '{}' ({} found via editor adapter)\n\n",
+            symbol,
+            refs.len()
+        );
+        let mut by_file: HashMap<String, Vec<&AdapterLocation>> = HashMap::new();
+        for item in &refs {
+            by_file.entry(item.file.clone()).or_default().push(item);
+        }
+        for (file, entries) in by_file {
+            let rel_path = PathBuf::from(&file)
+                .strip_prefix(&self.analyzer.working_dir)
+                .map(|p| p.display().to_string())
+                .unwrap_or(file);
+            output.push_str(&format!("### {}\n", rel_path));
+            for entry in entries {
+                output.push_str(&format!(
+                    "  L{}:{} {}\n",
+                    entry.line + 1,
+                    entry.col + 1,
+                    entry.preview.as_deref().unwrap_or("")
+                ));
+            }
+            output.push('\n');
+        }
+
+        Some(ToolResult::success(output))
+    }
 }
 
 #[async_trait]
@@ -932,6 +882,10 @@ impl Tool for FindAllReferencesTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'symbol' parameter"))?;
         let include_def = params["include_definition"].as_bool().unwrap_or(true);
+
+        if let Some(result) = self.try_editor_adapter(symbol).await {
+            return Ok(result);
+        }
 
         let files = self.analyzer.get_searchable_files(None);
 
@@ -1152,6 +1106,24 @@ impl GetSignatureTool {
             analyzer: CodeAnalyzer::new(working_dir),
         }
     }
+
+    async fn try_editor_adapter(&self) -> Option<String> {
+        let (client, caps) = adapter_client()?;
+        if !(caps.hover && caps.cursor) {
+            return None;
+        }
+
+        let cursor = client.cursor().await.ok()?;
+        client
+            .hover(
+                &cursor.path,
+                cursor.line.saturating_sub(1),
+                cursor.col.saturating_sub(1),
+            )
+            .await
+            .ok()
+            .flatten()
+    }
 }
 
 #[async_trait]
@@ -1183,6 +1155,13 @@ impl Tool for GetSignatureTool {
         let symbol = params["symbol"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'symbol' parameter"))?;
+
+        if let Some(hover) = self.try_editor_adapter().await {
+            return Ok(ToolResult::success(format!(
+                "# {} (via editor adapter)\n\n{}",
+                symbol, hover
+            )));
+        }
 
         let files = self.analyzer.get_searchable_files(None);
         let definitions = self.analyzer.find_definition(symbol, &files)?;

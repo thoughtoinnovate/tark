@@ -85,47 +85,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-  neovim-tests:
-    name: Neovim Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Neovim
-        uses: rhysd/action-setup-vim@v1
-        with:
-          neovim: true
-          version: stable
-      
-      - name: Verify Neovim version
-        run: |
-          nvim --version
-          # Require Neovim 0.8.0+ for plenary.nvim compatibility
-          VERSION=$(nvim --version | head -1 | grep -oP 'v\K[0-9]+\.[0-9]+')
-          MAJOR=$(echo $VERSION | cut -d. -f1)
-          MINOR=$(echo $VERSION | cut -d. -f2)
-          if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 8 ]; then
-            echo "Error: Neovim 0.8.0+ required, found $VERSION"
-            exit 1
-          fi
-          echo "Neovim $VERSION meets minimum requirement (0.8.0+)"
-      
-      - name: Install plenary.nvim
-        run: |
-          mkdir -p "$HOME/.local/share/nvim"
-          PLENARY_DIR="$HOME/.local/share/nvim/plenary.nvim"
-          if [ ! -d "$PLENARY_DIR" ]; then
-            echo "Installing plenary.nvim..."
-            git clone --depth=1 https://github.com/nvim-lua/plenary.nvim "$PLENARY_DIR"
-          else
-            echo "plenary.nvim already installed"
-          fi
-      
-      - name: Run Neovim tests
-        run: |
-          nvim --headless -u tests/minimal_init.lua \
-            -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
-
   # E2E Visual Tests
   e2e-smoke:
     name: E2E Smoke Tests

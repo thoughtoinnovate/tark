@@ -33,8 +33,8 @@ pub use file_ops::{
 pub use file_search::{CodebaseOverviewTool, FileSearchTool};
 pub use grep::FindReferencesTool;
 pub use lsp_tools::{
-    set_lsp_proxy_port, CallHierarchyTool, CodeAnalyzer, FindAllReferencesTool, GetSignatureTool,
-    GoToDefinitionTool, ListSymbolsTool,
+    CallHierarchyTool, CodeAnalyzer, FindAllReferencesTool, GetSignatureTool, GoToDefinitionTool,
+    ListSymbolsTool,
 };
 pub use mode_switch::ModeSwitchTool;
 pub use plan::{

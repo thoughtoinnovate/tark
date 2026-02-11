@@ -8,10 +8,6 @@
 /src/ @thoughtoinnovate
 /Cargo.toml @thoughtoinnovate
 
-# Neovim plugin
-/lua/ @thoughtoinnovate
-/plugin/ @thoughtoinnovate
-
 # Docker & CI/CD
 /Dockerfile* @thoughtoinnovate
 /.github/ @thoughtoinnovate
@@ -20,4 +16,3 @@
 # Documentation
 /README.md @thoughtoinnovate
 /examples/ @thoughtoinnovate
-

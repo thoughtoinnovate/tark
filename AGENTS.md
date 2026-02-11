@@ -115,15 +115,10 @@ tark/
 │       ├── cli.rs               # CLI commands
 │       └── dashboard.rs         # Usage dashboard HTML
 │
-├── lua/                         # Neovim plugin (Lua)
-│   └── tark/
-│       ├── init.lua             # Plugin entry point & setup
-│       ├── binary.lua           # Binary find/download/version
-│       ├── tui.lua              # TUI integration (socket RPC)
-│       ├── ghost.lua            # Ghost text completions
-│       ├── lsp.lua              # LSP integration helpers
-│       ├── statusline.lua       # Statusline helpers
-│       └── health.lua           # :checkhealth integration
+├── ../plugins/tark/editors/neovim/  # Extracted Neovim editor adapter plugin
+│   ├── lua/tark/*.lua               # Neovim runtime modules
+│   ├── plugin/tark.lua              # Command registration
+│   └── tests/                       # Adapter Lua/Neovim tests
 │
 ├── tests/                       # Test suite
 │   ├── cucumber_tui_new.rs      # BDD integration tests
@@ -225,8 +220,8 @@ RUST_LOG=debug ./target/release/tark tui  # Check span timings in logs
   cargo test --all-features
   
   # Neovim/Lua tests (requires nvim and plenary.nvim)
-  nvim --headless -u tests/minimal_init.lua \
-    -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
+  nvim --headless -u ../plugins/tark/editors/neovim/tests/minimal_init.lua \
+    -c "PlenaryBustedDirectory ../plugins/tark/editors/neovim/tests/specs/ {minimal_init = '../plugins/tark/editors/neovim/tests/minimal_init.lua'}"
   ```
 - **Coverage requirements**:
   - New features → Unit tests + integration tests
@@ -276,7 +271,7 @@ For TUI features, you MUST:
 
 - **Keep versions in sync**:
   - `Cargo.toml`: `version = "x.y.z"`
-  - `lua/tark/init.lua`: `M.version = 'x.y.z'`
+  - `../plugins/tark/editors/neovim/lua/tark/init.lua`: `M.version = 'x.y.z'`
 - **Binary downloads are pinned** to plugin version (stable channel)
 
 ## Don'ts ❌
@@ -383,10 +378,10 @@ For TUI features, you MUST:
 
 | File | Purpose | When to Modify |
 |------|---------|----------------|
-| `lua/tark/init.lua` | Plugin entry & config | Adding config options |
-| `lua/tark/tui.lua` | TUI integration | Socket RPC handlers |
-| `lua/tark/binary.lua` | Binary management | Download/version logic |
-| `plugin/tark.lua` | Command registration | Adding new commands |
+| `../plugins/tark/editors/neovim/lua/tark/init.lua` | Plugin entry & config | Adding config options |
+| `../plugins/tark/editors/neovim/lua/tark/tui.lua` | TUI integration | Adapter/TUI bridge behavior |
+| `../plugins/tark/editors/neovim/lua/tark/binary.lua` | Binary management | Download/version logic |
+| `../plugins/tark/editors/neovim/plugin/tark.lua` | Command registration | Adding new commands |
 
 ### Infrastructure
 
@@ -529,7 +524,7 @@ namespace = "gh"
 
 ### Adding a Config Option
 
-1. Add to `M.config` in `lua/tark/init.lua`
+1. Add to `M.config` in `../plugins/tark/editors/neovim/lua/tark/init.lua`
 2. Use in relevant module
 3. Document in README.md
 
@@ -538,7 +533,7 @@ namespace = "gh"
 ```bash
 # 1. Update versions
 # Cargo.toml: version = "X.Y.Z"
-# lua/tark/init.lua: M.version = 'X.Y.Z'
+# ../plugins/tark/editors/neovim/lua/tark/init.lua: M.version = 'X.Y.Z'
 
 # 2. Commit
 git add -A
@@ -575,12 +570,12 @@ cargo build --release    # Release build (before commit)
 nvim --cmd "set rtp+=." -c "lua require('tark').setup()"
 
 # Run Neovim/Lua tests (requires plenary.nvim)
-nvim --headless -u tests/minimal_init.lua \
-  -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
+nvim --headless -u ../plugins/tark/editors/neovim/tests/minimal_init.lua \
+  -c "PlenaryBustedDirectory ../plugins/tark/editors/neovim/tests/specs/ {minimal_init = '../plugins/tark/editors/neovim/tests/minimal_init.lua'}"
 
 # Run specific Lua test file
-nvim --headless -u tests/minimal_init.lua \
-  -c "PlenaryBustedFile tests/specs/init_spec.lua"
+nvim --headless -u ../plugins/tark/editors/neovim/tests/minimal_init.lua \
+  -c "PlenaryBustedFile ../plugins/tark/editors/neovim/tests/specs/init_spec.lua"
 ```
 
 ## Developer Workflow 🔄
@@ -646,8 +641,8 @@ cargo test --all-features
 cargo test --all-features --release
 
 # For Lua changes
-nvim --headless -u tests/minimal_init.lua \
-  -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
+nvim --headless -u ../plugins/tark/editors/neovim/tests/minimal_init.lua \
+  -c "PlenaryBustedDirectory ../plugins/tark/editors/neovim/tests/specs/ {minimal_init = '../plugins/tark/editors/neovim/tests/minimal_init.lua'}"
 ```
 
 **Why**: Tests prevent regressions and document expected behavior.
@@ -693,8 +688,8 @@ cargo test --all-features
 For Lua changes, also run:
 
 ```bash
-nvim --headless -u tests/minimal_init.lua \
-  -c "PlenaryBustedDirectory tests/specs/ {minimal_init = 'tests/minimal_init.lua'}"
+nvim --headless -u ../plugins/tark/editors/neovim/tests/minimal_init.lua \
+  -c "PlenaryBustedDirectory ../plugins/tark/editors/neovim/tests/specs/ {minimal_init = '../plugins/tark/editors/neovim/tests/minimal_init.lua'}"
 ```
 
 ### 6. Fix Any Issues
@@ -702,7 +697,7 @@ nvim --headless -u tests/minimal_init.lua \
 - **Format errors**: Run `cargo fmt --all` to auto-fix
 - **Clippy warnings**: Fix the code, don't just suppress warnings
 - **Rust test failures**: Fix the failing tests or update test expectations
-- **Lua test failures**: Check `tests/specs/*.lua` for test expectations
+- **Lua test failures**: Check `../plugins/tark/editors/neovim/tests/specs/*.lua` for test expectations
 - **Compilation errors**: Fix immediately; don't commit broken code
 
 ### 7. Update Version (if needed)
@@ -712,7 +707,7 @@ For breaking changes or new features:
 ```bash
 # Update both files to same version
 # Cargo.toml: version = "0.X.0"
-# lua/tark/init.lua: M.version = '0.X.0'
+# ../plugins/tark/editors/neovim/lua/tark/init.lua: M.version = '0.X.0'
 ```
 
 ### 8. Clean Git Workflow
@@ -769,7 +764,7 @@ Then check GitHub Actions to ensure CI passes. If CI fails:
 □ Tests added/updated for code changes
 □ Performance verified (for core agent code: no regressions, consider improvements)
 □ Documentation updated (README.md, AGENTS.md, doc comments)
-□ Versions synced (if needed: Cargo.toml & lua/tark/init.lua)
+□ Versions synced (if needed: Cargo.toml & ../plugins/tark/editors/neovim/lua/tark/init.lua)
 □ Git history clean (stashed unrelated changes)
 □ Conventional commit message
 □ Ready to push (CI will pass)
