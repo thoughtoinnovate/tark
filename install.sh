@@ -6,8 +6,8 @@
 
 set -e
 
-VERSION="v0.11.8"
-PREVIOUS_VERSION="v0.11.7"
+VERSION="v0.11.9"
+PREVIOUS_VERSION="v0.11.8"
 REPO="thoughtoinnovate/tark"
 BINARY_NAME="tark"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -286,7 +286,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Examples:"
             echo "  curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash"
-            echo "  ./install.sh --version v0.11.8"
+            echo "  ./install.sh --version v0.11.9"
             echo "  ./install.sh --install-dir ~/.local/bin"
             exit 0
             ;;
