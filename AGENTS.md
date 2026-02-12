@@ -111,7 +111,8 @@ tark/
 │   │   ├── transport.rs         # STDIO transport
 │   │   ├── wrapper.rs           # Tool wrapper adapters
 │   │   └── types.rs             # MCP protocol types
-│   └── transport/               # HTTP server and CLI
+│   └── transport/               # HTTP server, ACP stdio, and CLI
+│       ├── acp.rs               # ACP v2 (Content-Length JSON-RPC)
 │       ├── cli.rs               # CLI commands
 │       └── dashboard.rs         # Usage dashboard HTML
 │

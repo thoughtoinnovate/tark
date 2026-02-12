@@ -176,3 +176,60 @@ jobs:
             tests/visual/chat/diffs/
             tests/visual/logs/
           retention-days: 7
+
+
+  acp-unit:
+    name: acp-unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      - name: ACP unit tests
+        run: cargo test --all-features transport::acp::
+
+  acp-integration:
+    name: acp-integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      - name: Core integration regression
+        run: cargo test --all-features --test bff_integration_tests
+
+  acp-security:
+    name: acp-security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      - name: Security-related tests
+        run: cargo test --all-features policy::security::
+
+  core-regression:
+    name: core-regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      - name: Full regression suite
+        run: cargo test --all-features

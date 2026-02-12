@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tark ACP v2",
+  "type": "object",
+  "description": "Content-Length framed JSON-RPC 2.0 protocol for editor clients.",
+  "required": ["jsonrpc", "id", "method"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "id": {},
+    "method": {"type": "string"},
+    "params": {"type": "object"}
+  }
+}

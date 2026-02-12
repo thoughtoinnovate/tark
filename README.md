@@ -175,7 +175,7 @@ return {
 
 ## Commands
 
-### ACP Chat Commands
+### ACP Chat Commands (Neovim)
 
 | Command | Description |
 |---------|-------------|
@@ -223,7 +223,7 @@ tark chat
 # With specific model
 tark chat --model gpt-4o
 
-# Start ACP server on stdio (for editor widget clients)
+# Start ACP server on stdio (Content-Length JSON-RPC v2 for editor clients)
 tark acp --cwd .
 
 # In a specific directory
