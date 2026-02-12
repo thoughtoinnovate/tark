@@ -15,6 +15,8 @@ SKIP_VERIFY="${SKIP_VERIFY:-false}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 PROMPT_FOR_TOKEN="${PROMPT_FOR_TOKEN:-false}"
 TOKEN_FROM_STDIN="${TOKEN_FROM_STDIN:-false}"
+CONNECT_TIMEOUT_SECONDS="${CONNECT_TIMEOUT_SECONDS:-15}"
+DOWNLOAD_TIMEOUT_SECONDS="${DOWNLOAD_TIMEOUT_SECONDS:-120}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -79,13 +81,20 @@ download_file() {
     if command -v curl &> /dev/null; then
         if [ -n "$GITHUB_TOKEN" ]; then
             curl -fsSL \
+                --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" \
+                --max-time "${DOWNLOAD_TIMEOUT_SECONDS}" \
                 -H "Authorization: Bearer ${GITHUB_TOKEN}" \
                 -H "Accept: application/octet-stream" \
                 "$url" \
                 -o "$output" \
                 2>/dev/null
         else
-            curl -fsSL "$url" -o "$output" 2>/dev/null
+            curl -fsSL \
+                --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" \
+                --max-time "${DOWNLOAD_TIMEOUT_SECONDS}" \
+                "$url" \
+                -o "$output" \
+                2>/dev/null
         fi
         return $?
     fi
@@ -93,13 +102,18 @@ download_file() {
     if command -v wget &> /dev/null; then
         if [ -n "$GITHUB_TOKEN" ]; then
             wget -q \
+                --timeout="${CONNECT_TIMEOUT_SECONDS}" \
                 --header="Authorization: Bearer ${GITHUB_TOKEN}" \
                 --header="Accept: application/octet-stream" \
                 "$url" \
                 -O "$output" \
                 2>/dev/null
         else
-            wget -q "$url" -O "$output" 2>/dev/null
+            wget -q \
+                --timeout="${CONNECT_TIMEOUT_SECONDS}" \
+                "$url" \
+                -O "$output" \
+                2>/dev/null
         fi
         return $?
     fi
@@ -268,6 +282,11 @@ install() {
     platform=$(detect_platform)
     info "Platform: ${platform}"
 
+    # If caller explicitly asked for token mode, get it before network calls.
+    if [ "$PROMPT_FOR_TOKEN" = "true" ] || [ "$TOKEN_FROM_STDIN" = "true" ]; then
+        read_github_token || error "Token mode requested, but no GitHub token was provided."
+    fi
+
     # Create temp directory
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' EXIT
@@ -374,6 +393,10 @@ while [[ $# -gt 0 ]]; do
             echo "  This installer verifies SHA256 checksums to ensure binary integrity."
             echo "  If verification fails, installation is aborted for your protection."
             echo "  For private repos, prefer GITHUB_TOKEN env var or --prompt-token."
+            echo ""
+            echo "Network tuning:"
+            echo "  CONNECT_TIMEOUT_SECONDS   Connect timeout per request (default: 15)"
+            echo "  DOWNLOAD_TIMEOUT_SECONDS  Total request timeout (default: 120)"
             echo ""
             echo "Examples:"
             echo "  curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash"
