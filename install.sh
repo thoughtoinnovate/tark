@@ -142,6 +142,56 @@ download_with_auth_retry() {
     return 1
 }
 
+validate_github_token_access() {
+    # Only validate when token is present and curl exists.
+    if [ -z "$GITHUB_TOKEN" ] || ! command -v curl &> /dev/null; then
+        return 0
+    fi
+
+    local code
+    code=$(curl -sS -o /dev/null -w "%{http_code}" \
+        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+        "https://api.github.com/repos/${REPO}" || true)
+
+    case "$code" in
+        200) return 0 ;;
+        401) error "GitHub token is invalid or expired (HTTP 401). Create a new token with Contents: Read." ;;
+        403) error "GitHub token is not authorized for this repo (HTTP 403). Check org SSO authorization and repo access." ;;
+        404) error "Repo ${REPO} is not accessible with this token (HTTP 404). Check repo selection in fine-grained token." ;;
+        000) error "Network error while validating token access to GitHub." ;;
+        *) error "Unexpected GitHub response while validating token access: HTTP ${code}." ;;
+    esac
+}
+
+diagnose_download_failure() {
+    local url="$1"
+
+    if ! command -v curl &> /dev/null; then
+        warn "Download failed. Install curl for detailed diagnostics."
+        return
+    fi
+
+    local code
+    if [ -n "$GITHUB_TOKEN" ]; then
+        code=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            "$url" || true)
+    else
+        code=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Accept: application/octet-stream" \
+            "$url" || true)
+    fi
+
+    case "$code" in
+        401) warn "Download failed: invalid or expired token (HTTP 401)." ;;
+        403) warn "Download failed: token lacks permission, SSO not authorized, or API rate-limited (HTTP 403)." ;;
+        404) warn "Download failed: release asset not found or repo not accessible (HTTP 404)." ;;
+        000) warn "Download failed: network/connectivity issue (HTTP 000)." ;;
+        *) warn "Download failed with HTTP ${code}." ;;
+    esac
+}
+
 # Detect OS and architecture
 detect_platform() {
     local os arch
@@ -252,6 +302,7 @@ try_download() {
     info "Downloading ${BINARY_NAME}..."
     if ! download_with_auth_retry "$download_url" "${tmp_dir}/${BINARY_NAME}"; then
         warn "Failed to download version ${version}."
+        diagnose_download_failure "$download_url"
         if [ -z "$GITHUB_TOKEN" ]; then
             warn "If this repository is private, set GITHUB_TOKEN, use --prompt-token, or use --token-stdin."
         fi
@@ -286,6 +337,9 @@ install() {
     if [ "$PROMPT_FOR_TOKEN" = "true" ] || [ "$TOKEN_FROM_STDIN" = "true" ]; then
         read_github_token || error "Token mode requested, but no GitHub token was provided."
     fi
+
+    # Fail fast for invalid token/access issues before asset downloads.
+    validate_github_token_access
 
     # Create temp directory
     tmp_dir=$(mktemp -d)
