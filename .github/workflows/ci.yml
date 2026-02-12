@@ -118,7 +118,8 @@ jobs:
         continue-on-error: true
       
       - name: Upload recordings
-        if: always()
+        if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: e2e-smoke-recordings
@@ -127,7 +128,9 @@ jobs:
             tests/visual/chat/recordings/*.cast
             tests/visual/chat/current/*.png
             tests/visual/logs/*.log
-          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 9
+          retention-days: 1
 
   # Full E2E suite on PRs
   e2e-full:
@@ -166,7 +169,8 @@ jobs:
         continue-on-error: true
       
       - name: Upload artifacts
-        if: always()
+        if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: e2e-full-artifacts
@@ -175,7 +179,9 @@ jobs:
             tests/visual/chat/current/
             tests/visual/chat/diffs/
             tests/visual/logs/
-          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 9
+          retention-days: 1
 
 
   acp-unit:
