@@ -12,6 +12,9 @@ REPO="thoughtoinnovate/tark"
 BINARY_NAME="tark"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 SKIP_VERIFY="${SKIP_VERIFY:-false}"
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+PROMPT_FOR_TOKEN="${PROMPT_FOR_TOKEN:-false}"
+TOKEN_FROM_STDIN="${TOKEN_FROM_STDIN:-false}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -40,6 +43,89 @@ error() {
 
 security() {
     echo -e "${CYAN}[SECURITY]${NC} $1"
+}
+
+read_github_token() {
+    if [ -n "$GITHUB_TOKEN" ]; then
+        return 0
+    fi
+
+    if [ "$TOKEN_FROM_STDIN" = "true" ]; then
+        info "Reading GitHub token from stdin..."
+        IFS= read -r GITHUB_TOKEN || true
+    elif [ "$PROMPT_FOR_TOKEN" = "true" ]; then
+        if [ -t 0 ]; then
+            printf "GitHub token (input hidden): "
+            stty -echo
+            IFS= read -r GITHUB_TOKEN || true
+            stty echo
+            printf "\n"
+        else
+            warn "Cannot prompt for token in non-interactive mode. Use GITHUB_TOKEN env or --token-stdin."
+            return 1
+        fi
+    fi
+
+    if [ -z "$GITHUB_TOKEN" ]; then
+        return 1
+    fi
+    return 0
+}
+
+download_file() {
+    local url="$1"
+    local output="$2"
+
+    if command -v curl &> /dev/null; then
+        if [ -n "$GITHUB_TOKEN" ]; then
+            curl -fsSL \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/octet-stream" \
+                "$url" \
+                -o "$output" \
+                2>/dev/null
+        else
+            curl -fsSL "$url" -o "$output" 2>/dev/null
+        fi
+        return $?
+    fi
+
+    if command -v wget &> /dev/null; then
+        if [ -n "$GITHUB_TOKEN" ]; then
+            wget -q \
+                --header="Authorization: Bearer ${GITHUB_TOKEN}" \
+                --header="Accept: application/octet-stream" \
+                "$url" \
+                -O "$output" \
+                2>/dev/null
+        else
+            wget -q "$url" -O "$output" 2>/dev/null
+        fi
+        return $?
+    fi
+
+    error "Neither curl nor wget found. Please install one of them."
+}
+
+download_with_auth_retry() {
+    local url="$1"
+    local output="$2"
+
+    if download_file "$url" "$output"; then
+        return 0
+    fi
+
+    # If initial unauthenticated download fails, try token once.
+    if [ -z "$GITHUB_TOKEN" ]; then
+        warn "Download failed without authentication."
+        if read_github_token; then
+            info "Retrying download with GitHub token..."
+            download_file "$url" "$output"
+            return $?
+        fi
+    fi
+
+    return 1
 }
 
 # Detect OS and architecture
@@ -113,7 +199,7 @@ download_checksum() {
     local tmp_dir="$2"
     local checksum
     
-    if curl -fsSL "$checksum_url" -o "${tmp_dir}/checksum.sha256" 2>/dev/null; then
+    if download_with_auth_retry "$checksum_url" "${tmp_dir}/checksum.sha256"; then
         # Extract just the hash (first field)
         checksum=$(cut -d ' ' -f 1 "${tmp_dir}/checksum.sha256")
         echo "$checksum"
@@ -150,18 +236,12 @@ try_download() {
     fi
 
     info "Downloading ${BINARY_NAME}..."
-    if command -v curl &> /dev/null; then
-        if ! curl -fsSL "$download_url" -o "${tmp_dir}/${BINARY_NAME}"; then
-            warn "Failed to download version ${version}."
-            return 1
+    if ! download_with_auth_retry "$download_url" "${tmp_dir}/${BINARY_NAME}"; then
+        warn "Failed to download version ${version}."
+        if [ -z "$GITHUB_TOKEN" ]; then
+            warn "If this repository is private, set GITHUB_TOKEN, use --prompt-token, or use --token-stdin."
         fi
-    elif command -v wget &> /dev/null; then
-        if ! wget -q "$download_url" -O "${tmp_dir}/${BINARY_NAME}"; then
-            warn "Failed to download version ${version}."
-            return 1
-        fi
-    else
-        error "Neither curl nor wget found. Please install one of them."
+        return 1
     fi
 
     # Verify checksum
@@ -269,6 +349,14 @@ while [[ $# -gt 0 ]]; do
             SKIP_VERIFY="true"
             shift
             ;;
+        --prompt-token)
+            PROMPT_FOR_TOKEN="true"
+            shift
+            ;;
+        --token-stdin)
+            TOKEN_FROM_STDIN="true"
+            shift
+            ;;
         --help|-h)
             echo "tark installer"
             echo ""
@@ -278,15 +366,21 @@ while [[ $# -gt 0 ]]; do
             echo "  -v, --version VERSION   Install specific version (default: ${VERSION}, fallback: ${PREVIOUS_VERSION})"
             echo "  -d, --install-dir DIR   Installation directory (default: /usr/local/bin)"
             echo "  --skip-verify           Skip SHA256 checksum verification (not recommended)"
+            echo "  --prompt-token          Prompt securely for GitHub token (for private repos)"
+            echo "  --token-stdin           Read GitHub token from stdin (first line)"
             echo "  -h, --help              Show this help"
             echo ""
             echo "Security:"
             echo "  This installer verifies SHA256 checksums to ensure binary integrity."
             echo "  If verification fails, installation is aborted for your protection."
+            echo "  For private repos, prefer GITHUB_TOKEN env var or --prompt-token."
             echo ""
             echo "Examples:"
             echo "  curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash"
             echo "  ./install.sh --version v0.11.9"
+            echo "  GITHUB_TOKEN=ghp_xxx ./install.sh"
+            echo "  ./install.sh --prompt-token"
+            echo "  printf '%s\n' \"\$GITHUB_TOKEN\" | ./install.sh --token-stdin"
             echo "  ./install.sh --install-dir ~/.local/bin"
             exit 0
             ;;
