@@ -7,7 +7,7 @@
 set -e
 
 VERSION="v0.11.10"
-PREVIOUS_VERSION="v0.11.9"
+PREVIOUS_VERSION="v0.11.10"
 REPO="thoughtoinnovate/tark"
 BINARY_NAME="tark"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -488,8 +488,8 @@ install() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version|-v)
-            VERSION="$2"
-            PREVIOUS_VERSION="" # No fallback when specific version is requested
+            VERSION="v0.11.10"
+            PREVIOUS_VERSION="v0.11.10"
             shift 2
             ;;
         --install-dir|-d)
