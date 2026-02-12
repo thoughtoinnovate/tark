@@ -219,14 +219,89 @@ Note: FreeBSD/OpenBSD/NetBSD are not currently supported." ;;
 # Get the download URL for a specific version
 get_download_url() {
     local version="$1"
-    local platform="$2"
+    local asset_name="$2"
+    echo "https://github.com/${REPO}/releases/download/${version}/${asset_name}"
+}
+
+get_asset_name() {
+    local platform="$1"
     local asset_name="tark-${platform}"
-    
+
     if [[ "$platform" == windows* ]]; then
         asset_name="${asset_name}.exe"
     fi
 
-    echo "https://github.com/${REPO}/releases/download/${version}/${asset_name}"
+    echo "${asset_name}"
+}
+
+fetch_release_metadata() {
+    local version="$1"
+    local url="https://api.github.com/repos/${REPO}/releases/tags/${version}"
+
+    if command -v curl &> /dev/null; then
+        if [ -n "$GITHUB_TOKEN" ]; then
+            curl -fsSL \
+                --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" \
+                --max-time "${DOWNLOAD_TIMEOUT_SECONDS}" \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                "$url" \
+                2>/dev/null
+        else
+            curl -fsSL \
+                --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" \
+                --max-time "${DOWNLOAD_TIMEOUT_SECONDS}" \
+                "$url" \
+                2>/dev/null
+        fi
+    else
+        return 1
+    fi
+}
+
+resolve_release_asset_id() {
+    local version="$1"
+    local asset_name="$2"
+    local metadata
+
+    metadata=$(fetch_release_metadata "$version") || return 1
+
+    if command -v python3 &> /dev/null; then
+        echo "$metadata" | python3 -c '
+import json, sys
+name = sys.argv[1]
+data = json.load(sys.stdin)
+for asset in data.get("assets", []):
+    if asset.get("name") == name:
+        print(asset.get("id", ""))
+        break
+' "$asset_name"
+        return 0
+    fi
+
+    if command -v jq &> /dev/null; then
+        echo "$metadata" | jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .id' | head -n 1
+        return 0
+    fi
+
+    # Minimal fallback parser when python3/jq are unavailable.
+    echo "$metadata" | sed -n "/\"name\": \"${asset_name//\//\\/}\"/,/\"id\":/p" | grep -m1 '"id":' | sed -E 's/.*"id":[[:space:]]*([0-9]+).*/\1/'
+}
+
+get_release_asset_url() {
+    local version="$1"
+    local asset_name="$2"
+
+    # For private repos, prefer GitHub API asset downloads with token.
+    if [ -n "$GITHUB_TOKEN" ]; then
+        local asset_id
+        asset_id=$(resolve_release_asset_id "$version" "$asset_name")
+        if [ -n "$asset_id" ]; then
+            echo "https://api.github.com/repos/${REPO}/releases/assets/${asset_id}"
+            return 0
+        fi
+    fi
+
+    get_download_url "$version" "$asset_name"
 }
 
 # Get the checksum URL for a binary
@@ -277,17 +352,20 @@ try_download() {
     local version="$1"
     local platform="$2"
     local tmp_dir="$3"
+    local asset_name checksum_asset_name
+    asset_name=$(get_asset_name "$platform")
+    checksum_asset_name="${asset_name}.sha256"
     
     info "Attempting to download version ${version}..."
     local download_url
-    download_url=$(get_download_url "$version" "$platform")
+    download_url=$(get_release_asset_url "$version" "$asset_name")
     info "Download URL: ${download_url}"
 
     # Download checksum first
     local checksum_url expected_checksum
     if [ "$SKIP_VERIFY" != "true" ]; then
         security "Downloading checksum for verification..."
-        checksum_url=$(get_checksum_url "$download_url")
+        checksum_url=$(get_release_asset_url "$version" "$checksum_asset_name")
         expected_checksum=$(download_checksum "$checksum_url" "$tmp_dir")
         
         if [ -n "$expected_checksum" ]; then
