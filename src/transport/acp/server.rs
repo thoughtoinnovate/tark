@@ -1,5 +1,6 @@
 use crate::agent::ChatAgent;
 use crate::llm;
+use crate::storage::TarkStorage;
 use crate::tools::questionnaire::{interaction_channel, InteractionRequest};
 use crate::tools::{AgentMode, ToolRegistry};
 use crate::transport::acp::errors::*;
@@ -32,6 +33,12 @@ const MAX_SESSIONS: usize = 8;
 const MAX_REQUESTS_PER_MINUTE: usize = 30;
 const APPROVAL_TIMEOUT_SECS: u64 = 120;
 const QUESTIONNAIRE_TIMEOUT_SECS: u64 = 180;
+
+struct SessionBootstrap {
+    mode: AgentMode,
+    provider: String,
+    model: Option<String>,
+}
 
 pub struct AcpServer {
     working_dir: PathBuf,
@@ -362,11 +369,13 @@ impl AcpServer {
                 .await;
         }
 
-        let mode = parse_mode(params.mode.as_deref())?;
-        let provider = default_provider();
         let cwd = resolve_cwd(params.cwd, &self.working_dir)?;
+        let bootstrap = session_bootstrap(&cwd, params.mode.as_deref());
+        let mode = bootstrap.mode;
+        let provider = bootstrap.provider.clone();
+        let model = bootstrap.model.clone();
 
-        let provider_impl = llm::create_provider_with_options(&provider, true, None)
+        let provider_impl = llm::create_provider_with_options(&provider, true, model.as_deref())
             .with_context(|| format!("Failed to create provider '{}'", provider))?;
 
         let (interaction_tx, interaction_rx) = interaction_channel();
@@ -389,7 +398,7 @@ impl AcpServer {
             id: session_id.clone(),
             cwd,
             provider: provider.clone(),
-            model: None,
+            model: model.clone(),
             agent: Arc::new(Mutex::new(agent)),
             context: Arc::new(Mutex::new(SessionContext::default())),
             current_request: Arc::new(Mutex::new(None)),
@@ -413,7 +422,7 @@ impl AcpServer {
                 "session_id": session_id,
                 "mode": mode_to_str(mode),
                 "provider": provider,
-                "model": Value::Null,
+                "model": model,
             }),
         )
         .await
@@ -849,6 +858,63 @@ fn default_provider() -> String {
     config.llm.default_provider
 }
 
+fn model_preference_for_mode(
+    session: &crate::storage::ChatSession,
+    mode: AgentMode,
+) -> Option<crate::storage::ModelPreference> {
+    let pref = match mode {
+        AgentMode::Build => &session.mode_preferences.build,
+        AgentMode::Plan => &session.mode_preferences.plan,
+        AgentMode::Ask => &session.mode_preferences.ask,
+    };
+    if pref.is_empty() {
+        None
+    } else {
+        Some(pref.clone())
+    }
+}
+
+fn session_bootstrap(cwd: &std::path::Path, requested_mode: Option<&str>) -> SessionBootstrap {
+    let default_mode = parse_mode(requested_mode).unwrap_or(AgentMode::Build);
+    let mut bootstrap = SessionBootstrap {
+        mode: default_mode,
+        provider: default_provider(),
+        model: None,
+    };
+
+    let Ok(storage) = TarkStorage::new(cwd) else {
+        return bootstrap;
+    };
+    let Ok(session) = storage.load_current_session() else {
+        return bootstrap;
+    };
+
+    bootstrap.mode = if requested_mode.is_some() {
+        default_mode
+    } else {
+        parse_mode(Some(&session.mode)).unwrap_or(AgentMode::Build)
+    };
+
+    if let Some(pref) = model_preference_for_mode(&session, bootstrap.mode) {
+        if !pref.provider.trim().is_empty() {
+            bootstrap.provider = pref.provider.trim().to_string();
+        }
+        if !pref.model.trim().is_empty() {
+            bootstrap.model = Some(pref.model.trim().to_string());
+        }
+        return bootstrap;
+    }
+
+    if !session.provider.trim().is_empty() {
+        bootstrap.provider = session.provider.trim().to_string();
+    }
+    if !session.model.trim().is_empty() {
+        bootstrap.model = Some(session.model.trim().to_string());
+    }
+
+    bootstrap
+}
+
 fn parse_mode(mode: Option<&str>) -> Result<AgentMode> {
     Ok(match mode.unwrap_or("build").to_lowercase().as_str() {
         "ask" => AgentMode::Ask,
@@ -980,6 +1046,8 @@ pub async fn run_acp_stdio(cwd: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{ChatSession, ModelPreference, TarkStorage};
+    use tempfile::tempdir;
 
     #[test]
     fn parse_mode_values() {
@@ -1036,5 +1104,41 @@ mod tests {
         }
         let params = json!({ "buffers": buffers });
         assert!(AcpServer::validate_payload("context/update", &params).is_err());
+    }
+
+    #[test]
+    fn session_bootstrap_uses_current_workspace_session_defaults() {
+        let tmp = tempdir().unwrap();
+        let storage = TarkStorage::new(tmp.path()).unwrap();
+
+        let mut session = ChatSession::new();
+        session.mode = "plan".to_string();
+        session.provider = "ollama".to_string();
+        session.model = "qwen2.5-coder:3b".to_string();
+        session.mode_preferences.plan = ModelPreference::new("openai", "gpt-4o-mini");
+        storage.save_session(&session).unwrap();
+
+        let bootstrap = session_bootstrap(tmp.path(), None);
+        assert!(matches!(bootstrap.mode, AgentMode::Plan));
+        assert_eq!(bootstrap.provider, "openai");
+        assert_eq!(bootstrap.model.as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn session_bootstrap_respects_requested_mode_and_mode_preferences() {
+        let tmp = tempdir().unwrap();
+        let storage = TarkStorage::new(tmp.path()).unwrap();
+
+        let mut session = ChatSession::new();
+        session.mode = "build".to_string();
+        session.provider = "ollama".to_string();
+        session.model = "qwen2.5-coder:7b".to_string();
+        session.mode_preferences.ask = ModelPreference::new("claude", "claude-sonnet-4");
+        storage.save_session(&session).unwrap();
+
+        let bootstrap = session_bootstrap(tmp.path(), Some("ask"));
+        assert!(matches!(bootstrap.mode, AgentMode::Ask));
+        assert_eq!(bootstrap.provider, "claude");
+        assert_eq!(bootstrap.model.as_deref(), Some("claude-sonnet-4"));
     }
 }
