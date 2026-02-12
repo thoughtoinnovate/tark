@@ -229,6 +229,9 @@ jobs:
   core-regression:
     name: core-regression
     runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust

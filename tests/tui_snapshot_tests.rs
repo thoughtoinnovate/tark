@@ -23,6 +23,8 @@ fn create_test_app(width: u16, height: u16) -> TuiApp<TestBackend> {
     let terminal = Terminal::new(backend).unwrap();
     let mut app = TuiApp::new(terminal);
     app.state_mut().set_terminal_size(width, height);
+    // Keep snapshots stable across environments with different cwd path lengths.
+    app.state_mut().config.default_path = "<WORKING_DIR>".to_string();
     app
 }
 
