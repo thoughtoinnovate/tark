@@ -177,6 +177,13 @@ enum Commands {
         port: u16,
     },
 
+    /// Start ACP server on stdio
+    Acp {
+        /// Working directory for file operations
+        #[arg(long)]
+        cwd: Option<String>,
+    },
+
     /// NEW: Interactive TUI mode (TDD implementation)
     Tui {
         /// Working directory for file operations
@@ -509,6 +516,10 @@ async fn main() -> Result<()> {
 
             lsp::run_lsp_server().await?;
             http_handle.abort();
+        }
+        Commands::Acp { cwd } => {
+            tracing::info!("Starting ACP server on stdio");
+            transport::acp::run_acp_stdio(cwd).await?;
         }
         Commands::Complete { file, line, col } => {
             transport::cli::run_complete(&file, line, col).await?;

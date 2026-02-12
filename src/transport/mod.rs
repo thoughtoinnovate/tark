@@ -1,5 +1,6 @@
 //! Transport layer for CLI, HTTP, and stdio communication
 
+pub mod acp;
 pub mod cli;
 pub mod dashboard;
 pub mod http;

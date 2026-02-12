@@ -84,7 +84,7 @@ tark auth copilot
 ollama serve
 ```
 
-### 3. Install Neovim Adapter Plugin
+### 3. Install Neovim ACP Plugin
 
 Neovim adapter source has moved to the plugins monorepo:
 `../plugins/tark/editors/neovim` (repository path `thoughtoinnovate/plugins/tark/editors/neovim`).
@@ -96,27 +96,36 @@ return {
     dir = "~/code/plugins/tark/editors/neovim",
     lazy = false,
     keys = {
-        { "<leader>tc", "<cmd>TarkToggle<cr>", desc = "Toggle tark chat" },
+        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
     },
 }
 ```
 
 The adapter plugin automatically downloads the correct binary for your platform.
 
-#### Lazy.nvim from monorepo (recommended for most users)
+#### Lazy.nvim from monorepo
 
 ```lua
 return {
     url = "https://github.com/thoughtoinnovate/plugins",
-    dir = "tark/editors/neovim",
+    name = "tark-editors",
     lazy = false,
+    init = function(plugin)
+        vim.opt.rtp:prepend(plugin.dir .. "/tark/editors/neovim")
+    end,
     keys = {
-        { "<leader>tc", "<cmd>TarkToggle<cr>", desc = "Toggle tark chat" },
+        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
     },
 }
 ```
 
-Note: Lazy.nvim will clone the monorepo, but it will only load the Neovim adapter from `tark/editors/neovim`.
+Note: Git-based plugin managers clone repositories, not single folders. For minimal checkout size use sparse checkout and the local `dir` config:
+
+```bash
+git clone --filter=blob:none --sparse https://github.com/thoughtoinnovate/plugins.git
+cd plugins
+git sparse-checkout set tark/editors/neovim
+```
 
 #### Full Config (all options)
 
@@ -125,24 +134,28 @@ return {
     dir = "~/code/plugins/tark/editors/neovim",
     lazy = false,
     keys = {
-        { "<leader>tc", "<cmd>TarkToggle<cr>", desc = "Toggle tark chat" },
-        { "<leader>to", "<cmd>TarkOpen<cr>", desc = "Open tark chat" },
-        { "<leader>tx", "<cmd>TarkClose<cr>", desc = "Close tark chat" },
+        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle ACP chat" },
+        { "<leader>to", "<cmd>TarkChatOpen<cr>", desc = "Open ACP chat" },
+        { "<leader>tx", "<cmd>TarkChatClose<cr>", desc = "Close ACP chat" },
     },
     opts = {
         -- Binary path (auto-detected if nil)
         binary = nil,
-        
-        -- Window settings for TUI
-        window = {
-            position = 'right',  -- 'right', 'left', 'bottom', 'top', 'float'
-            width = 0.4,         -- 40% of screen (or columns if > 1)
-            height = 0.5,        -- 50% of screen (or rows if > 1)
+
+        -- ACP widget settings
+        chat = {
+            mode = 'ask',        -- ask | plan | build
+            timeout_ms = 8000,
+            window = {
+                position = 'right',
+                width = 0.4,
+                height = 0.5,
+            },
         },
-        
+
         -- Auto-download binary if not found
         auto_download = true,
-        
+
         -- Ghost text settings (inline suggestions like Copilot)
         ghost = {
             enabled = true,  -- Enable ghost text completions
@@ -150,7 +163,7 @@ return {
             debounce_ms = 300,  -- Debounce delay
             accept_key = '<Tab>',  -- Key to accept suggestion
         },
-        
+
         -- LSP settings for completion menu (optional, disabled by default)
         lsp = {
             enabled = false,  -- Enable LSP for nvim-cmp integration
@@ -162,14 +175,16 @@ return {
 
 ## Commands
 
-### TUI Commands
+### ACP Chat Commands
 
 | Command | Description |
 |---------|-------------|
-| `:Tark` | Toggle tark TUI |
-| `:TarkToggle` | Toggle tark TUI (show/hide) |
-| `:TarkOpen` | Open tark TUI |
-| `:TarkClose` | Close tark TUI |
+| `:TarkChatToggle` | Toggle ACP chat widget |
+| `:TarkChatOpen` | Open ACP chat widget |
+| `:TarkChatClose` | Close ACP chat widget |
+| `:TarkAskBuffer [question]` | Send current buffer as ACP context and ask |
+| `:'<,'>TarkAskSelection [question]` | Send selected lines as ACP context and ask |
+| `:TarkMode ask\|plan\|build` | Set ACP session mode |
 | `:TarkDownload` | Download tark binary |
 | `:TarkVersion` | Show tark version |
 
@@ -207,6 +222,9 @@ tark chat
 
 # With specific model
 tark chat --model gpt-4o
+
+# Start ACP server on stdio (for editor widget clients)
+tark acp --cwd .
 
 # In a specific directory
 cd /my/project && tark chat

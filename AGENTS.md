@@ -379,7 +379,8 @@ For TUI features, you MUST:
 | File | Purpose | When to Modify |
 |------|---------|----------------|
 | `../plugins/tark/editors/neovim/lua/tark/init.lua` | Plugin entry & config | Adding config options |
-| `../plugins/tark/editors/neovim/lua/tark/tui.lua` | TUI integration | Adapter/TUI bridge behavior |
+| `../plugins/tark/editors/neovim/lua/tark/acp_client.lua` | ACP stdio client | Editor-to-core ACP transport |
+| `../plugins/tark/editors/neovim/lua/tark/widgets/chat.lua` | Chat widget | ACP chat rendering in Neovim |
 | `../plugins/tark/editors/neovim/lua/tark/binary.lua` | Binary management | Download/version logic |
 | `../plugins/tark/editors/neovim/plugin/tark.lua` | Command registration | Adding new commands |
 
