@@ -190,7 +190,7 @@ jobs:
         with:
           prefix-key: ${{ env.CACHE_VERSION }}
       - name: ACP unit tests
-        run: cargo test --all-features transport::acp::
+        run: "cargo test --all-features transport::acp::"
 
   acp-integration:
     name: acp-integration
@@ -218,7 +218,7 @@ jobs:
         with:
           prefix-key: ${{ env.CACHE_VERSION }}
       - name: Security-related tests
-        run: cargo test --all-features policy::security::
+        run: "cargo test --all-features policy::security::"
 
   core-regression:
     name: core-regression
