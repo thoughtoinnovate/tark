@@ -237,5 +237,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: ${{ env.CACHE_VERSION }}
+      - name: Install snapshot test fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-color-emoji fonts-symbola fontconfig
+          fc-cache -f
       - name: Full regression suite
         run: cargo test --all-features
