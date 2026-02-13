@@ -82,6 +82,7 @@ fn dim_color(color: Color, factor: f32) -> Color {
 
 /// Wrap text to fit within a given width
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    let max_width = max_width.max(1);
     let mut result = Vec::new();
 
     for line in text.lines() {
@@ -121,6 +122,7 @@ struct VisualLine {
 }
 
 fn wrap_text_with_positions(text: &str, max_width: usize) -> Vec<VisualLine> {
+    let max_width = max_width.max(1);
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut line_start = 0usize;
@@ -1016,16 +1018,20 @@ impl<'a> MessageArea<'a> {
                     );
 
                 let content_lines = if show_message_cursor {
-                    wrap_text_with_positions(&msg.content, bubble_content_width - 2).len()
+                    wrap_text_with_positions(
+                        &msg.content,
+                        bubble_content_width.saturating_sub(2).max(1),
+                    )
+                    .len()
                 } else if msg.role == MessageRole::Agent {
                     super::markdown::render_markdown(
                         &msg.content,
                         self.theme,
-                        bubble_content_width - 2,
+                        bubble_content_width.saturating_sub(2).max(1),
                     )
                     .len()
                 } else {
-                    wrap_text(&msg.content, bubble_content_width - 2).len()
+                    wrap_text(&msg.content, bubble_content_width.saturating_sub(2).max(1)).len()
                 };
 
                 push_targets(message_target, content_lines);
@@ -1077,8 +1083,11 @@ impl<'a> MessageArea<'a> {
 
         if let Some(ref content) = self.streaming_content {
             if !content.is_empty() {
-                let markdown_lines =
-                    super::markdown::render_markdown(content, self.theme, bubble_content_width - 2);
+                let markdown_lines = super::markdown::render_markdown(
+                    content,
+                    self.theme,
+                    bubble_content_width.saturating_sub(2).max(1),
+                );
                 let line_count = 2 + markdown_lines.len() + 1;
                 push_targets(MessageLineTarget::None, line_count);
                 push_targets(MessageLineTarget::None, 1);
@@ -1145,7 +1154,7 @@ impl<'a> MessageArea<'a> {
             Span::styled(top_border, Style::default().fg(border_color)),
         ]));
 
-        let content_width = bubble_content_width.saturating_sub(2);
+        let content_width = bubble_content_width.saturating_sub(2).max(1);
         let mut display_lines = content_lines;
         let mut truncated = false;
 
@@ -1935,7 +1944,7 @@ impl Widget for MessageArea<'_> {
                             None
                         };
                         let cursor_visible = get_message_cursor_visible();
-                        let content_width = bubble_content_width - 2;
+                        let content_width = bubble_content_width.saturating_sub(2).max(1);
                         let visual_lines = wrap_text_with_positions(&msg.content, content_width);
                         let normal_style = if msg.role == MessageRole::User {
                             Style::default().fg(self.theme.text_primary).bg(bg)
@@ -2006,7 +2015,7 @@ impl Widget for MessageArea<'_> {
                         let markdown_lines = super::markdown::render_markdown(
                             &msg.content,
                             self.theme,
-                            bubble_content_width - 2,
+                            bubble_content_width.saturating_sub(2).max(1),
                         );
 
                         for md_line in markdown_lines {
@@ -2024,13 +2033,17 @@ impl Widget for MessageArea<'_> {
                         }
                     } else {
                         // Wrap content into lines that fit the bubble (for User messages)
-                        let wrapped_lines = wrap_text(&msg.content, bubble_content_width - 2);
+                        let wrapped_lines =
+                            wrap_text(&msg.content, bubble_content_width.saturating_sub(2).max(1));
 
                         // Content lines with side borders and full background
                         for content_line in wrapped_lines {
                             // Pad content to fill the bubble width exactly
                             let char_count = content_line.chars().count();
-                            let padding = bubble_content_width - 2 - char_count;
+                            let padding = bubble_content_width
+                                .saturating_sub(2)
+                                .max(1)
+                                .saturating_sub(char_count);
                             let padded = format!(" {}{} ", content_line, " ".repeat(padding));
 
                             lines.push(Line::from(vec![
@@ -2254,7 +2267,7 @@ impl Widget for MessageArea<'_> {
                 let markdown_lines = super::markdown::render_markdown(
                     thinking,
                     self.theme,
-                    bubble_content_width - 2,
+                    bubble_content_width.saturating_sub(2).max(1),
                 );
                 for md_line in markdown_lines {
                     let line_width = md_line.width();
@@ -2305,8 +2318,11 @@ impl Widget for MessageArea<'_> {
                 ]));
 
                 // Render streaming content as markdown (per chunk)
-                let markdown_lines =
-                    super::markdown::render_markdown(content, self.theme, bubble_content_width - 2);
+                let markdown_lines = super::markdown::render_markdown(
+                    content,
+                    self.theme,
+                    bubble_content_width.saturating_sub(2).max(1),
+                );
                 for md_line in markdown_lines {
                     let line_width = md_line.width();
                     let padding = bubble_content_width.saturating_sub(2 + line_width);
@@ -2452,6 +2468,24 @@ mod tests {
 
         let long_text = "This is a long line that should wrap across multiple lines.";
         let messages = vec![Message::agent(long_text)];
+
+        terminal
+            .draw(|f| {
+                let area = MessageArea::new(&messages, &theme).scroll(usize::MAX);
+                f.render_widget(area, f.area());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_message_area_narrow_width_does_not_hang() {
+        let backend = TestBackend::new(6, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+
+        let messages = vec![Message::user(
+            "This line is intentionally long to force wrapping in tiny layouts.",
+        )];
 
         terminal
             .draw(|f| {
