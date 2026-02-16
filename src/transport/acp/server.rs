@@ -1,4 +1,5 @@
 use crate::agent::ChatAgent;
+use crate::completion::{CompletionEngine, CompletionRequest};
 use crate::llm;
 use crate::storage::TarkStorage;
 use crate::tools::questionnaire::{interaction_channel, InteractionRequest};
@@ -187,13 +188,6 @@ impl AcpServer {
                     }
                 }
             }
-            "session/send_message" => {
-                if let Some(msg) = params.get("message").and_then(|v| v.as_str()) {
-                    if msg.len() > MAX_MESSAGE_BYTES {
-                        anyhow::bail!("message exceeds max size");
-                    }
-                }
-            }
             "context/update" => {
                 if let Some(text) = params
                     .get("selection")
@@ -224,60 +218,51 @@ impl AcpServer {
     }
 
     async fn handle_initialize(&self, req: JsonRpcRequest) -> Result<()> {
-        let params: InitializeParams =
-            serde_json::from_value(req.params).unwrap_or(InitializeParams {
-                protocol_version: None,
-                client_capabilities: None,
-                client_info: None,
-                client: None,
-                versions: vec![],
-            });
-
         let Some(req_id) = req.id else {
             anyhow::bail!("initialize requires request id");
         };
-
-        if let Some(protocol_version) = params.protocol_version {
-            if protocol_version != ACP_PROTOCOL_VERSION {
+        let params: InitializeParams = match serde_json::from_value(req.params) {
+            Ok(v) => v,
+            Err(err) => {
                 return self
                     .send_error_with_data(
                         req_id,
-                        ACP_UNSUPPORTED_VERSION,
-                        format!(
-                            "Unsupported ACP protocolVersion. Server supports '{}'",
-                            ACP_PROTOCOL_VERSION
-                        ),
+                        JSONRPC_INVALID_PARAMS,
+                        "Invalid params for initialize",
                         error_data(
-                            "unsupported_version",
-                            format!("supported={}", ACP_PROTOCOL_VERSION),
+                            "invalid_params",
+                            format!(
+                                "required fields: protocolVersion, clientCapabilities, clientInfo ({})",
+                                err
+                            ),
                         ),
                     )
                     .await;
             }
-        } else if !params.versions.is_empty() && !params.versions.iter().any(|v| v == ACP_VERSION) {
+        };
+
+        if params.protocol_version != ACP_PROTOCOL_VERSION {
             return self
                 .send_error_with_data(
                     req_id,
                     ACP_UNSUPPORTED_VERSION,
-                    format!("Unsupported ACP version. Server supports '{}'", ACP_VERSION),
-                    error_data("unsupported_version", format!("supported={}", ACP_VERSION)),
+                    format!(
+                        "Unsupported ACP protocolVersion. Server supports '{}'",
+                        ACP_PROTOCOL_VERSION
+                    ),
+                    error_data(
+                        "unsupported_version",
+                        format!("supported={}", ACP_PROTOCOL_VERSION),
+                    ),
                 )
                 .await;
         }
 
-        if let Some(client) = params.client_info {
-            tracing::info!(
-                "ACP initialize from client '{}' version '{}'",
-                client.name,
-                client.version
-            );
-        } else if let Some(client) = params.client {
-            tracing::info!(
-                "ACP initialize from client '{}' version '{}'",
-                client.name,
-                client.version
-            );
-        }
+        tracing::info!(
+            "ACP initialize from client '{}' version '{}'",
+            params.client_info.name,
+            params.client_info.version
+        );
 
         self.send_response(
             req_id,
@@ -355,25 +340,11 @@ impl AcpServer {
                     let _ = responder.send(response);
                 }
                 InteractionRequest::Questionnaire { data, responder } => {
-                    let _ = self
-                        .send_notification(
-                            "session/update",
-                            json!({
-                                "sessionId": session.id,
-                                "update": {
-                                    "sessionUpdate": "agent_message_chunk",
-                                    "content": {
-                                        "type": "text",
-                                        "text": format!(
-                                            "Questionnaire requested for request {}: {}",
-                                            request_id,
-                                            data.title
-                                        ),
-                                    }
-                                }
-                            }),
-                        )
-                        .await;
+                    tracing::info!(
+                        "Questionnaire interaction requested for request {} ('{}') but ACP strict cutover currently supports permission requests only",
+                        request_id,
+                        data.title
+                    );
                     let _ = responder.send(crate::tools::questionnaire::UserResponse::cancelled());
                 }
             }
@@ -504,15 +475,6 @@ impl AcpServer {
         match req.method.as_str() {
             "initialize" => self.handle_initialize(req).await,
             "session/new" => Arc::clone(&self).handle_session_new(req).await,
-            // Legacy alias for older clients.
-            "session/create" => {
-                Arc::clone(&self)
-                    .handle_session_new(JsonRpcRequest {
-                        method: "session/new".to_string(),
-                        ..req
-                    })
-                    .await
-            }
             "session/load" => {
                 let Some(req_id) = req.id else {
                     return Ok(());
@@ -723,14 +685,16 @@ impl AcpServer {
                                 json!({
                                     "sessionId": params.session_id,
                                     "update": {
-                                        "sessionUpdate": "agent_message_chunk",
-                                        "content": {
-                                            "type": "text",
-                                            "text": format!("internal_error: {}", err),
-                                        }
+                                        "sessionUpdate": "agent_message_end",
+                                        "responseId": spawn_request_id,
+                                        "stopReason": "refusal",
                                     },
                                     "_meta": {
-                                        "tark": { "requestId": spawn_request_id }
+                                        "tark": {
+                                            "requestId": spawn_request_id,
+                                            "errorCode": "internal_error",
+                                            "errorMessage": err.to_string(),
+                                        }
                                     }
                                 }),
                             )
@@ -740,65 +704,72 @@ impl AcpServer {
 
                 Ok(())
             }
-            // Legacy alias for old clients.
-            "session/send_message" => {
+            "tark/inline_completion" => {
                 let Some(req_id) = req.id else {
                     return Ok(());
                 };
-                let session_id = req
-                    .params
-                    .get("session_id")
-                    .or_else(|| req.params.get("sessionId"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let message = req
-                    .params
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-
-                let prompt_params = PromptRequestParams {
-                    session_id: session_id.clone(),
-                    prompt: vec![ContentBlock::Text { text: message }],
-                };
-                let Some(session) = self.get_session(&prompt_params.session_id).await else {
+                let params: InlineCompletionParams = serde_json::from_value(req.params)
+                    .context("Invalid params for tark/inline_completion")?;
+                let Some(session) = self.get_session(&params.session_id).await else {
                     return self
                         .send_error_with_data(
                             req_id,
                             ACP_SESSION_NOT_FOUND,
                             "Session not found",
-                            error_data("session_not_found", prompt_params.session_id),
+                            error_data("session_not_found", params.session_id),
                         )
                         .await;
                 };
 
-                let request_id =
-                    format!("req-{}", self.next_session.fetch_add(1, Ordering::SeqCst));
-                {
-                    let mut current = session.current_request.lock().await;
-                    if current.is_some() {
-                        return self
-                            .send_error_with_data(
-                                req_id,
-                                ACP_SESSION_BUSY,
-                                "Session is busy",
-                                error_data("session_busy", "one request at a time per session"),
-                            )
-                            .await;
-                    }
-                    *current = Some(request_id.clone());
-                }
+                let provider_impl = llm::create_provider_with_options(
+                    &session.provider,
+                    true,
+                    session.model.as_deref(),
+                )
+                .with_context(|| format!("Failed to create provider '{}'", session.provider))?;
+                let config = crate::config::Config::load().unwrap_or_default();
+                let engine = CompletionEngine::new(Arc::from(provider_impl))
+                    .with_cache_size(config.completion.cache_size)
+                    .with_context_lines(
+                        config.completion.context_lines_before,
+                        config.completion.context_lines_after,
+                    );
 
-                let server = Arc::clone(&self);
-                let message = prompt_to_text(&prompt_params.prompt);
-                tokio::spawn(async move {
-                    let _ = Arc::clone(&server)
-                        .run_session_prompt(session, request_id, message, req_id)
-                        .await;
-                });
-                Ok(())
+                let file_content = format!("{}{}", params.prefix, params.suffix);
+                let req = CompletionRequest {
+                    file_path: std::path::PathBuf::from(params.path),
+                    file_content,
+                    cursor_line: params.cursor.line,
+                    cursor_col: params.cursor.col,
+                    related_files: vec![],
+                    lsp_context: None,
+                };
+
+                let completion = engine
+                    .complete(&req)
+                    .await
+                    .map(|r| r.completion)
+                    .unwrap_or_default();
+                let stop_reason = if completion.is_empty() {
+                    "empty"
+                } else {
+                    "completed"
+                };
+
+                self.send_response(
+                    req_id,
+                    json!({
+                        "completion": completion,
+                        "stopReason": stop_reason,
+                        "_meta": {
+                            "tark": {
+                                "provider": session.provider,
+                                "model": session.model,
+                            }
+                        }
+                    }),
+                )
+                .await
             }
             "session/cancel" => {
                 let req_id = req.id;
@@ -844,10 +815,12 @@ impl AcpServer {
             }
             _ => {
                 if let Some(id) = req.id {
-                    self.send_error(
+                    let method = req.method;
+                    self.send_error_with_data(
                         id,
                         JSONRPC_METHOD_NOT_FOUND,
-                        format!("Method '{}' not found", req.method),
+                        format!("Method '{}' not found", method),
+                        error_data("unsupported_method", method),
                     )
                     .await
                 } else {
@@ -865,6 +838,7 @@ impl AcpServer {
         response_id: Value,
     ) -> Result<()> {
         let session_id = session.id.clone();
+        let response_stream_id = request_id.clone();
         let mut guard = ActiveRequestGuard::new(Arc::clone(&session.current_request));
 
         let context_snapshot = session.context.lock().await.clone();
@@ -872,17 +846,38 @@ impl AcpServer {
 
         session.interrupt.store(false, Ordering::SeqCst);
 
+        let _ = self
+            .send_notification(
+                "session/update",
+                json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_start",
+                        "responseId": response_stream_id,
+                    },
+                    "_meta": {
+                        "tark": {
+                            "requestId": request_id,
+                        }
+                    }
+                }),
+            )
+            .await;
+
         let server_for_text = Arc::clone(&self);
         let sid_for_text = session_id.clone();
         let rid_for_text = request_id.clone();
+        let response_for_text = response_stream_id.clone();
 
         let server_for_tool_start = Arc::clone(&self);
         let sid_for_tool_start = session_id.clone();
         let rid_for_tool_start = request_id.clone();
+        let response_for_tool_start = response_stream_id.clone();
 
         let server_for_tool_end = Arc::clone(&self);
         let sid_for_tool_end = session_id.clone();
         let rid_for_tool_end = request_id.clone();
+        let response_for_tool_end = response_stream_id.clone();
 
         let interrupt = Arc::clone(&session.interrupt);
         let check_interrupt = move || interrupt.load(Ordering::SeqCst);
@@ -897,6 +892,7 @@ impl AcpServer {
                         let server = Arc::clone(&server_for_text);
                         let sid = sid_for_text.clone();
                         let rid = rid_for_text.clone();
+                        let response_id = response_for_text.clone();
                         tokio::spawn(async move {
                             let _ = server
                                 .send_notification(
@@ -905,6 +901,7 @@ impl AcpServer {
                                         "sessionId": sid,
                                         "update": {
                                             "sessionUpdate": "agent_message_chunk",
+                                            "responseId": response_id,
                                             "content": {
                                                 "type": "text",
                                                 "text": chunk,
@@ -925,6 +922,7 @@ impl AcpServer {
                         let server = Arc::clone(&server_for_tool_start);
                         let sid = sid_for_tool_start.clone();
                         let rid = rid_for_tool_start.clone();
+                        let response_id = response_for_tool_start.clone();
                         tokio::spawn(async move {
                             let _ = server
                                 .send_notification(
@@ -933,6 +931,7 @@ impl AcpServer {
                                         "sessionId": sid,
                                         "update": {
                                             "sessionUpdate": "tool_call",
+                                            "responseId": response_id,
                                             "toolCallId": format!("tool-{}", rid),
                                             "title": name,
                                             "status": "pending",
@@ -949,6 +948,7 @@ impl AcpServer {
                         let server = Arc::clone(&server_for_tool_end);
                         let sid = sid_for_tool_end.clone();
                         let rid = rid_for_tool_end.clone();
+                        let response_id = response_for_tool_end.clone();
                         tokio::spawn(async move {
                             let _ = server
                                 .send_notification(
@@ -957,6 +957,7 @@ impl AcpServer {
                                         "sessionId": sid,
                                         "update": {
                                             "sessionUpdate": "tool_call_update",
+                                            "responseId": response_id,
                                             "toolCallId": format!("tool-{}", rid),
                                             "title": name,
                                             "status": if success { "completed" } else { "failed" },
@@ -991,6 +992,7 @@ impl AcpServer {
                                 "sessionId": session_id,
                                 "update": {
                                     "sessionUpdate": "agent_message_chunk",
+                                    "responseId": response_stream_id,
                                     "content": {
                                         "type": "text",
                                         "text": response.text,
@@ -1008,6 +1010,27 @@ impl AcpServer {
                         )
                         .await;
                 }
+                let _ = self
+                    .send_notification(
+                        "session/update",
+                        json!({
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "agent_message_end",
+                                "responseId": response_stream_id,
+                                "stopReason": stop_reason,
+                            },
+                            "_meta": {
+                                "tark": {
+                                    "requestId": request_id,
+                                    "usage": response.usage,
+                                    "toolCallsMade": response.tool_calls_made,
+                                    "contextUsagePercent": response.context_usage_percent,
+                                }
+                            }
+                        }),
+                    )
+                    .await;
             }
             Err(err) => {
                 let stop_reason = if session.interrupt.load(Ordering::SeqCst) {
@@ -1024,16 +1047,15 @@ impl AcpServer {
                         json!({
                             "sessionId": session_id,
                             "update": {
-                                "sessionUpdate": "agent_message_chunk",
-                                "content": {
-                                    "type": "text",
-                                    "text": format!("error: {}", err),
-                                }
+                                "sessionUpdate": "agent_message_end",
+                                "responseId": response_stream_id,
+                                "stopReason": stop_reason,
                             },
                             "_meta": {
                                 "tark": {
                                     "requestId": request_id,
                                     "errorCode": "internal_error",
+                                    "errorMessage": err.to_string(),
                                 }
                             }
                         }),
@@ -1380,13 +1402,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_payload_limits_message_size() {
-        let huge = "x".repeat(MAX_MESSAGE_BYTES + 1);
-        let params = json!({ "message": huge });
-        assert!(AcpServer::validate_payload("session/send_message", &params).is_err());
-    }
-
-    #[test]
     fn validate_payload_limits_prompt_size() {
         let huge = "x".repeat(MAX_MESSAGE_BYTES + 1);
         let params = json!({
@@ -1468,5 +1483,54 @@ mod tests {
 
         assert_eq!(response.choice, ApprovalChoice::ApproveOnce);
         assert!(response.selected_pattern.is_none());
+    }
+
+    #[test]
+    fn map_permission_response_maps_reject_once() {
+        let req = ApprovalRequest {
+            tool: "shell".to_string(),
+            command: "rm -rf /tmp/foo".to_string(),
+            risk_level: RiskLevel::Dangerous,
+            suggested_patterns: vec![],
+        };
+
+        let response = map_permission_response(
+            Ok(json!({
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": "reject_once"
+                }
+            })),
+            &req,
+        );
+
+        assert_eq!(response.choice, ApprovalChoice::Deny);
+        assert!(response.selected_pattern.is_none());
+    }
+
+    #[test]
+    fn map_permission_response_invalid_option_defaults_to_deny_once() {
+        let req = ApprovalRequest {
+            tool: "shell".to_string(),
+            command: "echo hi".to_string(),
+            risk_level: RiskLevel::Risky,
+            suggested_patterns: vec![SuggestedPattern {
+                pattern: "echo".to_string(),
+                match_type: MatchType::Prefix,
+                description: "echo".to_string(),
+            }],
+        };
+
+        let response = map_permission_response(
+            Ok(json!({
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": "unknown-option"
+                }
+            })),
+            &req,
+        );
+
+        assert_eq!(response.choice, ApprovalChoice::Deny);
     }
 }

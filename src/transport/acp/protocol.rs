@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const ACP_VERSION: &str = "2";
 pub const ACP_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,29 +53,12 @@ pub struct Implementation {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct InitializeParams {
-    #[serde(default)]
     #[serde(alias = "protocolVersion")]
-    pub protocol_version: Option<u32>,
-    #[serde(default)]
+    pub protocol_version: u32,
     #[serde(alias = "clientCapabilities")]
-    pub client_capabilities: Option<Value>,
-    #[serde(default)]
+    pub client_capabilities: Value,
     #[serde(alias = "clientInfo")]
-    pub client_info: Option<Implementation>,
-
-    // Legacy tark ACP initialize fields (kept for compatibility parsing)
-    #[serde(default)]
-    pub client: Option<AcpClientInfo>,
-    #[serde(default)]
-    pub versions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct AcpClientInfo {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub version: String,
+    pub client_info: Implementation,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -121,6 +103,24 @@ pub struct PromptRequestParams {
     #[serde(alias = "sessionId")]
     pub session_id: String,
     pub prompt: Vec<ContentBlock>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InlineCompletionParams {
+    #[serde(alias = "sessionId")]
+    pub session_id: String,
+    pub path: String,
+    pub cursor: CursorPos,
+    pub prefix: String,
+    pub suffix: String,
+    #[serde(default)]
+    #[serde(alias = "maxTokens")]
+    pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    #[serde(alias = "triggerKind")]
+    pub trigger_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -258,6 +258,16 @@ pub fn prompt_to_text(prompt: &[ContentBlock]) -> String {
     parts.join("\n")
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionUpdateKind {
+    AgentMessageStart,
+    AgentMessageChunk,
+    AgentMessageEnd,
+    ToolCall,
+    ToolCallUpdate,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,12 +282,20 @@ mod tests {
         }))
         .expect("initialize params should parse");
 
-        assert_eq!(params.protocol_version, Some(1));
-        assert_eq!(
-            params.client_info.as_ref().map(|c| c.name.as_str()),
-            Some("nvim")
-        );
-        assert!(params.client_capabilities.is_some());
+        assert_eq!(params.protocol_version, 1);
+        assert_eq!(params.client_info.name, "nvim");
+        assert!(params.client_capabilities["fs"]["readTextFile"]
+            .as_bool()
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn initialize_params_rejects_legacy_shape_without_required_fields() {
+        let parsed = serde_json::from_value::<InitializeParams>(json!({
+            "versions": ["2"],
+            "client": { "name": "legacy-client", "version": "0.1.0" }
+        }));
+        assert!(parsed.is_err());
     }
 
     #[test]

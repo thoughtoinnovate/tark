@@ -251,6 +251,11 @@ tark acp --cwd .
 cd /my/project && tark chat
 ```
 
+ACP cutover note:
+- Legacy ACP methods (`session/create`, `session/send_message`) are removed.
+- Prompt streaming is normalized to `session/update` lifecycle events.
+- Inline completion uses `tark/inline_completion` ACP extension (no HTTP fallback).
+
 ### In Neovim
 
 Press `<leader>tc` (or your configured keymap) to toggle the chat window.

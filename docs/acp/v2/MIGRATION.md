@@ -6,6 +6,9 @@
 - `session/send_message` -> `session/prompt`
 - `response/delta` / `response/final` / `tool/event` / `session/status` -> `session/update`
 - `approval/request` -> `session/request_permission`
+- `tark/inline_completion` added as Tark ACP extension method for ghost text.
+
+Legacy methods above are no longer accepted by the server.
 
 ## Initialize mapping
 
@@ -34,6 +37,8 @@
 - `:TarkUiPrevAction` -> `:AcpUiPrevAction`
 - `:TarkUiSubmit` -> `:AcpUiSubmit`
 - `:TarkUiCancel` -> `:AcpUiCancel`
+
+ACP-related `:Tark*` commands were removed (no command aliases).
 
 ## Config mapping (Neovim)
 

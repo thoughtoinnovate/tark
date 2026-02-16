@@ -198,6 +198,35 @@ jobs:
       - name: ACP unit tests
         run: "cargo test --all-features transport::acp::"
 
+  acp-contract-matrix:
+    name: acp-contract-matrix (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [codex, gemini, jetbrains]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      - name: ACP contract tests (${{ matrix.profile }})
+        env:
+          ACP_TEST_PROFILE: ${{ matrix.profile }}
+        run: |
+          set -o pipefail
+          cargo test --all-features transport::acp:: 2>&1 | tee acp-contract-${{ matrix.profile }}.log
+      - name: Upload ACP contract transcript
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acp-contract-${{ matrix.profile }}
+          path: acp-contract-${{ matrix.profile }}.log
+          if-no-files-found: ignore
+
   acp-integration:
     name: acp-integration
     runs-on: ubuntu-latest
