@@ -96,7 +96,7 @@ return {
     dir = "~/code/plugins/tark/editors/neovim",
     lazy = false,
     keys = {
-        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
+        { "<leader>ac", "<cmd>AcpChatToggle<cr>", desc = "Toggle ACP chat" },
     },
 }
 ```
@@ -114,7 +114,7 @@ return {
         vim.opt.rtp:prepend(plugin.dir .. "/tark/editors/neovim")
     end,
     keys = {
-        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle tark chat" },
+        { "<leader>ac", "<cmd>AcpChatToggle<cr>", desc = "Toggle ACP chat" },
     },
 }
 ```
@@ -134,18 +134,29 @@ return {
     dir = "~/code/plugins/tark/editors/neovim",
     lazy = false,
     keys = {
-        { "<leader>tc", "<cmd>TarkChatToggle<cr>", desc = "Toggle ACP chat" },
-        { "<leader>to", "<cmd>TarkChatOpen<cr>", desc = "Open ACP chat" },
-        { "<leader>tx", "<cmd>TarkChatClose<cr>", desc = "Close ACP chat" },
+        { "<leader>ac", "<cmd>AcpChatToggle<cr>", desc = "Toggle ACP chat" },
+        { "<leader>ao", "<cmd>AcpChatOpen<cr>", desc = "Open ACP chat" },
+        { "<leader>ax", "<cmd>AcpChatClose<cr>", desc = "Close ACP chat" },
     },
     opts = {
-        -- Binary path (auto-detected if nil)
-        binary = nil,
+        -- ACP transport settings
+        acp = {
+            command = "tark", -- nil => auto-detect
+            args = { "acp" },
+            env = {},
+            cwd = nil,
+            protocol_version = 1,
+            profile = "auto", -- auto | generic | tark_extension
+            client_capabilities = {
+                fs = { readTextFile = false, writeTextFile = false },
+                terminal = false,
+            },
+        },
 
         -- ACP widget settings
         chat = {
             mode = 'ask',        -- ask | plan | build
-            timeout_ms = 8000,
+            timeout_ms = 15000,
             window = {
                 position = 'right',
                 width = 0.4,
@@ -179,14 +190,24 @@ return {
 
 | Command | Description |
 |---------|-------------|
-| `:TarkChatToggle` | Toggle ACP chat widget |
-| `:TarkChatOpen` | Open ACP chat widget |
-| `:TarkChatClose` | Close ACP chat widget |
-| `:TarkAskBuffer [question]` | Send current buffer as ACP context and ask |
-| `:'<,'>TarkAskSelection [question]` | Send selected lines as ACP context and ask |
-| `:TarkMode ask\|plan\|build` | Set ACP session mode |
+| `:AcpChatToggle` | Toggle ACP chat widget |
+| `:AcpChatOpen` | Open ACP chat widget |
+| `:AcpChatClose` | Close ACP chat widget |
+| `:AcpSend [message]` | Send from input pane or argument |
+| `:AcpCancel` | Cancel active ACP request |
+| `:AcpAskBuffer [question]` | Send current buffer as ACP context and ask |
+| `:'<,'>AcpAskSelection [question]` | Send selected lines as ACP context and ask |
+| `:AcpMode ask\|plan\|build` | Set ACP session mode |
+| `:AcpConfigSet <configId> <value>` | Set ACP session configuration |
+| `:AcpUiFocus transcript\|input\|interaction` | Set ACP widget focus |
+| `:AcpUiNextAction` | Select next interactive action |
+| `:AcpUiPrevAction` | Select previous interactive action |
+| `:AcpUiSubmit` | Activate selection or send input |
+| `:AcpUiCancel` | Cancel active interaction |
 | `:TarkDownload` | Download tark binary |
 | `:TarkVersion` | Show tark version |
+
+Legacy `:Tark*` chat commands remain available as compatibility aliases during migration.
 
 ### Ghost Text Commands (Inline Suggestions)
 

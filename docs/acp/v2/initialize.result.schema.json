@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "initialize.result",
   "type": "object",
-  "required": ["acp_version", "server", "capabilities"],
+  "required": ["protocolVersion", "agentInfo", "agentCapabilities", "authMethods"],
   "properties": {
-    "acp_version": {"const": "2"},
-    "server": {
+    "protocolVersion": {"type": "integer"},
+    "agentInfo": {
       "type": "object",
       "required": ["name", "version"],
       "properties": {
@@ -13,17 +13,18 @@
         "version": {"type": "string"}
       }
     },
-    "capabilities": {
+    "agentCapabilities": {
       "type": "object",
-      "required": ["supports_modes", "supports_approvals", "supports_questionnaires", "streaming", "framing"],
+      "required": ["loadSession", "promptCapabilities", "mcpCapabilities", "sessionCapabilities"],
       "properties": {
-        "supports_modes": {"type": "boolean"},
-        "supports_approvals": {"type": "boolean"},
-        "supports_questionnaires": {"type": "boolean"},
-        "supports_editor_open_file": {"type": "boolean"},
-        "streaming": {"type": "boolean"},
-        "framing": {"const": "content-length"}
+        "loadSession": {"type": "boolean"},
+        "promptCapabilities": {"type": "object"},
+        "mcpCapabilities": {"type": "object"},
+        "sessionCapabilities": {"type": "object"}
       }
+    },
+    "authMethods": {
+      "type": "array"
     }
   }
 }

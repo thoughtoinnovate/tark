@@ -5,13 +5,8 @@ use crate::tools::questionnaire::{interaction_channel, InteractionRequest};
 use crate::tools::{AgentMode, ToolRegistry};
 use crate::transport::acp::errors::*;
 use crate::transport::acp::framing;
-use crate::transport::acp::interaction_bridge::{
-    map_approval_decision, map_questionnaire_response,
-};
 use crate::transport::acp::protocol::*;
-use crate::transport::acp::session::{
-    AcpSession, ActiveRequestGuard, PendingInteraction, SessionContext,
-};
+use crate::transport::acp::session::{AcpSession, ActiveRequestGuard, SessionContext};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -23,7 +18,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio::io::BufReader;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
@@ -32,7 +27,6 @@ const MAX_BUFFERS: usize = 64;
 const MAX_SESSIONS: usize = 8;
 const MAX_REQUESTS_PER_MINUTE: usize = 30;
 const APPROVAL_TIMEOUT_SECS: u64 = 120;
-const QUESTIONNAIRE_TIMEOUT_SECS: u64 = 180;
 
 struct SessionBootstrap {
     mode: AgentMode,
@@ -48,7 +42,9 @@ pub struct AcpServer {
     thinking_config: crate::config::ThinkingConfig,
     default_think_level: String,
     next_session: AtomicU64,
+    next_outbound_id: AtomicU64,
     sessions: Mutex<HashMap<String, Arc<AcpSession>>>,
+    outbound_pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, JsonRpcError>>>>,
     writer: Arc<Mutex<tokio::io::Stdout>>,
 }
 
@@ -62,7 +58,9 @@ impl AcpServer {
             thinking_config: config.thinking.clone(),
             default_think_level: config.thinking.effective_default_level_name(),
             next_session: AtomicU64::new(1),
+            next_outbound_id: AtomicU64::new(1),
             sessions: Mutex::new(HashMap::new()),
+            outbound_pending: Mutex::new(HashMap::new()),
             writer: Arc::new(Mutex::new(tokio::io::stdout())),
         }
     }
@@ -120,6 +118,44 @@ impl AcpServer {
         .await
     }
 
+    async fn send_request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
+        let id = self.next_outbound_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.outbound_pending.lock().await.insert(id, tx);
+
+        self.send_value(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))
+        .await?;
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(result))) => Ok(result),
+            Ok(Ok(Err(err))) => anyhow::bail!("request failed: {} ({})", err.message, err.code),
+            Ok(Err(_)) => anyhow::bail!("request cancelled"),
+            Err(_) => {
+                self.outbound_pending.lock().await.remove(&id);
+                anyhow::bail!("request timed out")
+            }
+        }
+    }
+
+    async fn handle_response(&self, resp: JsonRpcResponseEnvelope) {
+        let Some(id_u64) = resp.id.as_u64() else {
+            return;
+        };
+        if let Some(tx) = self.outbound_pending.lock().await.remove(&id_u64) {
+            let payload = if let Some(err) = resp.error {
+                Err(err)
+            } else {
+                Ok(resp.result.unwrap_or(Value::Null))
+            };
+            let _ = tx.send(payload);
+        }
+    }
+
     async fn send_json<T: Serialize>(&self, value: &T) -> Result<()> {
         let payload = serde_json::to_vec(value)?;
         let mut writer = self.writer.lock().await;
@@ -136,22 +172,21 @@ impl AcpServer {
         self.sessions.lock().await.get(session_id).cloned()
     }
 
-    async fn status_value(&self, session: &AcpSession, busy: bool) -> Value {
-        let mode = {
-            let agent = session.agent.lock().await;
-            mode_to_str(agent.mode())
-        };
-        json!({
-            "session_id": session.id,
-            "busy": busy,
-            "mode": mode,
-            "provider": session.provider,
-            "model": session.model,
-        })
-    }
-
     fn validate_payload(method: &str, params: &Value) -> Result<()> {
         match method {
+            "session/prompt" => {
+                if let Some(prompt) = params.get("prompt").and_then(|v| v.as_array()) {
+                    let prompt_text = prompt_to_text(
+                        &prompt
+                            .iter()
+                            .filter_map(|v| serde_json::from_value::<ContentBlock>(v.clone()).ok())
+                            .collect::<Vec<_>>(),
+                    );
+                    if prompt_text.len() > MAX_MESSAGE_BYTES {
+                        anyhow::bail!("prompt exceeds max size");
+                    }
+                }
+            }
             "session/send_message" => {
                 if let Some(msg) = params.get("message").and_then(|v| v.as_str()) {
                     if msg.len() > MAX_MESSAGE_BYTES {
@@ -191,14 +226,38 @@ impl AcpServer {
     async fn handle_initialize(&self, req: JsonRpcRequest) -> Result<()> {
         let params: InitializeParams =
             serde_json::from_value(req.params).unwrap_or(InitializeParams {
+                protocol_version: None,
+                client_capabilities: None,
+                client_info: None,
                 client: None,
                 versions: vec![],
             });
 
-        if !params.versions.is_empty() && !params.versions.iter().any(|v| v == ACP_VERSION) {
+        let Some(req_id) = req.id else {
+            anyhow::bail!("initialize requires request id");
+        };
+
+        if let Some(protocol_version) = params.protocol_version {
+            if protocol_version != ACP_PROTOCOL_VERSION {
+                return self
+                    .send_error_with_data(
+                        req_id,
+                        ACP_UNSUPPORTED_VERSION,
+                        format!(
+                            "Unsupported ACP protocolVersion. Server supports '{}'",
+                            ACP_PROTOCOL_VERSION
+                        ),
+                        error_data(
+                            "unsupported_version",
+                            format!("supported={}", ACP_PROTOCOL_VERSION),
+                        ),
+                    )
+                    .await;
+            }
+        } else if !params.versions.is_empty() && !params.versions.iter().any(|v| v == ACP_VERSION) {
             return self
                 .send_error_with_data(
-                    req.id,
+                    req_id,
                     ACP_UNSUPPORTED_VERSION,
                     format!("Unsupported ACP version. Server supports '{}'", ACP_VERSION),
                     error_data("unsupported_version", format!("supported={}", ACP_VERSION)),
@@ -206,7 +265,13 @@ impl AcpServer {
                 .await;
         }
 
-        if let Some(client) = params.client {
+        if let Some(client) = params.client_info {
+            tracing::info!(
+                "ACP initialize from client '{}' version '{}'",
+                client.name,
+                client.version
+            );
+        } else if let Some(client) = params.client {
             tracing::info!(
                 "ACP initialize from client '{}' version '{}'",
                 client.name,
@@ -215,21 +280,28 @@ impl AcpServer {
         }
 
         self.send_response(
-            req.id,
+            req_id,
             json!({
-                "acp_version": ACP_VERSION,
-                "server": {
+                "protocolVersion": ACP_PROTOCOL_VERSION,
+                "agentInfo": {
                     "name": "tark",
                     "version": env!("CARGO_PKG_VERSION")
                 },
-                "capabilities": {
-                    "supports_modes": true,
-                    "supports_approvals": true,
-                    "supports_questionnaires": true,
-                    "supports_editor_open_file": false,
-                    "streaming": true,
-                    "framing": "content-length"
+                "agentCapabilities": {
+                    "loadSession": true,
+                    "promptCapabilities": {
+                        "image": false,
+                        "audio": false,
+                        "embeddedContext": true
+                    },
+                    "mcpCapabilities": {
+                        "http": false,
+                        "sse": false
+                    },
+                    "sessionCapabilities": {}
                 }
+                ,
+                "authMethods": []
             }),
         )
         .await
@@ -248,120 +320,79 @@ impl AcpServer {
                 .clone()
                 .unwrap_or_else(|| "req-unknown".to_string());
 
-            let interaction_id = format!(
-                "itx-{}",
-                session.next_interaction_id.fetch_add(1, Ordering::SeqCst)
-            );
-
             match interaction {
                 InteractionRequest::Approval { request, responder } => {
-                    session.pending_interactions.lock().await.insert(
-                        interaction_id.clone(),
-                        PendingInteraction::Approval {
-                            request_id: request_id.clone(),
-                            responder,
-                            request: request.clone(),
-                        },
+                    let options = permission_options_for_request(&request);
+                    let tool_call_id = format!(
+                        "toolcall-{}",
+                        self.next_outbound_id.fetch_add(1, Ordering::SeqCst)
                     );
-
-                    let _ = self
-                        .send_notification(
-                            "approval/request",
-                            json!({
-                                "session_id": session.id,
-                                "request_id": request_id,
-                                "interaction_id": interaction_id,
+                    let req = json!({
+                        "sessionId": session.id,
+                        "toolCall": {
+                            "toolCallId": tool_call_id,
+                            "title": format!("{} {}", request.tool, request.command),
+                            "status": "pending",
+                            "kind": "execute",
+                            "rawInput": request.command,
+                        },
+                        "options": options,
+                        "_meta": {
+                            "tark": {
+                                "requestId": request_id,
                                 "tool": request.tool,
-                                "command": request.command,
-                                "risk": format!("{:?}", request.risk_level).to_lowercase(),
-                                "pattern_options": request.suggested_patterns,
-                                "timeout_seconds": APPROVAL_TIMEOUT_SECS,
-                            }),
-                        )
-                        .await;
-
-                    let pending = Arc::clone(&session.pending_interactions);
-                    let sid = session.id.clone();
-                    let iid = interaction_id.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_secs(APPROVAL_TIMEOUT_SECS)).await;
-                        if let Some(PendingInteraction::Approval { responder, .. }) =
-                            pending.lock().await.remove(&iid)
-                        {
-                            let _ = responder
-                                .send(crate::tools::questionnaire::ApprovalResponse::deny());
-                            tracing::warn!("ACP approval interaction timed out: {} {}", sid, iid);
+                            }
                         }
                     });
+                    let result = self
+                        .send_request(
+                            "session/request_permission",
+                            req,
+                            Duration::from_secs(APPROVAL_TIMEOUT_SECS),
+                        )
+                        .await;
+                    let response = map_permission_response(result, &request);
+                    let _ = responder.send(response);
                 }
                 InteractionRequest::Questionnaire { data, responder } => {
-                    session.pending_interactions.lock().await.insert(
-                        interaction_id.clone(),
-                        PendingInteraction::Questionnaire {
-                            request_id: request_id.clone(),
-                            responder,
-                        },
-                    );
-
                     let _ = self
                         .send_notification(
-                            "questionnaire/request",
+                            "session/update",
                             json!({
-                                "session_id": session.id,
-                                "request_id": request_id,
-                                "interaction_id": interaction_id,
-                                "questionnaire": data,
-                                "timeout_seconds": QUESTIONNAIRE_TIMEOUT_SECS,
+                                "sessionId": session.id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {
+                                        "type": "text",
+                                        "text": format!(
+                                            "Questionnaire requested for request {}: {}",
+                                            request_id,
+                                            data.title
+                                        ),
+                                    }
+                                }
                             }),
                         )
                         .await;
-
-                    let pending = Arc::clone(&session.pending_interactions);
-                    let sid = session.id.clone();
-                    let iid = interaction_id.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_secs(QUESTIONNAIRE_TIMEOUT_SECS)).await;
-                        if let Some(PendingInteraction::Questionnaire { responder, .. }) =
-                            pending.lock().await.remove(&iid)
-                        {
-                            let _ = responder
-                                .send(crate::tools::questionnaire::UserResponse::cancelled());
-                            tracing::warn!(
-                                "ACP questionnaire interaction timed out: {} {}",
-                                sid,
-                                iid
-                            );
-                        }
-                    });
+                    let _ = responder.send(crate::tools::questionnaire::UserResponse::cancelled());
                 }
             }
         }
     }
 
-    async fn handle_session_create(self: Arc<Self>, req: JsonRpcRequest) -> Result<()> {
-        let params: SessionCreateParams =
-            serde_json::from_value(req.params).context("Invalid params for session/create")?;
-
-        if params.provider.is_some() || params.model.is_some() {
-            return self
-                .send_error_with_data(
-                    req.id,
-                    ACP_PROVIDER_MODEL_OVERRIDE,
-                    "ACP provider/model overrides are not allowed",
-                    error_data(
-                        "provider_model_override_not_allowed",
-                        "configure provider/model locally via tark configuration",
-                    ),
-                )
-                .await;
-        }
+    async fn handle_session_new(self: Arc<Self>, req: JsonRpcRequest) -> Result<()> {
+        let Some(req_id) = req.id else {
+            anyhow::bail!("session/new requires request id");
+        };
+        let params: SessionNewParams =
+            serde_json::from_value(req.params).context("Invalid params for session/new")?;
 
         let mut sessions = self.sessions.lock().await;
         if sessions.len() >= MAX_SESSIONS {
             drop(sessions);
             return self
                 .send_error_with_data(
-                    req.id,
+                    req_id,
                     ACP_RATE_LIMITED,
                     "Too many ACP sessions",
                     error_data("rate_limited", "max sessions reached"),
@@ -369,8 +400,8 @@ impl AcpServer {
                 .await;
         }
 
-        let cwd = resolve_cwd(params.cwd, &self.working_dir)?;
-        let bootstrap = session_bootstrap(&cwd, params.mode.as_deref());
+        let cwd = resolve_cwd(Some(params.cwd.clone()), &self.working_dir)?;
+        let bootstrap = session_bootstrap(&cwd, None);
         let mode = bootstrap.mode;
         let provider = bootstrap.provider.clone();
         let model = bootstrap.model.clone();
@@ -404,8 +435,6 @@ impl AcpServer {
             current_request: Arc::new(Mutex::new(None)),
             interrupt: Arc::new(AtomicBool::new(false)),
             interaction_tx,
-            pending_interactions: Arc::new(Mutex::new(HashMap::new())),
-            next_interaction_id: AtomicU64::new(1),
             request_times: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         });
 
@@ -417,12 +446,41 @@ impl AcpServer {
         );
 
         self.send_response(
-            req.id,
+            req_id,
             json!({
-                "session_id": session_id,
-                "mode": mode_to_str(mode),
-                "provider": provider,
-                "model": model,
+                "sessionId": session_id,
+                "modes": {
+                    "currentModeId": mode_to_str(mode),
+                    "availableModes": [
+                        { "id": "ask", "name": "Ask", "description": "Q&A mode" },
+                        { "id": "plan", "name": "Plan", "description": "Planning mode" },
+                        { "id": "build", "name": "Build", "description": "Implementation mode" }
+                    ]
+                },
+                "configOptions": [
+                    {
+                        "id": "provider",
+                        "name": "Provider",
+                        "type": "select",
+                        "currentValue": provider,
+                        "options": [
+                            { "value": "openai", "name": "OpenAI" },
+                            { "value": "claude", "name": "Claude" },
+                            { "value": "gemini", "name": "Gemini" },
+                            { "value": "copilot", "name": "Copilot" },
+                            { "value": "openrouter", "name": "OpenRouter" },
+                            { "value": "ollama", "name": "Ollama" },
+                            { "value": "tark_sim", "name": "Tark Sim" }
+                        ]
+                    },
+                    {
+                        "id": "model",
+                        "name": "Model",
+                        "type": "select",
+                        "currentValue": model.unwrap_or_default(),
+                        "options": []
+                    }
+                ]
             }),
         )
         .await
@@ -430,9 +488,12 @@ impl AcpServer {
 
     async fn handle_request(self: Arc<Self>, req: JsonRpcRequest) -> Result<()> {
         if let Err(err) = Self::validate_payload(&req.method, &req.params) {
+            let Some(req_id) = req.id else {
+                return Ok(());
+            };
             return self
                 .send_error_with_data(
-                    req.id,
+                    req_id,
                     ACP_PAYLOAD_TOO_LARGE,
                     err.to_string(),
                     error_data("payload_too_large", err.to_string()),
@@ -442,15 +503,63 @@ impl AcpServer {
 
         match req.method.as_str() {
             "initialize" => self.handle_initialize(req).await,
-            "session/create" => Arc::clone(&self).handle_session_create(req).await,
-            "session/set_mode" => {
-                let params: SessionSetModeParams = serde_json::from_value(req.params)
-                    .context("Invalid params for session/set_mode")?;
-                let mode = parse_mode(Some(&params.mode))?;
+            "session/new" => Arc::clone(&self).handle_session_new(req).await,
+            // Legacy alias for older clients.
+            "session/create" => {
+                Arc::clone(&self)
+                    .handle_session_new(JsonRpcRequest {
+                        method: "session/new".to_string(),
+                        ..req
+                    })
+                    .await
+            }
+            "session/load" => {
+                let Some(req_id) = req.id else {
+                    return Ok(());
+                };
+                let params: SessionLoadParams = serde_json::from_value(req.params)
+                    .context("Invalid params for session/load")?;
                 let Some(session) = self.get_session(&params.session_id).await else {
                     return self
                         .send_error_with_data(
-                            req.id,
+                            req_id,
+                            ACP_SESSION_NOT_FOUND,
+                            "Session not found",
+                            error_data("session_not_found", params.session_id),
+                        )
+                        .await;
+                };
+                let mode = {
+                    let agent = session.agent.lock().await;
+                    mode_to_str(agent.mode())
+                };
+                self.send_response(
+                    req_id,
+                    json!({
+                        "modes": {
+                            "currentModeId": mode,
+                            "availableModes": [
+                                { "id": "ask", "name": "Ask", "description": "Q&A mode" },
+                                { "id": "plan", "name": "Plan", "description": "Planning mode" },
+                                { "id": "build", "name": "Build", "description": "Implementation mode" }
+                            ]
+                        },
+                        "configOptions": []
+                    }),
+                )
+                .await
+            }
+            "session/set_mode" => {
+                let Some(req_id) = req.id else {
+                    return Ok(());
+                };
+                let params: SessionSetModeParams = serde_json::from_value(req.params)
+                    .context("Invalid params for session/set_mode")?;
+                let mode = parse_mode(Some(&params.mode_id))?;
+                let Some(session) = self.get_session(&params.session_id).await else {
+                    return self
+                        .send_error_with_data(
+                            req_id,
                             ACP_SESSION_NOT_FOUND,
                             "Session not found",
                             error_data("session_not_found", params.session_id),
@@ -471,21 +580,61 @@ impl AcpServer {
                 agent.update_mode(tools, mode);
 
                 self.send_response(
-                    req.id,
+                    req_id,
                     json!({
-                        "session_id": params.session_id,
-                        "mode": mode_to_str(mode),
+                        "_meta": {
+                            "tark": {
+                                "sessionId": params.session_id,
+                                "mode": mode_to_str(mode),
+                            }
+                        }
+                    }),
+                )
+                .await
+            }
+            "session/set_config_option" => {
+                let Some(req_id) = req.id else {
+                    return Ok(());
+                };
+                let params: SessionSetConfigOptionParams = serde_json::from_value(req.params)
+                    .context("Invalid params for session/set_config_option")?;
+                let Some(_session) = self.get_session(&params.session_id).await else {
+                    return self
+                        .send_error_with_data(
+                            req_id,
+                            ACP_SESSION_NOT_FOUND,
+                            "Session not found",
+                            error_data("session_not_found", params.session_id),
+                        )
+                        .await;
+                };
+
+                self.send_response(
+                    req_id,
+                    json!({
+                        "configOptions": [
+                            {
+                                "id": params.config_id,
+                                "name": params.config_id,
+                                "type": "select",
+                                "currentValue": params.value,
+                                "options": []
+                            }
+                        ]
                     }),
                 )
                 .await
             }
             "context/update" => {
+                let Some(req_id) = req.id else {
+                    return Ok(());
+                };
                 let params: ContextUpdateParams = serde_json::from_value(req.params)
                     .context("Invalid params for context/update")?;
                 let Some(session) = self.get_session(&params.session_id).await else {
                     return self
                         .send_error_with_data(
-                            req.id,
+                            req_id,
                             ACP_SESSION_NOT_FOUND,
                             "Session not found",
                             error_data("session_not_found", params.session_id),
@@ -500,15 +649,18 @@ impl AcpServer {
                 ctx.active_excerpt = params.active_excerpt;
                 ctx.buffers = params.buffers;
 
-                self.send_response(req.id, json!({ "ok": true })).await
+                self.send_response(req_id, json!({ "ok": true })).await
             }
-            "session/send_message" => {
-                let params: SendMessageParams = serde_json::from_value(req.params)
-                    .context("Invalid params for session/send_message")?;
+            "session/prompt" => {
+                let Some(req_id) = req.id else {
+                    return Ok(());
+                };
+                let params: PromptRequestParams = serde_json::from_value(req.params)
+                    .context("Invalid params for session/prompt")?;
                 let Some(session) = self.get_session(&params.session_id).await else {
                     return self
                         .send_error_with_data(
-                            req.id,
+                            req_id,
                             ACP_SESSION_NOT_FOUND,
                             "Session not found",
                             error_data("session_not_found", params.session_id),
@@ -529,7 +681,7 @@ impl AcpServer {
                     if win.len() >= MAX_REQUESTS_PER_MINUTE {
                         return self
                             .send_error_with_data(
-                                req.id,
+                                req_id,
                                 ACP_RATE_LIMITED,
                                 "Too many session requests",
                                 error_data("rate_limited", "max requests per minute exceeded"),
@@ -539,16 +691,15 @@ impl AcpServer {
                     win.push_back(now);
                 }
 
-                let request_id = params.request_id.unwrap_or_else(|| {
-                    format!("req-{}", self.next_session.fetch_add(1, Ordering::SeqCst))
-                });
+                let request_id =
+                    format!("req-{}", self.next_session.fetch_add(1, Ordering::SeqCst));
 
                 {
                     let mut current = session.current_request.lock().await;
                     if current.is_some() {
                         return self
                             .send_error_with_data(
-                                req.id,
+                                req_id,
                                 ACP_SESSION_BUSY,
                                 "Session is busy",
                                 error_data("session_busy", "one request at a time per session"),
@@ -559,170 +710,162 @@ impl AcpServer {
                 }
 
                 let server = Arc::clone(&self);
-                let message = params.message;
+                let message = prompt_to_text(&params.prompt);
                 let spawn_request_id = request_id.clone();
                 tokio::spawn(async move {
                     if let Err(err) = Arc::clone(&server)
-                        .run_session_message(session, spawn_request_id.clone(), message)
+                        .run_session_prompt(session, spawn_request_id.clone(), message, req_id)
                         .await
                     {
                         let _ = server
                             .send_notification(
-                                "error/event",
+                                "session/update",
                                 json!({
-                                    "request_id": spawn_request_id,
-                                    "code": "internal_error",
-                                    "message": err.to_string(),
+                                    "sessionId": params.session_id,
+                                    "update": {
+                                        "sessionUpdate": "agent_message_chunk",
+                                        "content": {
+                                            "type": "text",
+                                            "text": format!("internal_error: {}", err),
+                                        }
+                                    },
+                                    "_meta": {
+                                        "tark": { "requestId": spawn_request_id }
+                                    }
                                 }),
                             )
                             .await;
                     }
                 });
 
-                self.send_response(
-                    req.id,
-                    json!({
-                        "accepted": true,
-                        "request_id": request_id,
-                    }),
-                )
-                .await
+                Ok(())
+            }
+            // Legacy alias for old clients.
+            "session/send_message" => {
+                let Some(req_id) = req.id else {
+                    return Ok(());
+                };
+                let session_id = req
+                    .params
+                    .get("session_id")
+                    .or_else(|| req.params.get("sessionId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let message = req
+                    .params
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+
+                let prompt_params = PromptRequestParams {
+                    session_id: session_id.clone(),
+                    prompt: vec![ContentBlock::Text { text: message }],
+                };
+                let Some(session) = self.get_session(&prompt_params.session_id).await else {
+                    return self
+                        .send_error_with_data(
+                            req_id,
+                            ACP_SESSION_NOT_FOUND,
+                            "Session not found",
+                            error_data("session_not_found", prompt_params.session_id),
+                        )
+                        .await;
+                };
+
+                let request_id =
+                    format!("req-{}", self.next_session.fetch_add(1, Ordering::SeqCst));
+                {
+                    let mut current = session.current_request.lock().await;
+                    if current.is_some() {
+                        return self
+                            .send_error_with_data(
+                                req_id,
+                                ACP_SESSION_BUSY,
+                                "Session is busy",
+                                error_data("session_busy", "one request at a time per session"),
+                            )
+                            .await;
+                    }
+                    *current = Some(request_id.clone());
+                }
+
+                let server = Arc::clone(&self);
+                let message = prompt_to_text(&prompt_params.prompt);
+                tokio::spawn(async move {
+                    let _ = Arc::clone(&server)
+                        .run_session_prompt(session, request_id, message, req_id)
+                        .await;
+                });
+                Ok(())
             }
             "session/cancel" => {
+                let req_id = req.id;
                 let params: CancelParams = serde_json::from_value(req.params)
                     .context("Invalid params for session/cancel")?;
                 let Some(session) = self.get_session(&params.session_id).await else {
-                    return self
-                        .send_error_with_data(
-                            req.id,
-                            ACP_SESSION_NOT_FOUND,
-                            "Session not found",
-                            error_data("session_not_found", params.session_id),
-                        )
-                        .await;
+                    if let Some(id) = req_id {
+                        return self
+                            .send_error_with_data(
+                                id,
+                                ACP_SESSION_NOT_FOUND,
+                                "Session not found",
+                                error_data("session_not_found", params.session_id),
+                            )
+                            .await;
+                    }
+                    return Ok(());
                 };
 
                 let mut cancelled = false;
                 let current = session.current_request.lock().await;
                 if let Some(active) = current.as_ref() {
-                    let matches = params
-                        .request_id
-                        .as_ref()
-                        .map(|rid| rid == active)
-                        .unwrap_or(true);
-                    if matches {
-                        session.interrupt.store(true, Ordering::SeqCst);
-                        cancelled = true;
-                    }
+                    let _ = active;
+                    session.interrupt.store(true, Ordering::SeqCst);
+                    cancelled = true;
                 }
 
-                self.send_response(req.id, json!({ "cancelled": cancelled }))
-                    .await
-            }
-            "approval/respond" => {
-                let params: ApprovalRespondParams = serde_json::from_value(req.params)
-                    .context("Invalid params for approval/respond")?;
-                let Some(session) = self.get_session(&params.session_id).await else {
+                if let Some(id) = req_id {
                     return self
-                        .send_error_with_data(
-                            req.id,
-                            ACP_SESSION_NOT_FOUND,
-                            "Session not found",
-                            error_data("session_not_found", params.session_id),
-                        )
-                        .await;
-                };
-
-                let mut pending = session.pending_interactions.lock().await;
-                let Some(interaction) = pending.remove(&params.interaction_id) else {
-                    return self
-                        .send_error(req.id, JSONRPC_INVALID_PARAMS, "Unknown interaction_id")
-                        .await;
-                };
-
-                let expected_request_id = match &interaction {
-                    PendingInteraction::Approval { request_id, .. } => request_id,
-                    PendingInteraction::Questionnaire { request_id, .. } => request_id,
-                };
-                if expected_request_id != &params.request_id {
-                    return self
-                        .send_error(req.id, JSONRPC_INVALID_PARAMS, "request_id mismatch")
+                        .send_response(id, json!({ "cancelled": cancelled }))
                         .await;
                 }
-                drop(pending);
-
-                let (decision, _) =
-                    map_approval_decision(&params.decision, params.selected_pattern, interaction)?;
-
-                self.send_response(req.id, json!({ "accepted": true, "decision": decision }))
-                    .await
-            }
-            "questionnaire/respond" => {
-                let params: QuestionnaireRespondParams = serde_json::from_value(req.params)
-                    .context("Invalid params for questionnaire/respond")?;
-                let Some(session) = self.get_session(&params.session_id).await else {
-                    return self
-                        .send_error_with_data(
-                            req.id,
-                            ACP_SESSION_NOT_FOUND,
-                            "Session not found",
-                            error_data("session_not_found", params.session_id),
-                        )
-                        .await;
-                };
-
-                let mut pending = session.pending_interactions.lock().await;
-                let Some(interaction) = pending.remove(&params.interaction_id) else {
-                    return self
-                        .send_error(req.id, JSONRPC_INVALID_PARAMS, "Unknown interaction_id")
-                        .await;
-                };
-
-                let expected_request_id = match &interaction {
-                    PendingInteraction::Approval { request_id, .. } => request_id,
-                    PendingInteraction::Questionnaire { request_id, .. } => request_id,
-                };
-                if expected_request_id != &params.request_id {
-                    return self
-                        .send_error(req.id, JSONRPC_INVALID_PARAMS, "request_id mismatch")
-                        .await;
-                }
-                drop(pending);
-
-                map_questionnaire_response(params.cancelled, params.answers, interaction)?;
-
-                self.send_response(req.id, json!({ "accepted": true }))
-                    .await
+                Ok(())
             }
             "session/close" => {
+                let Some(req_id) = req.id else {
+                    return Ok(());
+                };
                 let params: CloseParams = serde_json::from_value(req.params)
                     .context("Invalid params for session/close")?;
                 self.sessions.lock().await.remove(&params.session_id);
-                self.send_response(req.id, json!({ "closed": true })).await
+                self.send_response(req_id, json!({ "closed": true })).await
             }
             _ => {
-                self.send_error(
-                    req.id,
-                    JSONRPC_METHOD_NOT_FOUND,
-                    format!("Method '{}' not found", req.method),
-                )
-                .await
+                if let Some(id) = req.id {
+                    self.send_error(
+                        id,
+                        JSONRPC_METHOD_NOT_FOUND,
+                        format!("Method '{}' not found", req.method),
+                    )
+                    .await
+                } else {
+                    Ok(())
+                }
             }
         }
     }
 
-    async fn run_session_message(
+    async fn run_session_prompt(
         self: Arc<Self>,
         session: Arc<AcpSession>,
         request_id: String,
         message: String,
+        response_id: Value,
     ) -> Result<()> {
         let session_id = session.id.clone();
         let mut guard = ActiveRequestGuard::new(Arc::clone(&session.current_request));
-
-        let _ = self
-            .send_notification("session/status", self.status_value(&session, true).await)
-            .await;
 
         let context_snapshot = session.context.lock().await.clone();
         let merged_message = merge_message_with_context(&message, &context_snapshot);
@@ -757,11 +900,21 @@ impl AcpServer {
                         tokio::spawn(async move {
                             let _ = server
                                 .send_notification(
-                                    "response/delta",
+                                    "session/update",
                                     json!({
-                                        "session_id": sid,
-                                        "request_id": rid,
-                                        "delta": chunk,
+                                        "sessionId": sid,
+                                        "update": {
+                                            "sessionUpdate": "agent_message_chunk",
+                                            "content": {
+                                                "type": "text",
+                                                "text": chunk,
+                                            }
+                                        },
+                                        "_meta": {
+                                            "tark": {
+                                                "requestId": rid,
+                                            }
+                                        }
                                     }),
                                 )
                                 .await;
@@ -775,13 +928,18 @@ impl AcpServer {
                         tokio::spawn(async move {
                             let _ = server
                                 .send_notification(
-                                    "tool/event",
+                                    "session/update",
                                     json!({
-                                        "session_id": sid,
-                                        "request_id": rid,
-                                        "event": "start",
-                                        "tool": name,
-                                        "args": args,
+                                        "sessionId": sid,
+                                        "update": {
+                                            "sessionUpdate": "tool_call",
+                                            "toolCallId": format!("tool-{}", rid),
+                                            "title": name,
+                                            "status": "pending",
+                                            "kind": "execute",
+                                            "rawInput": args,
+                                        },
+                                        "_meta": { "tark": { "requestId": rid } }
                                     }),
                                 )
                                 .await;
@@ -794,14 +952,17 @@ impl AcpServer {
                         tokio::spawn(async move {
                             let _ = server
                                 .send_notification(
-                                    "tool/event",
+                                    "session/update",
                                     json!({
-                                        "session_id": sid,
-                                        "request_id": rid,
-                                        "event": "end",
-                                        "tool": name,
-                                        "success": success,
-                                        "output": output,
+                                        "sessionId": sid,
+                                        "update": {
+                                            "sessionUpdate": "tool_call_update",
+                                            "toolCallId": format!("tool-{}", rid),
+                                            "title": name,
+                                            "status": if success { "completed" } else { "failed" },
+                                            "rawOutput": output,
+                                        },
+                                        "_meta": { "tark": { "requestId": rid } }
                                     }),
                                 )
                                 .await;
@@ -814,42 +975,146 @@ impl AcpServer {
 
         match response {
             Ok(response) => {
+                let stop_reason = if session.interrupt.load(Ordering::SeqCst) {
+                    "cancelled"
+                } else {
+                    "end_turn"
+                };
                 let _ = self
-                    .send_notification(
-                        "response/final",
-                        json!({
-                            "session_id": session_id,
-                            "request_id": request_id,
-                            "text": response.text,
-                            "tool_calls_made": response.tool_calls_made,
-                            "usage": response.usage,
-                            "context_usage_percent": response.context_usage_percent,
-                        }),
-                    )
+                    .send_response(response_id, json!({ "stopReason": stop_reason }))
                     .await;
+                if !response.text.is_empty() {
+                    let _ = self
+                        .send_notification(
+                            "session/update",
+                            json!({
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {
+                                        "type": "text",
+                                        "text": response.text,
+                                    }
+                                },
+                                "_meta": {
+                                    "tark": {
+                                        "requestId": request_id,
+                                        "usage": response.usage,
+                                        "toolCallsMade": response.tool_calls_made,
+                                        "contextUsagePercent": response.context_usage_percent,
+                                    }
+                                }
+                            }),
+                        )
+                        .await;
+                }
             }
             Err(err) => {
+                let stop_reason = if session.interrupt.load(Ordering::SeqCst) {
+                    "cancelled"
+                } else {
+                    "refusal"
+                };
+                let _ = self
+                    .send_response(response_id, json!({ "stopReason": stop_reason }))
+                    .await;
                 let _ = self
                     .send_notification(
-                        "error/event",
+                        "session/update",
                         json!({
-                            "session_id": session_id,
-                            "request_id": request_id,
-                            "code": "internal_error",
-                            "message": err.to_string(),
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {
+                                    "type": "text",
+                                    "text": format!("error: {}", err),
+                                }
+                            },
+                            "_meta": {
+                                "tark": {
+                                    "requestId": request_id,
+                                    "errorCode": "internal_error",
+                                }
+                            }
                         }),
                     )
                     .await;
             }
         }
 
-        let _ = self
-            .send_notification("session/status", self.status_value(&session, false).await)
-            .await;
-
         session.interrupt.store(false, Ordering::SeqCst);
         guard.clear_now().await;
         Ok(())
+    }
+}
+
+fn permission_options_for_request(
+    request: &crate::tools::questionnaire::ApprovalRequest,
+) -> Vec<Value> {
+    let mut options = vec![
+        json!({ "optionId": "allow_once", "name": "Allow once", "kind": "allow_once" }),
+        json!({ "optionId": "reject_once", "name": "Reject once", "kind": "reject_once" }),
+    ];
+
+    if let Some(first) = request.suggested_patterns.first() {
+        options.push(json!({
+            "optionId": format!("allow_always:{}", first.pattern),
+            "name": format!("Always allow {}", first.pattern),
+            "kind": "allow_always",
+            "_meta": { "tark": { "pattern": first.pattern } }
+        }));
+        options.push(json!({
+            "optionId": format!("reject_always:{}", first.pattern),
+            "name": format!("Always reject {}", first.pattern),
+            "kind": "reject_always",
+            "_meta": { "tark": { "pattern": first.pattern } }
+        }));
+    }
+
+    options
+}
+
+fn map_permission_response(
+    result: Result<Value>,
+    request: &crate::tools::questionnaire::ApprovalRequest,
+) -> crate::tools::questionnaire::ApprovalResponse {
+    use crate::tools::questionnaire::{ApprovalPattern, ApprovalResponse};
+    use crate::tools::risk::MatchType;
+
+    let Ok(value) = result else {
+        return ApprovalResponse::deny();
+    };
+    let Ok(parsed) = serde_json::from_value::<RequestPermissionResponseResult>(value) else {
+        return ApprovalResponse::deny();
+    };
+
+    match parsed.outcome {
+        RequestPermissionOutcome::Cancelled => ApprovalResponse::deny(),
+        RequestPermissionOutcome::Selected { option_id } => {
+            if option_id == "allow_once" {
+                return ApprovalResponse::approve_once();
+            }
+            if option_id == "reject_once" {
+                return ApprovalResponse::deny();
+            }
+
+            if let Some(pattern) = option_id.strip_prefix("allow_always:") {
+                return ApprovalResponse::approve_always(ApprovalPattern::new(
+                    request.tool.clone(),
+                    pattern.to_string(),
+                    MatchType::Prefix,
+                ));
+            }
+            if let Some(pattern) = option_id.strip_prefix("reject_always:") {
+                return ApprovalResponse::deny_always(ApprovalPattern::new(
+                    request.tool.clone(),
+                    pattern.to_string(),
+                    MatchType::Prefix,
+                ));
+            }
+
+            ApprovalResponse::deny()
+        }
     }
 }
 
@@ -1019,7 +1284,7 @@ pub async fn run_acp_stdio(cwd: Option<String>) -> Result<()> {
             }
         };
 
-        let req: JsonRpcRequest = match serde_json::from_slice(&payload) {
+        let value: Value = match serde_json::from_slice(&payload) {
             Ok(v) => v,
             Err(err) => {
                 tracing::warn!("ACP parse error: {}", err);
@@ -1027,16 +1292,39 @@ pub async fn run_acp_stdio(cwd: Option<String>) -> Result<()> {
             }
         };
 
-        if req.jsonrpc.as_deref().is_some_and(|v| v != "2.0") {
-            server
-                .send_error(req.id, JSONRPC_INVALID_REQUEST, "Invalid JSON-RPC version")
-                .await?;
-            continue;
-        }
+        if value.get("method").is_some() {
+            let req: JsonRpcRequest = match serde_json::from_value(value) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!("ACP request parse error: {}", err);
+                    continue;
+                }
+            };
 
-        let server_clone = Arc::clone(&server);
-        if let Err(err) = server_clone.handle_request(req).await {
-            tracing::error!("ACP request error: {}", err);
+            if req.jsonrpc.as_deref().is_some_and(|v| v != "2.0") {
+                if let Some(id) = req.id {
+                    server
+                        .send_error(id, JSONRPC_INVALID_REQUEST, "Invalid JSON-RPC version")
+                        .await?;
+                }
+                continue;
+            }
+
+            let server_clone = Arc::clone(&server);
+            if let Err(err) = server_clone.handle_request(req).await {
+                tracing::error!("ACP request error: {}", err);
+            }
+        } else if value.get("id").is_some()
+            && (value.get("result").is_some() || value.get("error").is_some())
+        {
+            let resp: JsonRpcResponseEnvelope = match serde_json::from_value(value) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!("ACP response parse error: {}", err);
+                    continue;
+                }
+            };
+            server.handle_response(resp).await;
         }
     }
 
@@ -1047,6 +1335,8 @@ pub async fn run_acp_stdio(cwd: Option<String>) -> Result<()> {
 mod tests {
     use super::*;
     use crate::storage::{ChatSession, ModelPreference, TarkStorage};
+    use crate::tools::questionnaire::{ApprovalChoice, ApprovalRequest, SuggestedPattern};
+    use crate::tools::risk::{MatchType, RiskLevel};
     use tempfile::tempdir;
 
     #[test]
@@ -1097,6 +1387,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_payload_limits_prompt_size() {
+        let huge = "x".repeat(MAX_MESSAGE_BYTES + 1);
+        let params = json!({
+            "prompt": [
+                { "type": "text", "text": huge }
+            ]
+        });
+        assert!(AcpServer::validate_payload("session/prompt", &params).is_err());
+    }
+
+    #[test]
     fn validate_payload_limits_buffer_count() {
         let mut buffers = vec![];
         for i in 0..(MAX_BUFFERS + 1) {
@@ -1140,5 +1441,32 @@ mod tests {
         assert!(matches!(bootstrap.mode, AgentMode::Ask));
         assert_eq!(bootstrap.provider, "claude");
         assert_eq!(bootstrap.model.as_deref(), Some("claude-sonnet-4"));
+    }
+
+    #[test]
+    fn map_permission_response_maps_allow_once() {
+        let req = ApprovalRequest {
+            tool: "shell".to_string(),
+            command: "ls".to_string(),
+            risk_level: RiskLevel::Risky,
+            suggested_patterns: vec![SuggestedPattern {
+                pattern: "ls".to_string(),
+                match_type: MatchType::Prefix,
+                description: "ls".to_string(),
+            }],
+        };
+
+        let response = map_permission_response(
+            Ok(json!({
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": "allow_once"
+                }
+            })),
+            &req,
+        );
+
+        assert_eq!(response.choice, ApprovalChoice::ApproveOnce);
+        assert!(response.selected_pattern.is_none());
     }
 }

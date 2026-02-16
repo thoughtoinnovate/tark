@@ -1,16 +1,11 @@
 use crate::agent::ChatAgent;
-use crate::tools::questionnaire::{
-    ApprovalRequest, ApprovalResponse, InteractionSender, UserResponse,
-};
+use crate::tools::questionnaire::InteractionSender;
 use crate::transport::acp::protocol::{BufferSummary, CursorPos, SelectionContext};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64},
-    Arc,
-};
+use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Instant;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionContext {
@@ -31,21 +26,7 @@ pub struct AcpSession {
     pub current_request: Arc<Mutex<Option<String>>>,
     pub interrupt: Arc<AtomicBool>,
     pub interaction_tx: InteractionSender,
-    pub pending_interactions: Arc<Mutex<HashMap<String, PendingInteraction>>>,
-    pub next_interaction_id: AtomicU64,
     pub request_times: Arc<Mutex<VecDeque<Instant>>>,
-}
-
-pub enum PendingInteraction {
-    Approval {
-        request_id: String,
-        responder: oneshot::Sender<ApprovalResponse>,
-        request: ApprovalRequest,
-    },
-    Questionnaire {
-        request_id: String,
-        responder: oneshot::Sender<UserResponse>,
-    },
 }
 
 pub struct ActiveRequestGuard {
