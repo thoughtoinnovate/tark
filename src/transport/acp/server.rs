@@ -29,6 +29,10 @@ const MAX_SESSIONS: usize = 8;
 const MAX_REQUESTS_PER_MINUTE: usize = 30;
 const APPROVAL_TIMEOUT_SECS: u64 = 120;
 
+fn should_emit_terminal_chunk(response_text: &str, streamed_chunks: bool) -> bool {
+    !streamed_chunks && !response_text.is_empty()
+}
+
 struct SessionBootstrap {
     mode: AgentMode,
     provider: String,
@@ -868,6 +872,8 @@ impl AcpServer {
         let sid_for_text = session_id.clone();
         let rid_for_text = request_id.clone();
         let response_for_text = response_stream_id.clone();
+        let streamed_chunks = Arc::new(AtomicBool::new(false));
+        let streamed_chunks_for_text = Arc::clone(&streamed_chunks);
 
         let server_for_tool_start = Arc::clone(&self);
         let sid_for_tool_start = session_id.clone();
@@ -889,6 +895,7 @@ impl AcpServer {
                     &merged_message,
                     check_interrupt,
                     move |chunk| {
+                        streamed_chunks_for_text.store(true, Ordering::SeqCst);
                         let server = Arc::clone(&server_for_text);
                         let sid = sid_for_text.clone();
                         let rid = rid_for_text.clone();
@@ -984,7 +991,10 @@ impl AcpServer {
                 let _ = self
                     .send_response(response_id, json!({ "stopReason": stop_reason }))
                     .await;
-                if !response.text.is_empty() {
+                if should_emit_terminal_chunk(
+                    &response.text,
+                    streamed_chunks.load(Ordering::SeqCst),
+                ) {
                     let _ = self
                         .send_notification(
                             "session/update",
@@ -1532,5 +1542,12 @@ mod tests {
         );
 
         assert_eq!(response.choice, ApprovalChoice::Deny);
+    }
+
+    #[test]
+    fn terminal_chunk_emitted_only_without_streamed_chunks() {
+        assert!(should_emit_terminal_chunk("hello", false));
+        assert!(!should_emit_terminal_chunk("hello", true));
+        assert!(!should_emit_terminal_chunk("", false));
     }
 }
