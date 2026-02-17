@@ -6,8 +6,8 @@
 
 set -e
 
-VERSION="v0.12.1"
-PREVIOUS_VERSION="v0.12.0"
+VERSION="v0.12.2"
+PREVIOUS_VERSION="v0.12.1"
 REPO="thoughtoinnovate/tark"
 BINARY_NAME="tark"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
