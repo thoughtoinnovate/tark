@@ -33,6 +33,13 @@ fn should_emit_terminal_chunk(response_text: &str, streamed_chunks: bool) -> boo
     !streamed_chunks && !response_text.is_empty()
 }
 
+fn prompt_accept_result(request_id: &str) -> Value {
+    json!({
+        "accepted": true,
+        "requestId": request_id,
+    })
+}
+
 struct SessionBootstrap {
     mode: AgentMode,
     provider: String,
@@ -675,12 +682,15 @@ impl AcpServer {
                     *current = Some(request_id.clone());
                 }
 
+                self.send_response(req_id.clone(), prompt_accept_result(&request_id))
+                    .await?;
+
                 let server = Arc::clone(&self);
                 let message = prompt_to_text(&params.prompt);
                 let spawn_request_id = request_id.clone();
                 tokio::spawn(async move {
                     if let Err(err) = Arc::clone(&server)
-                        .run_session_prompt(session, spawn_request_id.clone(), message, req_id)
+                        .run_session_prompt(session, spawn_request_id.clone(), message)
                         .await
                     {
                         let _ = server
@@ -839,7 +849,6 @@ impl AcpServer {
         session: Arc<AcpSession>,
         request_id: String,
         message: String,
-        response_id: Value,
     ) -> Result<()> {
         let session_id = session.id.clone();
         let response_stream_id = request_id.clone();
@@ -1021,9 +1030,6 @@ impl AcpServer {
                 } else {
                     "end_turn"
                 };
-                let _ = self
-                    .send_response(response_id, json!({ "stopReason": stop_reason }))
-                    .await;
                 if should_emit_terminal_chunk(
                     &response.text,
                     streamed_chunks.load(Ordering::SeqCst),
@@ -1081,9 +1087,6 @@ impl AcpServer {
                 } else {
                     "refusal"
                 };
-                let _ = self
-                    .send_response(response_id, json!({ "stopReason": stop_reason }))
-                    .await;
                 let _ = self
                     .send_notification(
                         "session/update",
@@ -1582,5 +1585,12 @@ mod tests {
         assert!(should_emit_terminal_chunk("hello", false));
         assert!(!should_emit_terminal_chunk("hello", true));
         assert!(!should_emit_terminal_chunk("", false));
+    }
+
+    #[test]
+    fn prompt_accept_result_contains_request_id() {
+        let payload = prompt_accept_result("req-42");
+        assert_eq!(payload["accepted"], json!(true));
+        assert_eq!(payload["requestId"], json!("req-42"));
     }
 }
