@@ -2590,16 +2590,26 @@ impl ChatAgent {
             // Call LLM with streaming - callbacks fire in real-time during this await
             let interrupt_check_ref: &(dyn Fn() -> bool + Send + Sync) = &interrupt_check;
             let think_settings = self.resolve_think_settings();
-            let response = self
-                .llm
-                .chat_streaming_with_thinking(
-                    self.context.messages(),
-                    Some(&tool_definitions),
-                    callback,
-                    Some(interrupt_check_ref),
-                    &think_settings,
-                )
-                .await;
+            let response = if think_settings.enabled {
+                self.llm
+                    .chat_streaming_with_thinking(
+                        self.context.messages(),
+                        Some(&tool_definitions),
+                        callback,
+                        Some(interrupt_check_ref),
+                        &think_settings,
+                    )
+                    .await
+            } else {
+                self.llm
+                    .chat_streaming(
+                        self.context.messages(),
+                        Some(&tool_definitions),
+                        callback,
+                        Some(interrupt_check_ref),
+                    )
+                    .await
+            };
 
             // Get accumulated text from shared state
             if let Ok(acc) = accumulated_text_shared.lock() {
@@ -3018,9 +3028,11 @@ impl ChatAgent {
 #[cfg(test)]
 mod tests {
     use super::ChatAgent;
-    use crate::llm::{LlmProvider, LlmResponse, Message, ToolDefinition};
+    use crate::llm::{
+        LlmProvider, LlmResponse, Message, StreamCallback, StreamEvent, ToolDefinition,
+    };
     use async_trait::async_trait;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     struct TestProvider {
         name: &'static str,
@@ -3084,5 +3096,106 @@ mod tests {
 
         agent.update_provider(provider_b);
         assert_eq!(agent.llm.name(), "provider_b");
+    }
+
+    struct StreamingOnlyProvider;
+
+    #[async_trait]
+    impl LlmProvider for StreamingOnlyProvider {
+        fn name(&self) -> &str {
+            "streaming-only"
+        }
+
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: Option<&[ToolDefinition]>,
+        ) -> anyhow::Result<LlmResponse> {
+            Ok(LlmResponse::Text {
+                text: "fallback".to_string(),
+                usage: None,
+            })
+        }
+
+        async fn chat_streaming(
+            &self,
+            _messages: &[Message],
+            _tools: Option<&[ToolDefinition]>,
+            callback: StreamCallback,
+            _interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        ) -> anyhow::Result<LlmResponse> {
+            callback(StreamEvent::TextDelta("hello ".to_string()));
+            callback(StreamEvent::TextDelta("world".to_string()));
+            callback(StreamEvent::Done);
+            Ok(LlmResponse::Text {
+                text: "ignored".to_string(),
+                usage: None,
+            })
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+
+        async fn complete_fim(
+            &self,
+            _prefix: &str,
+            _suffix: &str,
+            _language: &str,
+        ) -> anyhow::Result<crate::llm::CompletionResult> {
+            unimplemented!("test provider")
+        }
+
+        async fn explain_code(&self, _code: &str, _context: &str) -> anyhow::Result<String> {
+            unimplemented!("test provider")
+        }
+
+        async fn suggest_refactorings(
+            &self,
+            _code: &str,
+            _context: &str,
+        ) -> anyhow::Result<Vec<crate::llm::RefactoringSuggestion>> {
+            unimplemented!("test provider")
+        }
+
+        async fn review_code(
+            &self,
+            _code: &str,
+            _language: &str,
+        ) -> anyhow::Result<Vec<crate::llm::CodeIssue>> {
+            unimplemented!("test provider")
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_streaming_uses_provider_streaming_when_thinking_disabled() {
+        let provider = Arc::new(StreamingOnlyProvider);
+        let tools = crate::tools::ToolRegistry::new(std::path::PathBuf::from("."));
+        let mut agent = ChatAgent::new(provider, tools);
+        agent.set_think_level_sync("off".to_string());
+
+        let chunks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let chunks_for_cb = Arc::clone(&chunks);
+        let response = agent
+            .chat_streaming(
+                "test",
+                || false,
+                move |chunk| {
+                    chunks_for_cb
+                        .lock()
+                        .expect("stream chunks mutex poisoned")
+                        .push(chunk);
+                },
+                |_thinking| {},
+                |_name, _args| {},
+                |_name, _result, _success| {},
+                |_content| {},
+            )
+            .await
+            .expect("streaming call should succeed");
+
+        let observed = chunks.lock().expect("stream chunks mutex poisoned").clone();
+        assert_eq!(observed, vec!["hello ".to_string(), "world".to_string()]);
+        assert_eq!(response.text, "hello world");
     }
 }
