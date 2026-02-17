@@ -880,6 +880,11 @@ impl AcpServer {
         let rid_for_tool_start = request_id.clone();
         let response_for_tool_start = response_stream_id.clone();
 
+        let server_for_thinking = Arc::clone(&self);
+        let sid_for_thinking = session_id.clone();
+        let rid_for_thinking = request_id.clone();
+        let response_for_thinking = response_stream_id.clone();
+
         let server_for_tool_end = Arc::clone(&self);
         let sid_for_tool_end = session_id.clone();
         let rid_for_tool_end = request_id.clone();
@@ -924,7 +929,35 @@ impl AcpServer {
                                 .await;
                         });
                     },
-                    |_thinking| {},
+                    move |thinking| {
+                        let server = Arc::clone(&server_for_thinking);
+                        let sid = sid_for_thinking.clone();
+                        let rid = rid_for_thinking.clone();
+                        let response_id = response_for_thinking.clone();
+                        tokio::spawn(async move {
+                            let _ = server
+                                .send_notification(
+                                    "session/update",
+                                    json!({
+                                        "sessionId": sid,
+                                        "update": {
+                                            "sessionUpdate": "agent_message_chunk",
+                                            "responseId": response_id,
+                                            "content": {
+                                                "type": "reasoning",
+                                                "text": thinking,
+                                            }
+                                        },
+                                        "_meta": {
+                                            "tark": {
+                                                "requestId": rid,
+                                            }
+                                        }
+                                    }),
+                                )
+                                .await;
+                        });
+                    },
                     move |name, args| {
                         let server = Arc::clone(&server_for_tool_start);
                         let sid = sid_for_tool_start.clone();

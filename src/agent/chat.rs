@@ -2590,7 +2590,9 @@ impl ChatAgent {
             // Call LLM with streaming - callbacks fire in real-time during this await
             let interrupt_check_ref: &(dyn Fn() -> bool + Send + Sync) = &interrupt_check;
             let think_settings = self.resolve_think_settings();
-            let response = if think_settings.enabled {
+            let use_native_thinking_stream =
+                think_settings.enabled && self.llm.supports_native_thinking();
+            let response = if use_native_thinking_stream {
                 self.llm
                     .chat_streaming_with_thinking(
                         self.context.messages(),
@@ -3173,6 +3175,38 @@ mod tests {
         let tools = crate::tools::ToolRegistry::new(std::path::PathBuf::from("."));
         let mut agent = ChatAgent::new(provider, tools);
         agent.set_think_level_sync("off".to_string());
+
+        let chunks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let chunks_for_cb = Arc::clone(&chunks);
+        let response = agent
+            .chat_streaming(
+                "test",
+                || false,
+                move |chunk| {
+                    chunks_for_cb
+                        .lock()
+                        .expect("stream chunks mutex poisoned")
+                        .push(chunk);
+                },
+                |_thinking| {},
+                |_name, _args| {},
+                |_name, _result, _success| {},
+                |_content| {},
+            )
+            .await
+            .expect("streaming call should succeed");
+
+        let observed = chunks.lock().expect("stream chunks mutex poisoned").clone();
+        assert_eq!(observed, vec!["hello ".to_string(), "world".to_string()]);
+        assert_eq!(response.text, "hello world");
+    }
+
+    #[tokio::test]
+    async fn chat_streaming_uses_provider_streaming_when_thinking_enabled_but_non_native() {
+        let provider = Arc::new(StreamingOnlyProvider);
+        let tools = crate::tools::ToolRegistry::new(std::path::PathBuf::from("."));
+        let mut agent = ChatAgent::new(provider, tools);
+        agent.set_think_level_sync("medium".to_string());
 
         let chunks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let chunks_for_cb = Arc::clone(&chunks);

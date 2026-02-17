@@ -21,6 +21,103 @@ fn generate_tool_call_id() -> String {
     format!("ollama_call_{}", id)
 }
 
+/// Splits streamed text into visible text and reasoning segments using
+/// prompt-level tags (`<think>...</think>` or `<thinking>...</thinking>`).
+#[derive(Debug, Default)]
+struct PromptThinkingTagParser {
+    in_thinking: bool,
+    pending: String,
+}
+
+impl PromptThinkingTagParser {
+    fn ingest(&mut self, chunk: &str) -> (String, String) {
+        self.pending.push_str(chunk);
+        let mut text_out = String::new();
+        let mut thinking_out = String::new();
+
+        loop {
+            if self.in_thinking {
+                if let Some((idx, close_len)) = find_closing_tag(&self.pending) {
+                    thinking_out.push_str(&self.pending[..idx]);
+                    self.pending = self.pending[idx + close_len..].to_string();
+                    self.in_thinking = false;
+                    continue;
+                }
+
+                thinking_out.push_str(&self.pending);
+                self.pending.clear();
+                break;
+            }
+
+            if let Some((idx, open_len)) = find_opening_tag(&self.pending) {
+                text_out.push_str(&self.pending[..idx]);
+                self.pending = self.pending[idx + open_len..].to_string();
+                self.in_thinking = true;
+                continue;
+            }
+
+            let (emit, rest) = split_emitable_text(&self.pending);
+            text_out.push_str(emit);
+            self.pending = rest.to_string();
+            break;
+        }
+
+        (text_out, thinking_out)
+    }
+
+    fn flush(&mut self) -> (String, String) {
+        let pending = std::mem::take(&mut self.pending);
+        if self.in_thinking {
+            self.in_thinking = false;
+            (String::new(), pending)
+        } else {
+            (pending, String::new())
+        }
+    }
+}
+
+fn find_opening_tag(s: &str) -> Option<(usize, usize)> {
+    let think = s.find("<think>");
+    let thinking = s.find("<thinking>");
+    match (think, thinking) {
+        (Some(a), Some(b)) => Some(if a <= b { (a, 7) } else { (b, 10) }),
+        (Some(a), None) => Some((a, 7)),
+        (None, Some(b)) => Some((b, 10)),
+        (None, None) => None,
+    }
+}
+
+fn find_closing_tag(s: &str) -> Option<(usize, usize)> {
+    let think = s.find("</think>");
+    let thinking = s.find("</thinking>");
+    match (think, thinking) {
+        (Some(a), Some(b)) => Some(if a <= b { (a, 8) } else { (b, 11) }),
+        (Some(a), None) => Some((a, 8)),
+        (None, Some(b)) => Some((b, 11)),
+        (None, None) => None,
+    }
+}
+
+fn split_emitable_text(s: &str) -> (&str, &str) {
+    // Hold a possible partial opening tag suffix so the next chunk can complete it.
+    const OPEN_TAGS: [&str; 2] = ["<think>", "<thinking>"];
+    let mut hold_len = 0usize;
+    for tag in OPEN_TAGS {
+        let max_prefix = std::cmp::min(tag.len() - 1, s.len());
+        for len in (1..=max_prefix).rev() {
+            if s.ends_with(&tag[..len]) {
+                hold_len = hold_len.max(len);
+                break;
+            }
+        }
+    }
+    if hold_len == 0 {
+        (s, "")
+    } else {
+        (&s[..s.len() - hold_len], &s[s.len() - hold_len..])
+    }
+}
+
 pub struct OllamaProvider {
     client: reqwest::Client,
     base_url: String,
@@ -362,6 +459,7 @@ impl LlmProvider for OllamaProvider {
         let mut builder = StreamingResponseBuilder::new();
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
+        let mut thinking_parser = PromptThinkingTagParser::default();
 
         let mut last_activity_at = std::time::Instant::now();
         loop {
@@ -448,13 +546,37 @@ impl LlmProvider for OllamaProvider {
                         }
 
                         if !message.content.is_empty() {
-                            let event = StreamEvent::TextDelta(message.content);
-                            builder.process(&event);
-                            callback(event);
+                            let (text_delta, thinking_delta) =
+                                thinking_parser.ingest(&message.content);
+
+                            if !thinking_delta.is_empty() {
+                                let event = StreamEvent::ThinkingDelta(thinking_delta);
+                                builder.process(&event);
+                                callback(event);
+                            }
+
+                            if !text_delta.is_empty() {
+                                let event = StreamEvent::TextDelta(text_delta);
+                                builder.process(&event);
+                                callback(event);
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // Flush any partial tag buffer at end-of-stream.
+        let (text_tail, thinking_tail) = thinking_parser.flush();
+        if !thinking_tail.is_empty() {
+            let event = StreamEvent::ThinkingDelta(thinking_tail);
+            builder.process(&event);
+            callback(event);
+        }
+        if !text_tail.is_empty() {
+            let event = StreamEvent::TextDelta(text_tail);
+            builder.process(&event);
+            callback(event);
         }
 
         // Fallback: try to parse tool call from accumulated text
@@ -469,6 +591,20 @@ impl LlmProvider for OllamaProvider {
         }
 
         Ok(builder.build())
+    }
+
+    async fn chat_streaming_with_thinking(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        callback: StreamCallback,
+        interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        _settings: &super::ThinkSettings,
+    ) -> Result<LlmResponse> {
+        // Ollama does not expose a native thinking parameter in /api/chat.
+        // Keep native streaming behavior and parse prompt-level think tags.
+        self.chat_streaming(messages, tools, callback, interrupt_check)
+            .await
     }
 
     async fn complete_fim(
@@ -740,4 +876,37 @@ struct OllamaStreamChunk {
     message: Option<OllamaMessage>,
     #[serde(default)]
     done: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PromptThinkingTagParser;
+
+    #[test]
+    fn parser_splits_prompt_thinking_tags() {
+        let mut parser = PromptThinkingTagParser::default();
+        let (t1, k1) = parser.ingest("hello <think>reason");
+        assert_eq!(t1, "hello ");
+        assert_eq!(k1, "reason");
+
+        let (t2, k2) = parser.ingest("ing</think> world");
+        assert_eq!(t2, " world");
+        assert_eq!(k2, "ing");
+
+        let (t3, k3) = parser.flush();
+        assert_eq!(t3, "");
+        assert_eq!(k3, "");
+    }
+
+    #[test]
+    fn parser_handles_split_open_tag() {
+        let mut parser = PromptThinkingTagParser::default();
+        let (t1, k1) = parser.ingest("hello <thi");
+        assert_eq!(t1, "hello ");
+        assert_eq!(k1, "");
+
+        let (t2, k2) = parser.ingest("nk>r</think>");
+        assert_eq!(t2, "");
+        assert_eq!(k2, "r");
+    }
 }
