@@ -1781,8 +1781,8 @@ impl<B: Backend> TuiRenderer<B> {
 
     /// Convert mouse event to command
     fn mouse_to_command(&self, mouse: MouseEvent, state: &SharedState) -> Option<Command> {
-        // Debug log mouse events
-        tracing::debug!(
+        // Mouse events are high-frequency; keep logs at trace to avoid debug-mode UI stalls.
+        tracing::trace!(
             "Mouse event: kind={:?}, col={}, row={}",
             mouse.kind,
             mouse.column,
@@ -1790,8 +1790,10 @@ impl<B: Backend> TuiRenderer<B> {
         );
 
         match mouse.kind {
-            MouseEventKind::ScrollDown => {
-                tracing::debug!("Scroll down event detected");
+            // Some terminals/trackpads report vertical wheel motion as horizontal scroll events.
+            // Treat right as down to keep scrolling responsive across terminals.
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollRight => {
+                tracing::trace!("Scroll down-like event detected: {:?}", mouse.kind);
                 if state.active_modal().is_some() {
                     Some(Command::ModalDown)
                 } else {
@@ -1806,8 +1808,9 @@ impl<B: Backend> TuiRenderer<B> {
                     }
                 }
             }
-            MouseEventKind::ScrollUp => {
-                tracing::debug!("Scroll up event detected");
+            // Treat left as up for terminals that emit horizontal events for wheel gestures.
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft => {
+                tracing::trace!("Scroll up-like event detected: {:?}", mouse.kind);
                 if state.active_modal().is_some() {
                     Some(Command::ModalUp)
                 } else {
@@ -1823,7 +1826,7 @@ impl<B: Backend> TuiRenderer<B> {
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                tracing::debug!("Left click event detected");
+                tracing::trace!("Left click event detected");
                 // Check if clicking a queued task in the Tasks panel (for drag-to-reorder)
                 let target = self.hit_test(mouse.column, mouse.row, state);
                 if target == ClickTarget::Sidebar {
@@ -1843,7 +1846,7 @@ impl<B: Backend> TuiRenderer<B> {
                                 .count();
                             let queue_idx = task_idx - active_count - completed_count;
                             state.start_task_drag(queue_idx);
-                            tracing::debug!("Started task drag for queue index {}", queue_idx);
+                            tracing::trace!("Started task drag for queue index {}", queue_idx);
                             // Also select the item in the sidebar
                             state.set_sidebar_selected_panel(2); // Tasks panel
                             state.set_sidebar_selected_item(Some(task_idx));
@@ -1860,26 +1863,26 @@ impl<B: Backend> TuiRenderer<B> {
                 self.handle_mouse_click(mouse.column, mouse.row, state)
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                tracing::debug!("Mouse drag event detected at row={}", mouse.row);
+                tracing::trace!("Mouse drag event detected at row={}", mouse.row);
                 // Handle scrollbar dragging for messages area or task drag-to-reorder
                 self.handle_scrollbar_drag(mouse.column, mouse.row, state)
             }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-                tracing::debug!("Mouse up event detected");
+                tracing::trace!("Mouse up event detected");
                 // Complete task drag operation if active
                 if state.is_dragging_task() {
                     let moved = state.complete_task_drag();
                     if moved {
-                        tracing::debug!("Task drag completed, task moved");
+                        tracing::trace!("Task drag completed, task moved");
                         return Some(Command::RefreshSidebar);
                     } else {
-                        tracing::debug!("Task drag cancelled (no movement)");
+                        tracing::trace!("Task drag cancelled (no movement)");
                     }
                 }
                 None
             }
             _ => {
-                tracing::debug!("Unhandled mouse event: {:?}", mouse.kind);
+                tracing::trace!("Unhandled mouse event: {:?}", mouse.kind);
                 None
             }
         }
@@ -3028,7 +3031,25 @@ mod tests {
     use super::*;
     use crate::ui_backend::questionnaire::QuestionnaireState;
     use crate::ui_backend::ModelInfo;
-    use crossterm::event::KeyEvent;
+    use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
+
+    fn make_test_renderer(width: u16, height: u16) -> TuiRenderer<TestBackend> {
+        let backend = TestBackend::new(width, height);
+        let terminal = Terminal::new(backend).expect("create test terminal");
+        TuiRenderer::new(terminal, PathBuf::from("."))
+    }
+
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
 
     #[test]
     fn test_model_display_name_ignores_picker_selection() {
@@ -3143,6 +3164,28 @@ mod tests {
 
         assert_eq!(cmd_j, Some(Command::NextMessage));
         assert_eq!(cmd_k, Some(Command::PrevMessage));
+    }
+
+    #[test]
+    fn test_mouse_scroll_left_maps_to_scroll_up() {
+        let renderer = make_test_renderer(120, 40);
+        let state = SharedState::new();
+
+        let cmd =
+            renderer.mouse_to_command(mouse_event(MouseEventKind::ScrollLeft, 20, 10), &state);
+
+        assert_eq!(cmd, Some(Command::ScrollUp));
+    }
+
+    #[test]
+    fn test_mouse_scroll_right_maps_to_scroll_down() {
+        let renderer = make_test_renderer(120, 40);
+        let state = SharedState::new();
+
+        let cmd =
+            renderer.mouse_to_command(mouse_event(MouseEventKind::ScrollRight, 20, 10), &state);
+
+        assert_eq!(cmd, Some(Command::ScrollDown));
     }
 
     /// Helper to create a key event
