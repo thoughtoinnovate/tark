@@ -5,7 +5,6 @@
 ### 1. Terminal (TTY) Required
 
 The TUI **requires a real terminal device (TTY)** to run. It will not work in:
-- Docker containers without `-t` flag
 - CI/CD pipelines
 - Piped or redirected environments
 - Non-interactive shells
@@ -18,12 +17,6 @@ tty
 ```
 
 **Solutions:**
-
-**Docker:**
-```bash
-docker run -it -e OPENAI_API_KEY="$OPENAI_API_KEY" your-image ./tark tui
-#          ^^ IMPORTANT: -it flags enable TTY
-```
 
 **SSH:**
 ```bash

@@ -8,10 +8,8 @@
 /src/ @thoughtoinnovate
 /Cargo.toml @thoughtoinnovate
 
-# Docker & CI/CD
-/Dockerfile* @thoughtoinnovate
+# CI/CD
 /.github/ @thoughtoinnovate
-/docker-compose.yml @thoughtoinnovate
 
 # Documentation
 /README.md @thoughtoinnovate

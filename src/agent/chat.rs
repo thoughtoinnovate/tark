@@ -637,7 +637,6 @@ Safe shell commands (OK to run):
 - git commands (except push --force)
 - cat, ls, find, grep
 - make, cmake
-- docker commands (with caution)
 
 💬 ASK_USER TOOL (MANDATORY - NEVER ASK IN CHAT):
 🚨 CRITICAL: You MUST use ask_user tool for ANY question expecting user input.

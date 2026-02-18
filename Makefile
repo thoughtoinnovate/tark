@@ -1,7 +1,7 @@
 # tark Makefile
 # Run `make help` for available commands
 
-.PHONY: help env env-rust env-docker build build-release test lint fmt clean docker-build docker-run docker-stop docker-logs install
+.PHONY: help env env-rust build build-release test lint fmt clean install
 
 # Default target
 help:
@@ -11,7 +11,6 @@ help:
 	@echo "Setup:"
 	@echo "  make env           - Set up complete dev environment (Rust + dependencies)"
 	@echo "  make env-rust      - Install Rust toolchain only"
-	@echo "  make env-docker    - Install Docker (shows instructions)"
 	@echo ""
 	@echo "Development:"
 	@echo "  make build         - Build debug binary"
@@ -26,13 +25,6 @@ help:
 	@echo "  make e2e-smoke     - Run P0 smoke tests (fast)"
 	@echo "  make e2e-core      - Run P0+P1 core tests"
 	@echo "  make help-e2e      - Show all E2E test commands"
-	@echo ""
-	@echo "Docker:"
-	@echo "  make docker-build  - Build Docker image locally"
-	@echo "  make docker-run    - Run tark in Docker container"
-	@echo "  make docker-stop   - Stop Docker container"
-	@echo "  make docker-logs   - Show Docker container logs"
-	@echo "  make docker-test   - Full Docker build and test"
 	@echo ""
 	@echo "Install:"
 	@echo "  make install       - Install tark binary to ~/.cargo/bin"
@@ -101,23 +93,6 @@ env-deps:
 		echo "⚠ Unknown OS: $$(uname). Please install build tools manually."; \
 	fi
 	@echo "✓ Dependencies check complete"
-
-env-docker:
-	@echo "Docker Installation Instructions"
-	@echo "================================="
-	@echo ""
-	@if command -v docker >/dev/null 2>&1; then \
-		echo "✓ Docker is already installed: $$(docker --version)"; \
-	else \
-		echo "Docker is not installed. Install from:"; \
-		echo ""; \
-		echo "  macOS:   https://docs.docker.com/desktop/mac/install/"; \
-		echo "  Linux:   https://docs.docker.com/engine/install/"; \
-		echo "  Windows: https://docs.docker.com/desktop/windows/install/"; \
-		echo ""; \
-		echo "Or use the convenience script (Linux only):"; \
-		echo "  curl -fsSL https://get.docker.com | sh"; \
-	fi
 
 # =============================================================================
 # Development
@@ -241,58 +216,6 @@ clean:
 	rm -rf target/
 
 # =============================================================================
-# Docker
-# =============================================================================
-
-DOCKER_IMAGE ?= tark:local-alpine
-DOCKER_CONTAINER ?= tark-server
-
-docker-build:
-	@echo "Building Docker image..."
-	docker build -f Dockerfile.alpine -t $(DOCKER_IMAGE) .
-	@echo ""
-	@echo "Image size:"
-	@docker images $(DOCKER_IMAGE) --format "{{.Repository}}:{{.Tag}} - {{.Size}}"
-
-docker-build-minimal:
-	@echo "Building minimal Docker image..."
-	docker build -f Dockerfile -t tark:local .
-	@echo ""
-	@echo "Image size:"
-	@docker images tark:local --format "{{.Repository}}:{{.Tag}} - {{.Size}}"
-
-docker-run:
-	@echo "Starting tark container..."
-	@docker rm -f $(DOCKER_CONTAINER) 2>/dev/null || true
-	docker run -d --name $(DOCKER_CONTAINER) \
-		-p 8765:8765 \
-		-v $$(pwd):/workspace \
-		-e OPENAI_API_KEY="$${OPENAI_API_KEY:-}" \
-		-e ANTHROPIC_API_KEY="$${ANTHROPIC_API_KEY:-}" \
-		$(DOCKER_IMAGE)
-	@echo ""
-	@echo "Container started. Health check:"
-	@sleep 2
-	@curl -sf http://localhost:8765/health && echo "" || echo "Waiting for startup..."
-
-docker-stop:
-	@echo "Stopping tark container..."
-	@docker stop $(DOCKER_CONTAINER) 2>/dev/null || true
-	@docker rm $(DOCKER_CONTAINER) 2>/dev/null || true
-	@echo "✓ Container stopped"
-
-docker-logs:
-	docker logs -f $(DOCKER_CONTAINER)
-
-docker-shell:
-	docker exec -it $(DOCKER_CONTAINER) sh
-
-docker-test: docker-build
-	@echo ""
-	@echo "Running Docker test..."
-	./test-docker-build.sh
-
-# =============================================================================
 # Install
 # =============================================================================
 
@@ -314,4 +237,3 @@ install-release:
 
 ci: fmt-check lint test
 	@echo "✓ All CI checks passed"
-

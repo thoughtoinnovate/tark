@@ -369,8 +369,6 @@ fn find_key_files(dir: &PathBuf) -> Vec<(&'static str, Vec<String>)> {
                 "pom.xml",
                 "build.gradle",
                 "Makefile",
-                "docker-compose.yml",
-                "Dockerfile",
             ],
         ),
         (

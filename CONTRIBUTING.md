@@ -8,7 +8,6 @@ Thank you for your interest in contributing to tark! This guide will help you ge
 
 - **Rust** (1.70+): https://rustup.rs/
 - **Neovim** (0.8.0+): For testing the plugin (see `tests/README.md`)
-- **Docker** (optional): For testing Docker mode
 
 ### Clone and Build
 
@@ -286,7 +285,7 @@ This triggers:
 1. Multi-platform binary builds
 2. SHA256 checksum generation
 3. GitHub Release creation
-4. Docker image builds
+4. Release metadata and notes generation
 
 ## Getting Help
 
@@ -301,4 +300,3 @@ By contributing, you agree that your contributions will be licensed under the Ap
 ---
 
 Thank you for contributing! 🎉
-

@@ -135,8 +135,6 @@ tark/
 │   └── TUI_MODAL_DESIGN_GUIDE.md # Modal design patterns
 │
 ├── .github/workflows/           # CI/CD
-├── Dockerfile                   # Minimal scratch image (~15MB)
-├── Dockerfile.alpine            # Alpine image with shell (~30MB)
 └── install.sh                   # Binary installer with checksum verification
 ```
 

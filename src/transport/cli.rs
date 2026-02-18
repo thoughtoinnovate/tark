@@ -1101,11 +1101,10 @@ pub async fn run_tui_new(
             "TUI requires a real terminal (TTY).\n\n\
             You are running in a non-TTY environment.\n\n\
             Solutions:\n\
-            1. Docker: Run with -it flags:   docker exec -it <container> bash\n\
-            2. SSH: Connect with -t flag:     ssh -t user@host\n\
-            3. Use tmux or screen:            tmux\n\
-            4. Use script command:            script -c './tark tui' /dev/null\n\
-            5. Use chat mode instead:         tark chat\n\n\
+            1. SSH: Connect with -t flag:      ssh -t user@host\n\
+            2. Use tmux or screen:             tmux\n\
+            3. Use script command:             script -c './tark tui' /dev/null\n\
+            4. Use chat mode instead:          tark chat\n\n\
             To check: Run 'tty' command (should NOT return 'not a tty')"
         );
     }

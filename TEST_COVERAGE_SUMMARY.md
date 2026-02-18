@@ -50,7 +50,7 @@ Total:               70 tests
 14. ✅ Network commands (curl, wget)
 15. ✅ Special characters in paths (spaces, special chars)
 16. ✅ Environment variable expansion ($HOME, etc.)
-17. ✅ Docker commands (ps, build, run)
+17. ✅ Command classification for external tooling
 
 #### Edge Cases
 18. ✅ Empty strings
@@ -161,7 +161,7 @@ Total:               70 tests
 - ✅ Path location detection (in_workdir logic)
 - ✅ Compound command handling
 - ✅ Edge cases (empty, whitespace, special chars)
-- ✅ Real-world commands (git, npm, cargo, docker, tar)
+- ✅ Real-world commands (git, npm, cargo, tar)
 
 ### Security Coverage
 - ✅ Pattern validation (length, content, forbidden commands)

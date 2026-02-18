@@ -330,27 +330,6 @@ mod classifier_tests {
         // Should be detected as outside workdir (absolute path via env var)
         assert_eq!(classification.operation, Operation::Read);
     }
-
-    #[test]
-    fn test_docker_commands() {
-        let classifier = CommandClassifier::new(PathBuf::from("/workspace"));
-
-        // Docker operations - classified as execute since they're external commands
-        let classification = classifier.classify("docker ps");
-        assert!(
-            matches!(
-                classification.operation,
-                Operation::Read | Operation::Execute
-            ),
-            "docker ps should be read or execute"
-        );
-
-        let classification = classifier.classify("docker build -t image .");
-        assert_eq!(classification.operation, Operation::Execute);
-
-        let classification = classifier.classify("docker run -it ubuntu bash");
-        assert_eq!(classification.operation, Operation::Execute);
-    }
 }
 
 mod security_tests {

@@ -279,7 +279,7 @@ function App() {
     { path: "lua/tark/health.lua", name: "lua/tark/health.lua", isFolder: false, indentLevel: 1 },
     { path: "lua/tark/statusline.lua", name: "lua/tark/statusline.lua", isFolder: false, indentLevel: 1 },
     { path: "lua/tark/lsp.lua", name: "lua/tark/lsp.lua", isFolder: false, indentLevel: 1 },
-    { path: "test-docker-build.sh", name: "test-docker-build.sh", isFolder: false, indentLevel: 0 },
+    { path: "run_tui.sh", name: "run_tui.sh", isFolder: false, indentLevel: 0 },
   ];
 
   /**

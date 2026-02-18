@@ -19,9 +19,6 @@ AI-powered CLI agent with TUI chat interface and Neovim integration.
 ```bash
 # Option 1: Binary install (Linux/macOS)
 curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash
-
-# Option 2: Docker
-docker pull ghcr.io/thoughtoinnovate/tark:alpine
 ```
 
 ## Installation
