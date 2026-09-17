@@ -1,21 +1,24 @@
 //! File search tool using fuzzy matching
 
+use super::workspace::WorkspaceCap;
 use super::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Tool for searching files by name
 pub struct FileSearchTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl FileSearchTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 }
 
@@ -59,10 +62,13 @@ impl Tool for FileSearchTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let search_dir = params
-            .path
-            .map(|p| self.working_dir.join(p))
-            .unwrap_or_else(|| self.working_dir.clone());
+        let search_dir = match params.path {
+            Some(ref p) => match self.cap.resolve(p) {
+                Ok(path) => path,
+                Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+            },
+            None => self.cap.primary().to_path_buf(),
+        };
         let max_results = params.max_results.unwrap_or(50);
         let pattern = params.pattern.to_lowercase();
 
@@ -99,10 +105,10 @@ impl Tool for FileSearchTool {
                 };
 
                 if matches {
-                    if let Ok(relative) = path.strip_prefix(&self.working_dir) {
-                        results.push(relative.display().to_string());
-                    } else {
-                        results.push(path.display().to_string());
+                    // Walker is rooted at the confined search_dir; skip any
+                    // symlink escape that resolves outside the grant.
+                    if self.cap.resolve(&path.display().to_string()).is_ok() {
+                        results.push(self.cap.relative(path));
                     }
                 }
             }
@@ -177,12 +183,14 @@ fn fuzzy_match(pattern: &str, text: &str) -> bool {
 
 /// Tool to get a high-level codebase overview without reading all files
 pub struct CodebaseOverviewTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl CodebaseOverviewTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 }
 
@@ -227,13 +235,13 @@ impl Tool for CodebaseOverviewTool {
 
         // 1. Directory structure
         output.push_str("## Directory Structure\n```\n");
-        let tree = build_tree(&self.working_dir, &self.working_dir, 0, max_depth);
+        let tree = build_tree(self.cap.primary(), self.cap.primary(), 0, max_depth);
         output.push_str(&tree);
         output.push_str("```\n\n");
 
         // 2. Key files (README, config files, entry points)
         output.push_str("## Key Files Found\n");
-        let key_files = find_key_files(&self.working_dir);
+        let key_files = find_key_files(self.cap.primary());
         if key_files.is_empty() {
             output.push_str("No standard key files found.\n");
         } else {
@@ -249,9 +257,9 @@ impl Tool for CodebaseOverviewTool {
         // 3. Language breakdown
         if include_counts {
             output.push_str("## Language Breakdown\n");
-            let stats = count_files_by_extension(&self.working_dir);
+            let stats = count_files_by_extension(self.cap.primary());
             let mut stats_vec: Vec<_> = stats.into_iter().collect();
-            stats_vec.sort_by(|a, b| b.1.cmp(&a.1));
+            stats_vec.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
             for (ext, count) in stats_vec.iter().take(15) {
                 let lang = extension_to_language(ext);
@@ -273,7 +281,7 @@ impl Tool for CodebaseOverviewTool {
 }
 
 #[allow(clippy::only_used_in_recursion)]
-fn build_tree(root: &PathBuf, current: &PathBuf, depth: usize, max_depth: usize) -> String {
+fn build_tree(root: &Path, current: &Path, depth: usize, max_depth: usize) -> String {
     if depth > max_depth {
         return String::new();
     }
@@ -347,7 +355,7 @@ fn build_tree(root: &PathBuf, current: &PathBuf, depth: usize, max_depth: usize)
     output
 }
 
-fn find_key_files(dir: &PathBuf) -> Vec<(&'static str, Vec<String>)> {
+fn find_key_files(dir: &Path) -> Vec<(&'static str, Vec<String>)> {
     let key_patterns = vec![
         (
             "Documentation",
@@ -404,7 +412,7 @@ fn find_key_files(dir: &PathBuf) -> Vec<(&'static str, Vec<String>)> {
     results
 }
 
-fn count_files_by_extension(dir: &PathBuf) -> std::collections::HashMap<String, usize> {
+fn count_files_by_extension(dir: &Path) -> std::collections::HashMap<String, usize> {
     let mut counts = std::collections::HashMap::new();
 
     let walker = WalkBuilder::new(dir).hidden(true).git_ignore(true).build();

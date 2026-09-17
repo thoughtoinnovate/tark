@@ -1,5 +1,6 @@
 //! Grep tool for searching file contents
 
+use super::workspace::WorkspaceCap;
 use super::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -12,12 +13,14 @@ use std::path::PathBuf;
 
 /// Tool for searching content within files
 pub struct GrepTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl GrepTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 }
 
@@ -76,10 +79,13 @@ impl Tool for GrepTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let search_path = params
-            .path
-            .map(|p| self.working_dir.join(p))
-            .unwrap_or_else(|| self.working_dir.clone());
+        let search_path = match params.path {
+            Some(ref p) => match self.cap.resolve(p) {
+                Ok(path) => path,
+                Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+            },
+            None => self.cap.primary().to_path_buf(),
+        };
         let case_sensitive = params.case_sensitive.unwrap_or(false);
         let max_results = params.max_results.unwrap_or(100);
         let context_lines = params.context_lines.unwrap_or(0);
@@ -99,7 +105,7 @@ impl Tool for GrepTool {
                 &pattern,
                 case_sensitive,
                 context_lines,
-                &self.working_dir,
+                self.cap.primary(),
                 &mut results,
                 max_results,
             )?;
@@ -121,6 +127,13 @@ impl Tool for GrepTool {
                     continue;
                 }
 
+                // Walker is rooted at the confined search_path, but a
+                // symlink inside the workspace could still point outside;
+                // skip entries that do not resolve inside the grant.
+                if self.cap.resolve(&path.display().to_string()).is_err() {
+                    continue;
+                }
+
                 // Check file pattern if specified
                 if let Some(ref file_pattern) = params.file_pattern {
                     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -139,7 +152,7 @@ impl Tool for GrepTool {
                     &pattern,
                     case_sensitive,
                     context_lines,
-                    &self.working_dir,
+                    self.cap.primary(),
                     &mut results,
                     max_results,
                 )?;
@@ -148,10 +161,7 @@ impl Tool for GrepTool {
 
         if results.is_empty() {
             // Include search context in the "no matches" message
-            let search_location = search_path
-                .strip_prefix(&self.working_dir)
-                .unwrap_or(&search_path)
-                .display();
+            let search_location = self.cap.relative(&search_path);
             Ok(ToolResult::success(format!(
                 "No matches for \"{}\" in {}",
                 params.pattern, search_location
@@ -292,12 +302,14 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 
 /// Tool for finding all references to a symbol and tracing code flow
 pub struct FindReferencesTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl FindReferencesTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 }
 
@@ -378,7 +390,7 @@ impl Tool for FindReferencesTool {
         let mut usages: Vec<(String, usize, String)> = Vec::new();
 
         // Walk the directory
-        let walker = WalkBuilder::new(&self.working_dir)
+        let walker = WalkBuilder::new(self.cap.primary())
             .hidden(false)
             .git_ignore(true)
             .build();
@@ -405,11 +417,7 @@ impl Tool for FindReferencesTool {
             let reader = BufReader::new(file);
             let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
 
-            let relative_path = path
-                .strip_prefix(&self.working_dir)
-                .unwrap_or(path)
-                .display()
-                .to_string();
+            let relative_path = self.cap.relative(path);
 
             for (i, line) in lines.iter().enumerate() {
                 if !line.contains(symbol) {

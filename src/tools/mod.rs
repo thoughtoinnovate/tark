@@ -25,6 +25,7 @@ mod lsp_tools;
 mod mode_switch;
 pub mod questionnaire;
 mod shell;
+pub mod workspace;
 
 pub use file_ops::{
     DeleteFileTool, ListDirectoryTool, PatchFileTool, ProposeChangeTool, ReadFileTool,

@@ -4,6 +4,7 @@
 //! using the same libraries that power ripgrep.
 
 use crate::tools::risk::RiskLevel;
+use crate::tools::workspace::WorkspaceCap;
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -19,12 +20,14 @@ use std::sync::{Arc, Mutex};
 
 /// Tool for searching content within files using ripgrep's grep-searcher.
 pub struct RipgrepTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl RipgrepTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 }
 
@@ -92,10 +95,13 @@ impl Tool for RipgrepTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let search_path = params
-            .path
-            .map(|p| self.working_dir.join(p))
-            .unwrap_or_else(|| self.working_dir.clone());
+        let search_path = match params.path {
+            Some(ref p) => match self.cap.resolve(p) {
+                Ok(path) => path,
+                Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+            },
+            None => self.cap.primary().to_path_buf(),
+        };
         let case_sensitive = params.case_sensitive.unwrap_or(false);
         let max_results = params.max_results.unwrap_or(100);
         let context_lines = params.context_lines.unwrap_or(0);
@@ -119,15 +125,13 @@ impl Tool for RipgrepTool {
 
         // Handle single file case
         if search_path.is_file() {
-            let relative_path = search_path
-                .strip_prefix(&self.working_dir)
-                .unwrap_or(&search_path);
+            let relative_path = self.cap.relative(&search_path);
 
             search_file(
                 &matcher,
                 &searcher,
                 &search_path,
-                &relative_path.display().to_string(),
+                &relative_path,
                 &results,
                 &match_count,
                 max_results,
@@ -167,6 +171,12 @@ impl Tool for RipgrepTool {
                     continue;
                 }
 
+                // Walker is rooted at the confined search_path, but skip any
+                // symlink escape that resolves outside the grant.
+                if self.cap.resolve(&path.display().to_string()).is_err() {
+                    continue;
+                }
+
                 // Check file pattern if specified
                 if let Some(ref fp) = params.file_pattern {
                     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -175,13 +185,13 @@ impl Tool for RipgrepTool {
                     }
                 }
 
-                let relative_path = path.strip_prefix(&self.working_dir).unwrap_or(path);
+                let relative_path = self.cap.relative(path);
 
                 search_file(
                     &matcher,
                     &searcher,
                     path,
-                    &relative_path.display().to_string(),
+                    &relative_path,
                     &results,
                     &match_count,
                     max_results,
@@ -195,10 +205,7 @@ impl Tool for RipgrepTool {
 
         if results.is_empty() {
             // Include search context in the "no matches" message
-            let search_location = search_path
-                .strip_prefix(&self.working_dir)
-                .unwrap_or(&search_path)
-                .display();
+            let search_location = self.cap.relative(&search_path);
             Ok(ToolResult::success(format!(
                 "No matches for \"{}\" in {}",
                 params.pattern, search_location

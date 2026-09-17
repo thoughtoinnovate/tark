@@ -4,6 +4,7 @@
 //! without loading the entire file into memory.
 
 use crate::tools::risk::RiskLevel;
+use crate::tools::workspace::WorkspaceCap;
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -15,12 +16,14 @@ use std::path::PathBuf;
 
 /// Tool for previewing large files efficiently.
 pub struct FilePreviewTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl FilePreviewTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 }
 
@@ -70,7 +73,10 @@ impl Tool for FilePreviewTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let file_path = self.working_dir.join(&params.path);
+        let file_path = match self.cap.resolve(&params.path) {
+            Ok(path) => path,
+            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+        };
         let head_lines = params.head_lines.unwrap_or(50);
         let tail_lines = params.tail_lines.unwrap_or(20);
 

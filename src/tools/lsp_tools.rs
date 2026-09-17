@@ -10,6 +10,7 @@
 //! When an editor adapter context is available, tools first try adapter-backed
 //! code intelligence and then fall back to tree-sitter on failures/timeouts.
 
+use super::workspace::WorkspaceCap;
 use super::{Tool, ToolResult};
 use crate::editor_adapter::{
     current_editor_context, AdapterLocation, AdapterSymbol, EditorAdapterClient,
@@ -88,12 +89,24 @@ impl std::fmt::Display for SymbolKind {
 
 /// Code analyzer using tree-sitter
 pub struct CodeAnalyzer {
-    working_dir: PathBuf,
+    pub(crate) cap: WorkspaceCap,
 }
 
 impl CodeAnalyzer {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
+    }
+
+    /// Resolve a user-supplied path inside the workspace.
+    pub fn resolve(&self, input: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
+        self.cap.resolve(input)
+    }
+
+    /// Workspace-relative display for a resolved path.
+    pub fn relative(&self, path: &Path) -> String {
+        self.cap.relative(path)
     }
 
     /// Parse provided content and extract symbols (fallback when LSP is unavailable)
@@ -424,7 +437,7 @@ impl CodeAnalyzer {
     /// Get files to search based on extension
     pub fn get_searchable_files(&self, extensions: Option<&[&str]>) -> Vec<PathBuf> {
         let mut files = Vec::new();
-        let walker = walkdir::WalkDir::new(&self.working_dir)
+        let walker = walkdir::WalkDir::new(self.cap.primary())
             .into_iter()
             .filter_entry(|e| {
                 let name = e.file_name().to_str().unwrap_or("");
@@ -531,7 +544,10 @@ impl Tool for ListSymbolsTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
         let kind_filter = params["kind"].as_str();
 
-        let target_path = self.analyzer.working_dir.join(path);
+        let target_path = match self.analyzer.resolve(path) {
+            Ok(resolved) => resolved,
+            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+        };
 
         if target_path.is_file() {
             if let Some(symbols) = self.try_editor_adapter_file_symbols(&target_path).await {
@@ -605,10 +621,7 @@ impl Tool for ListSymbolsTool {
         }
 
         for (file, symbols) in by_file {
-            let rel_path = PathBuf::from(&file)
-                .strip_prefix(&self.analyzer.working_dir)
-                .map(|p| p.display().to_string())
-                .unwrap_or(file);
+            let rel_path = self.analyzer.relative(Path::new(&file));
 
             output.push_str(&format!("## {}\n", rel_path));
             for s in symbols {
@@ -672,10 +685,7 @@ impl GoToDefinitionTool {
                     );
 
                     for loc in &locations {
-                        let rel_path = PathBuf::from(&loc.file)
-                            .strip_prefix(&self.analyzer.working_dir)
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|_| loc.file.clone());
+                        let rel_path = self.analyzer.relative(Path::new(&loc.file));
 
                         output.push_str(&format!(
                             "📍 **{}**\n   File: {}\n   Line: {}\n",
@@ -762,7 +772,7 @@ impl Tool for GoToDefinitionTool {
 
         for def in &definitions {
             let rel_path = PathBuf::from(&def.file)
-                .strip_prefix(&self.analyzer.working_dir)
+                .strip_prefix(self.analyzer.cap.primary())
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| def.file.clone());
 
@@ -829,7 +839,7 @@ impl FindAllReferencesTool {
         }
         for (file, entries) in by_file {
             let rel_path = PathBuf::from(&file)
-                .strip_prefix(&self.analyzer.working_dir)
+                .strip_prefix(self.analyzer.cap.primary())
                 .map(|p| p.display().to_string())
                 .unwrap_or(file);
             output.push_str(&format!("### {}\n", rel_path));
@@ -912,10 +922,7 @@ impl Tool for FindAllReferencesTool {
         if !definitions.is_empty() {
             output.push_str("## Definition\n\n");
             for def in &definitions {
-                let rel_path = PathBuf::from(&def.file)
-                    .strip_prefix(&self.analyzer.working_dir)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| def.file.clone());
+                let rel_path = self.analyzer.relative(Path::new(&def.file));
                 output.push_str(&format!(
                     "  📍 {}:{} [{}]\n     {}\n\n",
                     rel_path,
@@ -937,7 +944,7 @@ impl Tool for FindAllReferencesTool {
 
         for (file, refs) in by_file {
             let rel_path = PathBuf::from(&file)
-                .strip_prefix(&self.analyzer.working_dir)
+                .strip_prefix(self.analyzer.cap.primary())
                 .map(|p| p.display().to_string())
                 .unwrap_or(file);
 
@@ -1025,7 +1032,7 @@ impl Tool for CallHierarchyTool {
             } else {
                 for (file, line, content) in &callers {
                     let rel_path = PathBuf::from(file)
-                        .strip_prefix(&self.analyzer.working_dir)
+                        .strip_prefix(self.analyzer.cap.primary())
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|_| file.clone());
                     output.push_str(&format!("  {}:{}\n    {}\n\n", rel_path, line, content));
@@ -1072,7 +1079,7 @@ impl Tool for CallHierarchyTool {
                             if let Ok(defs) = self.analyzer.find_definition(&call, &files) {
                                 if let Some(d) = defs.first() {
                                     let rel_path = PathBuf::from(&d.file)
-                                        .strip_prefix(&self.analyzer.working_dir)
+                                        .strip_prefix(self.analyzer.cap.primary())
                                         .map(|p| p.display().to_string())
                                         .unwrap_or_else(|_| d.file.clone());
                                     output.push_str(&format!(
@@ -1177,7 +1184,7 @@ impl Tool for GetSignatureTool {
 
         for def in &definitions {
             let rel_path = PathBuf::from(&def.file)
-                .strip_prefix(&self.analyzer.working_dir)
+                .strip_prefix(self.analyzer.cap.primary())
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| def.file.clone());
 

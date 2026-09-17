@@ -1,5 +1,6 @@
 //! Shell command execution tool
 
+use super::workspace::WorkspaceCap;
 use super::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -107,12 +108,14 @@ fn should_warn(cmd: &str) -> Option<&'static str> {
 
 /// Tool for executing shell commands
 pub struct ShellTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl ShellTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 }
 
@@ -184,10 +187,13 @@ impl Tool for ShellTool {
             );
         }
 
-        let working_dir = params
-            .working_dir
-            .map(|p| self.working_dir.join(p))
-            .unwrap_or_else(|| self.working_dir.clone());
+        let working_dir = match params.working_dir {
+            Some(ref p) => match self.cap.resolve(p) {
+                Ok(path) => path,
+                Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+            },
+            None => self.cap.primary().to_path_buf(),
+        };
         let timeout = std::time::Duration::from_secs(params.timeout_secs.unwrap_or(60));
 
         // Determine shell based on OS (prefer bash/Powershell, fallback to sh/cmd)

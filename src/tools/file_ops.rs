@@ -1,5 +1,6 @@
 //! File operation tools: read, write, patch
 
+use super::workspace::WorkspaceCap;
 use super::{Tool, ToolResult};
 use crate::policy::{ClassificationStrategy, ModeId, Operation, RiskLevel, ToolPolicyMetadata};
 use anyhow::Result;
@@ -99,21 +100,18 @@ fn generate_diff(old_content: &str, new_content: &str, filename: &str) -> String
 
 /// Tool for reading file contents
 pub struct ReadFileTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl ReadFileTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 
-    fn resolve_path(&self, path: &str) -> PathBuf {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.working_dir.join(path)
-        }
+    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
+        self.cap.resolve(path)
     }
 }
 
@@ -157,14 +155,10 @@ impl Tool for ReadFileTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let path = self.resolve_path(&params.path);
-
-        // Security check: ensure path is within working directory
-        if !path.starts_with(&self.working_dir) && !path.starts_with("/") {
-            return Ok(ToolResult::error(
-                "Access denied: path outside working directory",
-            ));
-        }
+        let path = match self.resolve_path(&params.path) {
+            Ok(path) => path,
+            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+        };
 
         // Use lossy UTF-8 conversion to handle files with invalid encoding
         match std::fs::read(&path) {
@@ -213,21 +207,18 @@ impl Tool for ReadFileTool {
 
 /// Tool for writing file contents
 pub struct WriteFileTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl WriteFileTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 
-    fn resolve_path(&self, path: &str) -> PathBuf {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.working_dir.join(path)
-        }
+    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
+        self.cap.resolve(path)
     }
 }
 
@@ -270,15 +261,11 @@ impl Tool for WriteFileTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let path = self.resolve_path(&params.path);
+        let path = match self.resolve_path(&params.path) {
+            Ok(path) => path,
+            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+        };
         let filename = params.path.clone();
-
-        // Security check
-        if !path.starts_with(&self.working_dir) {
-            return Ok(ToolResult::error(
-                "Access denied: path outside working directory",
-            ));
-        }
 
         // Read existing content for diff (if file exists)
         let old_content = std::fs::read_to_string(&path).unwrap_or_default();
@@ -329,21 +316,18 @@ impl Tool for WriteFileTool {
 
 /// Tool for patching files with search/replace
 pub struct PatchFileTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl PatchFileTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 
-    fn resolve_path(&self, path: &str) -> PathBuf {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.working_dir.join(path)
-        }
+    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
+        self.cap.resolve(path)
     }
 }
 
@@ -391,14 +375,10 @@ impl Tool for PatchFileTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let path = self.resolve_path(&params.path);
-
-        // Security check
-        if !path.starts_with(&self.working_dir) {
-            return Ok(ToolResult::error(
-                "Access denied: path outside working directory",
-            ));
-        }
+        let path = match self.resolve_path(&params.path) {
+            Ok(path) => path,
+            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+        };
 
         // Read the file
         let content = match std::fs::read_to_string(&path) {
@@ -429,21 +409,18 @@ impl Tool for PatchFileTool {
 
 /// Tool for deleting files
 pub struct DeleteFileTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl DeleteFileTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 
-    fn resolve_path(&self, path: &str) -> PathBuf {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.working_dir.join(path)
-        }
+    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
+        self.cap.resolve(path)
     }
 }
 
@@ -481,14 +458,10 @@ impl Tool for DeleteFileTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let path = self.resolve_path(&params.path);
-
-        // Security check
-        if !path.starts_with(&self.working_dir) {
-            return Ok(ToolResult::error(
-                "Access denied: path outside working directory",
-            ));
-        }
+        let path = match self.resolve_path(&params.path) {
+            Ok(path) => path,
+            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+        };
 
         // Check if file exists
         if !path.exists() {
@@ -517,21 +490,18 @@ impl Tool for DeleteFileTool {
 
 /// Tool for reading multiple files at once (batch operation)
 pub struct ReadFilesTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl ReadFilesTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 
-    fn resolve_path(&self, path: &str) -> PathBuf {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.working_dir.join(path)
-        }
+    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
+        self.cap.resolve(path)
     }
 }
 
@@ -577,13 +547,13 @@ impl Tool for ReadFilesTool {
         let mut errors = Vec::new();
 
         for path_str in &params.paths {
-            let path = self.resolve_path(path_str);
-
-            // Security check
-            if !path.starts_with(&self.working_dir) && !path.is_absolute() {
-                errors.push(format!("{}: access denied", path_str));
-                continue;
-            }
+            let path = match self.resolve_path(path_str) {
+                Ok(path) => path,
+                Err(denied) => {
+                    errors.push(denied.to_string());
+                    continue;
+                }
+            };
 
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
@@ -618,21 +588,18 @@ impl Tool for ReadFilesTool {
 
 /// Tool for listing directory contents
 pub struct ListDirectoryTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl ListDirectoryTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 
-    fn resolve_path(&self, path: &str) -> PathBuf {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.working_dir.join(path)
-        }
+    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
+        self.cap.resolve(path)
     }
 }
 
@@ -681,17 +648,13 @@ impl Tool for ListDirectoryTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let path = self.resolve_path(&params.path);
+        let path = match self.resolve_path(&params.path) {
+            Ok(path) => path,
+            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+        };
         let recursive = params.recursive.unwrap_or(false);
         let max_depth = params.max_depth.unwrap_or(3);
         let include_hidden = params.include_hidden.unwrap_or(false);
-
-        // Security check
-        if !path.starts_with(&self.working_dir) && !path.is_absolute() {
-            return Ok(ToolResult::error(
-                "Access denied: path outside working directory",
-            ));
-        }
 
         if !path.exists() {
             return Ok(ToolResult::error(format!(
@@ -774,21 +737,18 @@ impl Tool for ListDirectoryTool {
 
 /// Tool for proposing changes (shows diff without applying) - for Plan mode
 pub struct ProposeChangeTool {
-    working_dir: PathBuf,
+    cap: WorkspaceCap,
 }
 
 impl ProposeChangeTool {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            cap: WorkspaceCap::new(working_dir),
+        }
     }
 
-    fn resolve_path(&self, path: &str) -> PathBuf {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.working_dir.join(path)
-        }
+    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
+        self.cap.resolve(path)
     }
 }
 
@@ -832,7 +792,10 @@ impl Tool for ProposeChangeTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let path = self.resolve_path(&params.path);
+        let path = match self.resolve_path(&params.path) {
+            Ok(path) => path,
+            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+        };
         let filename = params.path.clone();
 
         // Read existing content
