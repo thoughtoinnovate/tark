@@ -1,4 +1,7 @@
 //! LSP hover handler
+//!
+//! Word lookup uses the UTF-16-aware [`Document::get_word_at`](super::document::Document::get_word_at).
+//! The LLM call itself is bounded by the server-level 30s timeout (see `server.rs`).
 
 use super::document::DocumentStore;
 use crate::llm::LlmProvider;

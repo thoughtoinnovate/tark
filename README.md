@@ -241,7 +241,7 @@ tark chat
 # With specific model
 tark chat --model gpt-4o
 
-# Start ACP server on stdio (Content-Length JSON-RPC v2 for editor clients)
+# Start ACP server on stdio (newline-delimited JSON-RPC v1 for editor clients)
 tark acp --cwd .
 
 # In a specific directory
@@ -251,7 +251,9 @@ cd /my/project && tark chat
 ACP cutover note:
 - Legacy ACP methods (`session/create`, `session/send_message`) are removed.
 - Prompt streaming is normalized to `session/update` lifecycle events.
-- Inline completion uses `tark/inline_completion` ACP extension (no HTTP fallback).
+- Transport is newline-delimited JSON stdio (`Content-Length` framing removed).
+- `session/load` is not offered (`loadSession: false`); `session/new` rejects `mcpServers` entries.
+- Inline completion uses the optional `_tark/inlineCompletion` ACP extension (no HTTP fallback).
 
 ### In Neovim
 

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ACP Content-Length JSON-RPC envelope",
+  "title": "ACP NDJSON JSON-RPC message",
   "type": "object",
-  "description": "Upstream-compatible ACP Content-Length framed JSON-RPC 2.0 envelope.",
+  "description": "One ACP JSON-RPC 2.0 message per line (newline-delimited JSON stdio). The legacy Content-Length envelope was removed; peers sending it are rejected with a migration error.",
   "required": ["jsonrpc", "id", "method"],
   "properties": {
     "jsonrpc": {"const": "2.0"},

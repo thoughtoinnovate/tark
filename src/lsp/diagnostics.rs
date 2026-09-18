@@ -1,4 +1,8 @@
 //! LSP diagnostics handler
+//!
+//! Pure translation from [`DiagnosticsEngine`] issues to LSP diagnostics.
+//! Scheduling, per-document cancellation, version-staleness suppression, and
+//! the 30s LLM timeout all live in `server.rs` ([`DiagnosticsTracker`](super::server::DiagnosticsTracker)).
 
 use super::document::Document;
 use crate::diagnostics::{DiagnosticSeverity, DiagnosticsEngine};

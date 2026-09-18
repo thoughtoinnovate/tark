@@ -4,6 +4,7 @@ pub mod acp;
 pub mod cli;
 pub mod dashboard;
 pub mod http;
+pub mod mcp_cli;
 pub mod plugin_cli;
 pub mod remote;
 

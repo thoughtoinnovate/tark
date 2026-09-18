@@ -1,6 +1,11 @@
 //! LSP completion handler
+//!
+//! The client position uses UTF-16 columns; it is translated to a byte column
+//! before building the [`CompletionRequest`], whose engine splits the prefix
+//! by byte index. The LLM call itself is bounded by the server-level 30s
+//! timeout (see `server.rs`).
 
-use super::document::DocumentStore;
+use super::document::{utf16_to_byte_index, DocumentStore};
 use crate::completion::{CompletionEngine, CompletionRequest};
 use anyhow::Result;
 use std::path::PathBuf;
@@ -26,11 +31,19 @@ pub async fn handle_completion(
         .to_file_path()
         .unwrap_or_else(|_| PathBuf::from(uri.path()));
 
+    // Translate the UTF-16 client column to the byte column the completion
+    // engine expects (R9/S23). Without this, multibyte lines split the prefix
+    // at the wrong span — or panic on a non-char-boundary.
+    let cursor_col = doc
+        .get_line(position.line as usize)
+        .map(|line| utf16_to_byte_index(line, position.character))
+        .unwrap_or(0);
+
     let request = CompletionRequest {
         file_path,
         file_content: doc.content.clone(),
         cursor_line: position.line as usize,
-        cursor_col: position.character as usize,
+        cursor_col,
         related_files: vec![],
         lsp_context: None, // LSP mode doesn't need additional context
     };

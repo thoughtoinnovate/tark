@@ -236,7 +236,7 @@ impl TarkStorage {
         }
 
         // Sort by creation date (newest first)
-        conversations.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        conversations.sort_by_key(|c| std::cmp::Reverse(c.created_at));
         Ok(conversations)
     }
 
@@ -484,7 +484,7 @@ impl TarkStorage {
             }
         }
 
-        chunks.sort_by(|a, b| b.sequence.cmp(&a.sequence));
+        chunks.sort_by_key(|c| std::cmp::Reverse(c.sequence));
         Ok(chunks)
     }
 
@@ -595,7 +595,7 @@ impl TarkStorage {
         }
 
         // Sort by updated date (most recent first)
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         Ok(sessions)
     }
 
@@ -686,7 +686,7 @@ impl TarkStorage {
         }
 
         // Sort by timestamp (most recent first)
-        records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
         Ok(records)
     }
 
@@ -808,7 +808,7 @@ impl TarkStorage {
         }
 
         // Sort by updated date (most recent first)
-        plans.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        plans.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
         Ok(plans)
     }
 
@@ -892,7 +892,7 @@ impl TarkStorage {
             .collect();
 
         // Sort by modification time (newest first)
-        archives.sort_by(|a, b| b.1.cmp(&a.1));
+        archives.sort_by_key(|a| std::cmp::Reverse(a.1));
 
         // Remove excess archives
         for (path, _) in archives.into_iter().skip(keep_count) {
@@ -934,7 +934,7 @@ impl TarkStorage {
         }
 
         // Sort by updated date (most recent first)
-        plans.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        plans.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
         Ok(plans)
     }
 
@@ -999,7 +999,7 @@ impl TarkStorage {
             }
         }
 
-        plans.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        plans.sort_by_key(|p| std::cmp::Reverse(p.modified_at));
         Ok(plans)
     }
 

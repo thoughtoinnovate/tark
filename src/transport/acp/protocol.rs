@@ -59,6 +59,26 @@ pub struct InitializeParams {
     pub client_capabilities: Value,
     #[serde(alias = "clientInfo")]
     pub client_info: Implementation,
+    /// Optional `_meta` envelope. Tark reads
+    /// `_meta.tark.completion.supported == true` as the client's opt-in to
+    /// the optional `_tark/inlineCompletion` extension (R8 S22).
+    #[serde(default, alias = "_meta")]
+    pub meta: Value,
+}
+
+/// Name of the optional inline-completion extension method (R8 S22).
+///
+/// The leading underscore marks it as an extension; standard ACP chat works
+/// identically whether or not either side advertises it.
+pub const COMPLETION_EXTENSION_METHOD: &str = "_tark/inlineCompletion";
+/// Version of the completion extension contract advertised in `_meta`.
+pub const COMPLETION_EXTENSION_VERSION: u32 = 1;
+
+/// True when the client's initialize `_meta` opts into the completion extension.
+pub fn client_supports_completion(meta: &Value) -> bool {
+    meta.pointer("/tark/completion/supported")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,6 +90,9 @@ pub struct SessionNewParams {
     pub mcp_servers: Vec<Value>,
 }
 
+/// Retained for protocol documentation; `session/load` is not implemented
+/// (`loadSession: false`). Kept so the wire shape stays described in code.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionLoadParams {
     #[serde(alias = "sessionId")]
@@ -121,6 +144,16 @@ pub struct InlineCompletionParams {
     #[serde(default)]
     #[serde(alias = "triggerKind")]
     pub trigger_kind: Option<String>,
+    /// Client-supplied correlation id, echoed back in `_meta` so the client
+    /// can discard stale or cancelled results (R8 S22).
+    #[serde(default)]
+    #[serde(alias = "clientRequestId")]
+    pub client_request_id: Option<String>,
+    /// Client buffer version the request applies to; echoed back for the
+    /// same stale-suppression purpose.
+    #[serde(default)]
+    #[serde(alias = "bufferVersion")]
+    pub buffer_version: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1,4 +1,11 @@
 //! LSP code action handler
+//!
+//! Read-only boundary: the returned actions carry `refactor` kinds with
+//! [`WorkspaceEdit`] *suggestions* that the client — not the server — applies.
+//! The server itself never writes files, spawns processes, or touches
+//! agent/MCP/policy state. Selection ranges use the UTF-16-aware
+//! [`Document::get_range`](super::document::Document::get_range), and the LLM
+//! call is bounded by the server-level 30s timeout (see `server.rs`).
 
 use super::document::DocumentStore;
 use crate::llm::LlmProvider;

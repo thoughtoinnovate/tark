@@ -637,10 +637,8 @@ pub async fn run_auth(provider: Option<&str>) -> Result<()> {
             }
         }
 
-        let mut next_idx = 7;
-        for (_, name) in &plugin_providers {
-            println!("  {}. {} (plugin)", next_idx, name.green());
-            next_idx += 1;
+        for (offset, (_, name)) in plugin_providers.iter().enumerate() {
+            println!("  {}. {} (plugin)", 7 + offset, name.green());
         }
 
         println!();

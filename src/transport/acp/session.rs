@@ -3,7 +3,10 @@ use crate::tools::questionnaire::InteractionSender;
 use crate::transport::acp::protocol::{BufferSummary, CursorPos, SelectionContext};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64},
+    Arc,
+};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
@@ -27,6 +30,11 @@ pub struct AcpSession {
     pub interrupt: Arc<AtomicBool>,
     pub interaction_tx: InteractionSender,
     pub request_times: Arc<Mutex<VecDeque<Instant>>>,
+    /// Completion epoch for the `_tark/inlineCompletion` extension (R8 S22).
+    ///
+    /// Bumped on `session/cancel`; responses carry the epoch they were
+    /// computed under so clients can discard stale or cancelled results.
+    pub completion_epoch: AtomicU64,
 }
 
 pub struct ActiveRequestGuard {

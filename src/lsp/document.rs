@@ -1,7 +1,80 @@
 //! Document management for the LSP server
+//!
+//! All client-supplied positions use **UTF-16 code-unit offsets**, as required by
+//! the LSP specification. The helpers in this module convert between UTF-16
+//! columns and byte/char indexes so multibyte content (e.g. `é`, `中`) and
+//! non-BMP characters (e.g. `𝄞` U+1D11E, which occupies two UTF-16 code units)
+//! map to the correct text spans (requirement R9, scenario S23).
 
 use dashmap::DashMap;
 use tower_lsp::lsp_types::*;
+
+/// Convert a UTF-16 code-unit column (as sent by LSP clients) to a byte index
+/// into `line`.
+///
+/// Out-of-range columns clamp to the end of the line. Columns that fall inside
+/// a surrogate pair resolve to the next character boundary.
+pub fn utf16_to_byte_index(line: &str, utf16_col: u32) -> usize {
+    let mut utf16 = 0u32;
+    for (byte_idx, c) in line.char_indices() {
+        if utf16 >= utf16_col {
+            return byte_idx;
+        }
+        utf16 += c.len_utf16() as u32;
+    }
+    line.len()
+}
+
+/// Convert a byte index into `line` to a UTF-16 code-unit column.
+///
+/// Out-of-range indexes clamp to the end of the line; indexes in the middle of
+/// a character clamp down to that character's start.
+///
+/// Required R9/S23 API surface; exercised by the unit tests below (no current
+/// production caller needs the inverse mapping yet).
+#[allow(dead_code)]
+pub fn byte_to_utf16_col(line: &str, byte_idx: usize) -> u32 {
+    let mut idx = byte_idx.min(line.len());
+    while idx > 0 && !line.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    line[..idx].chars().map(|c| c.len_utf16() as u32).sum()
+}
+
+/// Convert a UTF-16 code-unit column to a Unicode-scalar (`char`) index into
+/// `line`, for consumers that index by character rather than by byte.
+pub fn utf16_to_char_index(line: &str, utf16_col: u32) -> usize {
+    line[..utf16_to_byte_index(line, utf16_col)].chars().count()
+}
+
+/// Split `content` into `(byte_offset_of_line_start, line_text)` pairs.
+///
+/// Line breaks are `\n` (a trailing `\r` is stripped, matching `str::lines`);
+/// offsets always refer to the original `content` bytes.
+fn split_lines_keep_offsets(content: &str) -> Vec<(usize, &str)> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for line in content.split_inclusive('\n') {
+        let text = line.strip_suffix('\n').unwrap_or(line);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        out.push((start, text));
+        start += line.len();
+    }
+    out
+}
+
+/// Resolve an LSP position (UTF-16 column) to a byte offset into `content`.
+///
+/// Returns `None` when the line number is out of range. Columns are clamped to
+/// the end of the line by [`utf16_to_byte_index`].
+pub fn position_to_byte_offset(content: &str, position: &Position) -> Option<usize> {
+    let lines = split_lines_keep_offsets(content);
+    let (start, text) = *lines.get(position.line as usize)?;
+    Some(start + utf16_to_byte_index(text, position.character))
+}
 
 /// Manages open documents
 pub struct DocumentStore {
@@ -23,62 +96,72 @@ impl Document {
         self.content.lines().nth(line)
     }
 
-    /// Get content in a range
-    pub fn get_range(&self, range: &Range) -> Option<String> {
-        let lines: Vec<&str> = self.content.lines().collect();
-        let start_line = range.start.line as usize;
-        let end_line = range.end.line as usize;
-
-        if start_line >= lines.len() {
+    /// Resolve an LSP range (UTF-16 columns) to a byte span of [`Self::content`].
+    ///
+    /// The start line must exist; an end line past EOF is clamped to EOF so a
+    /// client asking "to the end of the document" keeps working. Returns `None`
+    /// for an out-of-range start line or an inverted range.
+    pub fn range_to_byte_span(&self, range: &Range) -> Option<(usize, usize)> {
+        let start = position_to_byte_offset(&self.content, &range.start)?;
+        let end = position_to_byte_offset(&self.content, &range.end).unwrap_or(self.content.len());
+        if end < start {
             return None;
         }
+        Some((start, end))
+    }
 
-        let end_line = end_line.min(lines.len() - 1);
-
-        if start_line == end_line {
-            // Single line range
-            let line = lines.get(start_line)?;
-            let start_char = (range.start.character as usize).min(line.len());
-            let end_char = (range.end.character as usize).min(line.len());
-            Some(line[start_char..end_char].to_string())
-        } else {
-            // Multi-line range
-            let mut result = String::new();
-
-            // First line
-            if let Some(line) = lines.get(start_line) {
-                let start_char = (range.start.character as usize).min(line.len());
-                result.push_str(&line[start_char..]);
-                result.push('\n');
+    /// Apply a batch of `textDocument/didChange` content changes **in order**.
+    ///
+    /// Each change applies to the document state produced by the previous one
+    /// (per the LSP specification); overlapping ranges are therefore resolved
+    /// sequentially and must not be collapsed to last-change-wins. A change
+    /// with `range == None` is a full-document replacement, which this server
+    /// also accepts even though it advertises incremental sync. Out-of-range
+    /// ranged edits are skipped with a warning instead of corrupting the text.
+    pub fn apply_content_changes(
+        &mut self,
+        version: i32,
+        changes: Vec<TextDocumentContentChangeEvent>,
+    ) {
+        self.version = version;
+        for change in changes {
+            match change.range {
+                None => {
+                    self.content = change.text;
+                }
+                Some(range) => match self.range_to_byte_span(&range) {
+                    Some((start, end)) => {
+                        self.content.replace_range(start..end, &change.text);
+                    }
+                    None => {
+                        tracing::warn!(
+                            uri = %self.uri,
+                            version,
+                            ?range,
+                            "ignoring out-of-range incremental edit"
+                        );
+                    }
+                },
             }
-
-            // Middle lines
-            for line in lines.iter().take(end_line).skip(start_line + 1) {
-                result.push_str(line);
-                result.push('\n');
-            }
-
-            // Last line
-            if let Some(line) = lines.get(end_line) {
-                let end_char = (range.end.character as usize).min(line.len());
-                result.push_str(&line[..end_char]);
-            }
-
-            Some(result)
         }
     }
 
-    /// Get the word at a position
+    /// Get content in a range (UTF-16 columns per the LSP specification)
+    pub fn get_range(&self, range: &Range) -> Option<String> {
+        let (start, end) = self.range_to_byte_span(range)?;
+        self.content.get(start..end).map(|s| s.to_string())
+    }
+
+    /// Get the word at a position (UTF-16 column per the LSP specification)
     pub fn get_word_at(&self, position: &Position) -> Option<String> {
         let line = self.get_line(position.line as usize)?;
-        let col = position.character as usize;
-
-        if col > line.len() {
-            return None;
-        }
+        let col = utf16_to_char_index(line, position.character);
 
         // Find word boundaries
         let chars: Vec<char> = line.chars().collect();
+        if col > chars.len() {
+            return None;
+        }
 
         // Find start of word
         let mut start = col;
@@ -99,18 +182,10 @@ impl Document {
         }
     }
 
-    /// Get position as byte offset
+    /// Get position as byte offset (UTF-16 column per the LSP specification)
     #[allow(dead_code)]
     pub fn position_to_offset(&self, position: &Position) -> Option<usize> {
-        let mut offset = 0;
-        for (i, line) in self.content.lines().enumerate() {
-            if i == position.line as usize {
-                let col = (position.character as usize).min(line.len());
-                return Some(offset + col);
-            }
-            offset += line.len() + 1; // +1 for newline
-        }
-        None
+        position_to_byte_offset(&self.content, position)
     }
 }
 
@@ -137,11 +212,7 @@ impl DocumentStore {
 
     pub fn change(&self, params: DidChangeTextDocumentParams) {
         if let Some(mut doc) = self.documents.get_mut(&params.text_document.uri) {
-            doc.version = params.text_document.version;
-            // For simplicity, we use full sync - take the last change
-            if let Some(change) = params.content_changes.into_iter().last() {
-                doc.content = change.text;
-            }
+            doc.apply_content_changes(params.text_document.version, params.content_changes);
         }
     }
 
@@ -157,5 +228,240 @@ impl DocumentStore {
 impl Default for DocumentStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `a` (1 UTF-16 unit, 1 byte), `é` (1 unit, 2 bytes), `中` (1 unit,
+    /// 3 bytes), `𝄞` U+1D11E (2 units via a surrogate pair, 4 bytes),
+    /// `z` (1 unit, 1 byte).
+    const MIXED_LINE: &str = "aé中𝄞z";
+
+    fn pos(line: u32, character: u32) -> Position {
+        Position { line, character }
+    }
+
+    fn range(sl: u32, sc: u32, el: u32, ec: u32) -> Range {
+        Range {
+            start: pos(sl, sc),
+            end: pos(el, ec),
+        }
+    }
+
+    fn doc_with(content: &str) -> Document {
+        Document {
+            uri: Url::parse("file:///test.rs").unwrap(),
+            language_id: "rust".to_string(),
+            version: 1,
+            content: content.to_string(),
+        }
+    }
+
+    fn ranged_edit(
+        sl: u32,
+        sc: u32,
+        el: u32,
+        ec: u32,
+        text: &str,
+    ) -> TextDocumentContentChangeEvent {
+        TextDocumentContentChangeEvent {
+            range: Some(range(sl, sc, el, ec)),
+            range_length: None,
+            text: text.to_string(),
+        }
+    }
+
+    fn full_edit(text: &str) -> TextDocumentContentChangeEvent {
+        TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn utf16_to_byte_index_maps_multibyte_and_non_bmp() {
+        // UTF-16 columns: a=0..1, é=1..2, 中=2..3, 𝄞=3..5, z=5..6.
+        assert_eq!(utf16_to_byte_index(MIXED_LINE, 0), 0);
+        assert_eq!(utf16_to_byte_index(MIXED_LINE, 1), 1);
+        assert_eq!(utf16_to_byte_index(MIXED_LINE, 2), 3);
+        assert_eq!(utf16_to_byte_index(MIXED_LINE, 3), 6);
+        // Column 4 is a lone low surrogate (degenerate input): it resolves
+        // forward to the next character boundary.
+        assert_eq!(utf16_to_byte_index(MIXED_LINE, 4), 10);
+    }
+
+    #[test]
+    fn utf16_surrogate_pair_boundaries() {
+        // 𝄞 starts at byte 6 and is 4 bytes long; `z` starts at byte 10.
+        assert_eq!(utf16_to_byte_index(MIXED_LINE, 3), 6);
+        assert_eq!(utf16_to_byte_index(MIXED_LINE, 5), 10);
+        assert_eq!(utf16_to_byte_index(MIXED_LINE, 6), 11);
+        // Columns past EOL clamp to the end of the line.
+        assert_eq!(utf16_to_byte_index(MIXED_LINE, 100), 11);
+        assert_eq!(utf16_to_byte_index("", 5), 0);
+    }
+
+    #[test]
+    fn byte_to_utf16_col_round_trips() {
+        assert_eq!(byte_to_utf16_col(MIXED_LINE, 0), 0);
+        assert_eq!(byte_to_utf16_col(MIXED_LINE, 1), 1);
+        assert_eq!(byte_to_utf16_col(MIXED_LINE, 3), 2);
+        assert_eq!(byte_to_utf16_col(MIXED_LINE, 6), 3);
+        assert_eq!(byte_to_utf16_col(MIXED_LINE, 10), 5);
+        assert_eq!(byte_to_utf16_col(MIXED_LINE, 11), 6);
+        // Mid-character bytes clamp down to the character start.
+        assert_eq!(byte_to_utf16_col(MIXED_LINE, 2), 1); // inside `é`
+        assert_eq!(byte_to_utf16_col(MIXED_LINE, 7), 3); // inside `𝄞`
+                                                         // Out-of-range clamps to EOL.
+        assert_eq!(byte_to_utf16_col(MIXED_LINE, 100), 6);
+    }
+
+    #[test]
+    fn utf16_positions_round_trip() {
+        // Well-formed positions round-trip. Column 4 is a lone low
+        // surrogate (degenerate input): it normalizes forward to the next
+        // character boundary instead of round-tripping.
+        for col in [0, 1, 2, 3, 5, 6u32] {
+            let byte = utf16_to_byte_index(MIXED_LINE, col);
+            assert_eq!(byte_to_utf16_col(MIXED_LINE, byte), col);
+        }
+        assert_eq!(
+            byte_to_utf16_col(MIXED_LINE, utf16_to_byte_index(MIXED_LINE, 4)),
+            5
+        );
+    }
+
+    #[test]
+    fn incremental_single_ranged_edit() {
+        let mut doc = doc_with("hello\nworld\n");
+        doc.apply_content_changes(2, vec![ranged_edit(1, 0, 1, 5, "there")]);
+        assert_eq!(doc.content, "hello\nthere\n");
+        assert_eq!(doc.version, 2);
+    }
+
+    #[test]
+    fn incremental_multiple_edits_apply_sequentially() {
+        let mut doc = doc_with("aaa\nbbb\n");
+        doc.apply_content_changes(
+            2,
+            vec![ranged_edit(0, 0, 0, 3, "xx"), ranged_edit(1, 0, 1, 3, "yy")],
+        );
+        assert_eq!(doc.content, "xx\nyy\n");
+    }
+
+    #[test]
+    fn incremental_overlapping_edits_are_not_last_wins() {
+        // Sequential application: "abcdef" -> "Xdef" -> "XYZf".
+        // A last-change-wins collapse onto the original text would yield "aYZdef".
+        let mut doc = doc_with("abcdef");
+        doc.apply_content_changes(
+            2,
+            vec![ranged_edit(0, 0, 0, 3, "X"), ranged_edit(0, 1, 0, 3, "YZ")],
+        );
+        assert_eq!(doc.content, "XYZf");
+    }
+
+    #[test]
+    fn full_replace_is_accepted_as_input() {
+        let mut doc = doc_with("old content\n");
+        doc.apply_content_changes(2, vec![full_edit("brand new")]);
+        assert_eq!(doc.content, "brand new");
+    }
+
+    #[test]
+    fn mixed_full_then_ranged_applies_to_new_content() {
+        let mut doc = doc_with("old");
+        doc.apply_content_changes(2, vec![full_edit("abcdef"), ranged_edit(0, 0, 0, 3, "X")]);
+        assert_eq!(doc.content, "Xdef");
+    }
+
+    #[test]
+    fn incremental_edit_with_multibyte_text_uses_utf16_columns() {
+        // é=1 unit, 中=1 unit: UTF-16 span (0,1)-(0,3) covers `é中`.
+        // Interpreted as bytes it would cover only `é` + the first byte of `中`.
+        let mut doc = doc_with("aé中\nok\n");
+        doc.apply_content_changes(2, vec![ranged_edit(0, 1, 0, 3, "XY")]);
+        assert_eq!(doc.content, "aXY\nok\n");
+    }
+
+    #[test]
+    fn incremental_edit_with_non_bmp_text_uses_utf16_columns() {
+        // 𝄞 occupies UTF-16 columns 0..2, so `a` is at column 2.
+        // Interpreted as bytes, column 2 would land inside 𝄞 and corrupt it.
+        let mut doc = doc_with("𝄞abc");
+        doc.apply_content_changes(2, vec![ranged_edit(0, 2, 0, 3, "Z")]);
+        assert_eq!(doc.content, "𝄞Zbc");
+    }
+
+    #[test]
+    fn out_of_range_edit_is_skipped_without_corruption() {
+        let mut doc = doc_with("hi\n");
+        doc.apply_content_changes(2, vec![ranged_edit(9, 0, 9, 2, "X")]);
+        assert_eq!(doc.content, "hi\n");
+        assert_eq!(doc.version, 2);
+    }
+
+    #[test]
+    fn get_range_uses_utf16_columns() {
+        let doc = doc_with("aé中𝄞z");
+        assert_eq!(doc.get_range(&range(0, 1, 0, 3)), Some("é中".to_string()));
+        assert_eq!(doc.get_range(&range(0, 3, 0, 5)), Some("𝄞".to_string()));
+        assert_eq!(
+            doc.get_range(&range(0, 0, 0, 6)),
+            Some(MIXED_LINE.to_string())
+        );
+        assert_eq!(doc.get_range(&range(5, 0, 5, 1)), None);
+    }
+
+    #[test]
+    fn get_word_at_uses_utf16_columns() {
+        let doc = doc_with("héllo wörld");
+        // UTF-16 column 1 is inside `héllo` (`é` is one UTF-16 unit).
+        assert_eq!(doc.get_word_at(&pos(0, 1)), Some("héllo".to_string()));
+        // UTF-16 column 7 is inside `wörld`.
+        assert_eq!(doc.get_word_at(&pos(0, 7)), Some("wörld".to_string()));
+        assert_eq!(doc.get_word_at(&pos(3, 0)), None);
+    }
+
+    #[test]
+    fn position_to_offset_uses_utf16_columns() {
+        let doc = doc_with("aé\nxy");
+        // Line 0 is `aé` (3 bytes); line 1 starts at byte 4.
+        assert_eq!(doc.position_to_offset(&pos(0, 2)), Some(3));
+        assert_eq!(doc.position_to_offset(&pos(1, 1)), Some(5));
+        assert_eq!(doc.position_to_offset(&pos(7, 0)), None);
+    }
+
+    #[test]
+    fn document_store_applies_incremental_change() {
+        use tower_lsp::lsp_types::{
+            DidChangeTextDocumentParams, DidOpenTextDocumentParams, TextDocumentItem,
+            VersionedTextDocumentIdentifier,
+        };
+
+        let store = DocumentStore::new();
+        let uri = Url::parse("file:///edit.rs").unwrap();
+        store.open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "rust".to_string(),
+                version: 1,
+                text: "let x = 1;\n".to_string(),
+            },
+        });
+        store.change(DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![ranged_edit(0, 8, 0, 9, "2")],
+        });
+        let doc = store.get(&uri).unwrap();
+        assert_eq!(doc.content, "let x = 2;\n");
+        assert_eq!(doc.version, 2);
     }
 }

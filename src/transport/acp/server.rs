@@ -56,9 +56,20 @@ pub struct AcpServer {
     next_session: AtomicU64,
     next_outbound_id: AtomicU64,
     sessions: Mutex<HashMap<String, Arc<AcpSession>>>,
-    outbound_pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, JsonRpcError>>>>,
+    /// Pending outbound requests: id -> (owning session id or None, responder).
+    /// Session binding guarantees a response can never resolve the wrong
+    /// session's interaction, and lets `session/close` fail that session's
+    /// in-flight requests instead of leaking them (R8 S21, NFR4).
+    outbound_pending: Mutex<OutboundPending>,
     writer: Arc<Mutex<tokio::io::Stdout>>,
+    /// Whether the connected client opted into the `_tark/inlineCompletion`
+    /// extension via initialize `_meta` (R8 S22). One stdio connection serves
+    /// exactly one client, so server-level state is unambiguous.
+    client_supports_completion: AtomicBool,
 }
+
+/// Pending outbound ACP requests by id.
+type OutboundPending = HashMap<u64, (Option<String>, oneshot::Sender<Result<Value, JsonRpcError>>)>;
 
 impl AcpServer {
     pub fn new(working_dir: PathBuf, config: &crate::config::Config) -> Self {
@@ -74,6 +85,7 @@ impl AcpServer {
             sessions: Mutex::new(HashMap::new()),
             outbound_pending: Mutex::new(HashMap::new()),
             writer: Arc::new(Mutex::new(tokio::io::stdout())),
+            client_supports_completion: AtomicBool::new(false),
         }
     }
 
@@ -130,10 +142,19 @@ impl AcpServer {
         .await
     }
 
-    async fn send_request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
+    async fn send_request(
+        &self,
+        method: &str,
+        session_id: Option<&str>,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         let id = self.next_outbound_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.outbound_pending.lock().await.insert(id, tx);
+        self.outbound_pending
+            .lock()
+            .await
+            .insert(id, (session_id.map(str::to_string), tx));
 
         self.send_value(json!({
             "jsonrpc": "2.0",
@@ -158,7 +179,7 @@ impl AcpServer {
         let Some(id_u64) = resp.id.as_u64() else {
             return;
         };
-        if let Some(tx) = self.outbound_pending.lock().await.remove(&id_u64) {
+        if let Some((_, tx)) = self.outbound_pending.lock().await.remove(&id_u64) {
             let payload = if let Some(err) = resp.error {
                 Err(err)
             } else {
@@ -168,16 +189,33 @@ impl AcpServer {
         }
     }
 
+    /// Fail all in-flight outbound requests owned by `session_id` (R8 S28).
+    /// Receivers observe cancellation and deny fail-closed.
+    async fn fail_session_outbound(&self, session_id: &str) {
+        let mut pending = self.outbound_pending.lock().await;
+        let owned: Vec<u64> = pending
+            .iter()
+            .filter_map(|(id, (owner, _))| {
+                if owner.as_deref() == Some(session_id) {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in owned {
+            pending.remove(&id);
+        }
+    }
+
     async fn send_json<T: Serialize>(&self, value: &T) -> Result<()> {
         let payload = serde_json::to_vec(value)?;
-        let mut writer = self.writer.lock().await;
-        framing::write_frame(&mut writer, &payload).await
+        framing::write_stdout_frame(&self.writer, &payload).await
     }
 
     async fn send_value(&self, value: Value) -> Result<()> {
         let payload = serde_json::to_vec(&value)?;
-        let mut writer = self.writer.lock().await;
-        framing::write_frame(&mut writer, &payload).await
+        framing::write_stdout_frame(&self.writer, &payload).await
     }
 
     async fn get_session(&self, session_id: &str) -> Option<Arc<AcpSession>> {
@@ -275,6 +313,13 @@ impl AcpServer {
             params.client_info.version
         );
 
+        // Record the client's opt-in to the optional completion extension.
+        // Standard chat is unaffected either way (R8 S22).
+        self.client_supports_completion.store(
+            crate::transport::acp::protocol::client_supports_completion(&params.meta),
+            Ordering::SeqCst,
+        );
+
         self.send_response(
             req_id,
             json!({
@@ -283,8 +328,14 @@ impl AcpServer {
                     "name": "tark",
                     "version": env!("CARGO_PKG_VERSION")
                 },
+                // Capabilities match observed behavior exactly (R8):
+                // session/new + prompt + streamed updates + cancel + close +
+                // set_mode + effective set_config_option(mode) +
+                // request_permission round-trip. loadSession is NOT offered
+                // (no persisted-session loading exists); MCP passthrough is
+                // NOT offered (mcpServers entries are rejected explicitly).
                 "agentCapabilities": {
-                    "loadSession": true,
+                    "loadSession": false,
                     "promptCapabilities": {
                         "image": false,
                         "audio": false,
@@ -295,9 +346,16 @@ impl AcpServer {
                         "sse": false
                     },
                     "sessionCapabilities": {}
+                },
+                "authMethods": [],
+                "_meta": {
+                    "tark": {
+                        "completion": {
+                            "method": crate::transport::acp::protocol::COMPLETION_EXTENSION_METHOD,
+                            "version": crate::transport::acp::protocol::COMPLETION_EXTENSION_VERSION,
+                        }
+                    }
                 }
-                ,
-                "authMethods": []
             }),
         )
         .await
@@ -343,6 +401,7 @@ impl AcpServer {
                     let result = self
                         .send_request(
                             "session/request_permission",
+                            Some(&session.id),
                             req,
                             Duration::from_secs(APPROVAL_TIMEOUT_SECS),
                         )
@@ -351,10 +410,59 @@ impl AcpServer {
                     let _ = responder.send(response);
                 }
                 InteractionRequest::Questionnaire { data, responder } => {
+                    // Elicitation bridge (R8 S21): a single single-select
+                    // question maps onto the permission option flow. Anything
+                    // richer (multi-question, multi-select, free text) cannot
+                    // be represented in one optionId round-trip and is
+                    // cancelled fail-closed instead of guessed.
+                    if data.questions.len() == 1 {
+                        if let crate::tools::questionnaire::QuestionType::SingleSelect {
+                            options,
+                            ..
+                        } = &data.questions[0].kind
+                        {
+                            let question_id = data.questions[0].id.clone();
+                            let req = json!({
+                                "sessionId": session.id,
+                                "toolCall": {
+                                    "toolCallId": format!(
+                                        "elicit-{}",
+                                        self.next_outbound_id.fetch_add(1, Ordering::SeqCst)
+                                    ),
+                                    "title": data.title.clone(),
+                                    "status": "pending",
+                                    "kind": "elicit",
+                                    "rawInput": data.questions[0].text.clone(),
+                                },
+                                "options": options.iter().map(|item| json!({
+                                    "optionId": item.value,
+                                    "name": item.label,
+                                    "kind": "elicit_option",
+                                })).collect::<Vec<_>>(),
+                                "_meta": {
+                                    "tark": {
+                                        "requestId": request_id.clone(),
+                                        "elicitation": true,
+                                    }
+                                }
+                            });
+                            let result = self
+                                .send_request(
+                                    "session/request_permission",
+                                    Some(&session.id),
+                                    req,
+                                    Duration::from_secs(APPROVAL_TIMEOUT_SECS),
+                                )
+                                .await;
+                            let response = map_elicitation_response(result, &question_id, options);
+                            let _ = responder.send(response);
+                            continue;
+                        }
+                    }
                     tracing::info!(
-                        "Questionnaire interaction requested for request {} ('{}') but ACP strict cutover currently supports permission requests only",
-                        request_id,
-                        data.title
+                        "Questionnaire '{}' ({} questions) cannot be represented as one ACP permission round-trip; cancelling fail-closed",
+                        data.title,
+                        data.questions.len()
                     );
                     let _ = responder.send(crate::tools::questionnaire::UserResponse::cancelled());
                 }
@@ -368,6 +476,22 @@ impl AcpServer {
         };
         let params: SessionNewParams =
             serde_json::from_value(req.params).context("Invalid params for session/new")?;
+
+        // mcpCapabilities advertises no MCP support: entries are rejected
+        // with an explicit error instead of silently dropped (R8, NFR1).
+        if !params.mcp_servers.is_empty() {
+            return self
+                .send_error_with_data(
+                    req_id,
+                    JSONRPC_INVALID_PARAMS,
+                    "session/new mcpServers is not supported: configure MCP servers via mcp/servers.toml and the `tark mcp` CLI instead",
+                    error_data(
+                        "mcp_passthrough_unsupported",
+                        format!("{} server entries rejected", params.mcp_servers.len()),
+                    ),
+                )
+                .await;
+        }
 
         let mut sessions = self.sessions.lock().await;
         if sessions.len() >= MAX_SESSIONS {
@@ -407,6 +531,10 @@ impl AcpServer {
 
         let id_num = self.next_session.fetch_add(1, Ordering::SeqCst);
         let session_id = format!("acp-{}", id_num);
+        // Share the session interrupt flag with the agent's tool registry so
+        // `session/cancel` also drops a running tool and reaps its processes.
+        let session_interrupt = Arc::new(AtomicBool::new(false));
+        agent.set_interrupt_flag(session_interrupt.clone());
         let session = Arc::new(AcpSession {
             id: session_id.clone(),
             cwd,
@@ -415,9 +543,10 @@ impl AcpServer {
             agent: Arc::new(Mutex::new(agent)),
             context: Arc::new(Mutex::new(SessionContext::default())),
             current_request: Arc::new(Mutex::new(None)),
-            interrupt: Arc::new(AtomicBool::new(false)),
+            interrupt: session_interrupt,
             interaction_tx,
             request_times: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            completion_epoch: std::sync::atomic::AtomicU64::new(0),
         });
 
         sessions.insert(session_id.clone(), Arc::clone(&session));
@@ -490,37 +619,20 @@ impl AcpServer {
                 let Some(req_id) = req.id else {
                     return Ok(());
                 };
-                let params: SessionLoadParams = serde_json::from_value(req.params)
-                    .context("Invalid params for session/load")?;
-                let Some(session) = self.get_session(&params.session_id).await else {
-                    return self
-                        .send_error_with_data(
-                            req_id,
-                            ACP_SESSION_NOT_FOUND,
-                            "Session not found",
-                            error_data("session_not_found", params.session_id),
-                        )
-                        .await;
-                };
-                let mode = {
-                    let agent = session.agent.lock().await;
-                    mode_to_str(agent.mode())
-                };
-                self.send_response(
-                    req_id,
-                    json!({
-                        "modes": {
-                            "currentModeId": mode,
-                            "availableModes": [
-                                { "id": "ask", "name": "Ask", "description": "Q&A mode" },
-                                { "id": "plan", "name": "Plan", "description": "Planning mode" },
-                                { "id": "build", "name": "Build", "description": "Implementation mode" }
-                            ]
-                        },
-                        "configOptions": []
-                    }),
-                )
-                .await
+                // loadSession is advertised as false: there is no persisted
+                // ACP session loading. This documented error (not silent
+                // reinterpretation) tells the client the remediation (R12).
+                return self
+                    .send_error_with_data(
+                        req_id,
+                        JSONRPC_METHOD_NOT_FOUND,
+                        "session/load is not supported: loadSession is false; create a session with session/new",
+                        error_data(
+                            "load_session_unsupported",
+                            "use session/new; persisted conversation import is not implemented",
+                        ),
+                    )
+                    .await;
             }
             "session/set_mode" => {
                 let Some(req_id) = req.id else {
@@ -571,7 +683,7 @@ impl AcpServer {
                 };
                 let params: SessionSetConfigOptionParams = serde_json::from_value(req.params)
                     .context("Invalid params for session/set_config_option")?;
-                let Some(_session) = self.get_session(&params.session_id).await else {
+                let Some(session) = self.get_session(&params.session_id).await else {
                     return self
                         .send_error_with_data(
                             req_id,
@@ -582,21 +694,50 @@ impl AcpServer {
                         .await;
                 };
 
-                self.send_response(
-                    req_id,
-                    json!({
-                        "configOptions": [
-                            {
-                                "id": params.config_id,
-                                "name": params.config_id,
-                                "type": "select",
-                                "currentValue": params.value,
-                                "options": []
-                            }
-                        ]
-                    }),
-                )
-                .await
+                // Only `mode` is effective at runtime (same path as
+                // session/set_mode). Provider/model are creation-time
+                // bootstrap choices; anything else is rejected with the
+                // supported set instead of echoed ineffectively (R8).
+                if params.config_id == "mode" {
+                    let mode = parse_mode(Some(&params.value))?;
+                    let mut tools = ToolRegistry::for_mode_with_interaction(
+                        session.cwd.clone(),
+                        mode,
+                        self.shell_enabled,
+                        Some(session.interaction_tx.clone()),
+                    );
+                    tools.set_tool_timeout_secs(self.tool_timeout_secs);
+                    let mut agent = session.agent.lock().await;
+                    tools.set_trust_level(agent.trust_level());
+                    agent.update_mode(tools, mode);
+                    return self
+                        .send_response(
+                            req_id,
+                            json!({
+                                "configOptions": [
+                                    {
+                                        "id": "mode",
+                                        "name": "mode",
+                                        "type": "select",
+                                        "currentValue": mode_to_str(mode),
+                                        "options": ["ask", "plan", "build"]
+                                    }
+                                ]
+                            }),
+                        )
+                        .await;
+                }
+                return self
+                    .send_error_with_data(
+                        req_id,
+                        JSONRPC_INVALID_PARAMS,
+                        format!(
+                            "Unsupported config option '{}': only 'mode' can change at runtime (provider/model are fixed at session creation; start a new session to change them)",
+                            params.config_id
+                        ),
+                        error_data("unsupported_config_option", "supported=[mode]"),
+                    )
+                    .await;
             }
             "context/update" => {
                 let Some(req_id) = req.id else {
@@ -718,12 +859,28 @@ impl AcpServer {
 
                 Ok(())
             }
-            "tark/inline_completion" => {
+            crate::transport::acp::protocol::COMPLETION_EXTENSION_METHOD => {
                 let Some(req_id) = req.id else {
                     return Ok(());
                 };
+                // Optional extension (R8 S22): clients that did not opt in via
+                // initialize `_meta` get an explicit error; standard ACP chat
+                // is unaffected.
+                if !self.client_supports_completion.load(Ordering::SeqCst) {
+                    return self
+                        .send_error_with_data(
+                            req_id,
+                            JSONRPC_METHOD_NOT_FOUND,
+                            format!(
+                                "Completion extension '{}' not negotiated: advertise {{\"_meta\":{{\"tark\":{{\"completion\":{{\"supported\":true}}}}}}}} in initialize to enable it",
+                                crate::transport::acp::protocol::COMPLETION_EXTENSION_METHOD
+                            ),
+                            error_data("extension_not_negotiated", "standard chat unaffected"),
+                        )
+                        .await;
+                }
                 let params: InlineCompletionParams = serde_json::from_value(req.params)
-                    .context("Invalid params for tark/inline_completion")?;
+                    .context("Invalid params for completion extension")?;
                 let Some(session) = self.get_session(&params.session_id).await else {
                     return self
                         .send_error_with_data(
@@ -735,6 +892,9 @@ impl AcpServer {
                         .await;
                 };
 
+                let epoch = session
+                    .completion_epoch
+                    .load(std::sync::atomic::Ordering::SeqCst);
                 let provider_impl = llm::create_provider_with_options(
                     &session.provider,
                     true,
@@ -779,11 +939,33 @@ impl AcpServer {
                             "tark": {
                                 "provider": session.provider,
                                 "model": session.model,
+                                // Echoed so the client can discard stale or
+                                // cancelled results (R8 S22).
+                                "completionEpoch": epoch,
+                                "clientRequestId": params.client_request_id,
+                                "bufferVersion": params.buffer_version,
                             }
                         }
                     }),
                 )
                 .await
+            }
+            "tark/inline_completion" => {
+                // Removed non-standard method (R8): point at the extension.
+                let Some(req_id) = req.id else {
+                    return Ok(());
+                };
+                return self
+                    .send_error_with_data(
+                        req_id,
+                        JSONRPC_METHOD_NOT_FOUND,
+                        format!(
+                            "'tark/inline_completion' was removed; use the optional '{}' extension (advertise support in initialize _meta)",
+                            crate::transport::acp::protocol::COMPLETION_EXTENSION_METHOD
+                        ),
+                        error_data("method_removed", "see initialize _meta.tark.completion"),
+                    )
+                    .await;
             }
             "session/cancel" => {
                 let req_id = req.id;
@@ -808,6 +990,10 @@ impl AcpServer {
                 if let Some(active) = current.as_ref() {
                     let _ = active;
                     session.interrupt.store(true, Ordering::SeqCst);
+                    // Invalidate in-flight completion results (R8 S22).
+                    session
+                        .completion_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     cancelled = true;
                 }
 
@@ -825,18 +1011,34 @@ impl AcpServer {
                 let params: CloseParams = serde_json::from_value(req.params)
                     .context("Invalid params for session/close")?;
                 self.sessions.lock().await.remove(&params.session_id);
+                // Fail that session's in-flight outbound requests so no
+                // interaction leaks or misattributes after close (R8 S28).
+                self.fail_session_outbound(&params.session_id).await;
                 self.send_response(req_id, json!({ "closed": true })).await
             }
             _ => {
                 if let Some(id) = req.id {
                     let method = req.method;
-                    self.send_error_with_data(
-                        id,
-                        JSONRPC_METHOD_NOT_FOUND,
-                        format!("Method '{}' not found", method),
-                        error_data("unsupported_method", method),
-                    )
-                    .await
+                    // Removed/legacy methods get documented migration errors,
+                    // never silent reinterpretation (R12).
+                    let migration = legacy_method_migration(&method);
+                    if let Some((message, detail)) = migration {
+                        self.send_error_with_data(
+                            id,
+                            JSONRPC_METHOD_NOT_FOUND,
+                            message,
+                            error_data("method_removed", detail),
+                        )
+                        .await
+                    } else {
+                        self.send_error_with_data(
+                            id,
+                            JSONRPC_METHOD_NOT_FOUND,
+                            format!("Method '{}' not found", method),
+                            error_data("unsupported_method", method),
+                        )
+                        .await
+                    }
                 } else {
                     Ok(())
                 }
@@ -1186,6 +1388,58 @@ fn map_permission_response(
     }
 }
 
+/// Map an elicitation round-trip (single single-select question asked through
+/// `session/request_permission`) back to questionnaire answers (R8 S21).
+///
+/// Anything unexpected — transport error, unparsable response, cancellation,
+/// or an option value that was not offered — cancels fail-closed.
+fn map_elicitation_response(
+    result: Result<Value>,
+    question_id: &str,
+    options: &[crate::tools::questionnaire::OptionItem],
+) -> crate::tools::questionnaire::UserResponse {
+    use crate::tools::questionnaire::{AnswerValue, UserResponse};
+    let Ok(value) = result else {
+        return UserResponse::cancelled();
+    };
+    let Ok(parsed) = serde_json::from_value::<RequestPermissionResponseResult>(value) else {
+        return UserResponse::cancelled();
+    };
+    let RequestPermissionOutcome::Selected { option_id } = parsed.outcome else {
+        return UserResponse::cancelled();
+    };
+    if !options.iter().any(|item| item.value == option_id) {
+        tracing::warn!("Elicitation returned an unoffered option; cancelling");
+        return UserResponse::cancelled();
+    }
+    let mut answers = HashMap::new();
+    answers.insert(question_id.to_string(), AnswerValue::Single(option_id));
+    UserResponse::with_answers(answers)
+}
+
+/// Migration map for removed/legacy ACP methods (R12).
+///
+/// Returns (message, detail) so callers emit a documented remediation
+/// instead of a bare "not found".
+fn legacy_method_migration(method: &str) -> Option<(String, String)> {
+    let (message, detail) = match method {
+        "session/create" | "session/send_message" => (
+            "Legacy ACP framing was removed: use 'session/new' + 'session/prompt' over newline-delimited JSON (see docs/acp/v2/MIGRATION.md)",
+            "use session/new then session/prompt",
+        ),
+        "session/versions" | "session/capabilities" | "client/capabilities" => (
+            "Client capability probing was removed: capabilities are exchanged once via 'initialize'",
+            "use initialize",
+        ),
+        "tark/inline_completion" => (
+            "tark/inline_completion was removed: use the optional '_tark/inlineCompletion' extension (advertise support in initialize _meta)",
+            "see initialize _meta.tark.completion",
+        ),
+        _ => return None,
+    };
+    Some((message.to_string(), detail.to_string()))
+}
+
 fn default_provider() -> String {
     let config = crate::config::Config::load().unwrap_or_default();
     config.llm.default_provider
@@ -1355,7 +1609,20 @@ pub async fn run_acp_stdio(cwd: Option<String>) -> Result<()> {
         let value: Value = match serde_json::from_slice(&payload) {
             Ok(v) => v,
             Err(err) => {
-                tracing::warn!("ACP parse error: {}", err);
+                // Detect the removed Content-Length envelope and explain the
+                // migration instead of logging a bare parse error (R12).
+                let text = String::from_utf8_lossy(&payload);
+                if text
+                    .trim_start()
+                    .get(..14)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("content-length"))
+                {
+                    tracing::warn!(
+                        "Legacy Content-Length framing is not supported: send newline-delimited JSON instead (see docs/acp/v2/MIGRATION.md)"
+                    );
+                } else {
+                    tracing::warn!("ACP parse error: {}", err);
+                }
                 continue;
             }
         };
@@ -1515,6 +1782,7 @@ mod tests {
                 match_type: MatchType::Prefix,
                 description: "ls".to_string(),
             }],
+            working_dir: None,
         };
 
         let response = map_permission_response(
@@ -1538,6 +1806,7 @@ mod tests {
             command: "rm -rf /tmp/foo".to_string(),
             risk_level: RiskLevel::Dangerous,
             suggested_patterns: vec![],
+            working_dir: None,
         };
 
         let response = map_permission_response(
@@ -1565,6 +1834,7 @@ mod tests {
                 match_type: MatchType::Prefix,
                 description: "echo".to_string(),
             }],
+            working_dir: None,
         };
 
         let response = map_permission_response(
@@ -1592,5 +1862,78 @@ mod tests {
         let payload = prompt_accept_result("req-42");
         assert_eq!(payload["accepted"], json!(true));
         assert_eq!(payload["requestId"], json!("req-42"));
+    }
+
+    #[test]
+    fn completion_extension_method_is_underscore_prefixed() {
+        // R8 S22: exactly one documented optional extension, `_`-prefixed.
+        assert!(
+            crate::transport::acp::protocol::COMPLETION_EXTENSION_METHOD.starts_with('_'),
+            "extension method must start with '_'"
+        );
+    }
+
+    #[test]
+    fn client_completion_opt_in_parsed_from_meta() {
+        use crate::transport::acp::protocol::client_supports_completion;
+        assert!(client_supports_completion(
+            &json!({"tark": {"completion": {"supported": true}}})
+        ));
+        assert!(!client_supports_completion(
+            &json!({"tark": {"completion": {"supported": false}}})
+        ));
+        assert!(!client_supports_completion(&json!({})));
+        assert!(!client_supports_completion(&json!(null)));
+    }
+
+    #[test]
+    fn elicitation_maps_offered_option_to_answer() {
+        use crate::tools::questionnaire::{AnswerValue, OptionItem};
+        let options = vec![
+            OptionItem {
+                value: "a".to_string(),
+                label: "Option A".to_string(),
+            },
+            OptionItem {
+                value: "b".to_string(),
+                label: "Option B".to_string(),
+            },
+        ];
+        let response = map_elicitation_response(
+            Ok(json!({"outcome": {"outcome": "selected", "optionId": "b"}})),
+            "q1",
+            &options,
+        );
+        assert!(!response.cancelled);
+        assert!(matches!(
+            response.answers.get("q1"),
+            Some(AnswerValue::Single(v)) if v == "b"
+        ));
+    }
+
+    #[test]
+    fn elicitation_rejects_unoffered_option_and_errors() {
+        use crate::tools::questionnaire::OptionItem;
+        let options = vec![OptionItem {
+            value: "a".to_string(),
+            label: "Option A".to_string(),
+        }];
+        // Unoffered value -> cancelled fail-closed.
+        let response = map_elicitation_response(
+            Ok(json!({"outcome": {"outcome": "selected", "optionId": "evil"}})),
+            "q1",
+            &options,
+        );
+        assert!(response.cancelled);
+        // Transport error -> cancelled.
+        let response = map_elicitation_response(Err(anyhow::anyhow!("timeout")), "q1", &options);
+        assert!(response.cancelled);
+        // Explicit cancellation -> cancelled.
+        let response = map_elicitation_response(
+            Ok(json!({"outcome": {"outcome": "cancelled"}})),
+            "q1",
+            &options,
+        );
+        assert!(response.cancelled);
     }
 }
