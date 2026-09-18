@@ -1025,6 +1025,9 @@ impl ChatAgent {
 
     /// Update the agent's mode and tools while preserving conversation history
     pub fn update_mode(&mut self, tools: ToolRegistry, mode: AgentMode) {
+        let mut tools = tools;
+        // Preserve the shared interrupt flag across registry replacement.
+        tools.set_interrupt_flag(self.tools.interrupt_handle());
         let tool_names: Vec<_> = tools
             .definitions_for_mode()
             .iter()
@@ -1083,6 +1086,15 @@ impl ChatAgent {
     /// This ensures approval patterns are associated with the correct session.
     pub fn set_session_id(&mut self, session_id: String) {
         self.tools.set_session_id(session_id);
+    }
+
+    /// Share the agent/UI-owned interrupt flag with the tool registry (R2 S5).
+    ///
+    /// The same `Arc` should back the `interrupt_check` closures passed to
+    /// the chat loop so a user cancel during tool execution is honored
+    /// within ~50ms and running processes are reaped.
+    pub fn set_interrupt_flag(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
+        self.tools.set_interrupt_flag(flag);
     }
 
     /// List session approval patterns (for policy modal)

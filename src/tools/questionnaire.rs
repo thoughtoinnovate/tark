@@ -188,6 +188,10 @@ pub struct ApprovalRequest {
     pub risk_level: RiskLevel,
     /// Suggested patterns user can approve
     pub suggested_patterns: Vec<SuggestedPattern>,
+    /// Effective working directory for process-launching tools (R2).
+    /// Shown to the approver alongside the command. `None` for tools
+    /// without a process working directory.
+    pub working_dir: Option<String>,
 }
 
 /// A suggested pattern for approval

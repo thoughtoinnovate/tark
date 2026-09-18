@@ -2789,6 +2789,9 @@ fn format_approval_for_remote(request: &ApprovalRequest) -> String {
     let mut lines = Vec::new();
     lines.push(format!("Approval needed: {}", request.tool));
     lines.push(format!("Command: {}", request.command));
+    if let Some(ref cwd) = request.working_dir {
+        lines.push(format!("Working directory: {}", cwd));
+    }
     lines.push(format!("Risk: {:?}", request.risk_level));
     lines.push("Reply with: y/1 (approve once), s/2 (approve session), p/3 (approve always), n/4 (deny), N/5 (deny always).".to_string());
     lines.join("\n")

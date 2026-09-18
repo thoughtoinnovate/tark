@@ -241,8 +241,12 @@ impl ToolOrchestrator {
 
         // Execute each tool
         for call in limited_calls {
-            // Notify UI immediately that the tool is starting (so the user sees progress)
-            let args_preview = serde_json::to_string(&call.arguments).unwrap_or_default();
+            // Notify UI immediately that the tool is starting (so the user sees progress).
+            // Arguments are redacted for display: credential values must not
+            // reach UI history, traces, or mirrors (R3 S6).
+            let args_preview = crate::debug_logger::redact_secrets_text(
+                &serde_json::to_string(&call.arguments).unwrap_or_default(),
+            );
             on_tool_call(call.name.clone(), args_preview);
 
             // Yield to allow the UI to render the "tool started" state before execution
@@ -299,9 +303,12 @@ impl ToolOrchestrator {
             }
 
             // Notify UI
-            // Pass full tool output to UI so expanding the tool block shows real content.
-            // The UI will truncate for the collapsed preview.
-            on_tool_complete(call.name.clone(), result.output.clone(), result.success);
+            // Pass tool output to UI so expanding the tool block shows real content.
+            // The UI will truncate for the collapsed preview. Secrets are
+            // redacted from what the UI retains (R3 S6); the agent context
+            // below keeps its own sanitized copy for function.
+            let ui_output = crate::debug_logger::redact_secrets_text(&result.output);
+            on_tool_complete(call.name.clone(), ui_output, result.success);
 
             // Add to context
             self.context.add_tool_result(
@@ -310,7 +317,8 @@ impl ToolOrchestrator {
             );
 
             // Log for response
-            let preview = truncate_preview(&result.output, 200);
+            let preview =
+                crate::debug_logger::redact_secrets_text(&truncate_preview(&result.output, 200));
             state.log_tool_call(call, preview);
         }
 

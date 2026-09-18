@@ -408,6 +408,9 @@ impl PolicyEngine {
     /// Log approval decision for audit
     pub fn log_decision(&self, entry: AuditEntry) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+        // Never persist credential values in the audit log (R3 S6); the
+        // redacted command retains enough context to diagnose failures.
+        let command = crate::debug_logger::redact_secrets_text(&entry.command);
 
         conn.execute(
             "INSERT INTO approval_audit_log (timestamp, tool_id, command, classification_id, mode_id, trust_id, decision, matched_pattern_id, session_id, working_directory)
@@ -415,7 +418,7 @@ impl PolicyEngine {
             (
                 &entry.timestamp,
                 &entry.tool_id,
-                &entry.command,
+                &command,
                 &entry.classification_id,
                 &entry.mode_id,
                 &entry.trust_id,

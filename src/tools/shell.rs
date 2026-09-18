@@ -9,7 +9,14 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(not(unix))]
 use tokio::process::Command;
+
+/// Maximum bytes retained from a child process (stdout+stderr combined).
+/// Exceeding this kills the process and reports truncation (R2: output bounds).
+pub const MAX_CHILD_OUTPUT_BYTES: usize = 256 * 1024;
+/// Maximum lines retained from a child process.
+pub const MAX_CHILD_OUTPUT_LINES: usize = 2000;
 
 /// Dangerous command patterns that should be blocked
 const DANGEROUS_PATTERNS: &[&str] = &[
@@ -124,6 +131,83 @@ fn is_multiple_of_50(value: usize) -> bool {
     value % 50 == 0
 }
 
+/// Guard that kills a spawned process *group* when dropped.
+///
+/// The child is started as a process-group leader (`setsid`); dropping this
+/// guard (timeout, user interrupt via the registry watcher, runtime shutdown)
+/// sends `SIGKILL` to the whole group so descendants cannot outlive the tool
+/// call (R2 S5). Firing is best-effort and idempotent. Disarm promptly once
+/// the child is reaped so a recycled group id is never signalled.
+struct ProcessGroupGuard {
+    #[cfg(unix)]
+    pgid: i32,
+    disarmed: bool,
+}
+
+impl ProcessGroupGuard {
+    fn new(#[cfg(unix)] pgid: i32, #[cfg(not(unix))] _pgid: i32) -> Self {
+        Self {
+            #[cfg(unix)]
+            pgid,
+            disarmed: false,
+        }
+    }
+
+    /// The child exited on its own; do not kill.
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+
+    /// Kill the group now (e.g. output bound exceeded). Best-effort.
+    fn kill_group(&self) {
+        #[cfg(unix)]
+        {
+            if !self.disarmed && self.pgid > 0 {
+                // Negative pid targets the process group.
+                unsafe {
+                    libc::killpg(self.pgid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        self.kill_group();
+    }
+}
+
+/// Spawn `shell -c command` as a process-group leader (Unix `setsid`) so the
+/// whole tree can be reaped on timeout/cancel via [`ProcessGroupGuard`].
+fn spawn_grouped(
+    shell: &str,
+    shell_args: &[&str],
+    command: &str,
+    working_dir: &std::path::Path,
+) -> std::io::Result<std::process::Child> {
+    let mut std_cmd = std::process::Command::new(shell);
+    std_cmd.args(shell_args);
+    std_cmd.arg(command);
+    std_cmd.current_dir(working_dir);
+    std_cmd.stdout(Stdio::piped());
+    std_cmd.stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid() is async-signal-safe; the closure does nothing else.
+        unsafe {
+            std_cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    std_cmd.spawn()
+}
+
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
@@ -194,7 +278,12 @@ impl Tool for ShellTool {
             },
             None => self.cap.primary().to_path_buf(),
         };
-        let timeout = std::time::Duration::from_secs(params.timeout_secs.unwrap_or(60));
+        let timeout = std::time::Duration::from_secs(
+            params
+                .timeout_secs
+                .unwrap_or(60)
+                .clamp(1, super::MAX_TOOL_TIMEOUT_SECS),
+        );
 
         // Determine shell based on OS (prefer bash/Powershell, fallback to sh/cmd)
         // Note: We use -c instead of -lc to avoid slow login shell initialization
@@ -238,22 +327,39 @@ impl Tool for ShellTool {
 
         // Use spawn() with incremental reading to allow the TUI event loop to remain responsive
         let result = tokio::time::timeout(timeout, async {
-            let mut child = Command::new(shell)
-                .args(shell_args)
-                .arg(&params.command)
-                .current_dir(&working_dir)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?;
+            let mut std_child = spawn_grouped(shell, shell_args, &params.command, &working_dir)?;
+            // Dropping `group_guard` kills the whole process group (R2 S5).
+            // It fires on timeout, registry interrupt, or runtime abort.
+            // Disarm promptly once the child is reaped (see below).
+            let mut group_guard = ProcessGroupGuard::new(std_child.id() as i32);
 
-            let stdout = child.stdout.take().expect("stdout was piped");
-            let stderr = child.stderr.take().expect("stderr was piped");
-
-            let mut stdout_reader = BufReader::new(stdout).lines();
-            let mut stderr_reader = BufReader::new(stderr).lines();
+            let stdout = std_child.stdout.take().expect("stdout was piped");
+            let stderr = std_child.stderr.take().expect("stderr was piped");
+            let mut stdout_reader =
+                BufReader::new(tokio::process::ChildStdout::from_std(stdout)?).lines();
+            let mut stderr_reader =
+                BufReader::new(tokio::process::ChildStderr::from_std(stderr)?).lines();
 
             let mut stdout_lines: Vec<String> = Vec::new();
             let mut stderr_lines: Vec<String> = Vec::new();
+            let mut output_bytes: usize = 0;
+            let mut truncated = false;
+
+            // Push a line unless a bound is hit; returns false when full.
+            macro_rules! push_line {
+                ($lines:expr, $line:expr) => {{
+                    output_bytes += $line.len() + 1;
+                    if $lines.len() >= MAX_CHILD_OUTPUT_LINES
+                        || output_bytes > MAX_CHILD_OUTPUT_BYTES
+                    {
+                        truncated = true;
+                        false
+                    } else {
+                        $lines.push($line);
+                        true
+                    }
+                }};
+            }
 
             // Read stdout and stderr concurrently using select
             loop {
@@ -262,11 +368,17 @@ impl Tool for ShellTool {
 
                     line = stdout_reader.next_line() => {
                         match line {
-                            Ok(Some(l)) => stdout_lines.push(l),
+                            Ok(Some(l)) => {
+                                if !push_line!(stdout_lines, l) {
+                                    break;
+                                }
+                            }
                             Ok(None) => {
                                 // stdout closed, drain stderr and wait for process
                                 while let Ok(Some(l)) = stderr_reader.next_line().await {
-                                    stderr_lines.push(l);
+                                    if !push_line!(stderr_lines, l) {
+                                        break;
+                                    }
                                     // Yield periodically to keep TUI responsive
                         if is_multiple_of_50(stderr_lines.len()) {
                                         tokio::task::yield_now().await;
@@ -282,7 +394,11 @@ impl Tool for ShellTool {
                     }
                     line = stderr_reader.next_line() => {
                         match line {
-                            Ok(Some(l)) => stderr_lines.push(l),
+                            Ok(Some(l)) => {
+                                if !push_line!(stderr_lines, l) {
+                                    break;
+                                }
+                            }
                             Ok(None) => {} // stderr closed, continue reading stdout
                             Err(e) => {
                                 tracing::warn!("Error reading stderr: {}", e);
@@ -297,13 +413,27 @@ impl Tool for ShellTool {
                 }
             }
 
-            let status = child.wait().await?;
-            Ok::<_, std::io::Error>((status, stdout_lines, stderr_lines))
+            if truncated {
+                // Stop the flood at the source instead of retaining it.
+                group_guard.kill_group();
+                let _ = std_child.kill();
+            }
+            // Reap the child without blocking the executor.
+            let status = loop {
+                if let Some(status) = std_child.try_wait()? {
+                    // Reaped: disarm before the guard drops so a recycled
+                    // group id is never signalled.
+                    group_guard.disarm();
+                    break status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            };
+            Ok::<_, std::io::Error>((status, stdout_lines, stderr_lines, truncated))
         })
         .await;
 
         match result {
-            Ok(Ok((status, stdout_lines, stderr_lines))) => {
+            Ok(Ok((status, stdout_lines, stderr_lines, truncated))) => {
                 let mut result_text = String::new();
 
                 if !stdout_lines.is_empty() {
@@ -315,6 +445,13 @@ impl Tool for ShellTool {
                         result_text.push_str("\n--- stderr ---\n");
                     }
                     result_text.push_str(&stderr_lines.join("\n"));
+                }
+
+                if truncated {
+                    result_text.push_str(&format!(
+                        "\n... [output truncated at {} lines / {} bytes; process stopped]",
+                        MAX_CHILD_OUTPUT_LINES, MAX_CHILD_OUTPUT_BYTES
+                    ));
                 }
 
                 if status.success() {
@@ -333,7 +470,7 @@ impl Tool for ShellTool {
                 e
             ))),
             Err(_) => Ok(ToolResult::error(format!(
-                "Command timed out after {} seconds",
+                "Command timed out after {} seconds (process and descendants stopped)",
                 timeout.as_secs()
             ))),
         }

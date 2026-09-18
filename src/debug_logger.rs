@@ -402,6 +402,82 @@ impl Default for SensitiveDataRedactor {
     }
 }
 
+static GLOBAL_REDACTOR: std::sync::OnceLock<SensitiveDataRedactor> = std::sync::OnceLock::new();
+
+/// Redact secret-looking values from free text (R3 S6).
+///
+/// Covers API-key shapes, bearer tokens, GitHub tokens, and
+/// `key=value` assignments. Used for tracing output, UI previews, and
+/// audit rows — anywhere a credential value must never appear while
+/// non-secret context is preserved for diagnosis.
+pub fn redact_secrets_text(input: &str) -> String {
+    GLOBAL_REDACTOR
+        .get_or_init(SensitiveDataRedactor::new)
+        .redact(input)
+}
+
+/// An `io::Write` adapter that redacts secret-looking values line-wise
+/// before forwarding to the inner writer (R3 S6: no tokens in traces).
+pub struct RedactingWriter<W: std::io::Write> {
+    inner: W,
+    pending: Vec<u8>,
+}
+
+impl<W: std::io::Write> RedactingWriter<W> {
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for RedactingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.pending.extend_from_slice(buf);
+        // Flush complete lines; hold a partial tail for the next write.
+        while let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=pos).collect();
+            let text = String::from_utf8_lossy(&line);
+            let redacted = redact_secrets_text(&text);
+            self.inner.write_all(redacted.as_bytes())?;
+        }
+        // Bound the held tail so a line-less flood cannot grow unbounded.
+        const MAX_TAIL: usize = 64 * 1024;
+        if self.pending.len() > MAX_TAIL {
+            let tail = std::mem::take(&mut self.pending);
+            let text = String::from_utf8_lossy(&tail);
+            let redacted = redact_secrets_text(&text);
+            self.inner.write_all(redacted.as_bytes())?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.pending.is_empty() {
+            let tail = std::mem::take(&mut self.pending);
+            let text = String::from_utf8_lossy(&tail);
+            let redacted = redact_secrets_text(&text);
+            self.inner.write_all(redacted.as_bytes())?;
+        }
+        self.inner.flush()
+    }
+}
+
+/// `MakeWriter` producing redacting stderr writers for the tracing `fmt`
+/// layer, so `tracing::{debug,info,…}` output can never leak credential
+/// values even if a call site logs them (R3 S6).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RedactedStderr;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RedactedStderr {
+    type Writer = RedactingWriter<std::io::Stderr>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactingWriter::new(std::io::stderr())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

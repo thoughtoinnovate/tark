@@ -114,13 +114,16 @@ impl WorkspaceCap {
         let normalized = Self::lexical_normalize(&joined);
 
         // Fast path: the normalized path already exists — canonicalize it
-        // (resolves symlinks) and enforce containment.
+        // (resolves symlinks) and enforce containment. Symlink detection
+        // runs on the pre-canonical path: the canonical target of an escape
+        // is an ordinary outside path, while the user-supplied path holds
+        // the symlink that performed the escape.
         if normalized.exists() {
             let canonical = std::fs::canonicalize(&normalized).map_err(|_| WorkspaceDenied {
                 input: input.to_string(),
                 reason: "unresolvable",
             })?;
-            return self.enforce_containment(&canonical, input);
+            return self.enforce_containment(&canonical, &normalized, input);
         }
 
         // Creation path: find the closest existing ancestor, canonicalize it,
@@ -179,7 +182,15 @@ impl WorkspaceCap {
         for component in remainder.iter().rev() {
             resolved.push(component);
         }
-        self.enforce_containment_lexical(&resolved, input)
+        // `resolved` starts from a verified canonical ancestor plus inert file
+        // name components, so a lexical containment check is sufficient here.
+        if self.is_within_canonical(&resolved) {
+            return Ok(resolved);
+        }
+        Err(WorkspaceDenied {
+            input: input.to_string(),
+            reason: "escape",
+        })
     }
 
     /// Workspace-relative display for a resolved path (S1 reporting).
@@ -198,6 +209,7 @@ impl WorkspaceCap {
     fn enforce_containment(
         &self,
         canonical: &Path,
+        pre_canonical: &Path,
         input: &str,
     ) -> Result<PathBuf, WorkspaceDenied> {
         if self.is_within_canonical(canonical) {
@@ -205,27 +217,11 @@ impl WorkspaceCap {
         }
         Err(WorkspaceDenied {
             input: input.to_string(),
-            reason: if Self::is_symlink_escape(canonical) {
+            reason: if Self::is_symlink_escape(pre_canonical) {
                 "symlink-escape"
             } else {
                 "escape"
             },
-        })
-    }
-
-    fn enforce_containment_lexical(
-        &self,
-        resolved: &Path,
-        input: &str,
-    ) -> Result<PathBuf, WorkspaceDenied> {
-        // `resolved` starts from a verified canonical ancestor plus inert file
-        // name components, so a lexical check is sufficient here.
-        if self.is_within_canonical(resolved) {
-            return Ok(resolved.to_path_buf());
-        }
-        Err(WorkspaceDenied {
-            input: input.to_string(),
-            reason: "escape",
         })
     }
 

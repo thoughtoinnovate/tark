@@ -70,7 +70,10 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -169,6 +172,14 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// Upper bound for any single tool execution, including LLM-requested
+/// `timeout_secs` overrides (R2: execution-time bounds are mandatory and
+/// must not be LLM-controlled without a cap).
+pub const MAX_TOOL_TIMEOUT_SECS: u64 = 300;
+
+/// How often a running tool is polled for user-initiated cancellation (R2).
+const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Registry of available tools
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -183,6 +194,13 @@ pub struct ToolRegistry {
     trust_level: crate::policy::types::TrustId,
     /// Interaction channel for approval requests
     interaction_tx: Option<InteractionSender>,
+    /// Shared user-interrupt flag (R2 S5).
+    ///
+    /// When set while a tool is executing, the running tool future is
+    /// dropped (which triggers process-group kill guards in shell tools)
+    /// and a cancellation error is returned. The flag is owned by the
+    /// agent/UI layer; the registry only reads it.
+    interrupt: Arc<AtomicBool>,
 }
 
 impl ToolRegistry {
@@ -196,6 +214,7 @@ impl ToolRegistry {
             session_id: uuid::Uuid::new_v4().to_string(),
             trust_level: crate::policy::types::TrustId::default(),
             interaction_tx: None,
+            interrupt: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -275,6 +294,7 @@ impl ToolRegistry {
             session_id: uuid::Uuid::new_v4().to_string(),
             trust_level: crate::policy::types::TrustId::default(),
             interaction_tx: interaction_tx.clone(),
+            interrupt: Arc::new(AtomicBool::new(false)),
         };
 
         tracing::debug!("Creating tool registry for mode: {:?}", mode);
@@ -440,13 +460,13 @@ impl ToolRegistry {
             return Ok(ToolResult::error(format!("Unknown tool: {}", name)));
         };
 
-        let timeout_secs = self
-            .tool_timeout_override(&params)
-            .unwrap_or(self.tool_timeout_secs);
+        let timeout_secs = self.effective_timeout_secs(&params);
         let timeout_duration = Duration::from_secs(timeout_secs);
 
         // Build command string for display/pattern matching
         let command = self.build_command_string(name, &params);
+        // Effective cwd shown alongside the command when approval is required (R2).
+        let effective_cwd = self.effective_cwd(name, &params);
 
         // Check approval with PolicyEngine
         if let Some(ref engine) = self.policy_engine {
@@ -503,6 +523,7 @@ impl ToolRegistry {
                                 command: command.clone(),
                                 risk_level: tool.risk_level(),
                                 suggested_patterns,
+                                working_dir: effective_cwd.clone(),
                             };
 
                             // Send request to UI
@@ -589,15 +610,28 @@ impl ToolRegistry {
             }
         }
 
-        // Wrap tool execution with timeout + panic recovery to prevent crashes
-        match timeout(
-            timeout_duration,
-            AssertUnwindSafe(tool.execute(params)).catch_unwind(),
-        )
-        .await
-        {
-            Ok(Ok(result)) => result,
-            Ok(Err(panic_info)) => {
+        // Wrap tool execution with timeout + panic recovery to prevent crashes.
+        // A pending user interrupt drops the tool future: shell tools hold a
+        // process-group kill guard so the child and its descendants are
+        // reaped instead of orphaned (R2 S5).
+        let interrupt = self.interrupt.clone();
+        let execution = AssertUnwindSafe(tool.execute(params)).catch_unwind();
+        let watched = async move {
+            tokio::select! {
+                result = execution => Some(result),
+                _ = async {
+                    loop {
+                        if interrupt.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        tokio::time::sleep(INTERRUPT_POLL_INTERVAL).await;
+                    }
+                } => None,
+            }
+        };
+        match timeout(timeout_duration, watched).await {
+            Ok(Some(Ok(result))) => result,
+            Ok(Some(Err(panic_info))) => {
                 // Extract panic message
                 let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
                     (*s).to_string()
@@ -616,6 +650,13 @@ impl ToolRegistry {
                 "Tool '{}' timed out after {} seconds",
                 name, timeout_secs
             ))),
+            Ok(None) => {
+                tracing::info!("Tool '{}' cancelled by user interrupt", name);
+                Ok(ToolResult::error(format!(
+                    "Tool '{}' cancelled: operation interrupted by user",
+                    name
+                )))
+            }
         }
     }
 
@@ -716,6 +757,26 @@ impl ToolRegistry {
         tracing::debug!("ToolRegistry session_id updated to: {}", self.session_id);
     }
 
+    /// Share the agent/UI-owned interrupt flag with this registry (R2 S5).
+    ///
+    /// The same `Arc` should back the `interrupt_check` closures used by the
+    /// agent loop so a user cancel is visible to a running tool within
+    /// `INTERRUPT_POLL_INTERVAL`.
+    pub fn set_interrupt_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.interrupt = flag;
+    }
+
+    /// Signal cancellation of the currently running tool, if any.
+    pub fn request_interrupt(&self) {
+        self.interrupt.store(true, Ordering::SeqCst);
+    }
+
+    /// Access the shared interrupt flag (e.g. to preserve it across
+    /// registry replacement on mode switch).
+    pub fn interrupt_handle(&self) -> Arc<AtomicBool> {
+        self.interrupt.clone()
+    }
+
     /// Get the current session ID
     pub fn session_id(&self) -> &str {
         &self.session_id
@@ -728,6 +789,40 @@ impl ToolRegistry {
 
     fn tool_timeout_override(&self, params: &Value) -> Option<u64> {
         params.get("timeout_secs").and_then(|v| v.as_u64())
+    }
+
+    /// Effective timeout for one tool execution, clamped to
+    /// [`MAX_TOOL_TIMEOUT_SECS`] so LLM-supplied overrides cannot request
+    /// unbounded runs (R2).
+    fn effective_timeout_secs(&self, params: &Value) -> u64 {
+        let requested = self
+            .tool_timeout_override(params)
+            .unwrap_or(self.tool_timeout_secs);
+        // Clamp into [1, MAX]; a zero/negative request can never mean "run forever".
+        requested.clamp(1, MAX_TOOL_TIMEOUT_SECS)
+    }
+
+    /// Effective working directory to display when approval is required (R2).
+    ///
+    /// For process-launching tools this is the directory the child would
+    /// inherit: the tool's `working_dir` argument when it resolves inside
+    /// the workspace, otherwise the registry working directory. Returns
+    /// `None` for tools without a process working directory.
+    fn effective_cwd(&self, name: &str, params: &Value) -> Option<String> {
+        if name != "shell" {
+            return None;
+        }
+        if let Some(dir) = params.get("working_dir").and_then(|v| v.as_str()) {
+            // Resolve lexically only for display; the tool itself enforces
+            // WorkspaceCap containment at execution time.
+            let candidate = if std::path::Path::new(dir).is_absolute() {
+                PathBuf::from(dir)
+            } else {
+                self.working_dir.join(dir)
+            };
+            return Some(candidate.display().to_string());
+        }
+        Some(self.working_dir.display().to_string())
     }
 
     fn augment_tool_definition(mut def: ToolDefinition) -> ToolDefinition {
@@ -907,5 +1002,56 @@ mod tests {
             .await
             .unwrap();
         assert!(result.success);
+    }
+
+    #[test]
+    fn tool_timeout_override_is_clamped() {
+        // R2: LLM-supplied timeouts must be bounded.
+        let registry = ToolRegistry::new(PathBuf::from("."));
+        assert_eq!(
+            registry.effective_timeout_secs(&json!({ "timeout_secs": 1_000_000 })),
+            MAX_TOOL_TIMEOUT_SECS
+        );
+        assert_eq!(
+            registry.effective_timeout_secs(&json!({ "timeout_secs": 0 })),
+            1
+        );
+        assert_eq!(registry.effective_timeout_secs(&json!({})), 60);
+        assert_eq!(
+            registry.effective_timeout_secs(&json!({ "timeout_secs": 10 })),
+            10
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_registry_honors_interrupt_mid_execution() {
+        // R2 S5: a user interrupt during tool execution cancels the run.
+        let mut registry = ToolRegistry::new(PathBuf::from("."));
+        registry.register(Arc::new(SleepTool {
+            name: "sleep",
+            duration: Duration::from_secs(30),
+        }));
+        let flag = Arc::new(AtomicBool::new(false));
+        registry.set_interrupt_flag(flag.clone());
+
+        let handle =
+            tokio::spawn(async move { registry.execute("sleep", json!({})).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        flag.store(true, Ordering::SeqCst);
+
+        let result = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("cancelled tool must return promptly")
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn tool_registry_interrupt_flag_survives_mode_switch() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut registry = ToolRegistry::new(PathBuf::from("."));
+        registry.set_interrupt_flag(flag.clone());
+        assert!(Arc::ptr_eq(&registry.interrupt_handle(), &flag));
     }
 }
