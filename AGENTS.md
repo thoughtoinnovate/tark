@@ -62,6 +62,7 @@ tark/
 │   │   ├── controller.rs        # Event loop coordinator
 │   │   ├── renderer.rs          # UiRenderer implementation
 │   │   ├── theme.rs             # Theme system (6 presets)
+│   │   ├── terminal_guard.rs    # Terminal restore guard + panic hook
 │   │   ├── modals/              # Modal widgets
 │   │   │   ├── approval_modal.rs
 │   │   │   ├── trust_modal.rs
@@ -97,6 +98,7 @@ tark/
 │   ├── tools/                   # Agent tools with risk-based categorization
 │   │   ├── mod.rs               # Tool registry with mode-based composition
 │   │   ├── risk.rs              # RiskLevel and TrustLevel enums
+│   │   ├── workspace.rs          # WorkspaceCap confinement (R1)
 │   │   ├── approval.rs          # ApprovalGate with pattern matching
 │   │   ├── questionnaire.rs     # User interaction requests
 │   │   ├── builtin/             # Built-in native tools
@@ -110,11 +112,13 @@ tark/
 │   │   ├── client.rs            # McpServerManager
 │   │   ├── transport.rs         # STDIO transport
 │   │   ├── wrapper.rs           # Tool wrapper adapters
+│   │   ├── trust.rs              # Informed-trust store for stdio launches
 │   │   └── types.rs             # MCP protocol types
 │   └── transport/               # HTTP server, ACP stdio, and CLI
 │       ├── acp.rs               # ACP v1 (newline-delimited JSON stdio)
 │       ├── cli.rs               # CLI commands
-│       └── dashboard.rs         # Usage dashboard HTML
+│       ├── dashboard.rs         # Usage dashboard HTML
+│       └── mcp_cli.rs             # `tark mcp` lifecycle commands
 │
 ├── ../plugins/tark/editors/neovim/  # Extracted Neovim editor adapter plugin
 │   ├── lua/tark/*.lua               # Neovim runtime modules
@@ -338,6 +342,7 @@ For TUI features, you MUST:
 | `src/tui_new/controller.rs` | Event loop coordinator | Changing event handling |
 | `src/tui_new/renderer.rs` | Key-to-command mapping, rendering | Adding keybindings |
 | `src/tui_new/theme.rs` | Theme presets and colors | Adding themes |
+| `src/tui_new/terminal_guard.rs` | Terminal restore guard + panic hook | Changing terminal cleanup |
 | `src/tui_new/widgets/*.rs` | UI widgets | Modifying widgets |
 | `src/tui_new/modals/*.rs` | Modal dialogs | Adding modals |
 
@@ -347,6 +352,9 @@ For TUI features, you MUST:
 |------|---------|----------------|
 | `src/agent/chat.rs` | Chat agent logic | Adding agent features |
 | `src/tools/mod.rs` | Tool registry & mode composition | Adding/modifying tools |
+| `src/tools/workspace.rs` | WorkspaceCap confinement (R1) | Changing path authorization |
+| `src/tools/shell.rs` | Shell execution + process-group kill | Changing process controls |
+| `src/tools/readonly/safe_shell.rs` | Shell-free allowlisted exec (Ask/Plan) | Changing safe-mode commands |
 | `src/tools/risk.rs` | RiskLevel and TrustLevel enums | Changing risk categories |
 | `src/tools/approval.rs` | ApprovalGate with pattern matching | Changing approval flow |
 | `src/tools/questionnaire.rs` | User interaction requests | Adding question types |
@@ -358,9 +366,11 @@ For TUI features, you MUST:
 | File | Purpose | When to Modify |
 |------|---------|----------------|
 | `src/mcp/client.rs` | McpServerManager, connection handling | Adding MCP features |
-| `src/mcp/transport.rs` | STDIO transport for MCP servers | Changing communication |
+| `src/mcp/transport.rs` | STDIO + Streamable HTTP transports | Changing communication |
+| `src/mcp/trust.rs` | Informed-trust store for stdio launches | Changing trust gating |
 | `src/mcp/wrapper.rs` | McpToolWrapper (adapts MCP → Tool) | Changing tool adaptation |
 | `src/mcp/types.rs` | MCP protocol data structures | Changing MCP types |
+| `src/transport/mcp_cli.rs` | `tark mcp` lifecycle commands | Changing MCP CLI |
 | `src/storage/mod.rs` | McpServer config (servers.toml) | Changing MCP configuration |
 | `examples/tark-config/mcp/servers.toml` | Example MCP server configs | Adding examples |
 

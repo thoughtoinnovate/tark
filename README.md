@@ -397,6 +397,14 @@ tark usage
 # Serve HTTP API
 tark serve --port 8765
 
+# MCP servers (MCP 2026-07-28: list/inspect/trust/approve/connect/...)
+tark mcp list
+tark mcp inspect <server-id>
+tark mcp trust <server-id>     # review launch details before first connect
+tark mcp approve <server-id>   # record explicit trust
+tark mcp connect <server-id>
+tark mcp conformance <server-id>
+
 # Show version
 tark --version
 ```
