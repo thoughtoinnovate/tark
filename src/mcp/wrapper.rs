@@ -8,10 +8,32 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::Once;
 use std::time::Duration;
 
 /// Default timeout for MCP tool calls (30 seconds)
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Logs the Risky-fallback message at most once per process to avoid spam.
+static RISK_FALLBACK_LOGGED: Once = Once::new();
+
+fn log_risky_fallback_once(server_id: &str, tool_name: &str, reason: &str) {
+    RISK_FALLBACK_LOGGED.call_once(|| {
+        tracing::info!(
+            "MCP risk fallback: defaulting to Risky for external tools (first occurrence {}:{}: {}). \
+             This is the intentional safe default when no policy row matches.",
+            server_id,
+            tool_name,
+            reason
+        );
+    });
+    tracing::debug!(
+        "MCP risk fallback to Risky for {}:{}: {}",
+        server_id,
+        tool_name,
+        reason
+    );
+}
 
 /// Wraps an MCP tool to implement tark's Tool trait
 pub struct McpToolWrapper {
@@ -60,7 +82,11 @@ impl McpToolWrapper {
         self
     }
 
-    /// Get the full tool name (with namespace if set)
+    /// Get the full tool name (with namespace if set).
+    ///
+    /// Stable: `namespace:name` when a namespace is configured, otherwise the
+    /// bare MCP tool name. The underlying [`Tool::name`] remains the bare
+    /// name for protocol compatibility; use this for display/grouping.
     pub fn full_name(&self) -> String {
         match &self.namespace {
             Some(ns) => format!("{}:{}", ns, self.tool_def.name),
@@ -164,7 +190,7 @@ pub async fn wrap_server_tools(
         .collect()
 }
 
-/// Create tool wrappers with PolicyEngine-driven risk levels (NEW)
+/// Create tool wrappers with PolicyEngine-driven risk levels
 ///
 /// Queries the PolicyEngine for each tool's risk level. Falls back to
 /// provided defaults or Risky if no policy is defined.
@@ -206,20 +232,94 @@ pub async fn wrap_server_tools_with_policy(
         .collect()
 }
 
-/// Query PolicyEngine for MCP tool risk level
-fn query_mcp_risk_level(
-    _engine: &PolicyEngine,
+/// Map a policy-engine risk level to a tool risk level.
+///
+/// Policy uses Safe/Moderate/Dangerous; tools use
+/// ReadOnly/Write/Risky/Dangerous. Mapping is conservative:
+/// Safe -> ReadOnly, Moderate -> Risky, Dangerous -> Dangerous.
+pub fn map_policy_risk_to_tool_risk(policy_risk: crate::policy::RiskLevel) -> RiskLevel {
+    match policy_risk {
+        crate::policy::RiskLevel::Safe => RiskLevel::ReadOnly,
+        crate::policy::RiskLevel::Moderate => RiskLevel::Risky,
+        crate::policy::RiskLevel::Dangerous => RiskLevel::Dangerous,
+    }
+}
+
+/// Query PolicyEngine for MCP tool risk level.
+///
+/// Consults the policy tables via `PolicyEngine::check_approval` when
+/// available. The MCP-specific table (`mcp_tool_policies`, accessed via
+/// `McpPolicyHandler`) is not directly exposed by `PolicyEngine`, so this
+/// goes through the generic approval lookup for a synthetic `mcp:<server>:<tool>`
+/// command.
+///
+/// Fallback policy (documented, intentional): when no policy row matches or
+/// the lookup fails, default to [`RiskLevel::Risky`] as the safe default for
+/// external tools. The fallback is logged once at info level (then debug) to
+/// avoid spamming logs while keeping behavior explicit.
+pub fn query_mcp_risk_level(
+    engine: &PolicyEngine,
     server_id: &str,
     tool_name: &str,
 ) -> Result<RiskLevel> {
-    // The PolicyEngine's mcp module checks approval, but we just need the risk level here
-    // For now, we'll use a simple query - this could be extended to query the DB directly
-    // TODO: Query mcp_tool_policies table to get actual risk level
-    // Default to Risky for external MCP tools as a safe default
-    tracing::debug!(
-        "Querying PolicyEngine for MCP tool {}:{} - using Risky default",
-        server_id,
-        tool_name
-    );
-    Ok(RiskLevel::Risky)
+    let command = format!("mcp:{}:{}", server_id, tool_name);
+    match engine.check_approval("mcp", &command, "build", "balanced", "mcp-risk-query") {
+        Ok(decision) => {
+            let tool_risk = map_policy_risk_to_tool_risk(decision.classification.risk_level);
+            tracing::debug!(
+                "PolicyEngine risk for MCP tool {}:{} -> {} (needs_approval={})",
+                server_id,
+                tool_name,
+                tool_risk.label(),
+                decision.needs_approval
+            );
+            Ok(tool_risk)
+        }
+        Err(e) => {
+            log_risky_fallback_once(server_id, tool_name, &e.to_string());
+            Ok(RiskLevel::Risky)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_names_stable_with_and_without_namespace() {
+        let manager = Arc::new(McpServerManager::new(
+            std::env::temp_dir(),
+            std::env::temp_dir(),
+        ));
+        let def = McpToolDef {
+            name: "create_issue".to_string(),
+            description: "d".to_string(),
+            input_schema: serde_json::json!({}),
+        };
+        let plain = McpToolWrapper::new("gh".to_string(), def.clone(), manager.clone());
+        assert_eq!(plain.full_name(), "create_issue");
+        // Bare Tool::name stays stable for protocol use.
+        assert_eq!(plain.name(), "create_issue");
+        let namespaced =
+            McpToolWrapper::new("gh".to_string(), def, manager).with_namespace("gh".to_string());
+        assert_eq!(namespaced.full_name(), "gh:create_issue");
+        assert_eq!(namespaced.name(), "create_issue");
+    }
+
+    #[test]
+    fn policy_risk_mapping_is_conservative() {
+        assert_eq!(
+            map_policy_risk_to_tool_risk(crate::policy::RiskLevel::Safe),
+            RiskLevel::ReadOnly
+        );
+        assert_eq!(
+            map_policy_risk_to_tool_risk(crate::policy::RiskLevel::Moderate),
+            RiskLevel::Risky
+        );
+        assert_eq!(
+            map_policy_risk_to_tool_risk(crate::policy::RiskLevel::Dangerous),
+            RiskLevel::Dangerous
+        );
+    }
 }

@@ -260,6 +260,24 @@ enum Commands {
         #[command(subcommand)]
         command: PolicyCommands,
     },
+
+    /// MCP server lifecycle management (MCP 2026-07-28)
+    Mcp {
+        /// Action: list, inspect, trust, approve, revoke-trust, enable,
+        /// disable, connect, disconnect, reconnect, remove, conformance
+        action: String,
+
+        /// Server id (required by most actions)
+        target: Option<String>,
+
+        /// Scope: project (default) or global MCP servers file
+        #[arg(long, default_value = "project")]
+        scope: String,
+
+        /// Working directory (default: current directory)
+        #[arg(long)]
+        cwd: Option<String>,
+    },
 }
 
 /// Auth subcommands
@@ -378,7 +396,8 @@ async fn main() -> Result<()> {
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()),
         )
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        // Redacting writer: credential values can never reach stderr traces (R3 S6).
+        .with(tracing_subscriber::fmt::layer().with_writer(tark_cli::RedactedStderr))
         .init();
 
     // Initialize models.dev cache with a persistent global cache directory.
@@ -595,6 +614,16 @@ async fn main() -> Result<()> {
                 transport::cli::run_policy_verify(&working_dir, fix).await?;
             }
         },
+        Commands::Mcp {
+            action,
+            target,
+            scope,
+            cwd,
+        } => {
+            transport::mcp_cli::run_mcp_command(&action, target.as_deref(), &scope, cwd.as_deref())
+                .await
+                .map(|output| println!("{}", output))?;
+        }
         Commands::Tui { cwd } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());
             if cli.debug {

@@ -35,7 +35,9 @@ pub mod ui_backend;
 pub mod mcp;
 
 pub use config::Config;
-pub use debug_logger::{DebugLogEntry, DebugLogger, DebugLoggerConfig, LogCategory};
+pub use debug_logger::{
+    redact_secrets_text, DebugLogEntry, DebugLogger, DebugLoggerConfig, LogCategory, RedactedStderr,
+};
 pub use services::PlanService;
 pub use storage::{TarkStorage, WorkspaceConfig};
 
