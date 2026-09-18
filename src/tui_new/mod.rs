@@ -20,6 +20,7 @@ pub mod git_info;
 pub mod modals;
 mod renderer;
 pub mod session_prefs;
+pub mod terminal_guard;
 mod theme;
 mod utils;
 pub mod widgets;
@@ -47,3 +48,5 @@ pub use widgets::{
 // Re-export session preferences
 #[allow(unused_imports)]
 pub use session_prefs::{PreferencesManager, TuiPreferences};
+#[allow(unused_imports)]
+pub use terminal_guard::{install_panic_hook, TerminalGuard};

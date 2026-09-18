@@ -20,6 +20,34 @@ use crate::tui_new::widgets::FlashBarState;
 
 const MAX_FLASH_BAR_FRAME: u8 = 20;
 
+/// Maximum number of entries kept in input history (oldest dropped on overflow).
+pub const MAX_INPUT_HISTORY: usize = 200;
+/// Maximum number of queued messages kept (oldest dropped on overflow).
+pub const MAX_MESSAGE_QUEUE: usize = 50;
+/// Maximum bytes kept in streaming content/thinking buffers (oldest truncated).
+pub const MAX_STREAMING_CONTENT_LEN: usize = 1024 * 1024;
+
+/// Truncate the oldest bytes of a streaming buffer when it exceeds
+/// [`MAX_STREAMING_CONTENT_LEN`], keeping the tail (most recent output).
+/// Truncation respects UTF-8 char boundaries.
+fn truncate_streaming_buffer(buf: &mut String, name: &str) {
+    if buf.len() <= MAX_STREAMING_CONTENT_LEN {
+        return;
+    }
+    let overflow = buf.len() - MAX_STREAMING_CONTENT_LEN;
+    let mut cut = overflow;
+    while cut < buf.len() && !buf.is_char_boundary(cut) {
+        cut += 1;
+    }
+    buf.drain(..cut);
+    tracing::debug!(
+        "{} capped at {} bytes (truncated {} oldest bytes)",
+        name,
+        MAX_STREAMING_CONTENT_LEN,
+        cut
+    );
+}
+
 /// Error notification level
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorLevel {
@@ -264,6 +292,9 @@ struct StateInner {
     pub messages_scroll_offset: usize,
     pub messages_total_lines: usize,
     pub messages_viewport_height: usize,
+    /// Sticky follow-tail: when true, streaming appends auto-scroll to bottom.
+    /// Set false on ScrollUp, true when scrolled to bottom / scroll_to_bottom.
+    pub follow_tail: bool,
 
     // ========== Active Tools ==========
     /// Currently executing tools (for loading indicators)
@@ -473,6 +504,7 @@ impl SharedState {
                 messages_scroll_offset: 0,
                 messages_total_lines: 0,
                 messages_viewport_height: 0,
+                follow_tail: true,
                 active_tools: Vec::new(),
                 collapsed_tool_groups: std::collections::HashSet::new(),
                 todo_tracker: Arc::new(std::sync::Mutex::new(crate::tools::TodoTracker::new())),
@@ -1866,13 +1898,36 @@ impl SharedState {
         self.read_inner().focused_sub_index.is_some()
     }
 
-    /// Scroll to bottom (most recent message)
+    /// Scroll to bottom (most recent message).
+    /// Decoupled: only moves the scroll offset and re-engages follow-tail.
+    /// Never touches focused_message / selection (no focus stealing).
     pub fn scroll_to_bottom(&self) {
         let count = self.message_count();
         if count > 0 {
             self.set_messages_scroll_offset(usize::MAX);
-            self.set_focused_message(count.saturating_sub(1));
+        } else {
+            self.set_messages_scroll_offset(0);
         }
+        self.set_follow_tail(true);
+    }
+
+    /// Scroll to bottom only when follow-tail is engaged (sticky scrolling).
+    /// Used by streaming appends so background chunks don't steal the user's
+    /// scroll position when they have scrolled up to read history.
+    pub fn scroll_to_bottom_if_following(&self) {
+        if self.follow_tail() {
+            self.set_messages_scroll_offset(usize::MAX);
+        }
+    }
+
+    /// Whether follow-tail is currently engaged.
+    pub fn follow_tail(&self) -> bool {
+        self.read_inner().follow_tail
+    }
+
+    /// Set follow-tail explicitly.
+    pub fn set_follow_tail(&self, follow: bool) {
+        self.write_inner().follow_tail = follow;
     }
 
     /// Ensure the focused message is visible in the viewport
@@ -1984,7 +2039,17 @@ impl SharedState {
     }
 
     pub fn add_to_history(&self, text: String) {
-        self.write_inner().input_history.push(text);
+        let mut inner = self.write_inner();
+        inner.input_history.push(text);
+        if inner.input_history.len() > MAX_INPUT_HISTORY {
+            let overflow = inner.input_history.len() - MAX_INPUT_HISTORY;
+            inner.input_history.drain(..overflow);
+            tracing::debug!(
+                "input_history capped at {} (dropped {} oldest)",
+                MAX_INPUT_HISTORY,
+                overflow
+            );
+        }
     }
 
     pub fn clear_input(&self) {
@@ -2458,6 +2523,10 @@ impl SharedState {
         } else {
             inner.streaming_content = Some(chunk.to_string());
         }
+        truncate_streaming_buffer(
+            inner.streaming_content.as_mut().expect("just set"),
+            "streaming_content",
+        );
         inner.last_activity_at = Instant::now();
     }
 
@@ -2472,6 +2541,10 @@ impl SharedState {
         } else {
             inner.streaming_thinking = Some(chunk.to_string());
         }
+        truncate_streaming_buffer(
+            inner.streaming_thinking.as_mut().expect("just set"),
+            "streaming_thinking",
+        );
         inner.last_activity_at = Instant::now();
     }
 
@@ -2487,7 +2560,17 @@ impl SharedState {
     }
 
     pub fn queue_message(&self, msg: String) {
-        self.write_inner().message_queue.push(msg);
+        let mut inner = self.write_inner();
+        inner.message_queue.push(msg);
+        if inner.message_queue.len() > MAX_MESSAGE_QUEUE {
+            let overflow = inner.message_queue.len() - MAX_MESSAGE_QUEUE;
+            inner.message_queue.drain(..overflow);
+            tracing::debug!(
+                "message_queue capped at {} (dropped {} oldest)",
+                MAX_MESSAGE_QUEUE,
+                overflow
+            );
+        }
     }
 
     pub fn pop_queued_message(&self) -> Option<String> {
@@ -3661,5 +3744,107 @@ mod tests {
         let messages = state.queued_messages();
         assert_eq!(messages[0], "task_1");
         assert_eq!(messages[1], "task_2");
+    }
+
+    #[test]
+    fn test_follow_tail_defaults_true() {
+        let state = SharedState::new();
+        assert!(state.follow_tail());
+    }
+
+    #[test]
+    fn test_follow_tail_stickiness_scroll_up_keeps_offset() {
+        let state = SharedState::new();
+        state.set_messages(vec![
+            test_message(MessageRole::User, "one"),
+            test_message(MessageRole::User, "two"),
+        ]);
+        state.set_messages_metrics(100, 10);
+        // Start at tail.
+        state.scroll_to_bottom();
+        assert!(state.follow_tail());
+        assert_eq!(state.messages_scroll_offset(), usize::MAX);
+
+        // Simulate ScrollUp: move off tail and disengage follow.
+        state.set_messages_scroll_offset(10);
+        state.set_follow_tail(false);
+
+        // Streaming append must not steal the offset while unfollowed.
+        state.append_streaming_content("chunk");
+        state.scroll_to_bottom_if_following();
+        assert_eq!(state.messages_scroll_offset(), 10);
+        assert!(!state.follow_tail());
+    }
+
+    #[test]
+    fn test_follow_tail_resumes_on_scroll_to_bottom() {
+        let state = SharedState::new();
+        state.set_messages(vec![test_message(MessageRole::User, "one")]);
+        state.set_messages_metrics(100, 10);
+        state.set_messages_scroll_offset(5);
+        state.set_follow_tail(false);
+
+        // Scrolling to bottom re-engages follow-tail.
+        state.scroll_to_bottom();
+        assert!(state.follow_tail());
+        assert_eq!(state.messages_scroll_offset(), usize::MAX);
+
+        // Now streaming appends follow the tail again.
+        state.append_streaming_content("more");
+        state.scroll_to_bottom_if_following();
+        assert_eq!(state.messages_scroll_offset(), usize::MAX);
+    }
+
+    #[test]
+    fn test_scroll_to_bottom_does_not_steal_focus() {
+        let state = SharedState::new();
+        state.set_messages(vec![
+            test_message(MessageRole::User, "one"),
+            test_message(MessageRole::User, "two"),
+        ]);
+        state.set_focused_message(0);
+        state.set_message_selection(0, 1);
+        state.scroll_to_bottom();
+        assert_eq!(state.focused_message(), 0);
+        assert_eq!(state.message_selection(), Some((0, 1)));
+    }
+
+    #[test]
+    fn test_input_history_capped_at_200() {
+        let state = SharedState::new();
+        for i in 0..250 {
+            state.add_to_history(format!("entry-{i}"));
+        }
+        let history = state.input_history();
+        assert_eq!(history.len(), MAX_INPUT_HISTORY);
+        assert_eq!(history.first().unwrap(), "entry-50");
+        assert_eq!(history.last().unwrap(), "entry-249");
+    }
+
+    #[test]
+    fn test_message_queue_capped_at_50_drops_oldest() {
+        let state = SharedState::new();
+        for i in 0..60 {
+            state.queue_message(format!("msg-{i}"));
+        }
+        assert_eq!(state.queued_message_count(), MAX_MESSAGE_QUEUE);
+        let queued = state.queued_messages();
+        assert_eq!(queued.first().unwrap(), "msg-10");
+        assert_eq!(queued.last().unwrap(), "msg-59");
+    }
+
+    #[test]
+    fn test_streaming_content_capped_at_1mb_keeps_tail() {
+        let state = SharedState::new();
+        let big = "x".repeat(MAX_STREAMING_CONTENT_LEN + 100);
+        state.append_streaming_content(&big);
+        let content = state.streaming_content().expect("content");
+        assert_eq!(content.len(), MAX_STREAMING_CONTENT_LEN);
+        // Tail is kept (all x's, but length proves truncation of oldest).
+        assert!(content.chars().all(|c| c == 'x'));
+
+        state.append_streaming_thinking(&big);
+        let thinking = state.streaming_thinking().expect("thinking");
+        assert_eq!(thinking.len(), MAX_STREAMING_CONTENT_LEN);
     }
 }

@@ -25,6 +25,66 @@ use crate::ui_backend::{AppEvent, AppService, Command, SharedState};
 use super::modals::{ModalManager, ModalResult};
 use super::renderer::TuiRenderer;
 
+/// Maximum bytes joined into a single coalesced streaming append per frame.
+/// A burst of chunks becomes 1-2 appends instead of one append per chunk.
+pub(crate) const MAX_COALESCED_CHUNK_LEN: usize = 32 * 1024;
+
+/// Join consecutive chunk strings into pieces each holding at most `cap`
+/// bytes (UTF-8 boundary aware for splits). A single input larger than `cap`
+/// is kept as its own piece (never split mid-char; oversized singles pass
+/// through). Returns at least one piece when `chunks` is non-empty.
+pub(crate) fn coalesce_chunks(chunks: Vec<String>, cap: usize) -> Vec<String> {
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+    let cap = cap.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for chunk in chunks {
+        if chunk.is_empty() {
+            continue;
+        }
+        // Oversized single chunk: flush current, then push it as its own piece
+        // (split only if it alone exceeds cap by a wide margin? keep simple:
+        // push as-is to avoid mid-char splits; caller appends it directly).
+        if chunk.len() > cap {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            // Split the oversized chunk at char boundaries into cap-sized pieces.
+            let mut start = 0;
+            while start < chunk.len() {
+                let mut end = (start + cap).min(chunk.len());
+                while end < chunk.len() && !chunk.is_char_boundary(end) {
+                    end += 1;
+                }
+                // Guard against pathological non-boundary runs.
+                if end <= start {
+                    break;
+                }
+                out.push(chunk[start..end].to_string());
+                start = end;
+            }
+            continue;
+        }
+        if current.len() + chunk.len() > cap {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            current = chunk;
+        } else {
+            current.push_str(&chunk);
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
 /// TUI Controller
 ///
 /// Main event loop coordinator that:
@@ -54,6 +114,11 @@ pub struct TuiController<B: Backend> {
         std::sync::Arc<tokio::sync::Mutex<Option<crate::tools::questionnaire::Questionnaire>>>,
     /// Last tick time for flash bar animation
     flash_bar_last_tick: Instant,
+    /// Stashed events encountered during chunk coalescing lookahead.
+    /// `try_recv` has no peek, so a non-chunk event consumed while draining
+    /// a chunk burst is parked here and processed next (same frame when
+    /// possible, otherwise next `poll_events` call). Prevents event loss.
+    pending_events: std::collections::VecDeque<AppEvent>,
 }
 
 impl<B: Backend> TuiController<B> {
@@ -74,6 +139,7 @@ impl<B: Backend> TuiController<B> {
             modal_manager: ModalManager::new(),
             pending_questionnaire: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             flash_bar_last_tick: Instant::now(),
+            pending_events: std::collections::VecDeque::new(),
         }
     }
 
@@ -363,6 +429,7 @@ impl<B: Backend> TuiController<B> {
                             Vec::new(),
                             suggested_patterns,
                         );
+                        approval_state.working_dir = request.working_dir.clone();
                         if let Some(idx) = approval_state
                             .suggested_patterns
                             .iter()
@@ -441,7 +508,7 @@ impl<B: Backend> TuiController<B> {
                                             segments: Vec::new(),
                                             tool_args: None,
                                         });
-                                        state.scroll_to_bottom();
+                                        state.scroll_to_bottom_if_following();
                                     }
                                 }
                                 let is_mirror = event
@@ -478,6 +545,7 @@ impl<B: Backend> TuiController<B> {
                                 {
                                     if let Some(chunk) = event.message.clone() {
                                         state.append_streaming_content(&chunk);
+                                        state.scroll_to_bottom_if_following();
                                     }
                                 }
                             }
@@ -536,7 +604,7 @@ impl<B: Backend> TuiController<B> {
                                                 tool_args: Some(args_value),
                                             };
                                             state.add_message(msg);
-                                            state.scroll_to_bottom();
+                                            state.scroll_to_bottom_if_following();
                                         }
                                         "tool_completed" => {
                                             let result = metadata
@@ -562,7 +630,7 @@ impl<B: Backend> TuiController<B> {
                                             );
                                             state.update_tool_message(&name, new_content, true);
                                             state.collapse_all_tools_except_last();
-                                            state.scroll_to_bottom();
+                                            state.scroll_to_bottom_if_following();
                                         }
                                         "tool_failed" => {
                                             let result = metadata
@@ -588,7 +656,7 @@ impl<B: Backend> TuiController<B> {
                                             );
                                             state.update_tool_message(&name, new_content, true);
                                             state.collapse_all_tools_except_last();
-                                            state.scroll_to_bottom();
+                                            state.scroll_to_bottom_if_following();
                                         }
                                         _ => {}
                                     }
@@ -680,7 +748,7 @@ impl<B: Backend> TuiController<B> {
                                         segments: Vec::new(),
                                         tool_args: None,
                                     });
-                                    state.scroll_to_bottom();
+                                    state.scroll_to_bottom_if_following();
                                 }
                             }
                             "ask_user_answer" | "approval_answer" => {
@@ -743,7 +811,7 @@ impl<B: Backend> TuiController<B> {
                                         segments: Vec::new(),
                                         tool_args: None,
                                     });
-                                    state.scroll_to_bottom();
+                                    state.scroll_to_bottom_if_following();
                                 }
                             }
                             "queued" => {
@@ -778,7 +846,7 @@ impl<B: Backend> TuiController<B> {
                                         segments: Vec::new(),
                                         tool_args: None,
                                     });
-                                    state.scroll_to_bottom();
+                                    state.scroll_to_bottom_if_following();
                                 }
                             }
                             _ => {}
@@ -820,7 +888,7 @@ impl<B: Backend> TuiController<B> {
                                         if let Ok(session) = storage.load_session(session_id) {
                                             let messages = SessionService::session_messages_to_ui(&session);
                                             state.set_messages(messages);
-                                            state.scroll_to_bottom();
+                                            state.scroll_to_bottom_if_following();
                                             state.set_session_cost_total(session.total_cost);
                                             state.set_session_tokens_total(
                                                 session.input_tokens + session.output_tokens,
@@ -1447,30 +1515,29 @@ impl<B: Backend> TuiController<B> {
                 self.send_approval_response(ApprovalChoice::DenyAlways)
                     .await;
             }
-            Command::CloseModal => {
+            Command::CloseModal
                 if self.service.state().active_modal()
-                    == Some(crate::ui_backend::ModalType::Approval)
-                {
-                    self.send_approval_response(ApprovalChoice::Deny).await;
+                    == Some(crate::ui_backend::ModalType::Approval) =>
+            {
+                self.send_approval_response(ApprovalChoice::Deny).await;
 
-                    // Add a message showing the user skipped the approval
-                    self.service
-                        .state()
-                        .add_message(crate::ui_backend::Message {
-                            role: crate::ui_backend::MessageRole::System,
-                            content: "ℹ️ Operation skipped by user".to_string(),
-                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                            remote: false,
-                            provider: None,
-                            model: None,
-                            collapsed: false,
-                            thinking: None,
-                            context_transient: true,
-                            tool_calls: Vec::new(),
-                            segments: Vec::new(),
-                            tool_args: None,
-                        });
-                }
+                // Add a message showing the user skipped the approval
+                self.service
+                    .state()
+                    .add_message(crate::ui_backend::Message {
+                        role: crate::ui_backend::MessageRole::System,
+                        content: "ℹ️ Operation skipped by user".to_string(),
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        remote: false,
+                        provider: None,
+                        model: None,
+                        collapsed: false,
+                        thinking: None,
+                        context_transient: true,
+                        tool_calls: Vec::new(),
+                        segments: Vec::new(),
+                        tool_args: None,
+                    });
             }
             _ => {}
         }
@@ -2376,7 +2443,8 @@ impl<B: Backend> TuiController<B> {
                 return Ok(());
             }
             Command::ScrollUp => {
-                // Scroll up in messages area
+                // Scroll up in messages area; disengages follow-tail so
+                // streaming chunks don't steal the user's position.
                 let step = 3usize;
                 let total_lines = state.messages_total_lines();
                 let viewport_height = state.messages_viewport_height();
@@ -2390,10 +2458,12 @@ impl<B: Backend> TuiController<B> {
                 if normalized > 0 {
                     state.set_messages_scroll_offset(normalized.saturating_sub(step));
                 }
+                state.set_follow_tail(false);
                 return Ok(());
             }
             Command::ScrollDown => {
-                // Scroll down in messages area
+                // Scroll down in messages area; re-engages follow-tail when
+                // the bottom is reached.
                 let step = 3usize;
                 let current_offset = state.messages_scroll_offset();
                 let total_lines = state.messages_total_lines();
@@ -2406,6 +2476,7 @@ impl<B: Backend> TuiController<B> {
                 };
                 let next = normalized.saturating_add(step).min(max_offset);
                 state.set_messages_scroll_offset(next);
+                state.set_follow_tail(next >= max_offset);
                 return Ok(());
             }
             Command::ToggleSidebarPanel(panel_idx) => {
@@ -2739,7 +2810,75 @@ impl<B: Backend> TuiController<B> {
         let mut events_processed = 0;
         const MAX_EVENTS_PER_CYCLE: usize = 20; // Batch text chunks, but limit overall
 
-        while let Ok(event) = self.event_rx.try_recv() {
+        loop {
+            // Prefer stashed lookahead events before draining the channel.
+            let mut event = match self.pending_events.pop_front() {
+                Some(e) => e,
+                None => match self.event_rx.try_recv() {
+                    Ok(e) => e,
+                    Err(_) => break,
+                },
+            };
+
+            // Coalesce bursts of streaming chunks: drain consecutive same-kind
+            // chunks (non-blocking) and join them into ≤32KB pieces so a burst
+            // becomes 1-2 appends per frame instead of one append per chunk.
+            // The unbounded channel is coalesced on the consumer side here.
+            // A non-chunk event met during lookahead is parked in
+            // `pending_events` (try_recv has no peek) and processed next.
+            match event {
+                AppEvent::LlmTextChunk(first) => {
+                    let mut parts = vec![first];
+                    while let Ok(next) = self.event_rx.try_recv() {
+                        match next {
+                            AppEvent::LlmTextChunk(s) => {
+                                parts.push(s);
+                                events_processed += 1;
+                            }
+                            other => {
+                                self.pending_events.push_back(other);
+                                break;
+                            }
+                        }
+                    }
+                    let joined = coalesce_chunks(parts, MAX_COALESCED_CHUNK_LEN);
+                    let mut iter = joined.into_iter();
+                    let first_joined = iter.next().unwrap_or_default();
+                    let rest: Vec<String> = iter.collect();
+                    for s in rest.into_iter().rev() {
+                        self.pending_events.push_front(AppEvent::LlmTextChunk(s));
+                    }
+                    event = AppEvent::LlmTextChunk(first_joined);
+                }
+                AppEvent::LlmThinkingChunk(first) => {
+                    let mut parts = vec![first];
+                    while let Ok(next) = self.event_rx.try_recv() {
+                        match next {
+                            AppEvent::LlmThinkingChunk(s) => {
+                                parts.push(s);
+                                events_processed += 1;
+                            }
+                            other => {
+                                self.pending_events.push_back(other);
+                                break;
+                            }
+                        }
+                    }
+                    let joined = coalesce_chunks(parts, MAX_COALESCED_CHUNK_LEN);
+                    let mut iter = joined.into_iter();
+                    let first_joined = iter.next().unwrap_or_default();
+                    let rest: Vec<String> = iter.collect();
+                    for s in rest.into_iter().rev() {
+                        self.pending_events
+                            .push_front(AppEvent::LlmThinkingChunk(s));
+                    }
+                    event = AppEvent::LlmThinkingChunk(first_joined);
+                }
+                other => {
+                    event = other;
+                }
+            }
+
             events_processed += 1;
 
             // Track if this is a ToolStarted event (we'll render after it)
@@ -2862,11 +3001,11 @@ impl<B: Backend> TuiController<B> {
                         continue;
                     }
                     state.append_streaming_content(chunk);
-                    state.scroll_to_bottom();
+                    state.scroll_to_bottom_if_following();
                 }
                 AppEvent::LlmThinkingChunk(chunk) => {
                     state.append_streaming_thinking(chunk);
-                    state.scroll_to_bottom();
+                    state.scroll_to_bottom_if_following();
                 }
                 AppEvent::CommitIntermediateResponse(_) => unreachable!(), // Handled above
                 AppEvent::LlmCompleted {
@@ -4732,5 +4871,36 @@ mod tests {
             .await
             .expect("conversation mode");
         assert_eq!(conv_mode, AgentMode::Plan);
+    }
+
+    #[test]
+    fn coalesce_joins_small_chunks_into_one_piece() {
+        let parts = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let joined = super::coalesce_chunks(parts, super::MAX_COALESCED_CHUNK_LEN);
+        assert_eq!(joined, vec!["abc".to_string()]);
+    }
+
+    #[test]
+    fn coalesce_splits_at_cap() {
+        let parts = vec!["a".repeat(20_000), "b".repeat(20_000)];
+        let joined = super::coalesce_chunks(parts, 32 * 1024);
+        assert_eq!(joined.len(), 2);
+        assert!(joined[0].len() <= 32 * 1024);
+        assert!(joined[1].len() <= 32 * 1024);
+        assert_eq!(joined.concat().len(), 40_000);
+    }
+
+    #[test]
+    fn coalesce_empty_input_returns_empty() {
+        let joined = super::coalesce_chunks(Vec::new(), super::MAX_COALESCED_CHUNK_LEN);
+        assert!(joined.is_empty());
+    }
+
+    #[test]
+    fn coalesce_burst_keeps_order() {
+        let parts: Vec<String> = (0..50).map(|i| format!("{i}-")).collect();
+        let expected = parts.concat();
+        let joined = super::coalesce_chunks(parts, super::MAX_COALESCED_CHUNK_LEN);
+        assert_eq!(joined.concat(), expected);
     }
 }

@@ -90,6 +90,36 @@ enum ClickTarget {
     Outside,
 }
 
+/// Last rendered frame layout, cached during `render()` for hit-testing.
+///
+/// Hit-testing must use the geometry from the last rendered frame instead of
+/// recomputing estimates from `terminal.size()`, otherwise clicks drift from
+/// what the user actually sees (borders, dynamic input height, sidebar, modal).
+#[derive(Debug, Clone, Copy, Default)]
+struct LastLayout {
+    /// Full terminal area of the last frame.
+    area: Rect,
+    /// Vertical chunks of the main area.
+    header: Rect,
+    messages: Rect,
+    status_strip: Rect,
+    input: Rect,
+    status: Rect,
+    /// Sidebar rect when visible.
+    sidebar: Option<Rect>,
+    /// Centered modal rect when a modal was rendered.
+    modal: Option<Rect>,
+}
+
+impl LastLayout {
+    fn contains(rect: &Rect, col: u16, row: u16) -> bool {
+        col >= rect.x
+            && col < rect.x.saturating_add(rect.width)
+            && row >= rect.y
+            && row < rect.y.saturating_add(rect.height)
+    }
+}
+
 /// TUI Renderer implementation
 pub struct TuiRenderer<B: Backend> {
     /// Terminal instance
@@ -104,6 +134,8 @@ pub struct TuiRenderer<B: Backend> {
     streaming_markdown_cache: super::widgets::markdown::StreamingMarkdownCache,
     /// Cache for incremental thinking markdown rendering during streaming
     streaming_thinking_cache: super::widgets::markdown::StreamingMarkdownCache,
+    /// Geometry from the last rendered frame, used for hit-testing.
+    last_layout: Option<LastLayout>,
 }
 
 impl<B: Backend> TuiRenderer<B> {
@@ -116,6 +148,7 @@ impl<B: Backend> TuiRenderer<B> {
             working_dir,
             streaming_markdown_cache: super::widgets::markdown::StreamingMarkdownCache::new(),
             streaming_thinking_cache: super::widgets::markdown::StreamingMarkdownCache::new(),
+            last_layout: None,
         }
     }
 
@@ -1116,6 +1149,7 @@ impl<B: Backend> TuiRenderer<B> {
                     (FocusedComponent::Messages, VimMode::Normal) => {
                         // Scroll to top
                         state.set_messages_scroll_offset(0);
+                        state.set_follow_tail(false);
                         None
                     }
                     (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('g')),
@@ -1183,6 +1217,7 @@ impl<B: Backend> TuiRenderer<B> {
                         current
                     };
                     state.set_messages_scroll_offset(normalized.saturating_sub(10));
+                    state.set_follow_tail(false);
                 }
                 None
             }
@@ -1202,7 +1237,9 @@ impl<B: Backend> TuiRenderer<B> {
                     } else {
                         current
                     };
-                    state.set_messages_scroll_offset(normalized.saturating_add(10).min(max_offset));
+                    let next = normalized.saturating_add(10).min(max_offset);
+                    state.set_messages_scroll_offset(next);
+                    state.set_follow_tail(next >= max_offset);
                 }
                 None
             }
@@ -1616,7 +1653,12 @@ impl<B: Backend> TuiRenderer<B> {
             .collect()
     }
 
-    fn messages_area_rect(&self, state: &SharedState) -> Option<Rect> {
+    fn messages_area_rect(&self, _state: &SharedState) -> Option<Rect> {
+        // Prefer the geometry from the last rendered frame so clicks resolve
+        // against what the user actually sees.
+        if let Some(layout) = self.last_layout {
+            return Some(layout.messages);
+        }
         let size = self.terminal.size().ok()?;
         if size.width < 3 || size.height < 3 {
             return None;
@@ -1631,7 +1673,7 @@ impl<B: Backend> TuiRenderer<B> {
             return None;
         }
 
-        let sidebar_visible = state.sidebar_visible();
+        let sidebar_visible = _state.sidebar_visible();
         let (main_x, main_width) = if sidebar_visible && inner_width > 80 {
             (inner_x, inner_width.saturating_sub(35))
         } else {
@@ -2074,8 +2116,6 @@ impl<B: Backend> TuiRenderer<B> {
 
     /// Handle scrollbar dragging or task drag-to-reorder
     fn handle_scrollbar_drag(&self, col: u16, row: u16, state: &SharedState) -> Option<Command> {
-        let size = self.terminal.size().unwrap_or_default();
-
         // First, check if we're dragging a task for reorder
         if state.is_dragging_task() {
             // Update drag target based on mouse position in sidebar
@@ -2099,24 +2139,43 @@ impl<B: Backend> TuiRenderer<B> {
             return None; // State updated, no command needed
         }
 
-        // Check if dragging in the messages area scrollbar region
-        // The scrollbar is at the right edge of the messages panel
-        let header_height = 2u16;
-        let input_height = 5u16;
-        let status_message_height = 1u16;
-        let status_height = 1u16;
+        // Check if dragging in the messages area scrollbar region.
+        // Prefer the cached last-frame messages rect; fall back to estimates
+        // only before the first frame has rendered.
+        let (messages_start_y, messages_end_y, messages_height, main_width) =
+            if let Some(layout) = self.last_layout {
+                let r = layout.messages;
+                let start = r.y;
+                let end = r.y.saturating_add(r.height);
+                let height = r.height;
+                let width = r.x.saturating_add(r.width);
+                (start, end, height, width)
+            } else {
+                let size = self.terminal.size().unwrap_or_default();
+                let header_height = 2u16;
+                let input_height = 5u16;
+                let status_message_height = 1u16;
+                let status_height = 1u16;
 
-        let messages_start_y = 1 + header_height;
-        let messages_end_y = size.height - status_height - input_height - status_message_height - 1;
-        let messages_height = messages_end_y.saturating_sub(messages_start_y);
+                let messages_start_y = 1 + header_height;
+                let messages_end_y =
+                    size.height - status_height - input_height - status_message_height - 1;
+                let messages_height = messages_end_y.saturating_sub(messages_start_y);
 
-        // Check if the drag is in the messages scrollbar area (right edge)
-        let sidebar_visible = state.sidebar_visible();
-        let main_width = if sidebar_visible && size.width > 80 {
-            size.width.saturating_sub(37) // 35 for sidebar + 2 for borders
-        } else {
-            size.width.saturating_sub(2)
-        };
+                // Check if the drag is in the messages scrollbar area (right edge)
+                let sidebar_visible = state.sidebar_visible();
+                let main_width = if sidebar_visible && size.width > 80 {
+                    size.width.saturating_sub(37) // 35 for sidebar + 2 for borders
+                } else {
+                    size.width.saturating_sub(2)
+                };
+                (
+                    messages_start_y,
+                    messages_end_y,
+                    messages_height,
+                    main_width,
+                )
+            };
 
         // Scrollbar is at the right edge of the main area
         if col >= main_width
@@ -2134,7 +2193,10 @@ impl<B: Backend> TuiRenderer<B> {
                 // Map Y position to scroll offset
                 let scroll_ratio = relative_y as f32 / messages_height as f32;
                 let new_offset = (scroll_ratio * max_offset as f32) as usize;
-                state.set_messages_scroll_offset(new_offset.min(max_offset));
+                let clamped = new_offset.min(max_offset);
+                state.set_messages_scroll_offset(clamped);
+                // Dragging to the very bottom re-engages follow-tail.
+                state.set_follow_tail(clamped >= max_offset);
             }
 
             return None; // State is already updated, no command needed
@@ -2190,9 +2252,92 @@ impl<B: Backend> TuiRenderer<B> {
         None
     }
 
-    /// Perform hit testing to determine which component was clicked
+    /// Perform hit testing to determine which component was clicked.
+    /// Uses the cached geometry from the last rendered frame when available;
+    /// falls back to recomputing from `terminal.size()` only when no frame
+    /// has rendered yet (e.g. in tests before the first `render()`).
     fn hit_test(&self, col: u16, row: u16, state: &SharedState) -> ClickTarget {
+        if let Some(layout) = self.last_layout {
+            return Self::hit_test_cached(col, row, state, &layout);
+        }
         let size = self.terminal.size().unwrap_or_default();
+        let area = Rect::new(0, 0, size.width, size.height);
+        Self::hit_test_fallback(area, col, row, state)
+    }
+
+    /// Hit-test against the cached last-frame layout.
+    fn hit_test_cached(
+        col: u16,
+        row: u16,
+        state: &SharedState,
+        layout: &LastLayout,
+    ) -> ClickTarget {
+        // Border frame (1px on each side of the full area).
+        let area = layout.area;
+        if area.width == 0 || area.height == 0 {
+            return ClickTarget::Outside;
+        }
+        if col < area.x
+            || row < area.y
+            || col >= area.x.saturating_add(area.width).saturating_sub(1)
+            || row >= area.y.saturating_add(area.height).saturating_sub(1)
+        {
+            // On (or outside) the terminal frame border.
+            // Note: cached `area` starts at (0,0) in practice; keep the
+            // border semantics identical to the fallback path.
+            if col == 0 || row == 0 {
+                return ClickTarget::Outside;
+            }
+            // Fall through for clicks strictly inside; border clicks above
+            // already returned. Clicks beyond the area are outside.
+            if col >= area.x.saturating_add(area.width).saturating_sub(1)
+                || row >= area.y.saturating_add(area.height).saturating_sub(1)
+            {
+                return ClickTarget::Outside;
+            }
+        }
+
+        // Modal takes precedence when active.
+        if state.active_modal().is_some() {
+            if let Some(modal) = layout.modal {
+                if LastLayout::contains(&modal, col, row) {
+                    return ClickTarget::Modal;
+                }
+                return ClickTarget::Outside;
+            }
+            // No cached modal rect (should not happen when modal active);
+            // fall back to treating the click as outside.
+            return ClickTarget::Outside;
+        }
+
+        if let Some(sidebar) = layout.sidebar {
+            if LastLayout::contains(&sidebar, col, row) {
+                return ClickTarget::Sidebar;
+            }
+        }
+
+        if LastLayout::contains(&layout.header, col, row) {
+            return ClickTarget::Header;
+        }
+        if LastLayout::contains(&layout.messages, col, row) {
+            return ClickTarget::Messages;
+        }
+        // The 1-line status strip sits directly above input; preserve the
+        // legacy mapping where both resolve to Input.
+        if LastLayout::contains(&layout.status_strip, col, row)
+            || LastLayout::contains(&layout.input, col, row)
+        {
+            return ClickTarget::Input;
+        }
+        if LastLayout::contains(&layout.status, col, row) {
+            return ClickTarget::StatusBar;
+        }
+
+        ClickTarget::Outside
+    }
+
+    /// Legacy estimate-based hit-test, used only before the first frame.
+    fn hit_test_fallback(size: Rect, col: u16, row: u16, state: &SharedState) -> ClickTarget {
         let area = size;
 
         // Account for border frame (1px on each side)
@@ -2335,6 +2480,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
         let current_provider = state.current_provider();
         let current_model = state.current_model();
 
+        let mut captured_layout: Option<LastLayout> = None;
         self.terminal.draw(|frame| {
             let area = frame.area();
 
@@ -2375,6 +2521,31 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     Constraint::Length(1), // Status bar
                 ])
                 .split(main_area);
+
+            // Cache the rendered geometry for hit-testing. Clicks must be
+            // resolved against what was actually drawn, not fresh estimates
+            // from `terminal.size()`.
+            {
+                let modal_rect = if active_modal.is_some() {
+                    let modal_width = inner.width * 60 / 100;
+                    let modal_height = inner.height * 60 / 100;
+                    let modal_x = inner.x + (inner.width.saturating_sub(modal_width)) / 2;
+                    let modal_y = inner.y + (inner.height.saturating_sub(modal_height)) / 2;
+                    Some(Rect::new(modal_x, modal_y, modal_width, modal_height))
+                } else {
+                    None
+                };
+                captured_layout = Some(LastLayout {
+                    area,
+                    header: chunks[0],
+                    messages: chunks[1],
+                    status_strip: chunks[2],
+                    input: chunks[3],
+                    status: chunks[4],
+                    sidebar: sidebar_area,
+                    modal: modal_rect,
+                });
+            }
 
             // Render header
             let config = super::config::AppConfig::default();
@@ -2901,6 +3072,10 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 frame.render_widget(themed_question, area);
             }
         })?;
+
+        if captured_layout.is_some() {
+            self.last_layout = captured_layout;
+        }
 
         // Log render time with correlation_id if available
         let render_time = render_start.elapsed();
@@ -3658,5 +3833,68 @@ mod tests {
         );
 
         assert_eq!(cmd, Some(Command::QuestionCancel));
+    }
+
+    fn layout_for_hit_test() -> LastLayout {
+        LastLayout {
+            area: Rect::new(0, 0, 100, 30),
+            header: Rect::new(1, 1, 64, 2),
+            messages: Rect::new(1, 3, 64, 18),
+            status_strip: Rect::new(1, 21, 64, 1),
+            input: Rect::new(1, 22, 64, 5),
+            status: Rect::new(1, 27, 64, 1),
+            sidebar: Some(Rect::new(65, 1, 34, 28)),
+            modal: None,
+        }
+    }
+
+    #[test]
+    fn test_hit_test_uses_cached_layout() {
+        let mut renderer = make_test_renderer(100, 30);
+        let state = SharedState::new();
+        renderer.last_layout = Some(layout_for_hit_test());
+
+        assert_eq!(renderer.hit_test(5, 1, &state), ClickTarget::Header);
+        assert_eq!(renderer.hit_test(5, 10, &state), ClickTarget::Messages);
+        // Status strip maps to Input (legacy behavior).
+        assert_eq!(renderer.hit_test(5, 21, &state), ClickTarget::Input);
+        assert_eq!(renderer.hit_test(5, 24, &state), ClickTarget::Input);
+        assert_eq!(renderer.hit_test(5, 27, &state), ClickTarget::StatusBar);
+        assert_eq!(renderer.hit_test(70, 10, &state), ClickTarget::Sidebar);
+        assert_eq!(renderer.hit_test(0, 0, &state), ClickTarget::Outside);
+    }
+
+    #[test]
+    fn test_hit_test_cached_modal_takes_precedence() {
+        let mut renderer = make_test_renderer(100, 30);
+        let state = SharedState::new();
+        state.set_active_modal(Some(ModalType::Help));
+        let mut layout = layout_for_hit_test();
+        layout.modal = Some(Rect::new(20, 6, 60, 18));
+        renderer.last_layout = Some(layout);
+
+        assert_eq!(renderer.hit_test(30, 10, &state), ClickTarget::Modal);
+        // Click inside messages rect but outside modal is Outside when modal active.
+        assert_eq!(renderer.hit_test(5, 10, &state), ClickTarget::Outside);
+    }
+
+    #[test]
+    fn test_hit_test_falls_back_before_first_frame() {
+        let renderer = make_test_renderer(100, 30);
+        assert!(renderer.last_layout.is_none());
+        let state = SharedState::new();
+        // Fallback path recomputes from terminal size; just assert it does not
+        // panic and classifies the border as Outside.
+        assert_eq!(renderer.hit_test(0, 0, &state), ClickTarget::Outside);
+    }
+
+    #[test]
+    fn test_messages_area_rect_prefers_cached_layout() {
+        let mut renderer = make_test_renderer(100, 30);
+        let state = SharedState::new();
+        let layout = layout_for_hit_test();
+        renderer.last_layout = Some(layout);
+        let rect = renderer.messages_area_rect(&state).expect("rect");
+        assert_eq!(rect, layout.messages);
     }
 }

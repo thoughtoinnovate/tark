@@ -143,7 +143,13 @@ impl Widget for ApprovalModal<'_> {
             0
         };
         let base_height: u16 = 8; // Title, operation, command box, footer
-        let modal_height = (base_height + items_height + files_height).min(area.height - 2);
+        let cwd_height: u16 = if self.approval.working_dir.is_some() {
+            1
+        } else {
+            0
+        };
+        let modal_height =
+            (base_height + items_height + files_height + cwd_height).min(area.height - 2);
         let modal_width = area.width.min(65);
 
         let modal_area = Rect {
@@ -200,10 +206,15 @@ impl Widget for ApprovalModal<'_> {
         block.render(modal_area, buf);
 
         // Build layout constraints
+        let has_cwd = self.approval.working_dir.is_some();
         let mut constraints = vec![
             Constraint::Length(2), // Operation name
             Constraint::Length(3), // Command box
         ];
+
+        if has_cwd {
+            constraints.push(Constraint::Length(1)); // Working directory line
+        }
 
         if has_files {
             constraints.push(Constraint::Length(
@@ -232,7 +243,7 @@ impl Widget for ApprovalModal<'_> {
                 ),
             ]),
             Line::from(Span::styled(
-                format!("  {}", &self.approval.description),
+                format!("  {}", self.approval.description),
                 Style::default().fg(self.theme.text_secondary),
             )),
         ];
@@ -265,6 +276,19 @@ impl Widget for ApprovalModal<'_> {
             .wrap(Wrap { trim: false });
         command_text.render(command_inner, buf);
         chunk_idx += 1;
+
+        // Working directory (R2: approver must see where it runs)
+        if let Some(ref cwd) = self.approval.working_dir {
+            let cwd_line = Line::from(vec![
+                Span::styled("  in ", Style::default().fg(self.theme.text_muted)),
+                Span::styled(
+                    cwd.to_string(),
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+            ]);
+            Paragraph::new(cwd_line).render(chunks[chunk_idx], buf);
+            chunk_idx += 1;
+        }
 
         // Affected files (if any)
         if has_files {

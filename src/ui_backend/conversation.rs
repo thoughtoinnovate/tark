@@ -63,8 +63,13 @@ pub struct ConversationService {
 
 impl ConversationService {
     /// Create a new conversation service
-    pub fn new(chat_agent: ChatAgent, event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
+    pub fn new(mut chat_agent: ChatAgent, event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let conversation_mgr = Arc::new(tokio::sync::RwLock::new(ConversationManager::new()));
+        // Share one interrupt flag between the agent loop (`interrupt_check`
+        // closures) and the tool registry so a user cancel during tool
+        // execution drops the running tool and reaps its processes (R2 S5).
+        let interrupt_flag = Arc::new(AtomicBool::new(false));
+        chat_agent.set_interrupt_flag(interrupt_flag.clone());
         let chat_agent = Arc::new(tokio::sync::RwLock::new(chat_agent));
 
         Self {
@@ -72,7 +77,7 @@ impl ConversationService {
             chat_agent,
             event_tx,
             interaction_tx: None,
-            interrupt_flag: Arc::new(AtomicBool::new(false)),
+            interrupt_flag,
             is_processing: Arc::new(AtomicBool::new(false)),
             session_id: Arc::new(tokio::sync::RwLock::new(None)),
             remote_mirror: None,

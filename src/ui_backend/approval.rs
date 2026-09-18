@@ -76,6 +76,10 @@ pub struct ApprovalCardState {
     pub description: String,
     /// Command that will be executed (for display)
     pub command: String,
+    /// Effective working directory for process-launching tools (R2).
+    /// Displayed alongside the command so the approver sees where it runs.
+    #[serde(default)]
+    pub working_dir: Option<String>,
     /// Files/paths that will be affected
     pub affected_paths: Vec<String>,
     /// Tool call ID this approval is for
@@ -123,6 +127,7 @@ impl Default for ApprovalCardState {
             risk_level: RiskLevel::Safe,
             description: String::new(),
             command: String::new(),
+            working_dir: None,
             affected_paths: Vec::new(),
             tool_call_id: None,
             suggested_patterns: Vec::new(),
@@ -150,6 +155,7 @@ impl ApprovalCardState {
             risk_level,
             description,
             command,
+            working_dir: None,
             affected_paths,
             tool_call_id: None,
             suggested_patterns,

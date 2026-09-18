@@ -122,6 +122,7 @@ pub enum AppEvent {
         description: String,
         command: String,
         affected_paths: Vec<String>,
+        working_dir: Option<String>,
     },
 
     /// Operation was approved

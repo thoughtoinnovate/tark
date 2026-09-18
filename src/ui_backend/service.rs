@@ -712,7 +712,7 @@ impl AppService {
                 }
             }
 
-            // Message scrolling
+            // Message scrolling (sticky follow-tail)
             Command::ScrollDown => {
                 let step = 3usize;
                 let current = self.state.messages_scroll_offset();
@@ -726,6 +726,7 @@ impl AppService {
                 };
                 let next = normalized.saturating_add(step).min(max_offset);
                 self.state.set_messages_scroll_offset(next);
+                self.state.set_follow_tail(next >= max_offset);
             }
             Command::ScrollUp => {
                 let step = 3usize;
@@ -742,6 +743,7 @@ impl AppService {
                     self.state
                         .set_messages_scroll_offset(normalized.saturating_sub(step));
                 }
+                self.state.set_follow_tail(false);
             }
             Command::YankMessage => {
                 let messages = self.state.messages();

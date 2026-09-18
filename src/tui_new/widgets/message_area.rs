@@ -18,54 +18,64 @@ use crate::tui_new::theme::Theme;
 use crate::tui_new::widgets::question::QuestionWidget;
 use crate::ui_backend::DiffViewMode;
 use ratatui::style::Color;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
 
-/// Cursor blink interval
-const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
+/// Cursor blink interval in milliseconds.
+const CURSOR_BLINK_INTERVAL_MS: u64 = 530;
 
-/// Tool loading blink interval (faster for visual feedback)
-const TOOL_BLINK_INTERVAL: Duration = Duration::from_millis(400);
+/// Tool loading blink interval in milliseconds (faster for visual feedback).
+const TOOL_BLINK_INTERVAL_MS: u64 = 400;
 
-/// Global cursor blink state for messages (shared across renders)
-static mut MSG_LAST_BLINK: Option<Instant> = None;
-static mut MSG_CURSOR_VISIBLE: bool = true;
+/// Monotonic start instant for blink timestamps.
+static BLINK_START: OnceLock<std::time::Instant> = OnceLock::new();
 
-/// Global tool loading blink state (shared across renders)
-static mut TOOL_LAST_BLINK: Option<Instant> = None;
-static mut TOOL_INDICATOR_VISIBLE: bool = true;
+/// Global cursor blink state for messages (shared across renders, lock-free).
+static MSG_LAST_BLINK_MS: AtomicU64 = AtomicU64::new(0);
+static MSG_CURSOR_VISIBLE: AtomicBool = AtomicBool::new(true);
+
+/// Global tool loading blink state (shared across renders, lock-free).
+static TOOL_LAST_BLINK_MS: AtomicU64 = AtomicU64::new(0);
+static TOOL_INDICATOR_VISIBLE: AtomicBool = AtomicBool::new(true);
+
+/// Millis since first blink query (monotonic).
+fn blink_now_millis() -> u64 {
+    let start = BLINK_START.get_or_init(std::time::Instant::now);
+    start.elapsed().as_millis() as u64
+}
 
 /// Get current cursor visibility state for messages (blinks every 530ms)
 fn get_message_cursor_visible() -> bool {
-    unsafe {
-        let now = Instant::now();
-        if let Some(last) = MSG_LAST_BLINK {
-            if now.duration_since(last) >= CURSOR_BLINK_INTERVAL {
-                MSG_CURSOR_VISIBLE = !MSG_CURSOR_VISIBLE;
-                MSG_LAST_BLINK = Some(now);
-            }
-        } else {
-            MSG_LAST_BLINK = Some(now);
-            MSG_CURSOR_VISIBLE = true;
-        }
-        MSG_CURSOR_VISIBLE
+    let now = blink_now_millis();
+    let last = MSG_LAST_BLINK_MS.load(Ordering::Relaxed);
+    if last == 0 {
+        MSG_LAST_BLINK_MS.store(now, Ordering::Relaxed);
+        MSG_CURSOR_VISIBLE.store(true, Ordering::Relaxed);
+        return true;
     }
+    if now.wrapping_sub(last) >= CURSOR_BLINK_INTERVAL_MS {
+        let visible = MSG_CURSOR_VISIBLE.load(Ordering::Relaxed);
+        MSG_CURSOR_VISIBLE.store(!visible, Ordering::Relaxed);
+        MSG_LAST_BLINK_MS.store(now, Ordering::Relaxed);
+    }
+    MSG_CURSOR_VISIBLE.load(Ordering::Relaxed)
 }
 
 /// Get current tool loading indicator visibility state (blinks every 400ms)
 fn get_tool_indicator_visible() -> bool {
-    unsafe {
-        let now = Instant::now();
-        if let Some(last) = TOOL_LAST_BLINK {
-            if now.duration_since(last) >= TOOL_BLINK_INTERVAL {
-                TOOL_INDICATOR_VISIBLE = !TOOL_INDICATOR_VISIBLE;
-                TOOL_LAST_BLINK = Some(now);
-            }
-        } else {
-            TOOL_LAST_BLINK = Some(now);
-            TOOL_INDICATOR_VISIBLE = true;
-        }
-        TOOL_INDICATOR_VISIBLE
+    let now = blink_now_millis();
+    let last = TOOL_LAST_BLINK_MS.load(Ordering::Relaxed);
+    if last == 0 {
+        TOOL_LAST_BLINK_MS.store(now, Ordering::Relaxed);
+        TOOL_INDICATOR_VISIBLE.store(true, Ordering::Relaxed);
+        return true;
     }
+    if now.wrapping_sub(last) >= TOOL_BLINK_INTERVAL_MS {
+        let visible = TOOL_INDICATOR_VISIBLE.load(Ordering::Relaxed);
+        TOOL_INDICATOR_VISIBLE.store(!visible, Ordering::Relaxed);
+        TOOL_LAST_BLINK_MS.store(now, Ordering::Relaxed);
+    }
+    TOOL_INDICATOR_VISIBLE.load(Ordering::Relaxed)
 }
 
 /// Dim a color by a factor (0.0 = black, 1.0 = original color)

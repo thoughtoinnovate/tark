@@ -13,32 +13,43 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use crate::tui_new::theme::Theme;
 
-/// Cursor blink interval
-const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
+/// Cursor blink interval in milliseconds.
+const CURSOR_BLINK_INTERVAL_MS: u64 = 530;
 
-/// Global cursor blink state (shared across renders)
-static mut LAST_BLINK: Option<Instant> = None;
-static mut CURSOR_VISIBLE: bool = true;
+/// Monotonic start instant for blink timestamps.
+static BLINK_START: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Global cursor blink state (shared across renders, lock-free).
+static LAST_BLINK_MS: AtomicU64 = AtomicU64::new(0);
+static CURSOR_VISIBLE: AtomicBool = AtomicBool::new(true);
+
+/// Millis since first blink query (monotonic).
+fn blink_now_millis() -> u64 {
+    let start = BLINK_START.get_or_init(std::time::Instant::now);
+    start.elapsed().as_millis() as u64
+}
 
 /// Get current cursor visibility state (blinks every 530ms)
 fn get_cursor_visible() -> bool {
-    unsafe {
-        let now = Instant::now();
-        if let Some(last) = LAST_BLINK {
-            if now.duration_since(last) >= CURSOR_BLINK_INTERVAL {
-                CURSOR_VISIBLE = !CURSOR_VISIBLE;
-                LAST_BLINK = Some(now);
-            }
-        } else {
-            LAST_BLINK = Some(now);
-            CURSOR_VISIBLE = true;
-        }
-        CURSOR_VISIBLE
+    let now = blink_now_millis();
+    let last = LAST_BLINK_MS.load(Ordering::Relaxed);
+    if last == 0 {
+        LAST_BLINK_MS.store(now, Ordering::Relaxed);
+        CURSOR_VISIBLE.store(true, Ordering::Relaxed);
+        return true;
     }
+    if now.wrapping_sub(last) >= CURSOR_BLINK_INTERVAL_MS {
+        // Toggle visibility.
+        let visible = CURSOR_VISIBLE.load(Ordering::Relaxed);
+        CURSOR_VISIBLE.store(!visible, Ordering::Relaxed);
+        LAST_BLINK_MS.store(now, Ordering::Relaxed);
+    }
+    CURSOR_VISIBLE.load(Ordering::Relaxed)
 }
 
 /// Input widget for user text entry

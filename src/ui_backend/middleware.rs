@@ -77,18 +77,14 @@ pub fn logging_middleware(cmd: &Command, _state: &SharedState) -> MiddlewareResu
 pub fn validation_middleware(cmd: &Command, state: &SharedState) -> MiddlewareResult {
     match cmd {
         // Block SendMessage if LLM not connected
-        Command::SendMessage(_) => {
-            if !state.llm_connected() {
-                tracing::warn!("Blocked SendMessage: LLM not connected");
-                return MiddlewareResult::Block;
-            }
+        Command::SendMessage(_) if !state.llm_connected() => {
+            tracing::warn!("Blocked SendMessage: LLM not connected");
+            return MiddlewareResult::Block;
         }
         // Block SelectProvider/SelectModel if LLM not connected
-        Command::SelectProvider(_) | Command::SelectModel(_) => {
-            if !state.llm_connected() {
-                tracing::warn!("Blocked provider/model selection: LLM not connected");
-                return MiddlewareResult::Block;
-            }
+        Command::SelectProvider(_) | Command::SelectModel(_) if !state.llm_connected() => {
+            tracing::warn!("Blocked provider/model selection: LLM not connected");
+            return MiddlewareResult::Block;
         }
         _ => {}
     }
