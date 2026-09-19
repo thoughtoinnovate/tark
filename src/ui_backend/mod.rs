@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 pub mod approval;
+pub use approval::WorkspaceGrantRequest;
 pub mod catalog;
 mod commands;
 pub mod conversation;

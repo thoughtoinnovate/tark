@@ -2,12 +2,13 @@
 //!
 //! Thread-safe state that can be safely shared between the backend and frontend.
 
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use super::approval::ApprovalCardState;
+use super::approval::{ApprovalCardState, WorkspaceGrantRequest};
 use super::commands::{AgentMode, BuildMode};
 use super::questionnaire::{QuestionType, QuestionnaireState};
 use super::types::{
@@ -138,6 +139,8 @@ pub enum ModalType {
     TaskDeleteConfirm,
     /// Policy manager modal for viewing approval/denial patterns
     Policy,
+    /// Explicit permission interaction to grant an additional workspace root (R1)
+    WorkspaceGrant,
 }
 
 /// Active OAuth device flow session
@@ -427,6 +430,12 @@ struct StateInner {
     // ========== Approval Cards ==========
     pub pending_approval: Option<ApprovalCardState>,
 
+    // ========== Workspace Grants (R1) ==========
+    /// Pending explicit request to grant an additional workspace root.
+    pub pending_workspace_grant: Option<WorkspaceGrantRequest>,
+    /// Extra roots granted through the permission interaction (session-scoped).
+    pub granted_workspace_roots: Vec<PathBuf>,
+
     // ========== Rate Limiting ==========
     pub rate_limit_retry_at: Option<std::time::Instant>,
     pub rate_limit_pending_message: Option<String>,
@@ -577,6 +586,8 @@ impl SharedState {
                 attachment_tokens: Vec::new(),
                 active_questionnaire: None,
                 pending_approval: None,
+                pending_workspace_grant: None,
+                granted_workspace_roots: Vec::new(),
                 rate_limit_retry_at: None,
                 rate_limit_pending_message: None,
                 pending_mode_switch: None,
@@ -1039,6 +1050,25 @@ impl SharedState {
 
     pub fn pending_approval(&self) -> Option<ApprovalCardState> {
         self.read_inner().pending_approval.clone()
+    }
+
+    pub fn pending_workspace_grant(&self) -> Option<WorkspaceGrantRequest> {
+        self.read_inner().pending_workspace_grant.clone()
+    }
+
+    pub fn granted_workspace_roots(&self) -> Vec<PathBuf> {
+        self.read_inner().granted_workspace_roots.clone()
+    }
+
+    /// Effective workspace roots: primary first, then explicitly granted extras.
+    pub fn effective_workspace_roots(&self, primary: &std::path::Path) -> Vec<PathBuf> {
+        let mut roots = vec![primary.to_path_buf()];
+        for extra in self.read_inner().granted_workspace_roots.iter() {
+            if !roots.iter().any(|r| r == extra) {
+                roots.push(extra.clone());
+            }
+        }
+        roots
     }
 
     pub fn rate_limit_retry_at(&self) -> Option<std::time::Instant> {
@@ -2399,6 +2429,25 @@ impl SharedState {
         self.write_inner().pending_approval = approval;
     }
 
+    pub fn set_pending_workspace_grant(&self, request: Option<WorkspaceGrantRequest>) {
+        self.write_inner().pending_workspace_grant = request;
+    }
+
+    /// Record an explicitly granted workspace root. Returns false when the
+    /// root was already granted (no duplicate stored).
+    pub fn add_granted_workspace_root(&self, root: PathBuf) -> bool {
+        let mut inner = self.write_inner();
+        if inner.granted_workspace_roots.iter().any(|r| r == &root) {
+            return false;
+        }
+        inner.granted_workspace_roots.push(root);
+        true
+    }
+
+    pub fn clear_pending_workspace_grant(&self) {
+        self.write_inner().pending_workspace_grant = None;
+    }
+
     pub fn approval_select_prev(&self) {
         if let Some(ref mut approval) = self.write_inner().pending_approval {
             // Navigate actions (always available)
@@ -3007,6 +3056,25 @@ mod tests {
             model: None,
             tool_args: None,
         }
+    }
+
+    #[test]
+    fn granted_workspace_roots_dedup_and_effective_order() {
+        let state = SharedState::new();
+        let primary = std::path::PathBuf::from("/work/primary");
+        assert!(state.granted_workspace_roots().is_empty());
+
+        assert!(state.add_granted_workspace_root(std::path::PathBuf::from("/data/extra")));
+        assert!(!state.add_granted_workspace_root(std::path::PathBuf::from("/data/extra")));
+
+        let effective = state.effective_workspace_roots(&primary);
+        assert_eq!(
+            effective,
+            vec![
+                std::path::PathBuf::from("/work/primary"),
+                std::path::PathBuf::from("/data/extra"),
+            ]
+        );
     }
 
     #[test]

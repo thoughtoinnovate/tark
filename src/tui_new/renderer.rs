@@ -19,7 +19,7 @@ use crate::ui_backend::{
 
 use super::modals::{
     ApprovalModal, DeviceFlowModal, PluginModal, SessionSwitchConfirmModal, TaskDeleteConfirmModal,
-    TaskEditModal, ToolsModal, TrustModal,
+    TaskEditModal, ToolsModal, TrustModal, WorkspaceGrantModal,
 };
 use super::theme::Theme;
 use super::widgets::{
@@ -194,6 +194,14 @@ impl<B: Backend> TuiRenderer<B> {
                         'a' => Some(Command::ApproveAlways),
                         'p' => Some(Command::ApproveSession),
                         's' => Some(Command::DenyOperation),
+                        _ => None,
+                    }
+                }
+                Some(ModalType::WorkspaceGrant) => {
+                    // Handle workspace grant actions (R1: explicit grant/deny)
+                    match c.to_ascii_lowercase() {
+                        'g' => Some(Command::ApproveWorkspaceGrant),
+                        'd' => Some(Command::DenyWorkspaceGrant),
                         _ => None,
                     }
                 }
@@ -1337,6 +1345,7 @@ impl<B: Backend> TuiRenderer<B> {
                         }
                         ModalType::TaskEdit => Some(Command::ConfirmTaskEdit),
                         ModalType::TaskDeleteConfirm => Some(Command::ConfirmDeleteTask),
+                        ModalType::WorkspaceGrant => Some(Command::ApproveWorkspaceGrant),
                         _ => Some(Command::ConfirmModal),
                     }
                 } else if matches!(state.focused_component(), FocusedComponent::Input) {
@@ -2951,6 +2960,12 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     ModalType::Approval => {
                         if let Some(approval) = state.pending_approval() {
                             let modal = ApprovalModal::new(theme, &approval);
+                            frame.render_widget(modal, area);
+                        }
+                    }
+                    ModalType::WorkspaceGrant => {
+                        if let Some(request) = state.pending_workspace_grant() {
+                            let modal = WorkspaceGrantModal::new(theme, &request);
                             frame.render_widget(modal, area);
                         }
                     }

@@ -1701,6 +1701,10 @@ impl<B: Backend> TuiController<B> {
                 return Ok(());
             }
             Command::CloseModal => {
+                // Denying a workspace grant on dismiss (R1: fail-closed)
+                if state.active_modal() == Some(crate::ui_backend::ModalType::WorkspaceGrant) {
+                    state.clear_pending_workspace_grant();
+                }
                 // Restore original theme if canceling theme picker
                 if state.active_modal() == Some(crate::ui_backend::ModalType::ThemePicker) {
                     if let Some(original_theme) = state.theme_before_preview() {

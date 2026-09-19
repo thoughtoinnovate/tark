@@ -935,6 +935,9 @@ impl<B: Backend> TuiApp<B> {
                     ModalType::TaskDeleteConfirm => {
                         // TaskDeleteConfirm modal handled in tui_new renderer
                     }
+                    ModalType::WorkspaceGrant => {
+                        // WorkspaceGrant modal handled in tui_new renderer
+                    }
                 }
             }
         })?;
@@ -1131,6 +1134,9 @@ impl<B: Backend> TuiApp<B> {
                                         }
                                         Some(ModalType::TaskDeleteConfirm) => {
                                             // TaskDeleteConfirm handled in controller
+                                        }
+                                        Some(ModalType::WorkspaceGrant) => {
+                                            // WorkspaceGrant handled in controller
                                         }
                                         None => {}
                                     }

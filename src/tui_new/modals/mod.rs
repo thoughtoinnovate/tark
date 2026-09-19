@@ -16,6 +16,7 @@ pub mod task_edit_modal;
 pub mod theme_picker;
 pub mod tools_modal;
 pub mod trust_modal;
+pub mod workspace_grant_modal;
 
 pub use approval_modal::ApprovalModal;
 pub use common::{ModalHandler, ModalResult};
@@ -30,6 +31,7 @@ pub use task_edit_modal::{TaskDeleteConfirmModal, TaskEditModal};
 pub use theme_picker::ThemePickerHandler;
 pub use tools_modal::ToolsModal;
 pub use trust_modal::TrustModal;
+pub use workspace_grant_modal::WorkspaceGrantModal;
 
 use anyhow::Result;
 
@@ -73,6 +75,7 @@ impl ModalManager {
             | Some(ModalType::SessionSwitchConfirm)
             | Some(ModalType::TaskEdit)
             | Some(ModalType::TaskDeleteConfirm)
+            | Some(ModalType::WorkspaceGrant)
             | None => {
                 // These modals are handled directly in controller/renderer
                 Ok(ModalResult::NotHandled)

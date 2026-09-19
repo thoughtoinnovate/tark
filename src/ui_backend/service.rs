@@ -187,6 +187,23 @@ impl AppService {
         &self.working_dir
     }
 
+    /// True when the grant target already falls inside the primary root or a
+    /// previously granted root. Canonicalizes best-effort; fail-open is
+    /// avoided by treating unresolvable roots as non-matching.
+    fn grant_target_in_scope(
+        primary: &std::path::Path,
+        state: &crate::ui_backend::SharedState,
+        request: &crate::ui_backend::approval::WorkspaceGrantRequest,
+    ) -> bool {
+        let target = std::path::PathBuf::from(&request.canonical_target);
+        let canonical_target = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+        let roots = state.effective_workspace_roots(primary);
+        roots.iter().any(|root| {
+            let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            canonical_target.starts_with(&canonical_root)
+        })
+    }
+
     pub fn remote_mirror(&self) -> Option<Arc<crate::ui_backend::remote_mirror::RemoteMirror>> {
         self.conversation_svc
             .as_ref()
@@ -2100,6 +2117,79 @@ impl AppService {
                         .ok();
                 }
             }
+            // Workspace grant (R1): explicit permission interaction for extra roots
+            Command::RequestWorkspaceGrant(target) => {
+                match crate::ui_backend::approval::WorkspaceGrantRequest::new(
+                    target,
+                    "Workspace access requested".to_string(),
+                ) {
+                    Err(reason) => {
+                        self.event_tx
+                            .send(AppEvent::StatusChanged(format!(
+                                "Workspace grant invalid: {}",
+                                reason
+                            )))
+                            .ok();
+                    }
+                    Ok(request) => {
+                        if Self::grant_target_in_scope(&self.working_dir, &self.state, &request) {
+                            self.event_tx
+                                .send(AppEvent::StatusChanged(
+                                    "Path is already within the granted workspace".to_string(),
+                                ))
+                                .ok();
+                        } else {
+                            self.state.set_pending_workspace_grant(Some(request));
+                            self.state.set_active_modal(Some(
+                                crate::ui_backend::ModalType::WorkspaceGrant,
+                            ));
+                            self.state
+                                .set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+                        }
+                    }
+                }
+            }
+            Command::ApproveWorkspaceGrant => {
+                if let Some(request) = self.state.pending_workspace_grant() {
+                    let root = std::path::PathBuf::from(&request.canonical_target);
+                    self.state.add_granted_workspace_root(root);
+                    self.state.clear_pending_workspace_grant();
+                    self.state.set_active_modal(None);
+                    self.state
+                        .set_focused_component(crate::ui_backend::FocusedComponent::Input);
+                    let message = format!("Workspace root granted: {}", request.canonical_target);
+                    self.event_tx
+                        .send(AppEvent::StatusChanged(message.clone()))
+                        .ok();
+                    self.state.add_message(crate::ui_backend::Message {
+                        role: crate::ui_backend::MessageRole::System,
+                        content: format!("✅ {}", message),
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        remote: false,
+                        provider: None,
+                        model: None,
+                        collapsed: false,
+                        thinking: None,
+                        context_transient: true,
+                        tool_calls: Vec::new(),
+                        segments: Vec::new(),
+                        tool_args: None,
+                    });
+                }
+            }
+            Command::DenyWorkspaceGrant => {
+                if self.state.pending_workspace_grant().is_some() {
+                    self.state.clear_pending_workspace_grant();
+                    self.state.set_active_modal(None);
+                    self.state
+                        .set_focused_component(crate::ui_backend::FocusedComponent::Input);
+                    self.event_tx
+                        .send(AppEvent::StatusChanged(
+                            "Workspace grant denied".to_string(),
+                        ))
+                        .ok();
+                }
+            }
 
             // Questionnaire actions
             Command::QuestionUp => {
@@ -3787,6 +3877,84 @@ mod tests {
             .await
             .expect("conversation trust");
         assert_eq!(conv_trust, TrustLevel::Careful);
+    }
+
+    #[tokio::test]
+    async fn workspace_grant_request_approve_flow() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let working_dir = tempdir.path().to_path_buf();
+        // Grant target must live outside the primary root, otherwise it is
+        // already in scope and no permission interaction is needed.
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let grant_dir = outside.path().to_path_buf();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut service = AppService::new(working_dir, event_tx).expect("service");
+
+        service
+            .handle_command(Command::RequestWorkspaceGrant(
+                grant_dir.display().to_string(),
+            ))
+            .await
+            .expect("request grant");
+        let pending = service.state.pending_workspace_grant();
+        assert!(pending.is_some());
+        assert_eq!(
+            service.state.active_modal(),
+            Some(crate::ui_backend::ModalType::WorkspaceGrant)
+        );
+
+        service
+            .handle_command(Command::ApproveWorkspaceGrant)
+            .await
+            .expect("approve grant");
+        assert!(service.state.pending_workspace_grant().is_none());
+        assert_eq!(service.state.active_modal(), None);
+        assert_eq!(service.state.granted_workspace_roots().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_grant_request_deny_clears_pending() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let working_dir = tempdir.path().to_path_buf();
+        // Grant target must live outside the primary root, otherwise it is
+        // already in scope and no permission interaction is needed.
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let grant_dir = outside.path().to_path_buf();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut service = AppService::new(working_dir, event_tx).expect("service");
+
+        service
+            .handle_command(Command::RequestWorkspaceGrant(
+                grant_dir.display().to_string(),
+            ))
+            .await
+            .expect("request grant");
+        assert!(service.state.pending_workspace_grant().is_some());
+
+        service
+            .handle_command(Command::DenyWorkspaceGrant)
+            .await
+            .expect("deny grant");
+        assert!(service.state.pending_workspace_grant().is_none());
+        assert_eq!(service.state.active_modal(), None);
+        assert!(service.state.granted_workspace_roots().is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_grant_inside_scope_needs_no_modal() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let working_dir = tempdir.path().to_path_buf();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut service = AppService::new(working_dir.clone(), event_tx).expect("service");
+
+        service
+            .handle_command(Command::RequestWorkspaceGrant(
+                working_dir.display().to_string(),
+            ))
+            .await
+            .expect("request grant");
+        assert!(service.state.pending_workspace_grant().is_none());
+        assert_eq!(service.state.active_modal(), None);
     }
 
     #[tokio::test]

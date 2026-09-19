@@ -274,3 +274,113 @@ impl ApprovalCardState {
         }
     }
 }
+
+/// Explicit permission request to grant an additional workspace root (R1).
+///
+/// A user may grant another root only through an explicit interaction that
+/// clearly identifies the target. The `canonical_target` is the resolved
+/// absolute path that would be added to the capability; `requested_path` is
+/// the original user-supplied input for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceGrantRequest {
+    /// Original user-supplied path input.
+    pub requested_path: String,
+    /// Resolved absolute target that would be granted.
+    pub canonical_target: String,
+    /// Why the grant was requested (e.g. tool denial context).
+    pub reason: String,
+}
+
+impl WorkspaceGrantRequest {
+    /// Create a grant request, normalizing the target fail-closed.
+    pub fn new(requested_path: String, reason: String) -> Result<Self, String> {
+        let canonical_target = normalize_grant_target(&requested_path)?;
+        Ok(Self {
+            requested_path,
+            canonical_target,
+            reason,
+        })
+    }
+}
+
+/// Normalize a workspace-grant target fail-closed.
+///
+/// - Rejects empty input and NUL bytes.
+/// - Existing paths are canonicalized (resolves symlinks).
+/// - Non-existent paths must be absolute; they are lexically normalized so
+///   `..` cannot smuggle an escape past the displayed target.
+/// - Relative paths for non-existent targets are rejected: they would resolve
+///   against the primary root, so granting them as a new root is meaningless.
+pub fn normalize_grant_target(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Grant target must not be empty".to_string());
+    }
+    if trimmed.contains('\0') {
+        return Err("Grant target must not contain NUL bytes".to_string());
+    }
+    let path = std::path::Path::new(trimmed);
+    if path.exists() {
+        return std::fs::canonicalize(path)
+            .map(|p| p.display().to_string())
+            .map_err(|_| "Grant target could not be resolved".to_string());
+    }
+    if !path.is_absolute() {
+        return Err("Grant target must be an existing path or an absolute path".to_string());
+    }
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => {
+                normalized.push(prefix.as_os_str());
+            }
+            std::path::Component::RootDir => {
+                normalized.push(std::path::Component::RootDir.as_os_str());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err("Grant target could not be resolved".to_string());
+    }
+    Ok(normalized.display().to_string())
+}
+
+#[cfg(test)]
+mod workspace_grant_tests {
+    use super::*;
+
+    #[test]
+    fn grant_target_rejects_empty_and_nul() {
+        assert!(normalize_grant_target("").is_err());
+        assert!(normalize_grant_target("   ").is_err());
+        assert!(normalize_grant_target("a\0b").is_err());
+    }
+
+    #[test]
+    fn grant_target_rejects_relative_missing_path() {
+        assert!(normalize_grant_target("relative/missing-dir-xyz").is_err());
+    }
+
+    #[test]
+    fn grant_target_accepts_existing_dir_canonicalized() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = normalize_grant_target(&dir.path().display().to_string()).expect("target");
+        assert!(!target.is_empty());
+        let request =
+            WorkspaceGrantRequest::new(dir.path().display().to_string(), "test".to_string())
+                .expect("request");
+        assert_eq!(request.canonical_target, target);
+    }
+
+    #[test]
+    fn grant_target_accepts_absolute_missing_path_without_escape() {
+        let target =
+            normalize_grant_target("/tmp/tark-grant-test/../grant-target-xyz").expect("target");
+        assert_eq!(target, "/tmp/grant-target-xyz");
+    }
+}

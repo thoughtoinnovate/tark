@@ -264,6 +264,14 @@ pub enum Command {
     /// Deny with pattern persistently
     DenyAlways,
 
+    // ========== Workspace Grant (R1) ==========
+    /// Request an explicit permission interaction to grant a workspace root
+    RequestWorkspaceGrant(String),
+    /// Approve the pending workspace grant (session-scoped)
+    ApproveWorkspaceGrant,
+    /// Deny the pending workspace grant
+    DenyWorkspaceGrant,
+
     // ========== Questionnaire Actions ==========
     /// Navigate up in question options
     QuestionUp,
