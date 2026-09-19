@@ -1,0 +1,24 @@
+---
+source: tests/tui_snapshot_tests.rs
+expression: "capture_widget(widget, 65, 24)"
+---
+                                                                 
+                                                                 
+                                                                 
+                                                                 
+╭───────────────── ⚠ RISKY - Approval Required ─────────────────╮
+│shell                                                          │
+│Approval required for shell                                    │
+│╭ Command ────────────────────────────────────────────────────╮│
+││cargo test --all-features -- --nocapture tui_snapshot_tests  ││
+│╰─────────────────────────────────────────────────────────────╯│
+│  in /work/tark                                                │
+│  Affected files:                                              │
+│    📄  Cargo.toml                                              │
+│                                                               │
+│ ▶ [▶ Run Once] Execute this time only                         │
+│   [✓ Always Allow] Remember this command                      │
+│   [✗ Skip] Don't run this                                     │
+│                                                               │
+│                                                               │
+╰──────────── ↑↓ navigate  Enter select  Esc cancel ────────────╯

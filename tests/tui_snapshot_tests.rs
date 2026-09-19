@@ -255,6 +255,29 @@ fn snapshot_tool_diff_split() {
 }
 
 // ============================================================================
+// APPROVAL MODAL SNAPSHOTS (R2: effective command + working directory)
+// ============================================================================
+
+#[test]
+fn snapshot_approval_modal_with_cwd() {
+    use tark_cli::tui_new::modals::ApprovalModal;
+    use tark_cli::ui_backend::approval::{ApprovalCardState, RiskLevel};
+
+    let theme = Theme::default();
+    let mut approval = ApprovalCardState::new(
+        "shell".to_string(),
+        RiskLevel::Risky,
+        "Approval required for shell".to_string(),
+        "cargo test --all-features -- --nocapture tui_snapshot_tests".to_string(),
+        vec!["Cargo.toml".to_string()],
+        vec![],
+    );
+    approval.working_dir = Some("/work/tark".to_string());
+    let widget = ApprovalModal::new(&theme, &approval);
+    assert_snapshot!("approval_modal_with_cwd", capture_widget(widget, 65, 24));
+}
+
+// ============================================================================
 // COMBINED STATE SNAPSHOTS
 // ============================================================================
 

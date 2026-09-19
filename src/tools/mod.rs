@@ -1054,4 +1054,37 @@ mod tests {
         registry.set_interrupt_flag(flag.clone());
         assert!(Arc::ptr_eq(&registry.interrupt_handle(), &flag));
     }
+
+    #[test]
+    fn effective_cwd_covers_process_launching_tools() {
+        // R2: any mode that can launch a process must display the effective
+        // command and working directory when approval is required.
+        let registry = ToolRegistry::new(PathBuf::from("/work/primary"));
+        // Shell without an override runs in the registry working directory.
+        assert_eq!(
+            registry.effective_cwd("shell", &json!({ "command": "ls" })),
+            Some("/work/primary".to_string())
+        );
+        // Shell with a relative override resolves against the registry root.
+        assert_eq!(
+            registry.effective_cwd(
+                "shell",
+                &json!({ "command": "ls", "working_dir": "sub/dir" })
+            ),
+            Some("/work/primary/sub/dir".to_string())
+        );
+        // Shell with an absolute override shows it verbatim.
+        assert_eq!(
+            registry.effective_cwd(
+                "shell",
+                &json!({ "command": "ls", "working_dir": "/tmp/other" })
+            ),
+            Some("/tmp/other".to_string())
+        );
+        // Tools without a process working directory show no cwd line.
+        assert_eq!(
+            registry.effective_cwd("read_file", &json!({ "path": "a.txt" })),
+            None
+        );
+    }
 }

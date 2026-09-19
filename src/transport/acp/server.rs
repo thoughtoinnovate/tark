@@ -376,28 +376,16 @@ impl AcpServer {
 
             match interaction {
                 InteractionRequest::Approval { request, responder } => {
-                    let options = permission_options_for_request(&request);
                     let tool_call_id = format!(
                         "toolcall-{}",
                         self.next_outbound_id.fetch_add(1, Ordering::SeqCst)
                     );
-                    let req = json!({
-                        "sessionId": session.id,
-                        "toolCall": {
-                            "toolCallId": tool_call_id,
-                            "title": format!("{} {}", request.tool, request.command),
-                            "status": "pending",
-                            "kind": "execute",
-                            "rawInput": request.command,
-                        },
-                        "options": options,
-                        "_meta": {
-                            "tark": {
-                                "requestId": request_id,
-                                "tool": request.tool,
-                            }
-                        }
-                    });
+                    let req = permission_request_params(
+                        &session.id,
+                        &tool_call_id,
+                        &request_id,
+                        &request,
+                    );
                     let result = self
                         .send_request(
                             "session/request_permission",
@@ -1318,6 +1306,45 @@ impl AcpServer {
     }
 }
 
+/// Build the `session/request_permission` params for an approval request.
+///
+/// The effective working directory travels in two places (R2): clients that
+/// only render `toolCall.title` see it as an `(in <cwd>)` suffix, while
+/// clients that understand Tark's `_meta` extension can read the machine-
+/// friendly `tark.workingDir` value. `None` (tools without a process working
+/// directory) leaves both out.
+fn permission_request_params(
+    session_id: &str,
+    tool_call_id: &str,
+    request_id: &str,
+    request: &crate::tools::questionnaire::ApprovalRequest,
+) -> Value {
+    let title = match request.working_dir.as_deref() {
+        Some(cwd) if !cwd.is_empty() => {
+            format!("{} {} (in {})", request.tool, request.command, cwd)
+        }
+        _ => format!("{} {}", request.tool, request.command),
+    };
+    json!({
+        "sessionId": session_id,
+        "toolCall": {
+            "toolCallId": tool_call_id,
+            "title": title,
+            "status": "pending",
+            "kind": "execute",
+            "rawInput": request.command,
+        },
+        "options": permission_options_for_request(request),
+        "_meta": {
+            "tark": {
+                "requestId": request_id,
+                "tool": request.tool,
+                "workingDir": request.working_dir,
+            }
+        }
+    })
+}
+
 fn permission_options_for_request(
     request: &crate::tools::questionnaire::ApprovalRequest,
 ) -> Vec<Value> {
@@ -1769,6 +1796,41 @@ mod tests {
         assert!(matches!(bootstrap.mode, AgentMode::Ask));
         assert_eq!(bootstrap.provider, "claude");
         assert_eq!(bootstrap.model.as_deref(), Some("claude-sonnet-4"));
+    }
+
+    #[test]
+    fn permission_request_params_include_working_dir() {
+        let req = ApprovalRequest {
+            tool: "shell".to_string(),
+            command: "cargo test --all-features".to_string(),
+            risk_level: RiskLevel::Risky,
+            suggested_patterns: vec![],
+            working_dir: Some("/work/tark".to_string()),
+        };
+        let params = permission_request_params("sess-1", "toolcall-1", "req-1", &req);
+        assert_eq!(
+            params["toolCall"]["title"],
+            json!("shell cargo test --all-features (in /work/tark)")
+        );
+        assert_eq!(params["_meta"]["tark"]["workingDir"], json!("/work/tark"));
+        assert_eq!(
+            params["toolCall"]["rawInput"],
+            json!("cargo test --all-features")
+        );
+    }
+
+    #[test]
+    fn permission_request_params_omit_missing_working_dir() {
+        let req = ApprovalRequest {
+            tool: "read_file".to_string(),
+            command: "src/main.rs".to_string(),
+            risk_level: RiskLevel::ReadOnly,
+            suggested_patterns: vec![],
+            working_dir: None,
+        };
+        let params = permission_request_params("sess-1", "toolcall-2", "req-2", &req);
+        assert_eq!(params["toolCall"]["title"], json!("read_file src/main.rs"));
+        assert!(params["_meta"]["tark"]["workingDir"].is_null());
     }
 
     #[test]
