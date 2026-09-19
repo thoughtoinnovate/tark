@@ -464,4 +464,200 @@ mod tests {
         assert_eq!(doc.content, "let x = 2;\n");
         assert_eq!(doc.version, 2);
     }
+
+    #[test]
+    fn utf16_non_bmp_line_maps_surrogate_pair() {
+        // `𝄞` U+1D11E: 2 UTF-16 units, 4 bytes. In `a𝄞b` a UTF-16 client
+        // addresses a=0..1, 𝄞=1..3, b=3..4.
+        let line = "a𝄞b";
+        assert_eq!(line.encode_utf16().count(), 4);
+        assert_eq!(utf16_to_byte_index(line, 0), 0);
+        assert_eq!(utf16_to_byte_index(line, 1), 1);
+        // Column 2 is the lone low surrogate: resolves forward to `b`.
+        assert_eq!(utf16_to_byte_index(line, 2), 5);
+        assert_eq!(utf16_to_byte_index(line, 3), 5);
+        assert_eq!(utf16_to_byte_index(line, 4), 6);
+        assert_eq!(utf16_to_byte_index(line, 99), 6);
+        // A lone `𝄞` line: interior column and EOL clamping.
+        assert_eq!(utf16_to_byte_index("𝄞", 0), 0);
+        assert_eq!(utf16_to_byte_index("𝄞", 1), 4);
+        assert_eq!(utf16_to_byte_index("𝄞", 2), 4);
+        // The inverse mapping clamps mid-character bytes down to the char start.
+        assert_eq!(byte_to_utf16_col(line, 0), 0);
+        assert_eq!(byte_to_utf16_col(line, 1), 1);
+        assert_eq!(byte_to_utf16_col(line, 2), 1);
+        assert_eq!(byte_to_utf16_col(line, 5), 3);
+        assert_eq!(byte_to_utf16_col(line, 6), 4);
+        // Char indexes: 𝄞 is one scalar despite two UTF-16 units.
+        assert_eq!(utf16_to_char_index(line, 0), 0);
+        assert_eq!(utf16_to_char_index(line, 1), 1);
+        assert_eq!(utf16_to_char_index(line, 3), 2);
+        assert_eq!(utf16_to_char_index(line, 4), 3);
+    }
+
+    #[test]
+    fn utf16_emoji_zwj_sequence_counts_per_scalar() {
+        // 👨‍👩‍👧‍👦 is 7 scalars: each person emoji is non-BMP (2 units /
+        // 4 bytes) and each ZWJ U+200D is BMP (1 unit / 3 bytes), for 11
+        // UTF-16 units and 25 bytes. A UTF-16 client counts code units, not
+        // grapheme clusters, and so must the server.
+        let family = "👨‍👩‍👧‍👦";
+        assert_eq!(family.chars().count(), 7);
+        assert_eq!(family.encode_utf16().count(), 11);
+        assert_eq!(family.len(), 25);
+        // Well-formed boundary columns resolve to scalar starts.
+        for (col, byte) in [
+            (0, 0),
+            (2, 4),
+            (3, 7),
+            (5, 11),
+            (6, 14),
+            (8, 18),
+            (9, 21),
+            (11, 25),
+        ] {
+            assert_eq!(utf16_to_byte_index(family, col), byte, "col {col}");
+            assert_eq!(byte_to_utf16_col(family, byte), col, "byte {byte}");
+        }
+        // Interior (lone-surrogate) columns resolve forward, never panicking.
+        assert_eq!(utf16_to_byte_index(family, 1), 4);
+        assert_eq!(utf16_to_byte_index(family, 4), 11);
+        assert_eq!(utf16_to_byte_index(family, 7), 18);
+        assert_eq!(utf16_to_byte_index(family, 10), 25);
+        assert_eq!(utf16_to_byte_index(family, 99), 25);
+        // Char indexes advance per scalar.
+        assert_eq!(utf16_to_char_index(family, 0), 0);
+        assert_eq!(utf16_to_char_index(family, 2), 1);
+        assert_eq!(utf16_to_char_index(family, 3), 2);
+        assert_eq!(utf16_to_char_index(family, 11), 7);
+    }
+
+    #[test]
+    fn utf16_combining_mark_counts_per_scalar_not_per_grapheme() {
+        // `e` + U+0301 renders as one grapheme cluster but is two scalars of
+        // one UTF-16 unit each. LSP columns count units, so the mark stays
+        // individually addressable.
+        let decomposed = "é";
+        assert_eq!(decomposed.chars().count(), 2);
+        assert_eq!(decomposed.encode_utf16().count(), 2);
+        assert_eq!(utf16_to_byte_index(decomposed, 0), 0);
+        assert_eq!(utf16_to_byte_index(decomposed, 1), 1);
+        assert_eq!(utf16_to_byte_index(decomposed, 2), 3);
+        assert_eq!(utf16_to_byte_index(decomposed, 99), 3);
+        assert_eq!(byte_to_utf16_col(decomposed, 1), 1);
+        assert_eq!(byte_to_utf16_col(decomposed, 3), 2);
+    }
+
+    #[test]
+    fn utf16_mixed_cjk_latin_line() {
+        // a, b, c, d: 1 unit / 1 byte each; 中, 文: 1 unit / 3 bytes each.
+        let line = "ab中文cd";
+        assert_eq!(line.encode_utf16().count(), 6);
+        for (col, byte) in [(0, 0), (1, 1), (2, 2), (3, 5), (4, 8), (5, 9), (6, 10)] {
+            assert_eq!(utf16_to_byte_index(line, col), byte, "col {col}");
+            assert_eq!(byte_to_utf16_col(line, byte), col, "byte {byte}");
+        }
+        assert_eq!(utf16_to_byte_index(line, 99), 10);
+        // Mid-CJK bytes clamp down to the character start.
+        assert_eq!(byte_to_utf16_col(line, 3), 2);
+        assert_eq!(byte_to_utf16_col(line, 6), 3);
+        assert_eq!(utf16_to_char_index(line, 3), 3);
+        assert_eq!(
+            doc_with(line).get_range(&range(0, 2, 0, 4)),
+            Some("中文".to_string())
+        );
+    }
+
+    #[test]
+    fn utf16_empty_lines_and_empty_text() {
+        assert_eq!(utf16_to_byte_index("", 0), 0);
+        assert_eq!(utf16_to_byte_index("", 7), 0);
+        assert_eq!(byte_to_utf16_col("", 0), 0);
+        assert_eq!(byte_to_utf16_col("", 99), 0);
+        assert_eq!(utf16_to_char_index("", 5), 0);
+        // `a\n\nb`: line 1 is empty at byte offset 2 with zero width.
+        let doc = doc_with("a\n\nb");
+        assert_eq!(doc.position_to_offset(&pos(1, 0)), Some(2));
+        assert_eq!(doc.position_to_offset(&pos(1, 99)), Some(2));
+        assert_eq!(doc.range_to_byte_span(&range(1, 0, 1, 0)), Some((2, 2)));
+        assert_eq!(doc.get_range(&range(1, 0, 1, 5)), Some(String::new()));
+        assert_eq!(doc.get_line(1), Some(""));
+        // Empty content has no lines under `str::lines` semantics, so line 0
+        // does not resolve; edits targeting it are skipped, not misapplied.
+        assert_eq!(doc_with("").position_to_offset(&pos(0, 0)), None);
+    }
+
+    #[test]
+    fn utf16_positions_at_line_boundaries() {
+        // Line 0 `aé` (3 bytes, 2 units); line 1 `中𝄞` (7 bytes, 3 units,
+        // starting at byte 4); line 2 `xy` starting at byte 12; 14 bytes total.
+        let doc = doc_with("aé\n中𝄞\nxy");
+        // Start-of-line columns.
+        assert_eq!(doc.position_to_offset(&pos(0, 0)), Some(0));
+        assert_eq!(doc.position_to_offset(&pos(1, 0)), Some(4));
+        assert_eq!(doc.position_to_offset(&pos(2, 0)), Some(12));
+        // End-of-line columns and clamping past EOL.
+        assert_eq!(doc.position_to_offset(&pos(0, 2)), Some(3));
+        assert_eq!(doc.position_to_offset(&pos(0, 99)), Some(3));
+        assert_eq!(doc.position_to_offset(&pos(1, 3)), Some(11));
+        assert_eq!(doc.position_to_offset(&pos(1, 99)), Some(11));
+        // A lone-surrogate interior column normalizes forward within the line.
+        assert_eq!(doc.position_to_offset(&pos(1, 2)), Some(11));
+        // Out-of-range lines and inverted ranges resolve to `None`.
+        assert_eq!(doc.position_to_offset(&pos(3, 0)), None);
+        assert_eq!(doc.range_to_byte_span(&range(1, 1, 0, 0)), None);
+        // An end line past EOF clamps to EOF; cross-line spans keep newlines.
+        assert_eq!(doc.range_to_byte_span(&range(0, 0, 99, 0)), Some((0, 14)));
+        assert_eq!(doc.get_range(&range(0, 1, 1, 1)), Some("é\n中".to_string()));
+        assert_eq!(doc.get_range(&range(1, 1, 1, 3)), Some("𝄞".to_string()));
+    }
+
+    #[test]
+    fn utf16_client_columns_match_encode_utf16_prefixes() {
+        // A UTF-16 client addresses character `i` at the summed UTF-16
+        // lengths of the preceding characters; the helpers must agree with
+        // that addressing for every character of a mixed-script line.
+        let line = "héllo世界𝄞!";
+        let byte_offsets: Vec<usize> = line.char_indices().map(|(b, _)| b).collect();
+        let mut col = 0u32;
+        for (i, c) in line.chars().enumerate() {
+            assert_eq!(utf16_to_byte_index(line, col), byte_offsets[i], "char {i}");
+            assert_eq!(byte_to_utf16_col(line, byte_offsets[i]), col, "char {i}");
+            assert_eq!(utf16_to_char_index(line, col), i, "char {i}");
+            col += c.len_utf16() as u32;
+        }
+        assert_eq!(col, line.encode_utf16().count() as u32);
+        assert_eq!(utf16_to_byte_index(line, col), line.len());
+        assert_eq!(byte_to_utf16_col(line, line.len()), col);
+        // A client-style replacement of `世界` (columns 5..7) keeps `𝄞` intact.
+        let mut doc = doc_with(line);
+        doc.apply_content_changes(2, vec![ranged_edit(0, 5, 0, 7, "W")]);
+        assert_eq!(doc.content, "hélloW𝄞!");
+    }
+
+    #[test]
+    fn utf16_edit_spanning_zwj_sequence_uses_utf16_columns() {
+        // `a👨‍👩‍👧‍👦b`: the family occupies UTF-16 columns 1..12
+        // (bytes 1..26). Read as byte offsets, column 12 would land
+        // mid-sequence and corrupt it.
+        let line = "a👨‍👩‍👧‍👦b";
+        assert_eq!(line.encode_utf16().count(), 13);
+        assert_eq!(utf16_to_byte_index(line, 1), 1);
+        assert_eq!(utf16_to_byte_index(line, 12), 26);
+        let mut doc = doc_with(line);
+        doc.apply_content_changes(2, vec![ranged_edit(0, 1, 0, 12, "X")]);
+        assert_eq!(doc.content, "aXb");
+    }
+
+    #[test]
+    fn utf16_edit_spanning_cjk_uses_utf16_columns() {
+        // `ab中文cd`: 中文 occupies UTF-16 columns 2..4 (bytes 2..8).
+        let mut doc = doc_with("ab中文cd");
+        doc.apply_content_changes(2, vec![ranged_edit(0, 2, 0, 4, "XY")]);
+        assert_eq!(doc.content, "abXYcd");
+        assert_eq!(
+            doc_with("ab中文cd").get_range(&range(0, 2, 0, 4)),
+            Some("中文".to_string())
+        );
+    }
 }
