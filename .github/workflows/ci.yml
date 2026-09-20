@@ -342,7 +342,7 @@ jobs:
       # errors). Pristine builds are also the correct validation for a
       # portability matrix.
       - name: Compile check first (fast, clear errors)
-        run: "cargo check --all-features --tests 2>&1 | tee check-output.log; test ${PIPESTATUS[0]} -eq 0"
+        run: "cargo check --all-features --tests -v 2>&1 | tee check-output.log; test ${PIPESTATUS[0]} -eq 0"
       - name: Lib test suite
         run: "cargo test --all-features --lib 2>&1 | tee libtest-output.log; test ${PIPESTATUS[0]} -eq 0"
       - name: Report failure detail
@@ -358,6 +358,13 @@ jobs:
             N=$(grep -cE '^error(\[|:)' $f-clean.log 2>/dev/null || echo 0)
             echo "::warning::diag-$f error_lines=$N" || true
           done
+          # Artifact census: rmeta presence tells whether deps really built.
+          shopt -s nullglob || true
+          RMETA=(target/debug/deps/*.rmeta)
+          echo "::warning::diag-artifacts rmeta_count=${#RMETA[@]}" || true
+          # The exact rustc invocation for tark-cli (are --extern flags present?).
+          INVOC=$(grep -m1 -o 'Running `rustc --crate-name tark_cli[^`]*' libtest-clean.log check-clean.log 2>/dev/null | head -c 6000)
+          echo "::warning::diag-invocation ${INVOC:-none-found}" || true
           # Full-log excerpts as warnings (annotations cap at 64KB each).
           echo "::warning::diag-head $(head -80 libtest-clean.log | tr '\n' ' ' | head -c 20000)"
           echo "::warning::diag-tail $(tail -40 libtest-clean.log | tr '\n' ' ' | head -c 20000)"
