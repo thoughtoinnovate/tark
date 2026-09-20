@@ -69,11 +69,19 @@ impl PathSanitizer {
     }
 
     /// Canonicalize and verify path
+    ///
+    /// Relative paths anchor on the *canonical* workdir, so symlinked
+    /// prefixes (macOS `/var` -> `/private/var`) compare alike whether or
+    /// not the target exists yet.
     pub fn canonicalize(&self, path: &str) -> Result<PathBuf> {
         let path_buf = if Path::new(path).is_absolute() {
             PathBuf::from(path)
         } else {
-            self.working_dir.join(path)
+            let base = self
+                .working_dir
+                .canonicalize()
+                .unwrap_or_else(|_| self.working_dir.clone());
+            base.join(path)
         };
 
         // Attempt to canonicalize (resolves .. and symlinks)
