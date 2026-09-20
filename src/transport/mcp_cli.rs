@@ -375,9 +375,66 @@ pub async fn mcp_conformance(manager: &McpServerManager, id: &str) -> Conformanc
     conformance_check(manager, id).await
 }
 
+/// Per-id import preview entry (R12 S29: dry-run before migration).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ImportPreview {
+    /// Server id.
+    pub id: String,
+    /// `add` or `overwrite` (needs force).
+    pub action: String,
+    /// Human-readable reason for overwrite entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Preview an import without writing anything (R12 S29).
+///
+/// Reports per id whether it would be added or need force to overwrite.
+/// Invalid payloads fail closed with an explicit error (never silently
+/// reinterpreted). Never touches the file or the manager.
+pub fn preview_import(file_path: &Path, json_str: &str) -> Result<Vec<ImportPreview>> {
+    let imported = parse_import_json(json_str)?;
+    let servers = read_servers_file(file_path)?;
+    let mut preview = Vec::new();
+    for id in imported.keys() {
+        if servers.contains_key(id) {
+            preview.push(ImportPreview {
+                id: id.clone(),
+                action: "overwrite".to_string(),
+                reason: Some("already exists (needs force)".to_string()),
+            });
+        } else {
+            preview.push(ImportPreview {
+                id: id.clone(),
+                action: "add".to_string(),
+                reason: None,
+            });
+        }
+    }
+    preview.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(preview)
+}
+
+/// Back up `file_path` to `<file>.toml.bak-<unix-secs>`; returns the backup
+/// path. No-op (None) when the file does not exist.
+fn backup_servers_file(file_path: &Path) -> Result<Option<PathBuf>> {
+    if !file_path.exists() {
+        return Ok(None);
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = file_path.with_extension(format!("toml.bak-{secs}"));
+    std::fs::copy(file_path, &backup)
+        .with_context(|| format!("Failed to back up {}", file_path.display()))?;
+    Ok(Some(backup))
+}
+
 /// Import servers from JSON (`{mcpServers:{...}}` or `{servers:{...}}`).
 ///
-/// Returns imported ids. Refuses silent overwrite per id unless `force`.
+/// Returns imported ids. Refuses silent overwrite per id unless `force`;
+/// with `force`, the previous file is backed up first (R12 S29 rollback).
 pub async fn mcp_import(
     manager: &McpServerManager,
     file_path: &Path,
@@ -387,6 +444,7 @@ pub async fn mcp_import(
     let imported = parse_import_json(json_str)?;
     let mut servers = read_servers_file(file_path)?;
     let mut ids = Vec::new();
+    let mut overwrote = false;
     for (id, entry) in imported {
         if servers.contains_key(&id) && !force {
             anyhow::bail!(
@@ -396,11 +454,24 @@ pub async fn mcp_import(
             );
         }
         let server = toml_entry_to_server(&entry)?;
+        if servers.contains_key(&id) {
+            overwrote = true;
+        }
         servers.insert(id.clone(), entry);
         manager.register_server(&id, server).await;
         ids.push(id);
     }
     ids.sort();
+    if overwrote {
+        let backup = backup_servers_file(file_path)?;
+        tracing::info!(
+            "Backed up {} before overwrite{}",
+            file_path.display(),
+            backup
+                .map(|p| format!(" ({})", p.display()))
+                .unwrap_or_default()
+        );
+    }
     write_servers_file(file_path, &servers)?;
     Ok(ids)
 }
@@ -408,11 +479,12 @@ pub async fn mcp_import(
 /// Dispatch `tark mcp <action>`-style calls.
 ///
 /// `action` is one of: list, inspect, trust, approve, revoke-trust, enable,
-/// disable, connect, disconnect, reconnect, remove, conformance. Mutating
-/// file actions (enable/disable/remove) use `file_path`; `target` carries
-/// the server id when required.
-/// Returns human-readable output. `add`/`import` need structured payloads;
-/// use [`mcp_add`] / [`mcp_import`] directly for those.
+/// disable, connect, disconnect, reconnect, remove, conformance, sync.
+/// Mutating file actions (enable/disable/remove) use `file_path`; `target`
+/// carries the server id when required.
+/// Returns human-readable output. `add` needs a structured payload; use
+/// [`mcp_add`] directly for it. `import` takes its JSON payload through
+/// [`run_mcp_import_command`].
 pub async fn run_mcp_cli(
     manager: &McpServerManager,
     action: &str,
@@ -476,8 +548,20 @@ pub async fn run_mcp_cli(
                 &mcp_conformance(manager, id).await,
             )?)
         }
+        "sync" => {
+            let id = target.ok_or_else(|| anyhow::anyhow!("sync needs a server id"))?;
+            manager.refresh_server(id).await?;
+            let notifications = manager.drain_notifications(id).await;
+            Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "server": id,
+                "tools": manager.tools(id).await.len(),
+                "resources": manager.resources(id).await.len(),
+                "prompts": manager.prompts(id).await.len(),
+                "drained_notifications": notifications.len(),
+            }))?)
+        }
         other => anyhow::bail!(
-            "Unknown mcp action '{}': expected list/add/inspect/trust/approve/revoke-trust/enable/disable/connect/disconnect/reconnect/remove/import/conformance",
+            "Unknown mcp action '{}': expected list/add/inspect/trust/approve/revoke-trust/enable/disable/connect/disconnect/reconnect/remove/import/conformance/sync",
             other
         ),
     }
@@ -495,20 +579,69 @@ pub fn servers_file_in(dir: &Path) -> PathBuf {
 /// Mutating actions that need structured payloads (`add`, `import`) are not
 /// supported through this argv form; manage those via the project file or a
 /// future `--json` flag.
+/// Entry point for `tark mcp import --json <payload> [--force] [--dry-run]`.
+///
+/// With `dry_run`, prints the per-id preview and writes nothing. Otherwise
+/// imports (backing up on force-overwrite) and prints the imported ids.
+pub async fn run_mcp_import_command(
+    json_payload: &str,
+    force: bool,
+    dry_run: bool,
+    scope: &str,
+    cwd: Option<&str>,
+) -> Result<String> {
+    let working_dir = cwd
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let file_path = match scope {
+        "global" => {
+            let global = crate::storage::GlobalStorage::new()?;
+            global.root().join("mcp").join("servers.toml")
+        }
+        "project" | "" => {
+            let storage = crate::storage::TarkStorage::new(&working_dir)?;
+            storage.project_root().join("mcp").join("servers.toml")
+        }
+        other => anyhow::bail!("Unknown scope '{}': expected project|global", other),
+    };
+    if dry_run {
+        let preview = preview_import(&file_path, json_payload)?;
+        return Ok(serde_json::to_string_pretty(&preview)?);
+    }
+    let manager = McpServerManager::new(
+        working_dir.join(".tark").join("mcp-data"),
+        working_dir.clone(),
+    );
+    for (id, entry) in read_servers_file(&file_path)? {
+        if let Ok(server) = toml_entry_to_server(&entry) {
+            manager.register_server(&id, server).await;
+        }
+    }
+    let ids = mcp_import(&manager, &file_path, json_payload, force).await?;
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "imported": ids,
+        "file": file_path.display().to_string(),
+    }))?)
+}
+
 pub async fn run_mcp_command(
     action: &str,
     target: Option<&str>,
     scope: &str,
     cwd: Option<&str>,
 ) -> Result<String> {
-    if matches!(action, "add" | "import") {
+    if action == "add" {
         anyhow::bail!(
-            "'tark mcp {}' needs a structured payload; edit {} directly or use the TUI",
-            action,
+            "'tark mcp add' needs a structured payload; edit {} directly or use the TUI",
             match scope {
                 "global" => "~/.config/tark/mcp/servers.toml",
                 _ => ".tark/mcp/servers.toml",
             }
+        );
+    }
+    if action == "import" {
+        anyhow::bail!(
+            "'tark mcp import' needs --json '<payload>' (with --force/--dry-run as needed)"
         );
     }
     let working_dir = cwd
@@ -598,6 +731,78 @@ mod tests {
         let missing = std::env::temp_dir().join("tark-mcp-missing-xyz-123.toml");
         let _ = std::fs::remove_file(&missing);
         assert!(read_servers_file(&missing).unwrap().is_empty());
+    }
+
+    fn import_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tark-mcp-import-{name}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    const IMPORT_JSON: &str =
+        r#"{"mcpServers":{"gh":{"command":"npx","args":["-y","x"],"env":{}}}}"#;
+
+    #[test]
+    fn preview_reports_add_overwrite_rejected_without_writing() {
+        let dir = import_dir("preview");
+        let file = dir.join("servers.toml");
+        let _ = std::fs::remove_file(&file);
+
+        // Empty file: everything is an add; nothing is written.
+        let preview = preview_import(&file, IMPORT_JSON).unwrap();
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].action, "add");
+        assert!(!file.exists());
+
+        // Seed the file, then preview the same payload: overwrite.
+        std::fs::write(
+            &file,
+            "[servers.gh]\nname = \"GH\"\ncommand = \"npx\"\nargs = []\nenabled = true\n",
+        )
+        .unwrap();
+        let preview = preview_import(&file, IMPORT_JSON).unwrap();
+        assert_eq!(preview[0].action, "overwrite");
+
+        // Invalid payloads fail closed with an explicit error, never
+        // silently reinterpreted.
+        let err = preview_import(&file, r#"{"mcpServers":{"bad":{"env":{}}}}"#).unwrap_err();
+        assert!(err.to_string().contains("needs 'command' or 'url'"));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn import_force_backs_up_before_overwrite() {
+        let dir = import_dir("backup");
+        let file = dir.join("servers.toml");
+        let _ = std::fs::remove_file(&file);
+        let manager = McpServerManager::new(std::env::temp_dir(), std::env::temp_dir());
+
+        mcp_import(&manager, &file, IMPORT_JSON, false)
+            .await
+            .unwrap();
+        let original = std::fs::read_to_string(&file).unwrap();
+
+        // Refuses without force; force backs up the original first.
+        mcp_import(&manager, &file, IMPORT_JSON, false)
+            .await
+            .unwrap_err();
+        mcp_import(&manager, &file, IMPORT_JSON, true)
+            .await
+            .unwrap();
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("servers.toml.bak-"))
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "expected exactly one backup");
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), original);
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_file(&backups[0]);
     }
 
     #[tokio::test]

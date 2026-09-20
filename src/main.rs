@@ -264,7 +264,8 @@ enum Commands {
     /// MCP server lifecycle management (MCP 2026-07-28)
     Mcp {
         /// Action: list, inspect, trust, approve, revoke-trust, enable,
-        /// disable, connect, disconnect, reconnect, remove, conformance
+        /// disable, connect, disconnect, reconnect, remove, conformance,
+        /// sync, import
         action: String,
 
         /// Server id (required by most actions)
@@ -277,6 +278,18 @@ enum Commands {
         /// Working directory (default: current directory)
         #[arg(long)]
         cwd: Option<String>,
+
+        /// JSON payload for `import` (`{mcpServers:{...}}` or `{servers:{...}}`)
+        #[arg(long)]
+        json: Option<String>,
+
+        /// Allow overwriting existing servers on `import` (backs up first)
+        #[arg(long, default_value_t = false)]
+        force: bool,
+
+        /// Preview an `import` without writing anything
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
 }
 
@@ -619,10 +632,32 @@ async fn main() -> Result<()> {
             target,
             scope,
             cwd,
+            json,
+            force,
+            dry_run,
         } => {
-            transport::mcp_cli::run_mcp_command(&action, target.as_deref(), &scope, cwd.as_deref())
+            if action == "import" {
+                let payload = json
+                    .ok_or_else(|| anyhow::anyhow!("'tark mcp import' needs --json '<payload>'"))?;
+                transport::mcp_cli::run_mcp_import_command(
+                    &payload,
+                    force,
+                    dry_run,
+                    &scope,
+                    cwd.as_deref(),
+                )
                 .await
                 .map(|output| println!("{}", output))?;
+            } else {
+                transport::mcp_cli::run_mcp_command(
+                    &action,
+                    target.as_deref(),
+                    &scope,
+                    cwd.as_deref(),
+                )
+                .await
+                .map(|output| println!("{}", output))?;
+            }
         }
         Commands::Tui { cwd } => {
             let working_dir = cwd.unwrap_or_else(|| ".".to_string());

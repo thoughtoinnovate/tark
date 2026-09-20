@@ -276,3 +276,57 @@ jobs:
           fc-cache -f
       - name: Full regression suite
         run: cargo test --all-features
+
+  # Explicit MCP conformance evidence gate (R5, R13, S30): runs the
+  # dedicated conformance entry point (live mock-server checks) plus all
+  # MCP unit tests as a labelled gate, separate from the full suite.
+  mcp-conformance:
+    name: mcp-conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      - name: MCP conformance gate
+        run: cargo test --all-features mcp::
+
+  # Dependency vulnerability audit (R13: pinned, verified dependencies).
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies
+        run: cargo audit
+
+  # Cross-platform test evidence (NFR6): lib suite on macOS + Windows.
+  # Release binaries already build on all targets in release.yml.
+  test-os-matrix:
+    name: Lib tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.CACHE_VERSION }}
+      - name: Lib test suite
+        run: cargo test --all-features --lib
