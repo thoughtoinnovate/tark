@@ -345,6 +345,16 @@ jobs:
         run: "cargo check --all-features --tests -v 2>&1 | tee check-output.log; test ${PIPESTATUS[0]} -eq 0"
       - name: Lib test suite
         run: "cargo test --all-features --lib 2>&1 | tee libtest-output.log; test ${PIPESTATUS[0]} -eq 0"
+      - name: Retry compile check on failure (diagnostic)
+        if: failure()
+        run: |
+          shopt -s nullglob || true
+          RMETA=(target/debug/deps/*.rmeta)
+          RLIB=(target/debug/deps/*.rlib)
+          echo "::warning::diag-retry-artifacts rmeta=${#RMETA[@]} rlib=${#RLIB[@]}" || true
+          echo "::warning::diag-retry-oncecell $(ls target/debug/deps/*once_cell* 2>/dev/null | head -4 | tr '\n' ' ' | head -c 600)" || true
+          cargo check --all-features --tests > retry-check.log 2>&1 || true
+          echo "::warning::diag-retry-tail $(tail -8 retry-check.log | tr '\n' ' ' | head -c 2000)" || true
       - name: Report failure detail
         if: failure()
         run: |
@@ -363,7 +373,7 @@ jobs:
           RMETA=(target/debug/deps/*.rmeta)
           echo "::warning::diag-artifacts rmeta_count=${#RMETA[@]}" || true
           # The exact rustc invocation for tark-cli (are --extern flags present?).
-          INVOC=$(grep -m1 -o 'Running `rustc --crate-name tark_cli[^`]*' libtest-clean.log check-clean.log 2>/dev/null | head -c 6000)
+          INVOC=$(grep -m1 -o 'Running `rustc --crate-name tark_cli[^`]*' libtest-clean.log check-clean.log 2>/dev/null | head -c 6000 || true)
           echo "::warning::diag-invocation ${INVOC:-none-found}" || true
           # Full-log excerpts as warnings (annotations cap at 64KB each).
           echo "::warning::diag-head $(head -80 libtest-clean.log | tr '\n' ' ' | head -c 20000)"
