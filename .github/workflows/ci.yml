@@ -350,8 +350,14 @@ jobs:
         run: |
           cat check-output.log libtest-output.log > combined.log 2>/dev/null || true
           sed 's/\x1b\[[0-9;]*m//g' combined.log > libtest-clean.log
-          DETAIL=$( (echo '--- FAILED CRATES ---'; grep -E -m15 'could not compile|failed to run|failed to download|failed to get' libtest-clean.log; echo '--- ERROR CODES ---'; grep -oE '^error\[E[0-9]+\]' libtest-clean.log | sort | uniq -c; echo '--- FIRST ERRORS ---'; grep -E -m4 -A12 '^error(\[|:)' libtest-clean.log) | head -60 | tr '\n' ' ')
+          DETAIL=$( (echo '--- FAILED CRATES ---'; grep -E -m15 'could not compile|failed to run|failed to download|failed to get' libtest-clean.log; echo '--- ERROR CODES ---'; grep -oE '^error\[E[0-9]+\]' libtest-clean.log | sort | uniq -c; echo '--- MISSING CRATES ---'; grep -oE '(unlinked crate|unresolved import) `?[a-zA-Z0-9_]+' libtest-clean.log | sort -u | head -40) | head -60 | tr '\n' ' ')
           echo "::error::libtest-failed ${DETAIL:0:4000}"
+          # Bisect: did `cargo check` or `cargo test` produce the errors?
+          for f in check-output libtest-output; do
+            sed 's/\x1b\[[0-9;]*m//g' $f.log > $f-clean.log 2>/dev/null || true
+            N=$(grep -cE '^error(\[|:)' $f-clean.log 2>/dev/null || echo 0)
+            echo "::warning::diag-$f error_lines=$N" || true
+          done
           # Full-log excerpts as warnings (annotations cap at 64KB each).
           echo "::warning::diag-head $(head -80 libtest-clean.log | tr '\n' ' ' | head -c 20000)"
           echo "::warning::diag-tail $(tail -40 libtest-clean.log | tr '\n' ' ' | head -c 20000)"
