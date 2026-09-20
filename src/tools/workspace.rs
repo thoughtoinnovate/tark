@@ -522,6 +522,8 @@ fn open_file_nofollow(resolved: &Path, mode: OpenMode) -> std::io::Result<std::f
 mod tests {
     use super::*;
     use std::fs;
+    // Symlink creation needs privileges on Windows; these tests are unix-only.
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     fn test_workspace() -> (tempfile::TempDir, WorkspaceCap) {
@@ -559,6 +561,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn s3_symlink_escape_denied() {
         let (dir, cap) = test_workspace();
         let outside = tempfile::tempdir().expect("outside tempdir");
@@ -609,6 +612,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn confined_open_refuses_symlink_final() {
         let (dir, cap) = test_workspace();
         let outside = tempfile::tempdir().expect("outside tempdir");

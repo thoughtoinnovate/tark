@@ -1322,6 +1322,24 @@ for line in sys.stdin:
         mock_manager_with_extra_arg(version, None).await
     }
 
+    /// Python executable for the mock MCP server: `python3` with a `python`
+    /// fallback (Windows runners may only provide the latter).
+    fn mock_python_exe() -> &'static str {
+        static EXE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+        EXE.get_or_init(|| {
+            for candidate in ["python3", "python"] {
+                if std::process::Command::new(candidate)
+                    .arg("--version")
+                    .output()
+                    .is_ok()
+                {
+                    return Box::leak(candidate.to_string().into_boxed_str());
+                }
+            }
+            "python3"
+        })
+    }
+
     async fn mock_manager_with_extra_arg(
         version: &str,
         extra_arg: Option<&str>,
@@ -1339,7 +1357,7 @@ for line in sys.stdin:
                 "mock",
                 McpServer {
                     name: "Mock".to_string(),
-                    command: "python3".to_string(),
+                    command: mock_python_exe().to_string(),
                     args,
                     env: HashMap::new(),
                     enabled: true,

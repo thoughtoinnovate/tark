@@ -369,13 +369,19 @@ mod tests {
     #[test]
     fn cleanup_stale_removes_dead_pid_files_and_keeps_live() {
         let dir = test_dir();
-        // A guaranteed-dead pid: spawn and reap a short-lived child.
-        // (u32::MAX must NOT be used: as pid_t it is -1, i.e. "all processes".)
-        let mut child = std::process::Command::new("/bin/true")
+        // A guaranteed-dead pid: spawn and reap a short-lived child. The
+        // test binary itself with `--list` is the only executable known to
+        // exist on every platform (`/bin/true` is absent on macOS/Windows;
+        // u32::MAX as pid_t is -1, i.e. "all processes").
+        let exe = std::env::current_exe().expect("current exe");
+        let mut child = std::process::Command::new(exe)
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("spawn true");
+            .expect("spawn list probe");
         let dead_pid = child.id();
-        child.wait().expect("reap true");
+        child.wait().expect("reap list probe");
         let dead_path = dir
             .path()
             .join(format!("{FILE_PREFIX}{dead_pid}-1-deadbeef.token"));

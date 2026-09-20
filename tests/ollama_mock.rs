@@ -84,7 +84,18 @@ async fn ollama_mock_end_to_end() {
     let script = dir.path().join("mock_ollama.py");
     std::fs::write(&script, MOCK_OLLAMA_PY).expect("write mock");
 
-    let mut child = tokio::process::Command::new("python3")
+    // `python3` with a `python` fallback (Windows runners may only
+    // provide the latter).
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|exe| {
+            std::process::Command::new(exe)
+                .arg("--version")
+                .output()
+                .is_ok()
+        })
+        .unwrap_or("python3");
+    let mut child = tokio::process::Command::new(python)
         .arg(&script)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
