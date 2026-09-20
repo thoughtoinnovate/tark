@@ -11,6 +11,8 @@
 //! - `MCP_BEARER_ENV` names the env var holding the bearer token.
 //! - `MCP_BEARER_FILE` names a file holding the bearer token (preferred for
 //!   Tark-issued loopback credentials; see `mcp::loopback_cred`).
+//! - `MCP_BEARER_CREDENTIAL` names a managed credential-store key
+//!   (`service/account`; see `mcp::credential_store`).
 //! - `MCP_ALLOW_INSECURE=1` opts into plain http to non-loopback hosts.
 //! - `MCP_HEADER_<NAME>` entries become extra headers.
 

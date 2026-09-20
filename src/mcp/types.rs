@@ -159,6 +159,12 @@ pub struct HttpMcpConfig {
     /// `bearer_env` when both are set.
     #[serde(default)]
     pub bearer_file: Option<PathBuf>,
+    /// Credential-store lookup key (`service/account`, see
+    /// [`crate::mcp::credential_store::CredentialKey`]). Consulted after
+    /// `bearer_file` and `bearer_env` when set; missing entries fail closed
+    /// to unauthenticated.
+    #[serde(default)]
+    pub credential_key: Option<String>,
     /// Allow plain http:// to non-loopback hosts (default false).
     #[serde(default)]
     pub allow_insecure: bool,
@@ -174,6 +180,8 @@ pub struct HttpMcpConfig {
 /// - `MCP_BEARER_ENV`: name of an env var holding the bearer token.
 /// - `MCP_BEARER_FILE`: path to a file holding the bearer token (takes
 ///   precedence over `MCP_BEARER_ENV`; see [`HttpMcpConfig::bearer_file`]).
+/// - `MCP_BEARER_CREDENTIAL`: credential-store key (`service/account`;
+///   consulted after file/env; see [`HttpMcpConfig::credential_key`]).
 /// - `MCP_ALLOW_INSECURE=1`: allow plain `http://` to non-loopback hosts.
 /// - `MCP_HEADER_<NAME>`: extra headers (`<NAME>` with `_` converted to `-`).
 ///
@@ -212,6 +220,7 @@ impl McpServerEndpoint {
 /// - Otherwise select [`McpServerTransport::Stdio`].
 /// - `MCP_BEARER_ENV` names the env var holding the bearer token.
 /// - `MCP_BEARER_FILE` names a file holding the bearer token.
+/// - `MCP_BEARER_CREDENTIAL` names a credential-store key (`service/account`).
 /// - `MCP_ALLOW_INSECURE=1` permits non-loopback plain http.
 /// - `MCP_HEADER_<NAME>` entries become extra headers.
 pub fn resolve_endpoint(server: &crate::storage::McpServer) -> McpServerEndpoint {
@@ -240,6 +249,11 @@ pub fn resolve_endpoint(server: &crate::storage::McpServer) -> McpServerEndpoint
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
+    let credential_key = server
+        .env
+        .get("MCP_BEARER_CREDENTIAL")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let allow_insecure = server
         .env
         .get("MCP_ALLOW_INSECURE")
@@ -263,6 +277,7 @@ pub fn resolve_endpoint(server: &crate::storage::McpServer) -> McpServerEndpoint
             headers,
             bearer_env,
             bearer_file,
+            credential_key,
             allow_insecure,
         }),
     }

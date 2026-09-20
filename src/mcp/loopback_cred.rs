@@ -162,7 +162,7 @@ fn unique_token_path(dir: &Path) -> PathBuf {
 /// Uses `O_CREAT | O_EXCL | O_NOFOLLOW` so creation is atomic: an existing
 /// file (or symlink) at `path` fails instead of being followed or clobbered.
 /// Post-creation metadata is verified (regular file, `0600` on unix).
-fn write_owner_only_file(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) fn write_owner_only_file(path: &Path, contents: &[u8]) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};

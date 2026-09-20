@@ -60,6 +60,9 @@ pub struct McpServerManager {
     data_dir: PathBuf,
     /// Working directory for spawned processes
     working_dir: PathBuf,
+    /// Lazily opened credential store for managed auth tokens (R6 S17).
+    /// Failures degrade to no store (env/file auth still works).
+    credential_store: once_cell::sync::OnceCell<Arc<super::credential_store::EncryptedFileStore>>,
 }
 
 impl McpServerManager {
@@ -70,6 +73,24 @@ impl McpServerManager {
             trust_gated: RwLock::new(HashSet::new()),
             data_dir,
             working_dir,
+            credential_store: once_cell::sync::OnceCell::new(),
+        }
+    }
+
+    /// Credential store for managed authorization tokens, opened best-effort.
+    ///
+    /// Cached after the first attempt; a failed open is retried on the next
+    /// call. `None` degrades to env/file auth without blocking connects.
+    fn credential_store(&self) -> Option<Arc<super::credential_store::EncryptedFileStore>> {
+        match self.credential_store.get_or_try_init(|| {
+            let path = self.data_dir.join("credentials.json");
+            super::credential_store::EncryptedFileStore::open(&path).map(Arc::new)
+        }) {
+            Ok(store) => Some(store.clone()),
+            Err(e) => {
+                tracing::debug!("MCP credential store unavailable: {}", e);
+                None
+            }
         }
     }
 
@@ -353,7 +374,15 @@ impl McpServerManager {
                 let http_config = endpoint.http.clone().ok_or_else(|| {
                     anyhow::anyhow!("Missing HTTP config for server: {}", server_id)
                 })?;
-                match StreamableHttpTransport::new(http_config) {
+                // Attach the managed credential store when the endpoint
+                // references it (MCP_BEARER_CREDENTIAL); env/file auth is
+                // unaffected when the store is unavailable.
+                let transport = StreamableHttpTransport::new(http_config);
+                let transport = match (transport, self.credential_store()) {
+                    (Ok(t), Some(store)) => Ok(t.with_credential_store(store)),
+                    (transport, _) => transport,
+                };
+                match transport {
                     Ok(t) => ActiveTransport::Http(Arc::new(t)),
                     Err(e) => {
                         let msg = e.to_string();

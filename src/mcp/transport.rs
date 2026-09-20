@@ -23,6 +23,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+use super::credential_store::{CredentialKey, CredentialStore};
 use super::types::{HttpMcpConfig, McpError, MCP_PROTOCOL_REVISION};
 
 /// Default per-request timeout (stdio read and HTTP round-trip).
@@ -399,7 +400,8 @@ impl StdioTransport {
 /// - `MCP-Protocol-Version: 2026-07-28`
 /// - Optional `Authorization: Bearer <token>` where the token is read at
 ///   request time from the file named by `bearer_file` (preferred, e.g. a
-///   Tark-issued loopback credential) or the env var named by `bearer_env`
+///   Tark-issued loopback credential), the env var named by `bearer_env`,
+///   or the credential store entry named by `credential_key`
 ///   (never logged).
 pub struct StreamableHttpTransport {
     /// HTTP client with request timeout.
@@ -410,6 +412,8 @@ pub struct StreamableHttpTransport {
     next_id: AtomicU64,
     /// Timeout per request.
     timeout: Duration,
+    /// Credential store for `credential_key` lookups (R6 S17).
+    credential_store: Option<Arc<dyn CredentialStore>>,
 }
 
 impl StreamableHttpTransport {
@@ -425,7 +429,14 @@ impl StreamableHttpTransport {
             config,
             next_id: AtomicU64::new(1),
             timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
+            credential_store: None,
         })
+    }
+
+    /// Attach a credential store for `credential_key` token lookups.
+    pub fn with_credential_store(mut self, store: Arc<dyn CredentialStore>) -> Self {
+        self.credential_store = Some(store);
+        self
     }
 
     /// Endpoint URL (for labels; may contain no credentials by construction).
@@ -452,14 +463,44 @@ impl StreamableHttpTransport {
                 }
             }
         }
-        match &self.config.bearer_env {
-            Some(name) => std::env::var(name).ok().filter(|v| !v.is_empty()),
-            None => None,
+        if let Some(name) = &self.config.bearer_env {
+            if let Some(token) = std::env::var(name).ok().filter(|v| !v.is_empty()) {
+                return Some(token);
+            }
+        }
+        // Managed credential store, scoped to the configured key (R6 S17).
+        // Absent entries and store errors fail closed to unauthenticated.
+        match (&self.config.credential_key, &self.credential_store) {
+            (Some(raw), Some(store)) => match CredentialKey::parse(raw) {
+                Ok(key) => match store.load_token(&key) {
+                    Ok(token) => token.filter(|v| !v.is_empty()),
+                    Err(e) => {
+                        tracing::debug!(
+                            "MCP http credential lookup failed host={} key={} error={}",
+                            self.host_label(),
+                            key,
+                            e
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!(
+                        "MCP http credential key invalid host={} error={}",
+                        self.host_label(),
+                        e
+                    );
+                    None
+                }
+            },
+            _ => None,
         }
     }
 
     fn has_auth(&self) -> bool {
-        self.config.bearer_env.is_some() || self.config.bearer_file.is_some()
+        self.config.bearer_env.is_some()
+            || self.config.bearer_file.is_some()
+            || self.config.credential_key.is_some()
     }
 
     fn host_label(&self) -> String {
@@ -731,6 +772,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             bearer_env: None,
             bearer_file: Some(path),
+            credential_key: None,
             allow_insecure: false,
         })
         .expect("transport")
@@ -758,6 +800,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             bearer_env: Some("TARK_TEST_BEARER_PRECEDENCE".to_string()),
             bearer_file: Some(cred.path().to_path_buf()),
+            credential_key: None,
             allow_insecure: false,
         })
         .expect("transport");
@@ -765,6 +808,56 @@ mod tests {
             crate::mcp::loopback_cred::read_token_file(cred.path()).expect("read token file");
         assert_eq!(transport.bearer_token().as_deref(), Some(expected.as_str()));
         std::env::remove_var("TARK_TEST_BEARER_PRECEDENCE");
+    }
+
+    #[test]
+    fn credential_store_lookup_scoped_to_key_and_last_in_precedence() {
+        use crate::mcp::credential_store::{CredentialKey, MemoryCredentialStore};
+
+        let store = Arc::new(MemoryCredentialStore::new());
+        let key = CredentialKey::new("tark-mcp-oauth", "https://example.com").expect("key");
+        store.store_token(&key, "stored-token").expect("store");
+
+        // Store-backed token resolves when nothing else is configured.
+        let transport = StreamableHttpTransport::new(HttpMcpConfig {
+            url: "https://example.com/mcp".to_string(),
+            headers: std::collections::HashMap::new(),
+            bearer_env: None,
+            bearer_file: None,
+            credential_key: Some(key.to_string()),
+            allow_insecure: false,
+        })
+        .expect("transport")
+        .with_credential_store(store.clone());
+        assert_eq!(transport.bearer_token().as_deref(), Some("stored-token"));
+
+        // Unknown keys fail closed to unauthenticated.
+        let transport = StreamableHttpTransport::new(HttpMcpConfig {
+            url: "https://example.com/mcp".to_string(),
+            headers: std::collections::HashMap::new(),
+            bearer_env: None,
+            bearer_file: None,
+            credential_key: Some("tark-mcp-oauth/https://unknown.example".to_string()),
+            allow_insecure: false,
+        })
+        .expect("transport")
+        .with_credential_store(store.clone());
+        assert!(transport.bearer_token().is_none());
+
+        // Env beats the store (file would beat both).
+        std::env::set_var("TARK_TEST_BEARER_STORE_PRECEDENCE", "env-token");
+        let transport = StreamableHttpTransport::new(HttpMcpConfig {
+            url: "https://example.com/mcp".to_string(),
+            headers: std::collections::HashMap::new(),
+            bearer_env: Some("TARK_TEST_BEARER_STORE_PRECEDENCE".to_string()),
+            bearer_file: None,
+            credential_key: Some(key.to_string()),
+            allow_insecure: false,
+        })
+        .expect("transport")
+        .with_credential_store(store);
+        assert_eq!(transport.bearer_token().as_deref(), Some("env-token"));
+        std::env::remove_var("TARK_TEST_BEARER_STORE_PRECEDENCE");
     }
 
     #[test]
