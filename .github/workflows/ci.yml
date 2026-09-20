@@ -336,13 +336,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        # OS-scoped key: target/ artifacts are not portable across OSes, and
-        # a foreign cache restores "fresh" fingerprints with missing rlibs,
-        # which surfaces as hundreds of E0432/E0433 errors in this repo.
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: ${{ env.CACHE_VERSION }}-${{ matrix.os }}
+      # NOTE: intentionally NO cargo cache here. Restored target/ trees have
+      # repeatedly produced "fresh" fingerprints with missing rlibs on these
+      # runners (hundreds of E0432/E0433 in tark-cli with zero dependency
+      # errors). Pristine builds are also the correct validation for a
+      # portability matrix.
       - name: Compile check first (fast, clear errors)
         run: "cargo check --all-features --tests 2>&1 | tee check-output.log; test ${PIPESTATUS[0]} -eq 0"
       - name: Lib test suite
