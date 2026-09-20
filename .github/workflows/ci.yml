@@ -349,5 +349,5 @@ jobs:
         run: |
           cat check-output.log libtest-output.log > combined.log 2>/dev/null || true
           sed 's/\x1b\[[0-9;]*m//g' combined.log > libtest-clean.log
-          DETAIL=$( (echo '--- TAIL ---'; tail -15 libtest-clean.log; echo '--- FIRST ERRORS ---'; grep -E -m6 -A10 '^error(\[|:)' libtest-clean.log) | head -70 | tr '\n' ' ')
+          DETAIL=$( (echo '--- FAILED CRATES ---'; grep -E -m15 'could not compile|failed to run|failed to download|failed to get' libtest-clean.log; echo '--- FIRST ERRORS ---'; grep -E -m4 -A12 '^error(\[|:)' libtest-clean.log) | head -60 | tr '\n' ' ')
           echo "::error::libtest-failed ${DETAIL:0:4000}"
