@@ -19,6 +19,8 @@ pub mod todo;
 pub use command_autocomplete::{AutocompleteState, CommandAutocomplete, SlashCommand};
 pub use flash_bar::{FlashBar, FlashBarState};
 pub use header::Header;
+#[cfg(any(test, feature = "snapshot-tests"))]
+pub use input::freeze_cursor_blink_for_tests;
 #[allow(unused_imports)]
 pub use input::AttachmentBadge;
 pub use input::InputWidget;

@@ -28,6 +28,30 @@ static BLINK_START: OnceLock<std::time::Instant> = OnceLock::new();
 static LAST_BLINK_MS: AtomicU64 = AtomicU64::new(0);
 static CURSOR_VISIBLE: AtomicBool = AtomicBool::new(true);
 
+/// Test-only freeze for deterministic snapshot tests (R13).
+///
+/// Wall-clock blink phase makes snapshots flake under parallel load; freezing
+/// visibility removes the time dependency. Available under `cfg(test)` or the
+/// `snapshot-tests` feature only: production builds are unaffected.
+#[cfg(any(test, feature = "snapshot-tests"))]
+static BLINK_FROZEN_VISIBLE: AtomicBool = AtomicBool::new(true);
+#[cfg(any(test, feature = "snapshot-tests"))]
+static BLINK_FROZEN: AtomicBool = AtomicBool::new(false);
+
+/// Freeze cursor visibility for deterministic snapshot rendering.
+///
+/// Snapshot-test builds only; pass `None` to resume live blinking.
+#[cfg(any(test, feature = "snapshot-tests"))]
+pub fn freeze_cursor_blink_for_tests(visible: Option<bool>) {
+    match visible {
+        Some(v) => {
+            BLINK_FROZEN_VISIBLE.store(v, Ordering::Relaxed);
+            BLINK_FROZEN.store(true, Ordering::Relaxed);
+        }
+        None => BLINK_FROZEN.store(false, Ordering::Relaxed),
+    }
+}
+
 /// Millis since first blink query (monotonic).
 fn blink_now_millis() -> u64 {
     let start = BLINK_START.get_or_init(std::time::Instant::now);
@@ -36,6 +60,10 @@ fn blink_now_millis() -> u64 {
 
 /// Get current cursor visibility state (blinks every 530ms)
 fn get_cursor_visible() -> bool {
+    #[cfg(any(test, feature = "snapshot-tests"))]
+    if BLINK_FROZEN.load(Ordering::Relaxed) {
+        return BLINK_FROZEN_VISIBLE.load(Ordering::Relaxed);
+    }
     let now = blink_now_millis();
     let last = LAST_BLINK_MS.load(Ordering::Relaxed);
     if last == 0 {

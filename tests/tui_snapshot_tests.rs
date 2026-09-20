@@ -54,8 +54,15 @@ fn normalize_output(output: String) -> String {
     result
 }
 
+/// Freeze wall-clock cursor blink so snapshots are deterministic under
+/// parallel load (R13: no flaky time-dependent assertions).
+fn freeze_blink() {
+    tark_cli::tui_new::widgets::freeze_cursor_blink_for_tests(Some(true));
+}
+
 /// Capture buffer as string for snapshot
 fn capture_buffer(app: &mut TuiApp<TestBackend>) -> String {
+    freeze_blink();
     app.render().unwrap();
     let buf = app.terminal().backend().buffer();
     let area = buf.area();
@@ -74,6 +81,7 @@ fn capture_buffer(app: &mut TuiApp<TestBackend>) -> String {
 
 /// Capture a widget as string for snapshot testing
 fn capture_widget<W: ratatui::widgets::Widget>(widget: W, width: u16, height: u16) -> String {
+    freeze_blink();
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
 
