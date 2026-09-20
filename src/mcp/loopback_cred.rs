@@ -17,6 +17,7 @@
 //! - The token value never appears in logs, traces, or [`Debug`] output.
 
 use anyhow::{Context, Result};
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
