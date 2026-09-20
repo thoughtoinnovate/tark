@@ -309,7 +309,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Audit dependencies
-        run: "cargo audit 2>&1 | tee audit-output.log; test ${PIPESTATUS[0]} -eq 0"
+        # NOTE: cargo-audit does not auto-discover ./audit.toml, so the
+        # policy file (documented ignores) must be passed explicitly.
+        run: "cargo audit --file ./audit.toml 2>&1 | tee audit-output.log; test ${PIPESTATUS[0]} -eq 0"
       - name: Report audit detail
         if: failure()
         run: |
