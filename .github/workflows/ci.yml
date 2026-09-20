@@ -309,7 +309,12 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Audit dependencies
-        run: cargo audit
+        run: "cargo audit 2>&1 | tee audit-output.log; test ${PIPESTATUS[0]} -eq 0"
+      - name: Report audit detail
+        if: failure()
+        run: |
+          DETAIL=$(grep -E -m5 -A4 'Crate:|warning:|error' audit-output.log | head -40 | tr '\n' ' ')
+          echo "::error::audit-failed ${DETAIL:0:1500}"
 
   # Cross-platform test evidence (NFR6): lib suite on macOS + Windows.
   # Release binaries already build on all targets in release.yml.
@@ -329,4 +334,9 @@ jobs:
         with:
           prefix-key: ${{ env.CACHE_VERSION }}
       - name: Lib test suite
-        run: cargo test --all-features --lib
+        run: "cargo test --all-features --lib 2>&1 | tee libtest-output.log; test ${PIPESTATUS[0]} -eq 0"
+      - name: Report failure detail
+        if: failure()
+        run: |
+          DETAIL=$(grep -E -m8 -A6 '^error|FAILED|failures:$|panicked at' libtest-output.log | head -60 | tr '\n' ' ')
+          echo "::error::libtest-failed ${DETAIL:0:1500}"
