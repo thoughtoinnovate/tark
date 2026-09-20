@@ -292,7 +292,7 @@ jobs:
         with:
           prefix-key: ${{ env.CACHE_VERSION }}
       - name: MCP conformance gate
-        run: cargo test --all-features mcp::
+        run: "cargo test --all-features mcp::"
 
   # Dependency vulnerability audit (R13: pinned, verified dependencies).
   audit:
