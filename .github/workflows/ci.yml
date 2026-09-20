@@ -342,5 +342,5 @@ jobs:
         if: failure()
         run: |
           sed 's/\x1b\[[0-9;]*m//g' libtest-output.log > libtest-clean.log
-          DETAIL=$( (tail -25 libtest-clean.log; grep -E -m8 -A8 '^error|FAILED|failures:|panicked at' libtest-clean.log) | head -60 | tr '\n' ' ')
+          DETAIL=$( (echo '--- TAIL ---'; tail -12 libtest-clean.log; echo '--- FIRST ERRORS ---'; grep -E -m6 -A10 '^error(\[|:)' libtest-clean.log) | head -70 | tr '\n' ' ')
           echo "::error::libtest-failed ${DETAIL:0:4000}"
