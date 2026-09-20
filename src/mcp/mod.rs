@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 pub mod client;
+pub mod loopback_cred;
 pub mod transport;
 pub mod trust;
 pub mod types;
@@ -12,6 +13,7 @@ pub mod wrapper;
 
 // Re-export main types
 pub use client::{conformance_check, McpServerManager};
+pub use loopback_cred::{read_token_file, LoopbackCredential, LOOPBACK_TOKEN_FILE_ENV};
 pub use transport::{ActiveTransport, StdioTransport, StreamableHttpTransport};
 pub use trust::{McpTrustRecord, McpTrustStore};
 pub use types::{

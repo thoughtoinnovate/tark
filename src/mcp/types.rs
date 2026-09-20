@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Current MCP protocol revision spoken by this client.
 ///
@@ -151,6 +152,13 @@ pub struct HttpMcpConfig {
     /// Name of an environment variable holding a bearer token.
     #[serde(default)]
     pub bearer_env: Option<String>,
+    /// Path to a file holding a bearer token (e.g. a Tark-issued loopback
+    /// credential). Read at request time so rotation needs no restart; the
+    /// file must be a regular non-symlink file with owner-only permissions
+    /// (unix), otherwise it is refused fail-closed. Takes precedence over
+    /// `bearer_env` when both are set.
+    #[serde(default)]
+    pub bearer_file: Option<PathBuf>,
     /// Allow plain http:// to non-loopback hosts (default false).
     #[serde(default)]
     pub allow_insecure: bool,
@@ -164,6 +172,8 @@ pub struct HttpMcpConfig {
 ///
 /// - `MCP_URL`: http(s) URL of the Streamable HTTP endpoint. Absent => stdio.
 /// - `MCP_BEARER_ENV`: name of an env var holding the bearer token.
+/// - `MCP_BEARER_FILE`: path to a file holding the bearer token (takes
+///   precedence over `MCP_BEARER_ENV`; see [`HttpMcpConfig::bearer_file`]).
 /// - `MCP_ALLOW_INSECURE=1`: allow plain `http://` to non-loopback hosts.
 /// - `MCP_HEADER_<NAME>`: extra headers (`<NAME>` with `_` converted to `-`).
 ///
@@ -201,6 +211,7 @@ impl McpServerEndpoint {
 ///   parses as an `http(s)` URL, select [`McpServerTransport::StreamableHttp`].
 /// - Otherwise select [`McpServerTransport::Stdio`].
 /// - `MCP_BEARER_ENV` names the env var holding the bearer token.
+/// - `MCP_BEARER_FILE` names a file holding the bearer token.
 /// - `MCP_ALLOW_INSECURE=1` permits non-loopback plain http.
 /// - `MCP_HEADER_<NAME>` entries become extra headers.
 pub fn resolve_endpoint(server: &crate::storage::McpServer) -> McpServerEndpoint {
@@ -223,6 +234,12 @@ pub fn resolve_endpoint(server: &crate::storage::McpServer) -> McpServerEndpoint
         .get("MCP_BEARER_ENV")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let bearer_file = server
+        .env
+        .get("MCP_BEARER_FILE")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
     let allow_insecure = server
         .env
         .get("MCP_ALLOW_INSECURE")
@@ -245,6 +262,7 @@ pub fn resolve_endpoint(server: &crate::storage::McpServer) -> McpServerEndpoint
             url: raw_url.to_string(),
             headers,
             bearer_env,
+            bearer_file,
             allow_insecure,
         }),
     }
@@ -718,6 +736,29 @@ mod tests {
         assert_eq!(http.bearer_env.as_deref(), Some("MY_TOKEN"));
         assert!(http.allow_insecure);
         assert_eq!(http.headers.get("X-CUSTOM").map(String::as_str), Some("v"));
+    }
+
+    #[test]
+    fn resolve_endpoint_reads_bearer_file_key() {
+        let mut env = HashMap::new();
+        env.insert("MCP_URL".into(), "http://localhost:3000/mcp".into());
+        env.insert("MCP_BEARER_FILE".into(), "/run/tark/loopback.token".into());
+        let server = crate::storage::McpServer {
+            name: "x".into(),
+            command: "npx".into(),
+            args: vec![],
+            env,
+            enabled: true,
+            capabilities: vec![],
+            tark: None,
+        };
+        let ep = resolve_endpoint(&server);
+        let http = ep.http.expect("http endpoint");
+        assert_eq!(
+            http.bearer_file.as_deref(),
+            Some(std::path::Path::new("/run/tark/loopback.token"))
+        );
+        assert!(http.bearer_env.is_none());
     }
 
     #[test]

@@ -9,6 +9,8 @@
 //! Env-key mapping for Streamable HTTP (see `mcp::types::resolve_endpoint`):
 //! - `MCP_URL` carries the http(s) endpoint (absent => stdio).
 //! - `MCP_BEARER_ENV` names the env var holding the bearer token.
+//! - `MCP_BEARER_FILE` names a file holding the bearer token (preferred for
+//!   Tark-issued loopback credentials; see `mcp::loopback_cred`).
 //! - `MCP_ALLOW_INSECURE=1` opts into plain http to non-loopback hosts.
 //! - `MCP_HEADER_<NAME>` entries become extra headers.
 

@@ -398,7 +398,9 @@ impl StdioTransport {
 /// - `Content-Type: application/json`
 /// - `MCP-Protocol-Version: 2026-07-28`
 /// - Optional `Authorization: Bearer <token>` where the token is read at
-///   request time from the env var named by `bearer_env` (never logged).
+///   request time from the file named by `bearer_file` (preferred, e.g. a
+///   Tark-issued loopback credential) or the env var named by `bearer_env`
+///   (never logged).
 pub struct StreamableHttpTransport {
     /// HTTP client with request timeout.
     client: reqwest::Client,
@@ -432,10 +434,32 @@ impl StreamableHttpTransport {
     }
 
     fn bearer_token(&self) -> Option<String> {
+        // Explicit file binding wins: it supports rotation without restart.
+        // Refusals (symlink, lax permissions, missing file) fail closed to
+        // unauthenticated, which the server rejects; the token value itself
+        // is never logged.
+        if let Some(path) = &self.config.bearer_file {
+            match super::loopback_cred::read_token_file(path) {
+                Ok(token) => return Some(token),
+                Err(e) => {
+                    tracing::debug!(
+                        "MCP http bearer file unreadable host={} path={} error={}",
+                        self.host_label(),
+                        path.display(),
+                        e
+                    );
+                    return None;
+                }
+            }
+        }
         match &self.config.bearer_env {
             Some(name) => std::env::var(name).ok().filter(|v| !v.is_empty()),
             None => None,
         }
+    }
+
+    fn has_auth(&self) -> bool {
+        self.config.bearer_env.is_some() || self.config.bearer_file.is_some()
     }
 
     fn host_label(&self) -> String {
@@ -449,7 +473,7 @@ impl StreamableHttpTransport {
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let params_bytes = params_byte_len(&params);
-        let has_auth = self.config.bearer_env.is_some();
+        let has_auth = self.has_auth();
         // Redacted: method + sizes + host only; never header values or params.
         tracing::debug!(
             "MCP http request method={} id={} host={} params_bytes={} has_auth={}",
@@ -555,7 +579,7 @@ impl StreamableHttpTransport {
             method,
             self.host_label(),
             params_bytes,
-            self.config.bearer_env.is_some()
+            self.has_auth()
         );
         let mut body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -699,6 +723,59 @@ mod tests {
         assert_eq!(expand_env_vars("${TEST_VAR} world"), "hello world");
         assert_eq!(expand_env_vars("no vars here"), "no vars here");
         assert_eq!(expand_env_vars("${NONEXISTENT}"), "${NONEXISTENT}");
+    }
+
+    fn http_transport_with_bearer_file(path: std::path::PathBuf) -> StreamableHttpTransport {
+        StreamableHttpTransport::new(HttpMcpConfig {
+            url: "http://localhost:3000/mcp".to_string(),
+            headers: std::collections::HashMap::new(),
+            bearer_env: None,
+            bearer_file: Some(path),
+            allow_insecure: false,
+        })
+        .expect("transport")
+    }
+
+    #[test]
+    fn bearer_file_token_read_at_request_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cred =
+            crate::mcp::loopback_cred::LoopbackCredential::issue_in(dir.path()).expect("issue");
+        let token =
+            crate::mcp::loopback_cred::read_token_file(cred.path()).expect("read token file");
+        let transport = http_transport_with_bearer_file(cred.path().to_path_buf());
+        assert_eq!(transport.bearer_token().as_deref(), Some(token.as_str()));
+        assert!(transport.has_auth());
+    }
+    #[test]
+    fn bearer_file_takes_precedence_over_bearer_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cred =
+            crate::mcp::loopback_cred::LoopbackCredential::issue_in(dir.path()).expect("issue");
+        std::env::set_var("TARK_TEST_BEARER_PRECEDENCE", "env-token");
+        let transport = StreamableHttpTransport::new(HttpMcpConfig {
+            url: "http://localhost:3000/mcp".to_string(),
+            headers: std::collections::HashMap::new(),
+            bearer_env: Some("TARK_TEST_BEARER_PRECEDENCE".to_string()),
+            bearer_file: Some(cred.path().to_path_buf()),
+            allow_insecure: false,
+        })
+        .expect("transport");
+        let expected =
+            crate::mcp::loopback_cred::read_token_file(cred.path()).expect("read token file");
+        assert_eq!(transport.bearer_token().as_deref(), Some(expected.as_str()));
+        std::env::remove_var("TARK_TEST_BEARER_PRECEDENCE");
+    }
+
+    #[test]
+    fn bearer_file_refusal_fails_closed_to_unauthenticated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing.token");
+        let transport = http_transport_with_bearer_file(missing);
+        assert!(transport.bearer_token().is_none());
+        // Configured auth that cannot be read still advertises intent, but
+        // no token value is ever attached to the request.
+        assert!(transport.has_auth());
     }
 
     #[test]
