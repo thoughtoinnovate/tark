@@ -109,10 +109,6 @@ impl ReadFileTool {
             cap: WorkspaceCap::new(working_dir),
         }
     }
-
-    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
-        self.cap.resolve(path)
-    }
 }
 
 #[async_trait]
@@ -155,43 +151,45 @@ impl Tool for ReadFileTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let path = match self.resolve_path(&params.path) {
-            Ok(path) => path,
-            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
+
+        // Confined open (openat2 on Linux): authorization and open cannot
+        // be separated by a symlink swap.
+        let mut file = match self.cap.open_read(&params.path) {
+            Ok(file) => file,
+            Err(e) => return Ok(ToolResult::error(e.to_string())),
         };
+        let mut bytes = Vec::new();
+        if let Err(e) = std::io::Read::read_to_end(&mut file, &mut bytes) {
+            return Ok(ToolResult::error(format!("Failed to read file: {}", e)));
+        }
 
         // Use lossy UTF-8 conversion to handle files with invalid encoding
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                let content = String::from_utf8_lossy(&bytes).into_owned();
-                let output = match (params.start_line, params.end_line) {
-                    (Some(start), Some(end)) => {
-                        let lines: Vec<&str> = content.lines().collect();
-                        let start = start.saturating_sub(1).min(lines.len());
-                        let end = end.min(lines.len());
-                        if start >= end {
-                            // Return empty if range is invalid or empty
-                            String::new()
-                        } else {
-                            lines[start..end].join("\n")
-                        }
-                    }
-                    (Some(start), None) => {
-                        let lines: Vec<&str> = content.lines().collect();
-                        let start = start.saturating_sub(1).min(lines.len());
-                        lines[start..].join("\n")
-                    }
-                    (None, Some(end)) => {
-                        let lines: Vec<&str> = content.lines().collect();
-                        let end = end.min(lines.len());
-                        lines[..end].join("\n")
-                    }
-                    (None, None) => content,
-                };
-                Ok(ToolResult::success(output))
+        let content = String::from_utf8_lossy(&bytes).into_owned();
+        let output = match (params.start_line, params.end_line) {
+            (Some(start), Some(end)) => {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = start.saturating_sub(1).min(lines.len());
+                let end = end.min(lines.len());
+                if start >= end {
+                    // Return empty if range is invalid or empty
+                    String::new()
+                } else {
+                    lines[start..end].join("\n")
+                }
             }
-            Err(e) => Ok(ToolResult::error(format!("Failed to read file: {}", e))),
-        }
+            (Some(start), None) => {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = start.saturating_sub(1).min(lines.len());
+                lines[start..].join("\n")
+            }
+            (None, Some(end)) => {
+                let lines: Vec<&str> = content.lines().collect();
+                let end = end.min(lines.len());
+                lines[..end].join("\n")
+            }
+            (None, None) => content,
+        };
+        Ok(ToolResult::success(output))
     }
 
     fn policy_metadata(&self) -> Option<ToolPolicyMetadata> {
@@ -215,10 +213,6 @@ impl WriteFileTool {
         Self {
             cap: WorkspaceCap::new(working_dir),
         }
-    }
-
-    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
-        self.cap.resolve(path)
     }
 }
 
@@ -261,27 +255,38 @@ impl Tool for WriteFileTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let path = match self.resolve_path(&params.path) {
-            Ok(path) => path,
-            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
-        };
         let filename = params.path.clone();
 
-        // Read existing content for diff (if file exists)
-        let old_content = std::fs::read_to_string(&path).unwrap_or_default();
+        // Read existing content for diff (if file exists). Missing files
+        // read as empty; denials abort fail-closed.
+        let old_content = match self.cap.open_read(&params.path) {
+            Ok(mut file) => {
+                let mut content = String::new();
+                std::io::Read::read_to_string(&mut file, &mut content).unwrap_or_default();
+                content
+            }
+            Err(super::workspace::CapIoError::Denied(denied)) => {
+                return Ok(ToolResult::error(denied.to_string()))
+            }
+            Err(super::workspace::CapIoError::Io(_)) => String::new(),
+        };
+        let path = match self.cap.ensure_parent_dir(&params.path) {
+            Ok(path) => path,
+            Err(e) => return Ok(ToolResult::error(e.to_string())),
+        };
         let is_new_file = old_content.is_empty() && !path.exists();
 
-        // Create parent directories if needed
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return Ok(ToolResult::error(format!(
-                    "Failed to create directories: {}",
-                    e
-                )));
-            }
-        }
-
-        match std::fs::write(&path, &params.content) {
+        // Confined create+truncate (openat2 on Linux).
+        let write_result = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = self
+                .cap
+                .open_write(&params.path)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            file.write_all(params.content.as_bytes())?;
+            file.flush()
+        })();
+        match write_result {
             Ok(()) => {
                 let mut output = String::new();
 
@@ -324,10 +329,6 @@ impl PatchFileTool {
         Self {
             cap: WorkspaceCap::new(working_dir),
         }
-    }
-
-    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
-        self.cap.resolve(path)
     }
 }
 
@@ -375,16 +376,16 @@ impl Tool for PatchFileTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let path = match self.resolve_path(&params.path) {
-            Ok(path) => path,
-            Err(denied) => return Ok(ToolResult::error(denied.to_string())),
-        };
 
-        // Read the file
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => return Ok(ToolResult::error(format!("Failed to read file: {}", e))),
+        // Confined read (openat2 on Linux).
+        let mut file = match self.cap.open_read(&params.path) {
+            Ok(file) => file,
+            Err(e) => return Ok(ToolResult::error(e.to_string())),
         };
+        let mut content = String::new();
+        if let Err(e) = std::io::Read::read_to_string(&mut file, &mut content) {
+            return Ok(ToolResult::error(format!("Failed to read file: {}", e)));
+        }
 
         // Check if old_text exists
         if !content.contains(&params.old_text) {
@@ -396,11 +397,20 @@ impl Tool for PatchFileTool {
         // Replace the text
         let new_content = content.replacen(&params.old_text, &params.new_text, 1);
 
-        // Write back
-        match std::fs::write(&path, &new_content) {
+        // Confined write-back.
+        let write_result = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = self
+                .cap
+                .open_write(&params.path)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            file.write_all(new_content.as_bytes())?;
+            file.flush()
+        })();
+        match write_result {
             Ok(()) => Ok(ToolResult::success(format!(
                 "Successfully patched {}",
-                path.display()
+                params.path
             ))),
             Err(e) => Ok(ToolResult::error(format!("Failed to write file: {}", e))),
         }
@@ -417,10 +427,6 @@ impl DeleteFileTool {
         Self {
             cap: WorkspaceCap::new(working_dir),
         }
-    }
-
-    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
-        self.cap.resolve(path)
     }
 }
 
@@ -458,31 +464,38 @@ impl Tool for DeleteFileTool {
         }
 
         let params: Params = serde_json::from_value(params)?;
-        let path = match self.resolve_path(&params.path) {
-            Ok(path) => path,
+
+        // Authorize first so messaging stays accurate; the unlink itself is
+        // confined (unlinkat on Linux) and re-verified there.
+        let display = match self.cap.resolve(&params.path) {
+            Ok(path) => path.display().to_string(),
             Err(denied) => return Ok(ToolResult::error(denied.to_string())),
         };
 
-        // Check if file exists
-        if !path.exists() {
-            return Ok(ToolResult::error(format!(
-                "File not found: {}",
-                path.display()
-            )));
-        }
-
-        // Check if it's a file (not a directory)
-        if path.is_dir() {
+        // Refuse directories (checked on metadata that does not follow the
+        // final component where the platform allows).
+        let is_dir = std::fs::symlink_metadata(&display)
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
+        if is_dir {
             return Ok(ToolResult::error(
                 "Cannot delete directories with this tool. Use shell with 'rm -r' for directories.",
             ));
         }
 
-        match std::fs::remove_file(&path) {
+        match self.cap.remove_file(&params.path) {
             Ok(()) => Ok(ToolResult::success(format!(
                 "Successfully deleted {}",
-                path.display()
+                display
             ))),
+            Err(super::workspace::CapIoError::Denied(denied)) => {
+                Ok(ToolResult::error(denied.to_string()))
+            }
+            Err(super::workspace::CapIoError::Io(e))
+                if e.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(ToolResult::error(format!("File not found: {}", display)))
+            }
             Err(e) => Ok(ToolResult::error(format!("Failed to delete file: {}", e))),
         }
     }
@@ -498,10 +511,6 @@ impl ReadFilesTool {
         Self {
             cap: WorkspaceCap::new(working_dir),
         }
-    }
-
-    fn resolve_path(&self, path: &str) -> Result<PathBuf, super::workspace::WorkspaceDenied> {
-        self.cap.resolve(path)
     }
 }
 
@@ -547,34 +556,31 @@ impl Tool for ReadFilesTool {
         let mut errors = Vec::new();
 
         for path_str in &params.paths {
-            let path = match self.resolve_path(path_str) {
-                Ok(path) => path,
-                Err(denied) => {
-                    errors.push(denied.to_string());
+            let mut file = match self.cap.open_read(path_str) {
+                Ok(file) => file,
+                Err(e) => {
+                    errors.push(e.to_string());
                     continue;
                 }
             };
-
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    // Truncate if too long
-                    let lines: Vec<&str> = content.lines().collect();
-                    let truncated = lines.len() > max_lines;
-                    let content = if truncated {
-                        format!(
-                            "{}\n... ({} more lines)",
-                            lines[..max_lines].join("\n"),
-                            lines.len() - max_lines
-                        )
-                    } else {
-                        content
-                    };
-                    results.push(format!("=== {} ===\n{}", path_str, content));
-                }
-                Err(e) => {
-                    errors.push(format!("{}: {}", path_str, e));
-                }
+            let mut content = String::new();
+            if let Err(e) = std::io::Read::read_to_string(&mut file, &mut content) {
+                errors.push(format!("{}: {}", path_str, e));
+                continue;
             }
+            // Truncate if too long
+            let lines: Vec<&str> = content.lines().collect();
+            let truncated = lines.len() > max_lines;
+            let content = if truncated {
+                format!(
+                    "{}\n... ({} more lines)",
+                    lines[..max_lines].join("\n"),
+                    lines.len() - max_lines
+                )
+            } else {
+                content
+            };
+            results.push(format!("=== {} ===\n{}", path_str, content));
         }
 
         let mut output = results.join("\n\n");

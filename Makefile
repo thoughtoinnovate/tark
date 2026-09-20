@@ -1,7 +1,7 @@
 # tark Makefile
 # Run `make help` for available commands
 
-.PHONY: help env env-rust build build-release test lint fmt clean install
+.PHONY: help env env-rust build build-release test lint fmt fmt-check clean nuke install
 
 # Default target
 help:
@@ -19,6 +19,7 @@ help:
 	@echo "  make lint          - Run clippy linter"
 	@echo "  make fmt           - Format code"
 	@echo "  make clean         - Clean build artifacts"
+	@echo "  make nuke          - Deep clean regenerable bulk (disk pressure)"
 	@echo ""
 	@echo "E2E Tests (asciinema + agg):"
 	@echo "  make e2e           - Run E2E visual tests (P1 core)"
@@ -214,6 +215,22 @@ clean:
 	@echo "Cleaning build artifacts..."
 	cargo clean
 	rm -rf target/
+
+# Deep clean for disk pressure. Removes regenerable bulk (incremental
+# compilation cache, built test binaries) plus stale temp logs, while
+# keeping dependency rlibs so the next build stays incremental-ish.
+# Use when the disk fills up; `make clean` above is the full reset.
+nuke:
+	@echo "Nuking regenerable bulk..."
+	rm -rf target/debug/incremental
+	@if [ -d target/debug/deps ]; then \
+		find target/debug/deps -maxdepth 1 -type f -name 'tark_cli-*' ! -name '*.d' -delete; \
+	else \
+		echo "(no target/debug/deps; nothing to prune)"; \
+	fi
+	rm -f /tmp/check*.log /tmp/test*.log /tmp/clippy*.log /tmp/build*.log /tmp/final*.log
+	@echo "Disk after nuke:"
+	@df -h / | tail -1
 
 # =============================================================================
 # Install

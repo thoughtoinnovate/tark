@@ -68,6 +68,10 @@ ctrlc = "3.4"
 # Unix process groups for descendant reaping on cancel/timeout (R2 S5)
 libc = "0.2"
 
+# Race-free workspace confinement via openat2 (R1 H1, Linux)
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "0.38", features = ["fs"] }
+
 # Utilities
 url = "2"
 once_cell = "1"
