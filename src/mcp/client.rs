@@ -596,9 +596,16 @@ impl McpServerManager {
 /// Run a conformance check for a server.
 ///
 /// Performs: handshake state + protocol-version assertion + transport check +
-/// live `tools/list` + a `tools/call` ping when tools are available.
+/// live `ping` + `notifications/initialized` acceptance + live `tools/list` +
+/// a `tools/call` ping when tools are available.
 /// Returns a serializable [`ConformanceReport`]; never panics on
 /// disconnected servers (checks are recorded as failed/skipped instead).
+///
+/// This is Tark's dedicated conformance entry point (R13 S30): it exercises
+/// the client contract against any configured server, including the official
+/// Everything/Filesystem reference servers. Running the upstream
+/// modelcontextprotocol/conformance suite itself remains a CI follow-up
+/// requiring network access to the reference servers.
 pub async fn conformance_check(manager: &McpServerManager, server_id: &str) -> ConformanceReport {
     let revision = MCP_PROTOCOL_REVISION.to_string();
     let mut checks: Vec<ConformanceCheck> = Vec::new();
@@ -669,11 +676,13 @@ pub async fn conformance_check(manager: &McpServerManager, server_id: &str) -> C
             passed: true,
             detail: format!("configured transport: {}", transport_label),
         });
-        checks.push(ConformanceCheck {
-            name: "tools/list".to_string(),
-            passed: false,
-            detail: "skipped: not connected".to_string(),
-        });
+        for name in ["ping", "notifications/initialized", "tools/list"] {
+            checks.push(ConformanceCheck {
+                name: name.to_string(),
+                passed: false,
+                detail: "skipped: not connected".to_string(),
+            });
+        }
         checks.push(ConformanceCheck {
             name: "tools/call-ping".to_string(),
             passed: false,
@@ -704,8 +713,37 @@ pub async fn conformance_check(manager: &McpServerManager, server_id: &str) -> C
         detail: format!("active transport: {}", transport_label),
     });
 
-    // 4. Live tools/list.
     let transport = transport_opt.expect("connected implies transport");
+
+    // 4. Live ping (protocol liveness, independent of capabilities).
+    match transport.request("ping", None).await {
+        Ok(_) => checks.push(ConformanceCheck {
+            name: "ping".to_string(),
+            passed: true,
+            detail: "ping ok".to_string(),
+        }),
+        Err(e) => checks.push(ConformanceCheck {
+            name: "ping".to_string(),
+            passed: false,
+            detail: format!("ping failed: {}", e),
+        }),
+    }
+
+    // 5. notifications/initialized acceptance (send path; servers ack nothing).
+    match transport.notify("notifications/initialized", None).await {
+        Ok(_) => checks.push(ConformanceCheck {
+            name: "notifications/initialized".to_string(),
+            passed: true,
+            detail: "initialized notification accepted".to_string(),
+        }),
+        Err(e) => checks.push(ConformanceCheck {
+            name: "notifications/initialized".to_string(),
+            passed: false,
+            detail: format!("initialized notification failed: {}", e),
+        }),
+    }
+
+    // 6. Live tools/list.
     match transport.request("tools/list", None).await {
         Ok(value) => {
             let count = value
@@ -739,7 +777,7 @@ pub async fn conformance_check(manager: &McpServerManager, server_id: &str) -> C
         }
     }
 
-    // 5. tools/call ping when tools are available.
+    // 7. tools/call ping when tools are available.
     if let Some(first) = known_tools.first() {
         match transport
             .request(
@@ -853,5 +891,120 @@ mod tests {
         fn all_passed_for_test(&self) -> bool {
             self.checks.iter().all(|c| c.passed)
         }
+    }
+
+    /// Minimal in-process MCP server speaking newline-delimited JSON-RPC
+    /// (S12/S30): answers `initialize`, `tools/list`, `tools/call`, and
+    /// `ping`; ignores notifications. Protocol version comes from argv[1].
+    const MOCK_MCP_SERVER_PY: &str = r#"
+import sys, json
+version = sys.argv[1] if len(sys.argv) > 1 else "2026-07-28"
+def respond(req_id, result):
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result}) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    if "id" not in msg:
+        continue
+    method = msg.get("method")
+    if method == "initialize":
+        respond(msg["id"], {
+            "protocolVersion": version,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "mock", "version": "1.0"},
+        })
+    elif method == "tools/list":
+        respond(msg["id"], {"tools": [
+            {"name": "ping", "description": "Ping tool",
+             "inputSchema": {"type": "object"}},
+        ]})
+    elif method == "tools/call":
+        respond(msg["id"], {"content": [{"type": "text", "text": "pong"}]})
+    elif method == "ping":
+        respond(msg["id"], {})
+    else:
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"],
+            "error": {"code": -32601, "message": "unknown method"}}) + "\n")
+        sys.stdout.flush()
+"#;
+
+    async fn mock_manager(version: &str) -> (tempfile::TempDir, McpServerManager) {
+        let work = tempfile::tempdir().expect("workdir");
+        let script = work.path().join("mock_mcp.py");
+        std::fs::write(&script, MOCK_MCP_SERVER_PY).expect("write mock");
+        let manager = McpServerManager::new(work.path().to_path_buf(), work.path().to_path_buf());
+        manager
+            .register_server(
+                "mock",
+                McpServer {
+                    name: "Mock".to_string(),
+                    command: "python3".to_string(),
+                    args: vec![script.display().to_string(), version.to_string()],
+                    env: HashMap::new(),
+                    enabled: true,
+                    capabilities: vec![],
+                    tark: None,
+                },
+            )
+            .await;
+        // Explicit informed trust for the mock launch (R3 S7).
+        manager.approve_server("mock").await.expect("approve");
+        (work, manager)
+    }
+
+    fn check_passed(report: &ConformanceReport, name: &str) {
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("missing check {name}"));
+        assert!(check.passed, "check {name} failed: {}", check.detail);
+    }
+
+    #[tokio::test]
+    async fn conformance_live_mock_stdio_server_passes() {
+        let (_work, manager) = mock_manager(MCP_PROTOCOL_REVISION).await;
+        manager.connect("mock").await.expect("connect");
+        let report = conformance_check(&manager, "mock").await;
+        assert_eq!(report.revision, MCP_PROTOCOL_REVISION);
+        assert_eq!(report.transport, "stdio");
+        for name in [
+            "handshake",
+            "protocol-version",
+            "transport",
+            "ping",
+            "notifications/initialized",
+            "tools/list",
+            "tools/call-ping",
+        ] {
+            check_passed(&report, name);
+        }
+        assert!(report.all_passed_for_test());
+        manager.disconnect("mock").await.expect("disconnect");
+    }
+
+    #[tokio::test]
+    async fn conformance_mock_wrong_protocol_version_rejected() {
+        let (_work, manager) = mock_manager("2020-11-05").await;
+        let err = manager.connect("mock").await.expect_err("must reject");
+        assert!(
+            err.to_string().contains("2020-11-05"),
+            "unexpected error: {err}"
+        );
+        // Failed handshake surfaces as a failed (not skipped) handshake check.
+        let report = conformance_check(&manager, "mock").await;
+        assert!(!report.all_passed_for_test());
+        let handshake = report
+            .checks
+            .iter()
+            .find(|c| c.name == "handshake")
+            .unwrap();
+        assert!(!handshake.passed);
     }
 }
