@@ -372,8 +372,14 @@ jobs:
           shopt -s nullglob || true
           RMETA=(target/debug/deps/*.rmeta)
           echo "::warning::diag-artifacts rmeta_count=${#RMETA[@]}" || true
+          # Toolchain/env forensics (names only, never values).
+          echo "::warning::diag-toolchain $(cargo --version 2>&1 | head -c 200) / $(rustc --version 2>&1 | head -c 200)" || true
+          echo "::warning::diag-env $(env | cut -d= -f1 | grep -iE 'cargo|rust|sccache|target|ci|github' | sort | tr '\n' ' ' | head -c 1000)" || true
+          # The exact --extern path cargo passed for once_cell vs built files.
+          EXTERN=$(grep -m1 -o '\-\-extern once_cell=[^ ]*' check-output-clean.log libtest-output-clean.log 2>/dev/null | head -1)
+          echo "::warning::diag-extern ${EXTERN:-none-found}" || true
           # The exact rustc invocation for tark-cli (are --extern flags present?).
-          INVOC=$(grep -m1 -o 'Running `rustc --crate-name tark_cli[^`]*' libtest-clean.log check-clean.log 2>/dev/null | head -c 6000 || true)
+          INVOC=$(grep -m1 -o 'Running `rustc --crate-name tark_cli[^`]*' libtest-clean.log check-output-clean.log libtest-output-clean.log 2>/dev/null | head -c 6000 || true)
           echo "::warning::diag-invocation ${INVOC:-none-found}" || true
           # Full-log excerpts as warnings (annotations cap at 64KB each).
           echo "::warning::diag-head $(head -80 libtest-clean.log | tr '\n' ' ' | head -c 20000)"
