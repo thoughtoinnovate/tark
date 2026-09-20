@@ -70,7 +70,7 @@ impl PathSanitizer {
 
     /// Canonicalize and verify path
     pub fn canonicalize(&self, path: &str) -> Result<PathBuf> {
-        let path_buf = if path.starts_with('/') {
+        let path_buf = if Path::new(path).is_absolute() {
             PathBuf::from(path)
         } else {
             self.working_dir.join(path)
@@ -87,6 +87,10 @@ impl PathSanitizer {
     }
 
     /// Check if path is within working directory
+    ///
+    /// Compares verbatim-prefix-stripped paths: on Windows,
+    /// `canonicalize()` returns `\\?\`-prefixed paths while lexically
+    /// resolved (non-existent) targets do not carry the prefix.
     pub fn is_in_workdir(&self, path: &str) -> Result<bool> {
         let canonical_path = self.canonicalize(path)?;
         let canonical_workdir = self
@@ -94,7 +98,22 @@ impl PathSanitizer {
             .canonicalize()
             .unwrap_or_else(|_| self.working_dir.clone());
 
-        Ok(canonical_path.starts_with(canonical_workdir))
+        Ok(Self::without_verbatim_prefix(&canonical_path)
+            .starts_with(Self::without_verbatim_prefix(&canonical_workdir)))
+    }
+
+    /// Strip the Windows verbatim prefix (`\\?\` or `\\?\UNC\`) so
+    /// canonicalized and lexically resolved paths compare alike.
+    /// No-op on other platforms.
+    fn without_verbatim_prefix(path: &Path) -> PathBuf {
+        let s = path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            PathBuf::from(format!(r"\\{rest}"))
+        } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+            PathBuf::from(rest)
+        } else {
+            path.to_path_buf()
+        }
     }
 
     /// Extract paths from command string
@@ -143,7 +162,6 @@ impl PathSanitizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     #[test]
     fn test_pattern_validator() {
@@ -161,14 +179,18 @@ mod tests {
 
     #[test]
     fn test_path_sanitizer() {
-        let workdir = env::current_dir().unwrap();
-        let sanitizer = PathSanitizer::new(workdir.clone());
+        // Distinct roots: portable on all platforms (`/tmp/...` literals
+        // are not absolute on Windows, so they cannot express "outside").
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        let sanitizer = PathSanitizer::new(root_a.path().to_path_buf());
 
         // Relative path
         assert!(sanitizer.is_in_workdir("./file.txt").unwrap());
 
         // Absolute path outside
-        assert!(!sanitizer.is_in_workdir("/tmp/file.txt").unwrap());
+        let outside = root_b.path().join("file.txt");
+        assert!(!sanitizer.is_in_workdir(outside.to_str().unwrap()).unwrap());
     }
 
     #[test]

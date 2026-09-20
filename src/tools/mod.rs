@@ -1059,27 +1059,35 @@ mod tests {
     fn effective_cwd_covers_process_launching_tools() {
         // R2: any mode that can launch a process must display the effective
         // command and working directory when approval is required.
+        // Compared as paths: display separators differ per platform.
         let registry = ToolRegistry::new(PathBuf::from("/work/primary"));
         // Shell without an override runs in the registry working directory.
         assert_eq!(
-            registry.effective_cwd("shell", &json!({ "command": "ls" })),
-            Some("/work/primary".to_string())
+            registry
+                .effective_cwd("shell", &json!({ "command": "ls" }))
+                .map(PathBuf::from),
+            Some(PathBuf::from("/work/primary"))
         );
         // Shell with a relative override resolves against the registry root.
         assert_eq!(
-            registry.effective_cwd(
-                "shell",
-                &json!({ "command": "ls", "working_dir": "sub/dir" })
-            ),
-            Some("/work/primary/sub/dir".to_string())
+            registry
+                .effective_cwd(
+                    "shell",
+                    &json!({ "command": "ls", "working_dir": "sub/dir" })
+                )
+                .map(PathBuf::from),
+            Some(PathBuf::from("/work/primary").join("sub").join("dir"))
         );
         // Shell with an absolute override shows it verbatim.
+        let absolute = std::env::temp_dir().join("tark-cwd-probe");
         assert_eq!(
-            registry.effective_cwd(
-                "shell",
-                &json!({ "command": "ls", "working_dir": "/tmp/other" })
-            ),
-            Some("/tmp/other".to_string())
+            registry
+                .effective_cwd(
+                    "shell",
+                    &json!({ "command": "ls", "working_dir": absolute.display().to_string() })
+                )
+                .map(PathBuf::from),
+            Some(absolute)
         );
         // Tools without a process working directory show no cwd line.
         assert_eq!(

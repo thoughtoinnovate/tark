@@ -592,12 +592,14 @@ redirect_uri = "${TEST_REDIRECT}"
 
     #[test]
     fn test_expand_home_path() {
+        use std::path::PathBuf;
         let home = dirs::home_dir().unwrap();
-        let home_str = home.to_string_lossy();
 
+        // Compared as paths: `Path::join` uses the platform separator while
+        // the test expectation below is written with `/`.
         assert_eq!(
-            expand_home_path("~/.gemini/oauth_creds.json"),
-            format!("{}/.gemini/oauth_creds.json", home_str)
+            PathBuf::from(expand_home_path("~/.gemini/oauth_creds.json")),
+            home.join(".gemini/oauth_creds.json")
         );
         assert_eq!(expand_home_path("/absolute/path"), "/absolute/path");
         assert_eq!(expand_home_path("relative/path"), "relative/path");

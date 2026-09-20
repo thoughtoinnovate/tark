@@ -602,7 +602,14 @@ mod tests {
     fn confined_open_denies_escape_and_missing_is_io() {
         let (_dir, cap) = test_workspace();
         match cap.open_read("/etc/passwd") {
-            Err(CapIoError::Denied(denied)) => assert_eq!(denied.reason, "escape"),
+            // The denial reason is platform-dependent (`/etc` itself is a
+            // symlink on macOS, yielding `symlink-escape`); the security
+            // property under test is that the escape is denied.
+            Err(CapIoError::Denied(denied)) => assert!(
+                denied.reason == "escape" || denied.reason == "symlink-escape",
+                "unexpected denial reason: {}",
+                denied.reason
+            ),
             other => panic!("expected denial, got {:?}", other.is_ok()),
         }
         match cap.open_read("no-such-file.txt") {
