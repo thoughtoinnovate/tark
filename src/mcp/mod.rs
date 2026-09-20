@@ -7,6 +7,7 @@
 pub mod client;
 pub mod credential_store;
 pub mod loopback_cred;
+pub mod oauth;
 pub mod transport;
 pub mod trust;
 pub mod types;
@@ -18,6 +19,7 @@ pub use credential_store::{
     CredentialKey, CredentialStore, EncryptedFileStore, MemoryCredentialStore,
 };
 pub use loopback_cred::{read_token_file, LoopbackCredential, LOOPBACK_TOKEN_FILE_ENV};
+pub use oauth::{OAuthTokenRecord, OAUTH_RECORD_SUFFIX, OAUTH_TOKEN_SERVICE};
 pub use transport::{ActiveTransport, StdioTransport, StreamableHttpTransport};
 pub use trust::{McpTrustRecord, McpTrustStore};
 pub use types::{

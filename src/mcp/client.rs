@@ -101,6 +101,79 @@ impl McpServerManager {
         }
     }
 
+    /// Refresh an OAuth-managed access token when expired (R6 S17).
+    ///
+    /// Applies when the endpoint's `credential_key` names the OAuth service
+    /// (`tark-mcp-oauth/<issuer>`): the refresh record is loaded, rotated
+    /// when expired, and both the raw token entry (read at request time by
+    /// the transport) and the record are updated. Best-effort: failures warn
+    /// and the connect proceeds (the server then rejects with a clear 401).
+    /// No-ops when no store, no key, or no record exists yet.
+    async fn ensure_oauth_token(&self, credential_key: Option<&str>) {
+        use super::credential_store::{CredentialKey, CredentialStore};
+        use super::oauth::{
+            refresh_access_token, OAuthTokenRecord, OAUTH_RECORD_SUFFIX, OAUTH_TOKEN_SERVICE,
+        };
+
+        let Some(raw) = credential_key else {
+            return;
+        };
+        let Ok(key) = CredentialKey::parse(raw) else {
+            return;
+        };
+        if key.service != OAUTH_TOKEN_SERVICE {
+            return;
+        }
+        let Some(store) = self.credential_store() else {
+            return;
+        };
+        let record_key = match CredentialKey::new(
+            OAUTH_TOKEN_SERVICE,
+            &format!("{}{}", key.account, OAUTH_RECORD_SUFFIX),
+        ) {
+            Ok(key) => key,
+            Err(_) => return,
+        };
+        let record_json = match store.load_token(&record_key) {
+            Ok(Some(json)) => json,
+            Ok(None) => return, // Initial authorization not completed yet.
+            Err(e) => {
+                tracing::warn!("OAuth record unreadable for '{}': {}", key.account, e);
+                return;
+            }
+        };
+        let record: OAuthTokenRecord = match serde_json::from_str(&record_json) {
+            Ok(record) => record,
+            Err(e) => {
+                tracing::warn!("OAuth record invalid for '{}': {}", key.account, e);
+                return;
+            }
+        };
+        if !record.is_expired() {
+            return;
+        }
+        match refresh_access_token(&record).await {
+            Ok((access_token, updated)) => {
+                if store.store_token(&key, &access_token).is_err() {
+                    tracing::warn!("OAuth token store failed for '{}'", key.account);
+                    return;
+                }
+                let record_json = serde_json::to_string(&updated).unwrap_or_default();
+                if !record_json.is_empty() {
+                    let _ = store.store_token(&record_key, &record_json);
+                }
+                tracing::info!("OAuth token refreshed for '{}'", key.account);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "OAuth refresh failed for '{}': {} (re-authorization may be required)",
+                    key.account,
+                    e
+                );
+            }
+        }
+    }
+
     /// Load server configurations
     pub async fn load_config(&self, config: &McpConfig) {
         let mut connections = self.connections.write().await;
@@ -549,6 +622,9 @@ impl McpServerManager {
                 let http_config = endpoint.http.clone().ok_or_else(|| {
                     anyhow::anyhow!("Missing HTTP config for server: {}", server_id)
                 })?;
+                // Rotate OAuth-managed tokens before connecting (R6 S17).
+                self.ensure_oauth_token(http_config.credential_key.as_deref())
+                    .await;
                 // Attach the managed credential store when the endpoint
                 // references it (MCP_BEARER_CREDENTIAL); env/file auth is
                 // unaffected when the store is unavailable.
