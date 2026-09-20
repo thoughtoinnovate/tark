@@ -9,10 +9,124 @@ use super::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
+
+/// Default wait for the first byte (cold model load can take tens of seconds).
+/// Override with `OLLAMA_INITIAL_TIMEOUT` (seconds).
+const DEFAULT_INITIAL_TIMEOUT_SECS: u64 = 120;
+/// Default wait between subsequent stream chunks. Override with
+/// `OLLAMA_CHUNK_TIMEOUT` (seconds).
+const DEFAULT_CHUNK_TIMEOUT_SECS: u64 = 60;
+/// Warmup is skipped when the model was warmed within this TTL (under
+/// Ollama's default 5-minute `keep_alive`).
+const WARMUP_TTL_SECS: u64 = 240;
+/// Max attempts for transient failures (connect/timeout) with backoff.
+const MAX_ATTEMPTS: u32 = 3;
+
+fn initial_timeout() -> Duration {
+    Duration::from_secs(
+        env::var("OLLAMA_INITIAL_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &u64| *v > 0)
+            .unwrap_or(DEFAULT_INITIAL_TIMEOUT_SECS),
+    )
+}
+
+fn chunk_timeout() -> Duration {
+    Duration::from_secs(
+        env::var("OLLAMA_CHUNK_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &u64| *v > 0)
+            .unwrap_or(DEFAULT_CHUNK_TIMEOUT_SECS),
+    )
+}
+
+/// Marker for timeout failures so the retry policy can classify them without
+/// parsing message strings.
+#[derive(Debug)]
+struct OllamaTimeout(&'static str);
+
+impl std::fmt::Display for OllamaTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ollama operation timed out ({})", self.0)
+    }
+}
+
+impl std::error::Error for OllamaTimeout {}
+
+/// True for failures worth retrying: timeouts and connection errors.
+/// HTTP 4xx (unknown model, bad request) and parse errors are not retried.
+fn is_transient(e: &anyhow::Error) -> bool {
+    if e.downcast_ref::<OllamaTimeout>().is_some() {
+        return true;
+    }
+    if let Some(req_err) = e.downcast_ref::<reqwest::Error>() {
+        return req_err.is_timeout() || req_err.is_connect();
+    }
+    false
+}
+
+/// Run `f` up to `max_attempts` times with 1s/2s/4s backoff on transient
+/// failures. Non-transient errors return immediately.
+async fn with_retry<T, F, Fut>(op: &str, max_attempts: u32, f: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match f().await {
+            Ok(value) => return Ok(value),
+            Err(e) if attempt < max_attempts && is_transient(&e) => {
+                let backoff_secs = 1u64 << (attempt - 1).min(3);
+                tracing::warn!(
+                    "Ollama {op} attempt {attempt}/{max_attempts} failed ({e}); retrying in {backoff_secs}s"
+                );
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Process-global warmup timestamps per `base_url#model`.
+static WARMED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
+    std::sync::OnceLock::new();
+
+fn warmed_at(key: &str) -> Option<std::time::Instant> {
+    WARMED
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .ok()?
+        .get(key)
+        .copied()
+}
+
+fn mark_warmed(key: &str) {
+    if let Ok(mut map) = WARMED
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        map.insert(key.to_string(), std::time::Instant::now());
+    }
+}
+
+/// True when `installed` (e.g. `llama3.2:latest` from `/api/tags`) satisfies
+/// `wanted` (e.g. `llama3.2`), ignoring a trailing `:latest` on either side.
+fn model_matches(installed: &str, wanted: &str) -> bool {
+    fn strip(s: &str) -> &str {
+        s.strip_suffix(":latest").unwrap_or(s)
+    }
+    strip(installed) == strip(wanted)
+}
 
 /// Generate a unique tool call ID for Ollama tool calls
 fn generate_tool_call_id() -> String {
@@ -273,27 +387,140 @@ impl OllamaProvider {
             .collect()
     }
 
-    async fn send_request(&self, request: OllamaRequest) -> Result<OllamaResponse> {
-        let url = format!("{}/api/chat", self.base_url);
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send request to Ollama")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Ollama API error ({}): {}", status, error_text);
+    /// Ensure the server is reachable, the model is installed, and the model
+    /// is loaded (cold-start warmup). Fails fast with actionable errors
+    /// instead of hanging the chat flow.
+    async fn ensure_model_ready(&self) -> Result<()> {
+        let key = format!("{}#{}", self.base_url, self.model);
+        if warmed_at(&key).is_some_and(|at| at.elapsed().as_secs() < WARMUP_TTL_SECS) {
+            return Ok(());
         }
 
-        response
-            .json::<OllamaResponse>()
+        // 1. Server reachable?
+        let tags_url = format!("{}/api/tags", self.base_url);
+        let probe =
+            tokio::time::timeout(Duration::from_secs(10), self.client.get(&tags_url).send()).await;
+        let tags_resp = match probe {
+            Err(_) => anyhow::bail!(
+                "Ollama is not reachable at {} within 10s — is it running? Try: ollama serve",
+                self.base_url
+            ),
+            Ok(Err(e)) => anyhow::bail!(
+                "Cannot reach Ollama at {} ({e}) — is it running? Try: ollama serve",
+                self.base_url
+            ),
+            Ok(Ok(resp)) => resp,
+        };
+
+        if !tags_resp.status().is_success() {
+            anyhow::bail!(
+                "Ollama API error ({}) at {} — is it running? Try: ollama serve",
+                tags_resp.status(),
+                self.base_url
+            );
+        }
+        #[derive(Deserialize)]
+        struct TagsResponse {
+            #[serde(default)]
+            models: Vec<OllamaModelInfo>,
+        }
+        let tags: TagsResponse = tags_resp
+            .json()
             .await
-            .context("Failed to parse Ollama response")
+            .context("Failed to parse Ollama /api/tags response")?;
+
+        // 2. Model installed?
+        if !tags
+            .models
+            .iter()
+            .any(|m| model_matches(&m.name, &self.model))
+        {
+            let installed: Vec<&str> = tags.models.iter().map(|m| m.name.as_str()).collect();
+            let hint = if installed.is_empty() {
+                "no models are installed yet".to_string()
+            } else {
+                format!("installed: {}", installed.join(", "))
+            };
+            anyhow::bail!(
+                "Ollama model '{}' is not installed ({hint}) — pull it with: ollama pull {}",
+                self.model,
+                self.model
+            );
+        }
+
+        // 3. Warm the model (cold load can take tens of seconds on first use).
+        let warmup = OllamaGenerateRequest {
+            model: self.model.clone(),
+            prompt: "ok".to_string(),
+            stream: false,
+            options: Some(OllamaOptions {
+                num_predict: Some(1),
+            }),
+            keep_alive: Some("5m".to_string()),
+        };
+        let url = format!("{}/api/generate", self.base_url);
+        let limit = initial_timeout();
+        tokio::time::timeout(limit, self.client.post(&url).json(&warmup).send())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Ollama model '{}' did not load within {}s (cold start on first use can be slow) — \
+                     increase via OLLAMA_INITIAL_TIMEOUT, or pre-load with: ollama run {} ''",
+                    self.model,
+                    limit.as_secs(),
+                    self.model
+                )
+            })?
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Cannot reach Ollama at {} during warmup ({e}) — is it running? Try: ollama serve",
+                    self.base_url
+                )
+            })?;
+        // Warmup response body is intentionally ignored; loading is the goal.
+
+        mark_warmed(&key);
+        Ok(())
+    }
+
+    async fn send_request(&self, request: OllamaRequest) -> Result<OllamaResponse> {
+        let url = format!("{}/api/chat", self.base_url);
+        let limit = initial_timeout();
+
+        with_retry("chat", MAX_ATTEMPTS, || async {
+            let response = tokio::time::timeout(limit, self.client.post(&url).json(&request).send())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(OllamaTimeout("chat response")).context(format!(
+                        "Ollama model '{}' produced no response within {}s — the model may still be loading; \
+                         increase via OLLAMA_INITIAL_TIMEOUT",
+                        self.model,
+                        limit.as_secs()
+                    ))
+                })?
+                .context("Failed to send request to Ollama")?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_default();
+                if status.as_u16() == 404 {
+                    anyhow::bail!(
+                        "Ollama model '{}' not found ({}) — pull it with: ollama pull {} ({})",
+                        self.model,
+                        status,
+                        self.model,
+                        error_text
+                    );
+                }
+                anyhow::bail!("Ollama API error ({}): {}", status, error_text);
+            }
+
+            response
+                .json::<OllamaResponse>()
+                .await
+                .context("Failed to parse Ollama response")
+        })
+        .await
     }
 
     async fn generate(&self, prompt: &str) -> Result<String> {
@@ -303,14 +530,21 @@ impl OllamaProvider {
             model: self.model.clone(),
             prompt: prompt.to_string(),
             stream: false,
+            options: None,
+            keep_alive: None,
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
+        let limit = initial_timeout();
+        let response = tokio::time::timeout(limit, self.client.post(&url).json(&request).send())
             .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Ollama model '{}' produced no response within {}s — the model may still be loading; \
+                     increase via OLLAMA_INITIAL_TIMEOUT",
+                    self.model,
+                    limit.as_secs()
+                )
+            })?
             .context("Failed to send request to Ollama")?;
 
         if !response.status().is_success() {
@@ -356,6 +590,10 @@ impl LlmProvider for OllamaProvider {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse> {
+        // Fail fast on unreachable server / missing model / cold load
+        // instead of hanging the chat flow.
+        self.ensure_model_ready().await?;
+
         let ollama_messages = self.convert_messages(messages);
 
         // Convert tools to native Ollama format
@@ -417,10 +655,13 @@ impl LlmProvider for OllamaProvider {
         interrupt_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<LlmResponse> {
         use futures::StreamExt;
-        use tokio::time::{timeout, Duration};
+        use tokio::time::timeout;
 
-        const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
         const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+        // Fail fast on unreachable server / missing model / cold load
+        // instead of spinning the TUI loading state forever.
+        self.ensure_model_ready().await?;
 
         let ollama_messages = self.convert_messages(messages);
 
@@ -436,14 +677,24 @@ impl LlmProvider for OllamaProvider {
         };
 
         let url = format!("{}/api/chat", self.base_url);
+        let setup_limit = initial_timeout();
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send streaming request to Ollama")?;
+        // Retry transient setup failures (connect resets under load); the
+        // first byte may take a full cold-load window to arrive.
+        let response = with_retry("chat stream setup", MAX_ATTEMPTS, || async {
+            tokio::time::timeout(setup_limit, self.client.post(&url).json(&request).send())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(OllamaTimeout("stream setup")).context(format!(
+                        "Ollama model '{}' sent no data within {}s — the model may still be loading; \
+                         increase via OLLAMA_INITIAL_TIMEOUT",
+                        self.model,
+                        setup_limit.as_secs()
+                    ))
+                })?
+                .context("Failed to send streaming request to Ollama")
+        })
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -462,6 +713,7 @@ impl LlmProvider for OllamaProvider {
         let mut thinking_parser = PromptThinkingTagParser::default();
 
         let mut last_activity_at = std::time::Instant::now();
+        let mut received_any = false;
         loop {
             // Check for user interrupt frequently so Ctrl+C/Esc+Esc are responsive
             if let Some(check) = interrupt_check {
@@ -470,11 +722,27 @@ impl LlmProvider for OllamaProvider {
                 }
             }
 
-            // Enforce per-chunk timeout: if we haven't received any bytes recently, abort.
-            if last_activity_at.elapsed() >= STREAM_CHUNK_TIMEOUT {
+            // First byte gets the cold-load window; subsequent chunks get the
+            // steady-state window. This is the "keeps loading forever" fix:
+            // a silent server now fails loudly with a remediation hint.
+            let limit = if received_any {
+                chunk_timeout()
+            } else {
+                initial_timeout()
+            };
+            if last_activity_at.elapsed() >= limit {
+                if received_any {
+                    anyhow::bail!(
+                        "Stream timeout - no response from Ollama for {} seconds",
+                        limit.as_secs()
+                    );
+                }
                 anyhow::bail!(
-                    "Stream timeout - no response from Ollama for {} seconds",
-                    STREAM_CHUNK_TIMEOUT.as_secs()
+                    "Ollama model '{}' sent no data within {}s — the model may still be loading; \
+                     increase via OLLAMA_INITIAL_TIMEOUT, or pre-load with: ollama run {} ''",
+                    self.model,
+                    limit.as_secs(),
+                    self.model
                 );
             }
 
@@ -487,6 +755,7 @@ impl LlmProvider for OllamaProvider {
             };
 
             last_activity_at = std::time::Instant::now();
+            received_any = true;
             let chunk = chunk_result.context("Error reading stream chunk")?;
             let chunk_str = String::from_utf8_lossy(&chunk);
 
@@ -807,7 +1076,7 @@ fn uuid_simple() -> String {
 
 // Ollama API types
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OllamaRequest {
     model: String,
     messages: Vec<OllamaMessage>,
@@ -857,11 +1126,21 @@ struct OllamaToolCallFunction {
     arguments: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OllamaGenerateRequest {
     model: String,
     prompt: String,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OllamaOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_predict: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -881,6 +1160,10 @@ struct OllamaStreamChunk {
 #[cfg(test)]
 mod tests {
     use super::PromptThinkingTagParser;
+    use super::{initial_timeout, is_transient, mark_warmed, model_matches, warmed_at, with_retry};
+    use super::{OllamaTimeout, DEFAULT_CHUNK_TIMEOUT_SECS, DEFAULT_INITIAL_TIMEOUT_SECS};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn parser_splits_prompt_thinking_tags() {
@@ -908,5 +1191,131 @@ mod tests {
         let (t2, k2) = parser.ingest("nk>r</think>");
         assert_eq!(t2, "");
         assert_eq!(k2, "r");
+    }
+
+    #[test]
+    fn timeout_env_parsing_falls_back_to_defaults() {
+        // Single sequential test: env mutation is process-global.
+        std::env::set_var("OLLAMA_INITIAL_TIMEOUT", "5");
+        std::env::set_var("OLLAMA_CHUNK_TIMEOUT", "7");
+        assert_eq!(initial_timeout(), std::time::Duration::from_secs(5));
+        assert_eq!(super::chunk_timeout(), std::time::Duration::from_secs(7));
+
+        for bad in ["bogus", "0", "-3", ""] {
+            std::env::set_var("OLLAMA_INITIAL_TIMEOUT", bad);
+            std::env::set_var("OLLAMA_CHUNK_TIMEOUT", bad);
+            assert_eq!(
+                initial_timeout(),
+                std::time::Duration::from_secs(DEFAULT_INITIAL_TIMEOUT_SECS)
+            );
+            assert_eq!(
+                super::chunk_timeout(),
+                std::time::Duration::from_secs(DEFAULT_CHUNK_TIMEOUT_SECS)
+            );
+        }
+        std::env::remove_var("OLLAMA_INITIAL_TIMEOUT");
+        std::env::remove_var("OLLAMA_CHUNK_TIMEOUT");
+        assert_eq!(
+            initial_timeout(),
+            std::time::Duration::from_secs(DEFAULT_INITIAL_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn transient_classification() {
+        assert!(is_transient(&anyhow::anyhow!(OllamaTimeout("x"))));
+        assert!(!is_transient(&anyhow::anyhow!(
+            "Ollama model 'x' not found"
+        )));
+        assert!(!is_transient(&anyhow::anyhow!(
+            "Failed to parse Ollama response"
+        )));
+    }
+
+    #[test]
+    fn model_name_matching_ignores_latest_tag() {
+        assert!(model_matches("llama3.2:latest", "llama3.2"));
+        assert!(model_matches("llama3.2", "llama3.2:latest"));
+        assert!(model_matches("llama3.2:latest", "llama3.2:latest"));
+        assert!(model_matches("deepseek-r1:8b", "deepseek-r1:8b"));
+        assert!(!model_matches("llama3.2:latest", "llama3.1"));
+        assert!(!model_matches("llama3.2:8b", "llama3.2:70b"));
+    }
+
+    #[test]
+    fn warmup_cache_marks_and_expires() {
+        let key = "test://warmup-cache-probe#model";
+        mark_warmed(key);
+        assert!(warmed_at(key).is_some());
+        // Backdate past the TTL: treated as cold.
+        if let Ok(mut map) = super::WARMED
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+        {
+            map.insert(
+                key.to_string(),
+                std::time::Instant::now()
+                    - std::time::Duration::from_secs(super::WARMUP_TTL_SECS + 1),
+            );
+        }
+        let at = warmed_at(key).expect("entry");
+        assert!(at.elapsed().as_secs() >= super::WARMUP_TTL_SECS);
+    }
+
+    #[tokio::test]
+    async fn retry_succeeds_after_transient_failures() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let probe = attempts.clone();
+        let result = with_retry("probe", 3, || {
+            let probe = probe.clone();
+            async move {
+                let n = probe.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err::<u32, _>(anyhow::anyhow!(OllamaTimeout("probe")))
+                } else {
+                    Ok(n)
+                }
+            }
+        })
+        .await
+        .expect("retry");
+        assert_eq!(result, 2);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_does_not_retry_permanent_errors() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let probe = attempts.clone();
+        let err = with_retry("probe", 3, || {
+            let probe = probe.clone();
+            async move {
+                probe.fetch_add(1, Ordering::SeqCst);
+                Err::<u32, _>(anyhow::anyhow!("Ollama model 'x' not found"))
+            }
+        })
+        .await
+        .expect_err("permanent");
+        assert!(err.to_string().contains("not found"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_warmup_against_local_ollama() {
+        // Runs only with OLLAMA_TEST_URL + OLLAMA_TEST_MODEL set, e.g.:
+        // OLLAMA_TEST_URL=http://localhost:11434 OLLAMA_TEST_MODEL=llama3.2 \
+        //   cargo test --all-features --lib ollama -- --ignored
+        let (Some(base_url), Some(model)) = (
+            std::env::var("OLLAMA_TEST_URL").ok(),
+            std::env::var("OLLAMA_TEST_MODEL").ok(),
+        ) else {
+            return;
+        };
+        let provider = super::OllamaProvider::new()
+            .expect("provider")
+            .with_base_url(&base_url)
+            .with_model(&model);
+        provider.ensure_model_ready().await.expect("warmup");
     }
 }
