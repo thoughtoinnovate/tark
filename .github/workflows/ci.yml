@@ -356,4 +356,10 @@ jobs:
           echo "::warning::diag-head $(head -80 libtest-clean.log | tr '\n' ' ' | head -c 20000)"
           echo "::warning::diag-tail $(tail -40 libtest-clean.log | tr '\n' ' ' | head -c 20000)"
           # Environment forensics: disk, artifacts present, toolchain.
-          echo "::warning::diag-env $(echo "DISK:$(df -h . | tail -1)"; echo "RLIBS:$(ls target/debug/deps/*.rlib 2>/dev/null | wc -l)"; echo "DEPS_ENTRIES:$(ls target/debug/deps/ 2>/dev/null | wc -l)"; echo "RUSTC:$(rustc --version)"; echo "CARGO_HOME_SET:${CARGO_HOME:-unset}" | tr '\n' ' ' | head -c 4000)"
+          # Separate annotations so one failing probe cannot mask the rest.
+          shopt -s nullglob || true
+          echo "::warning::diag-disk $(df -h . | tail -1 | tr '\n' ' ' | head -c 500)" || true
+          RLIBS=(target/debug/deps/*.rlib)
+          echo "::warning::diag-rlibs rlib_count=${#RLIBS[@]}" || true
+          echo "::warning::diag-rustc $(rustc --version 2>&1 | head -c 200)" || true
+          echo "::warning::diag-deps-sample $(ls target/debug/deps/ 2>/dev/null | head -8 | tr '\n' ' ' | head -c 1000)" || true
