@@ -13,7 +13,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,10 +21,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use super::credential_store::{CredentialKey, CredentialStore};
-use super::types::{HttpMcpConfig, McpError, MCP_PROTOCOL_REVISION};
+use super::types::{HttpMcpConfig, McpError, ServerNotification, MCP_PROTOCOL_REVISION};
 
 /// Default per-request timeout (stdio read and HTTP round-trip).
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -196,6 +196,63 @@ fn params_byte_len(params: &Option<Value>) -> usize {
     }
 }
 
+/// Cap for buffered server notifications (drop-oldest past the cap).
+const MAX_BUFFERED_NOTIFICATIONS: usize = 64;
+
+/// Response delivered to a pending request: decoded `result` or error text.
+type StdResponse = std::result::Result<Value, String>;
+
+/// Route one stdout line: id-matched responses complete pending requests,
+/// method-only lines buffer as server notifications, garbage is logged and
+/// skipped (R5: server push must never desynchronize requests).
+async fn route_stdio_line(
+    line: &str,
+    pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<StdResponse>>>>,
+    notifications: &Arc<Mutex<VecDeque<ServerNotification>>>,
+) {
+    let value: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::debug!("MCP stdio unparsable line skipped ({} bytes)", line.len());
+            return;
+        }
+    };
+    if let Some(id) = value.get("id").and_then(Value::as_u64) {
+        if value.get("result").is_some() || value.get("error").is_some() {
+            let response = match value.get("error") {
+                Some(err) => Err(format!(
+                    "MCP error {}: {}",
+                    err.get("code").map(|c| c.to_string()).unwrap_or_default(),
+                    err.get("message").and_then(Value::as_str).unwrap_or("")
+                )),
+                None => value
+                    .get("result")
+                    .cloned()
+                    .ok_or_else(|| "MCP response missing result".to_string()),
+            };
+            if let Some(tx) = pending.lock().await.remove(&id) {
+                let _ = tx.send(response);
+            } else {
+                tracing::debug!("MCP stdio orphan response id={} ignored", id);
+            }
+            return;
+        }
+    }
+    if let Some(method) = value.get("method").and_then(Value::as_str) {
+        let notification = ServerNotification {
+            method: method.to_string(),
+            params: value.get("params").cloned(),
+        };
+        let mut buffer = notifications.lock().await;
+        if buffer.len() >= MAX_BUFFERED_NOTIFICATIONS {
+            buffer.pop_front();
+        }
+        buffer.push_back(notification);
+        return;
+    }
+    tracing::debug!("MCP stdio unrecognized line skipped ({} bytes)", line.len());
+}
+
 /// STDIO transport for MCP servers (async)
 pub struct StdioTransport {
     /// Child process
@@ -204,8 +261,10 @@ pub struct StdioTransport {
     next_id: AtomicU64,
     /// Stdin writer
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
-    /// Stdout reader
-    stdout: Arc<Mutex<BufReader<tokio::process::ChildStdout>>>,
+    /// In-flight requests by id, completed by the reader task.
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<StdResponse>>>>,
+    /// Buffered server notifications (bounded, drop-oldest).
+    notifications: Arc<Mutex<VecDeque<ServerNotification>>>,
 }
 
 impl StdioTransport {
@@ -259,15 +318,48 @@ impl StdioTransport {
             .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to get stdout"))?;
 
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<StdResponse>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let notifications: Arc<Mutex<VecDeque<ServerNotification>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
+
+        // Reader task: demultiplexes responses (by id) from server
+        // notifications. Ends on EOF/error and fails pending requests so
+        // callers never hang on a dead server. Holds no child handle: child
+        // death (including kill_on_drop) ends the task via EOF.
+        let reader_pending = pending.clone();
+        let reader_notifications = notifications.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break, // EOF: server exited
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                route_stdio_line(&line, &reader_pending, &reader_notifications).await;
+            }
+            let mut pending = reader_pending.lock().await;
+            for (_, tx) in pending.drain() {
+                let _ = tx.send(Err("MCP server closed stdout".to_string()));
+            }
+        });
+
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
             next_id: AtomicU64::new(1),
             stdin: Arc::new(Mutex::new(stdin)),
-            stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
+            pending,
+            notifications,
         })
     }
 
-    /// Send a request and wait for response (async, 30s timeout).
+    /// Send a request and wait for the id-matched response (async, 30s timeout).
+    ///
+    /// Server notifications arriving concurrently are buffered (not mistaken
+    /// for responses) by the reader task.
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let params_bytes = params_byte_len(&params);
@@ -290,52 +382,40 @@ impl StdioTransport {
             request_str.len()
         );
 
-        // Async write
-        {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+
+        // Async write; drop the pending entry on write failure.
+        let write_result = async {
             let mut stdin = self.stdin.lock().await;
             stdin.write_all(request_str.as_bytes()).await?;
             stdin.write_all(b"\n").await?;
             stdin.flush().await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(e) = write_result {
+            self.pending.lock().await.remove(&id);
+            return Err(e).with_context(|| format!("Failed to send MCP request '{}'", method));
         }
 
-        // Async read with per-request timeout (previously blocked indefinitely).
-        let response: JsonRpcResponse = {
-            let mut stdout = self.stdout.lock().await;
-            let mut line = String::new();
-            let read = tokio::time::timeout(
-                Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
-                stdout.read_line(&mut line),
-            )
+        // Wait for the id-matched response with per-request timeout.
+        let response = tokio::time::timeout(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS), rx)
             .await
             .map_err(|_| McpError::Timeout {
                 method: method.to_string(),
                 secs: DEFAULT_REQUEST_TIMEOUT_SECS,
-            })?
-            .with_context(|| format!("Failed to read MCP response for '{}'", method))?;
-            let _ = read;
-            // Redacted: byte count only, never full response payload.
-            tracing::debug!(
-                "MCP stdio response method={} id={} response_bytes={}",
-                method,
-                id,
-                line.len()
-            );
-            serde_json::from_str(&line)
-                .with_context(|| format!("Failed to parse MCP response for '{}'", method))?
-        };
+            })?;
+        // Remove the entry: a late response after timeout must not linger.
+        self.pending.lock().await.remove(&id);
+        let response = response
+            .map_err(|_| anyhow::anyhow!("MCP transport closed while waiting for '{}'", method))?;
+        response.map_err(|e| anyhow::anyhow!(e).context(format!("MCP request '{}' failed", method)))
+    }
 
-        // Handle response
-        if let Some(error) = response.error {
-            return Err(anyhow::anyhow!(
-                "MCP error {}: {}",
-                error.code,
-                error.message
-            ));
-        }
-
-        response
-            .result
-            .ok_or_else(|| anyhow::anyhow!("MCP response missing result"))
+    /// Drain buffered server notifications (oldest first, buffer cleared).
+    pub async fn drain_notifications(&self) -> Vec<ServerNotification> {
+        self.notifications.lock().await.drain(..).collect()
     }
 
     /// Send a notification (no response expected) (async)
@@ -717,6 +797,15 @@ impl ActiveTransport {
         match self {
             Self::Stdio(t) => t.notify(method, params).await,
             Self::Http(t) => t.notify(method, params).await,
+        }
+    }
+
+    /// Drain buffered server notifications (stdio only; HTTP has no
+    /// server-push channel and always returns empty).
+    pub async fn drain_notifications(&self) -> Vec<ServerNotification> {
+        match self {
+            Self::Stdio(t) => t.drain_notifications().await,
+            Self::Http(_) => Vec::new(),
         }
     }
 

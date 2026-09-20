@@ -489,6 +489,128 @@ pub struct McpResourceDef {
     pub mime_type: Option<String>,
 }
 
+/// Single content entry returned by `resources/read`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpResourceContent {
+    /// Resource URI the content came from.
+    pub uri: String,
+    /// MIME type when the server provides one.
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+    /// Text payload (UTF-8).
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Binary payload (base64).
+    #[serde(default)]
+    pub blob: Option<String>,
+}
+
+/// Result of `resources/read`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpResourceResult {
+    /// Content entries (usually one).
+    #[serde(default)]
+    pub contents: Vec<McpResourceContent>,
+}
+
+impl McpResourceResult {
+    /// Human-readable rendering (text inline, blobs summarized).
+    pub fn to_text(&self) -> String {
+        self.contents
+            .iter()
+            .map(|c| {
+                if let Some(text) = &c.text {
+                    text.clone()
+                } else if c.blob.is_some() {
+                    format!("[Binary resource: {}]", c.uri)
+                } else {
+                    format!("[Empty resource: {}]", c.uri)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Prompt definition from MCP server
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPromptDef {
+    /// Prompt name
+    pub name: String,
+    /// Prompt description
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Declared arguments
+    #[serde(default)]
+    pub arguments: Vec<McpPromptArgument>,
+}
+
+/// Single argument declared by a prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPromptArgument {
+    /// Argument name
+    pub name: String,
+    /// Argument description
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Whether the argument is required
+    #[serde(default)]
+    pub required: Option<bool>,
+}
+
+/// One message of a `prompts/get` result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPromptMessage {
+    /// Message role (`user`, `assistant`, ...).
+    pub role: String,
+    /// Message content.
+    pub content: McpContent,
+}
+
+/// Result of `prompts/get`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpPromptResult {
+    /// Prompt description when the server provides one.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Prompt messages.
+    #[serde(default)]
+    pub messages: Vec<McpPromptMessage>,
+}
+
+/// Server-initiated notification (R5: required notifications/subscriptions).
+///
+/// The stdio transport demultiplexes these from request responses into a
+/// bounded buffer; the manager drains and acts on them (list refreshes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerNotification {
+    /// Notification method (e.g. `notifications/tools/list_changed`).
+    pub method: String,
+    /// Optional notification params.
+    #[serde(default)]
+    pub params: Option<Value>,
+}
+
+impl ServerNotification {
+    /// True for `notifications/<kind>/list_changed` (tools, resources, prompts).
+    pub fn is_list_changed(&self) -> Option<&str> {
+        match self.method.as_str() {
+            "notifications/tools/list_changed" => Some("tools"),
+            "notifications/resources/list_changed" => Some("resources"),
+            "notifications/prompts/list_changed" => Some("prompts"),
+            _ => None,
+        }
+    }
+
+    /// URI carried by `notifications/resources/updated`, if present.
+    pub fn resource_updated_uri(&self) -> Option<&str> {
+        if self.method != "notifications/resources/updated" {
+            return None;
+        }
+        self.params.as_ref()?.get("uri")?.as_str()
+    }
+}
+
 /// Result of a tool call
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolResult {
@@ -593,6 +715,18 @@ pub struct McpInspectSummary {
     pub tool_count: usize,
     /// Names of discovered tools.
     pub tool_names: Vec<String>,
+    /// Number of discovered resources.
+    #[serde(default)]
+    pub resource_count: usize,
+    /// URIs of discovered resources.
+    #[serde(default)]
+    pub resource_uris: Vec<String>,
+    /// Number of discovered prompts.
+    #[serde(default)]
+    pub prompt_count: usize,
+    /// Names of discovered prompts.
+    #[serde(default)]
+    pub prompt_names: Vec<String>,
     /// Extension gates in effect at inspect time.
     pub apps_enabled: bool,
     /// Extension gates in effect at inspect time (draft, never stable).

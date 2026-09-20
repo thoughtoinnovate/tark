@@ -4,7 +4,8 @@ use super::transport::{ActiveTransport, StdioTransport, StreamableHttpTransport}
 use super::trust::McpTrustStore;
 use super::types::{
     protocol, ConformanceCheck, ConformanceReport, ConnectionState, ConnectionStatus,
-    ExtensionGate, McpInspectSummary, McpToolDef, McpToolResult, ServerCapabilities,
+    ExtensionGate, McpInspectSummary, McpPromptDef, McpPromptResult, McpResourceDef,
+    McpResourceResult, McpToolDef, McpToolResult, ServerCapabilities, ServerNotification,
     MCP_PROTOCOL_REVISION,
 };
 use crate::storage::{McpConfig, McpServer};
@@ -25,6 +26,10 @@ pub struct McpServerConnection {
     transport: Option<ActiveTransport>,
     /// Discovered tools
     pub tools: Vec<McpToolDef>,
+    /// Discovered resources (R5)
+    pub resources: Vec<McpResourceDef>,
+    /// Discovered prompts (R5)
+    pub prompts: Vec<McpPromptDef>,
     /// Server capabilities
     pub capabilities: ServerCapabilities,
 }
@@ -37,6 +42,8 @@ impl McpServerConnection {
             status: ConnectionStatus::Disconnected,
             transport: None,
             tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
             capabilities: ServerCapabilities::default(),
         }
     }
@@ -114,12 +121,16 @@ impl McpServerManager {
             let transport = existing.transport.clone();
             let status = existing.status.clone();
             let tools = existing.tools.clone();
+            let resources = existing.resources.clone();
+            let prompts = existing.prompts.clone();
             let capabilities = existing.capabilities.clone();
             *existing = McpServerConnection {
                 config,
                 status,
                 transport,
                 tools,
+                resources,
+                prompts,
                 capabilities,
             };
         } else {
@@ -282,6 +293,170 @@ impl McpServerManager {
             }
         }
         tools
+    }
+
+    /// Clone the live transport for a connected server.
+    async fn live_transport(&self, server_id: &str) -> Result<ActiveTransport> {
+        self.connections
+            .read()
+            .await
+            .get(server_id)
+            .filter(|conn| conn.status.is_connected())
+            .and_then(|conn| conn.transport.clone())
+            .ok_or_else(|| anyhow::anyhow!("Server '{}' is not connected", server_id))
+    }
+
+    /// List discovered resources for a server (R5).
+    pub async fn resources(&self, server_id: &str) -> Vec<McpResourceDef> {
+        self.connections
+            .read()
+            .await
+            .get(server_id)
+            .map(|c| c.resources.clone())
+            .unwrap_or_default()
+    }
+
+    /// List discovered prompts for a server (R5).
+    pub async fn prompts(&self, server_id: &str) -> Vec<McpPromptDef> {
+        self.connections
+            .read()
+            .await
+            .get(server_id)
+            .map(|c| c.prompts.clone())
+            .unwrap_or_default()
+    }
+
+    /// Read a resource by URI (R5).
+    pub async fn read_resource(&self, server_id: &str, uri: &str) -> Result<McpResourceResult> {
+        let transport = self.live_transport(server_id).await?;
+        let value = transport
+            .request("resources/read", Some(json!({"uri": uri})))
+            .await?;
+        serde_json::from_value(value).context("Failed to parse resources/read result")
+    }
+
+    /// Subscribe to resource updates (R5).
+    ///
+    /// The server must advertise the subscribe capability; otherwise this
+    /// fails closed instead of sending a request the server cannot honor.
+    pub async fn subscribe_resource(&self, server_id: &str, uri: &str) -> Result<()> {
+        let advertised = self
+            .connections
+            .read()
+            .await
+            .get(server_id)
+            .and_then(|c| c.capabilities.resources.clone())
+            .is_some_and(|r| r.subscribe);
+        if !advertised {
+            anyhow::bail!(
+                "Server '{}' does not advertise resources/subscribe",
+                server_id
+            );
+        }
+        let transport = self.live_transport(server_id).await?;
+        transport
+            .request("resources/subscribe", Some(json!({"uri": uri})))
+            .await?;
+        Ok(())
+    }
+
+    /// Unsubscribe from resource updates (R5).
+    pub async fn unsubscribe_resource(&self, server_id: &str, uri: &str) -> Result<()> {
+        let transport = self.live_transport(server_id).await?;
+        transport
+            .request("resources/unsubscribe", Some(json!({"uri": uri})))
+            .await?;
+        Ok(())
+    }
+
+    /// Render a prompt with arguments (R5).
+    pub async fn get_prompt(
+        &self,
+        server_id: &str,
+        name: &str,
+        arguments: Option<Value>,
+    ) -> Result<McpPromptResult> {
+        let transport = self.live_transport(server_id).await?;
+        let mut params = serde_json::Map::new();
+        params.insert("name".to_string(), Value::String(name.to_string()));
+        if let Some(args) = arguments {
+            params.insert("arguments".to_string(), args);
+        }
+        let value = transport
+            .request("prompts/get", Some(Value::Object(params)))
+            .await?;
+        serde_json::from_value(value).context("Failed to parse prompts/get result")
+    }
+
+    /// Re-discover tools/resources/prompts per advertised capabilities (R5).
+    ///
+    /// Used after `*/list_changed` notifications and on demand (`tark mcp
+    /// sync`). Never clears capabilities, only refreshes listings.
+    pub async fn refresh_server(&self, server_id: &str) -> Result<()> {
+        let (transport, capabilities) = {
+            let connections = self.connections.read().await;
+            let conn = connections
+                .get(server_id)
+                .filter(|c| c.status.is_connected())
+                .ok_or_else(|| anyhow::anyhow!("Server '{}' is not connected", server_id))?;
+            (conn.transport.clone(), conn.capabilities.clone())
+        };
+        let transport =
+            transport.ok_or_else(|| anyhow::anyhow!("Server '{}' is not connected", server_id))?;
+
+        if capabilities.tools.is_some() {
+            if let Ok(result) = transport.request("tools/list", None).await {
+                if let Some(tools) = result
+                    .get("tools")
+                    .and_then(|t| serde_json::from_value(t.clone()).ok())
+                {
+                    if let Some(conn) = self.connections.write().await.get_mut(server_id) {
+                        conn.tools = tools;
+                    }
+                }
+            }
+        }
+        if capabilities.resources.is_some() {
+            if let Ok(result) = transport.request("resources/list", None).await {
+                if let Some(resources) = result
+                    .get("resources")
+                    .and_then(|t| serde_json::from_value(t.clone()).ok())
+                {
+                    if let Some(conn) = self.connections.write().await.get_mut(server_id) {
+                        conn.resources = resources;
+                    }
+                }
+            }
+        }
+        if capabilities.prompts.is_some() {
+            if let Ok(result) = transport.request("prompts/list", None).await {
+                if let Some(prompts) = result
+                    .get("prompts")
+                    .and_then(|t| serde_json::from_value(t.clone()).ok())
+                {
+                    if let Some(conn) = self.connections.write().await.get_mut(server_id) {
+                        conn.prompts = prompts;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Drain buffered server notifications, applying `*/list_changed`
+    /// refreshes (R5).
+    ///
+    /// Returns the drained notifications so callers can observe resource
+    /// updates (`notifications/resources/updated` carries the URI).
+    pub async fn drain_notifications(&self, server_id: &str) -> Vec<ServerNotification> {
+        let Ok(transport) = self.live_transport(server_id).await else {
+            return Vec::new();
+        };
+        let notifications = transport.drain_notifications().await;
+        if notifications.iter().any(|n| n.is_list_changed().is_some()) {
+            let _ = self.refresh_server(server_id).await;
+        }
+        notifications
     }
 
     /// Build the `capabilities` object advertised in `initialize`.
@@ -467,6 +642,38 @@ impl McpServerManager {
             Vec::new()
         };
 
+        // Discover resources (async, R5)
+        let resources = if capabilities.resources.is_some() {
+            match transport.request("resources/list", None).await {
+                Ok(result) => result
+                    .get("resources")
+                    .and_then(|t| serde_json::from_value(t.clone()).ok())
+                    .unwrap_or_default(),
+                Err(e) => {
+                    tracing::warn!("Failed to list resources: {}", e);
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Discover prompts (async, R5)
+        let prompts = if capabilities.prompts.is_some() {
+            match transport.request("prompts/list", None).await {
+                Ok(result) => result
+                    .get("prompts")
+                    .and_then(|t| serde_json::from_value(t.clone()).ok())
+                    .unwrap_or_default(),
+                Err(e) => {
+                    tracing::warn!("Failed to list prompts: {}", e);
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
         // Update connection
         {
             let mut connections = self.connections.write().await;
@@ -474,6 +681,8 @@ impl McpServerManager {
                 conn.transport = Some(transport);
                 conn.capabilities = capabilities;
                 conn.tools = tools;
+                conn.resources = resources;
+                conn.prompts = prompts;
                 conn.status = ConnectionStatus::Connected;
             }
         }
@@ -512,6 +721,10 @@ impl McpServerManager {
             capabilities: conn.capabilities.clone(),
             tool_count: conn.tools.len(),
             tool_names: conn.tools.iter().map(|t| t.name.clone()).collect(),
+            resource_count: conn.resources.len(),
+            resource_uris: conn.resources.iter().map(|r| r.uri.clone()).collect(),
+            prompt_count: conn.prompts.len(),
+            prompt_names: conn.prompts.iter().map(|p| p.name.clone()).collect(),
             apps_enabled: gate.apps_enabled,
             tasks_experimental: gate.tasks_experimental,
         })
@@ -526,6 +739,8 @@ impl McpServerManager {
             }
             conn.status = ConnectionStatus::Disconnected;
             conn.tools.clear();
+            conn.resources.clear();
+            conn.prompts.clear();
             tracing::info!("Disconnected from MCP server: {}", server_id);
         }
         Ok(())
@@ -618,11 +833,12 @@ pub async fn conformance_check(manager: &McpServerManager, server_id: &str) -> C
                 c.status.clone(),
                 c.transport.clone(),
                 c.tools.clone(),
+                c.capabilities.clone(),
             )
         })
     };
 
-    let Some((config, status, transport_opt, known_tools)) = snapshot else {
+    let Some((config, status, transport_opt, known_tools, capabilities)) = snapshot else {
         return ConformanceReport {
             server_id: server_id.to_string(),
             revision,
@@ -777,7 +993,65 @@ pub async fn conformance_check(manager: &McpServerManager, server_id: &str) -> C
         }
     }
 
-    // 7. tools/call ping when tools are available.
+    // 7. resources/list when the server advertises resources.
+    if capabilities.resources.is_some() {
+        match transport.request("resources/list", None).await {
+            Ok(value) => {
+                let count = value
+                    .get("resources")
+                    .and_then(|t| t.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                checks.push(ConformanceCheck {
+                    name: "resources/list".to_string(),
+                    passed: true,
+                    detail: format!("resources/list ok: {} resource(s)", count),
+                });
+            }
+            Err(e) => checks.push(ConformanceCheck {
+                name: "resources/list".to_string(),
+                passed: false,
+                detail: format!("resources/list failed: {}", e),
+            }),
+        }
+    } else {
+        checks.push(ConformanceCheck {
+            name: "resources/list".to_string(),
+            passed: true,
+            detail: "not advertised (skipped)".to_string(),
+        });
+    }
+
+    // 8. prompts/list when the server advertises prompts.
+    if capabilities.prompts.is_some() {
+        match transport.request("prompts/list", None).await {
+            Ok(value) => {
+                let count = value
+                    .get("prompts")
+                    .and_then(|t| t.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                checks.push(ConformanceCheck {
+                    name: "prompts/list".to_string(),
+                    passed: true,
+                    detail: format!("prompts/list ok: {} prompt(s)", count),
+                });
+            }
+            Err(e) => checks.push(ConformanceCheck {
+                name: "prompts/list".to_string(),
+                passed: false,
+                detail: format!("prompts/list failed: {}", e),
+            }),
+        }
+    } else {
+        checks.push(ConformanceCheck {
+            name: "prompts/list".to_string(),
+            passed: true,
+            detail: "not advertised (skipped)".to_string(),
+        });
+    }
+
+    // 9. tools/call ping when tools are available.
     if let Some(first) = known_tools.first() {
         match transport
             .request(
@@ -894,14 +1168,23 @@ mod tests {
     }
 
     /// Minimal in-process MCP server speaking newline-delimited JSON-RPC
-    /// (S12/S30): answers `initialize`, `tools/list`, `tools/call`, and
-    /// `ping`; ignores notifications. Protocol version comes from argv[1].
+    /// (S12/S30): answers `initialize`, `tools/list`, `tools/call`, `ping`,
+    /// `resources/list`, `resources/read`, `resources/subscribe`,
+    /// `resources/unsubscribe`, `prompts/list`, and `prompts/get`; ignores
+    /// notifications. Protocol version comes from argv[1]; when argv[2] is
+    /// `notify-first`, a `notifications/tools/list_changed` line is emitted
+    /// before the first response to prove server push never desynchronizes
+    /// requests.
     const MOCK_MCP_SERVER_PY: &str = r#"
 import sys, json
 version = sys.argv[1] if len(sys.argv) > 1 else "2026-07-28"
-def respond(req_id, result):
-    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result}) + "\n")
+notify_first = len(sys.argv) > 2 and sys.argv[2] == "notify-first"
+notified = False
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+def respond(req_id, result):
+    emit({"jsonrpc": "2.0", "id": req_id, "result": result})
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -912,11 +1195,15 @@ for line in sys.stdin:
         continue
     if "id" not in msg:
         continue
+    if notify_first and not notified:
+        notified = True
+        emit({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
     method = msg.get("method")
+    params = msg.get("params") or {}
     if method == "initialize":
         respond(msg["id"], {
             "protocolVersion": version,
-            "capabilities": {"tools": {}},
+            "capabilities": {"tools": {}, "resources": {"subscribe": True}, "prompts": {}},
             "serverInfo": {"name": "mock", "version": "1.0"},
         })
     elif method == "tools/list":
@@ -928,24 +1215,56 @@ for line in sys.stdin:
         respond(msg["id"], {"content": [{"type": "text", "text": "pong"}]})
     elif method == "ping":
         respond(msg["id"], {})
+    elif method == "resources/list":
+        respond(msg["id"], {"resources": [
+            {"uri": "mock://greeting", "name": "greeting",
+             "description": "A greeting", "mimeType": "text/plain"},
+        ]})
+    elif method == "resources/read":
+        respond(msg["id"], {"contents": [
+            {"uri": params.get("uri", ""), "mimeType": "text/plain", "text": "hello"},
+        ]})
+    elif method == "resources/subscribe":
+        respond(msg["id"], {})
+    elif method == "resources/unsubscribe":
+        respond(msg["id"], {})
+    elif method == "prompts/list":
+        respond(msg["id"], {"prompts": [
+            {"name": "greet", "description": "Greet someone",
+             "arguments": [{"name": "who", "required": True}]},
+        ]})
+    elif method == "prompts/get":
+        respond(msg["id"], {"description": "greeting", "messages": [
+            {"role": "user", "content": {"type": "text", "text": "hi"}},
+        ]})
     else:
-        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"],
-            "error": {"code": -32601, "message": "unknown method"}}) + "\n")
-        sys.stdout.flush()
+        emit({"jsonrpc": "2.0", "id": msg["id"],
+            "error": {"code": -32601, "message": "unknown method"}})
 "#;
 
     async fn mock_manager(version: &str) -> (tempfile::TempDir, McpServerManager) {
+        mock_manager_with_extra_arg(version, None).await
+    }
+
+    async fn mock_manager_with_extra_arg(
+        version: &str,
+        extra_arg: Option<&str>,
+    ) -> (tempfile::TempDir, McpServerManager) {
         let work = tempfile::tempdir().expect("workdir");
         let script = work.path().join("mock_mcp.py");
         std::fs::write(&script, MOCK_MCP_SERVER_PY).expect("write mock");
         let manager = McpServerManager::new(work.path().to_path_buf(), work.path().to_path_buf());
+        let mut args = vec![script.display().to_string(), version.to_string()];
+        if let Some(extra) = extra_arg {
+            args.push(extra.to_string());
+        }
         manager
             .register_server(
                 "mock",
                 McpServer {
                     name: "Mock".to_string(),
                     command: "python3".to_string(),
-                    args: vec![script.display().to_string(), version.to_string()],
+                    args,
                     env: HashMap::new(),
                     enabled: true,
                     capabilities: vec![],
@@ -981,11 +1300,72 @@ for line in sys.stdin:
             "ping",
             "notifications/initialized",
             "tools/list",
+            "resources/list",
+            "prompts/list",
             "tools/call-ping",
         ] {
             check_passed(&report, name);
         }
         assert!(report.all_passed_for_test());
+        manager.disconnect("mock").await.expect("disconnect");
+    }
+
+    #[tokio::test]
+    async fn mock_server_discovers_resources_and_prompts() {
+        let (_work, manager) = mock_manager(MCP_PROTOCOL_REVISION).await;
+        manager.connect("mock").await.expect("connect");
+
+        let resources = manager.resources("mock").await;
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].uri, "mock://greeting");
+
+        let prompts = manager.prompts("mock").await;
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].name, "greet");
+
+        let read = manager
+            .read_resource("mock", "mock://greeting")
+            .await
+            .expect("read");
+        assert_eq!(read.to_text(), "hello");
+
+        manager
+            .subscribe_resource("mock", "mock://greeting")
+            .await
+            .expect("subscribe");
+        manager
+            .unsubscribe_resource("mock", "mock://greeting")
+            .await
+            .expect("unsubscribe");
+
+        let prompt = manager
+            .get_prompt("mock", "greet", Some(json!({"who": "tark"})))
+            .await
+            .expect("get prompt");
+        assert_eq!(prompt.messages.len(), 1);
+        assert_eq!(prompt.messages[0].role, "user");
+
+        manager.disconnect("mock").await.expect("disconnect");
+    }
+
+    #[tokio::test]
+    async fn server_push_notification_never_desynchronizes_requests() {
+        // The mock emits a list_changed notification before its first
+        // response; id-matched demux must still deliver that response.
+        let (_work, manager) =
+            mock_manager_with_extra_arg(MCP_PROTOCOL_REVISION, Some("notify-first")).await;
+        manager.connect("mock").await.expect("connect");
+        assert!(!manager.tools("mock").await.is_empty());
+
+        let notifications = manager.drain_notifications("mock").await;
+        assert!(
+            notifications
+                .iter()
+                .any(|n| n.method == "notifications/tools/list_changed"),
+            "expected buffered list_changed, got {notifications:?}"
+        );
+        // Draining applied the refresh: tools still listed afterwards.
+        assert!(!manager.tools("mock").await.is_empty());
         manager.disconnect("mock").await.expect("disconnect");
     }
 
