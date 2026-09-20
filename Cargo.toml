@@ -68,10 +68,6 @@ ctrlc = "3.4"
 # Unix process groups for descendant reaping on cancel/timeout (R2 S5)
 libc = "0.2"
 
-# Race-free workspace confinement via openat2 (R1 H1, Linux)
-[target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "0.38", features = ["fs"] }
-
 # Utilities
 url = "2"
 once_cell = "1"
@@ -133,6 +129,14 @@ tiktoken-rs = { version = "0.5", optional = true }
 
 # BDD/Cucumber testing (optional - run with: cargo test --features cucumber-tests)
 cucumber = { version = "0.21", optional = true }
+
+# Race-free workspace confinement via openat2 (R1 H1, Linux).
+# NOTE: keep this target table LAST among dependencies: in TOML every entry
+# after a [target...] header belongs to that table, so placing it mid-file
+# silently made all following deps Linux-only (broke macOS/Windows builds
+# with hundreds of E0432 errors and zero dependency failures).
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "0.38", features = ["fs"] }
 
 [dev-dependencies]
 assert_cmd = "2"
