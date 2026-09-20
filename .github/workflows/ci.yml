@@ -379,8 +379,12 @@ jobs:
           EXTERN=$(grep -m1 -o '\-\-extern once_cell=[^ ]*' check-output-clean.log libtest-output-clean.log 2>/dev/null | head -1)
           echo "::warning::diag-extern ${EXTERN:-none-found}" || true
           # The exact rustc invocation for tark-cli (are --extern flags present?).
-          INVOC=$(grep -m1 -o 'Running `rustc --crate-name tark_cli[^`]*' libtest-clean.log check-output-clean.log libtest-output-clean.log 2>/dev/null | head -c 6000 || true)
+          # NOTE: cargo prints the full rustc path, so match any prefix.
+          INVOC=$(grep -m1 -o 'Running `[^`]*rustc --crate-name tark_cli[^`]*' check-output-clean.log libtest-clean.log 2>/dev/null | head -c 6000 || true)
           echo "::warning::diag-invocation ${INVOC:-none-found}" || true
+          # Sorted unique extern crate NAMES across tark-cli invocations.
+          NAMES=$(grep -o 'Running `[^`]*rustc --crate-name tark_cli[^`]*' check-output-clean.log libtest-clean.log 2>/dev/null | grep -o '\-\-extern [a-zA-Z0-9_]*' | sort -u | tr '\n' ' ' | head -c 3000 || true)
+          echo "::warning::diag-extern-names ${NAMES:-none-found}" || true
           # Full-log excerpts as warnings (annotations cap at 64KB each).
           echo "::warning::diag-head $(head -80 libtest-clean.log | tr '\n' ' ' | head -c 20000)"
           echo "::warning::diag-tail $(tail -40 libtest-clean.log | tr '\n' ' ' | head -c 20000)"
