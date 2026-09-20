@@ -379,8 +379,17 @@ mod workspace_grant_tests {
 
     #[test]
     fn grant_target_accepts_absolute_missing_path_without_escape() {
-        let target =
-            normalize_grant_target("/tmp/tark-grant-test/../grant-target-xyz").expect("target");
-        assert_eq!(target, "/tmp/grant-target-xyz");
+        // Build from temp_dir: `/tmp/...` literals are not absolute on
+        // Windows, so hardcoding them would fail there.
+        let base = std::env::temp_dir().join("tark-grant-nonexistent-dir");
+        let input = base.join("..").join("grant-target-xyz");
+        let target = normalize_grant_target(&input.display().to_string()).expect("target");
+        assert_eq!(
+            target,
+            std::env::temp_dir()
+                .join("grant-target-xyz")
+                .display()
+                .to_string()
+        );
     }
 }
