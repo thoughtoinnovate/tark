@@ -34,8 +34,10 @@ pub use modal::{
 #[allow(unused_imports)]
 pub use question::{QuestionOption, QuestionType, QuestionWidget, ThemedQuestion};
 #[allow(unused_imports)]
-pub use sidebar::{GitChange, GitStatus, SessionInfo, Sidebar, SidebarPanel, Task, TaskStatus};
-pub use status_bar::StatusBar;
+pub use sidebar::{
+    GitChange, GitStatus, SessionInfo, Sidebar, SidebarClickMap, SidebarPanel, Task, TaskStatus,
+};
+pub use status_bar::{StatusBar, StatusSectionMap};
 pub use terminal_frame::TerminalFrame;
 #[allow(unused_imports)]
 pub use thinking_block::ThinkingBlockWidget;

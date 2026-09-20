@@ -98,6 +98,28 @@ fn format_tokens(tokens: usize) -> String {
     }
 }
 
+/// Clickable geometry recorded during the last sidebar render (P2.4).
+///
+/// Hit-testing must resolve clicks against what was actually drawn: panel
+/// heights and item rows depend on live content (task counts, file lists),
+/// so formula-based estimates drift. The renderer keeps the latest map and
+/// resolves sidebar clicks from it.
+#[derive(Debug, Default, Clone)]
+pub struct SidebarClickMap {
+    /// VIM header strip (not clickable; clicks here resolve to nothing).
+    pub header: Option<Rect>,
+    /// Panel header+content areas: 0=Session, 1=Context, 2=Tasks, 3=Todo,
+    /// 4=Git, 5=Plugins.
+    pub panels: [Option<Rect>; 6],
+    /// Theme footer strip (panel index 6 in selection terms).
+    pub footer: Option<Rect>,
+    /// Visible clickable item rows per panel: `items[p][i]` is the screen row
+    /// of the `i`-th clickable item in panel `p` (accounts for panel scroll).
+    /// For the Tasks panel (`items[2]`), position `i` is the display task
+    /// index in render order (active, completed, queued).
+    pub items: [Vec<Rect>; 6],
+}
+
 /// Sidebar widget
 #[derive(Debug)]
 pub struct Sidebar<'a> {
@@ -373,6 +395,27 @@ impl<'a> Sidebar<'a> {
         self
     }
 
+    /// Resolve the effective scroll offset for a panel, shared by rendering
+    /// and click-map recording so both always agree (P2.4).
+    fn panel_scroll_pos(
+        total_lines: usize,
+        visible_height: usize,
+        scroll: usize,
+        selected_line: Option<usize>,
+    ) -> usize {
+        let max_scroll = total_lines.saturating_sub(visible_height);
+        let mut scroll_pos = scroll.min(max_scroll);
+        if let Some(selected_line) = selected_line {
+            let selected_line = selected_line.min(total_lines.saturating_sub(1));
+            if selected_line < scroll_pos {
+                scroll_pos = selected_line;
+            } else if selected_line >= scroll_pos.saturating_add(visible_height) {
+                scroll_pos = selected_line.saturating_sub(visible_height.saturating_sub(1));
+            }
+        }
+        scroll_pos
+    }
+
     fn render_panel(
         &self,
         area: Rect,
@@ -385,19 +428,10 @@ impl<'a> Sidebar<'a> {
         if area.height == 0 || area.width == 0 {
             return;
         }
-
         let total_lines = lines.len();
         let visible_height = area.height as usize;
         let max_scroll = total_lines.saturating_sub(visible_height);
-        let mut scroll_pos = scroll.min(max_scroll);
-        if let Some(selected_line) = selected_line {
-            let selected_line = selected_line.min(total_lines.saturating_sub(1));
-            if selected_line < scroll_pos {
-                scroll_pos = selected_line;
-            } else if selected_line >= scroll_pos.saturating_add(visible_height) {
-                scroll_pos = selected_line.saturating_sub(visible_height.saturating_sub(1));
-            }
-        }
+        let scroll_pos = Self::panel_scroll_pos(total_lines, visible_height, scroll, selected_line);
 
         let paragraph = Paragraph::new(lines).scroll((scroll_pos as u16, 0));
         paragraph.render(area, buf);
@@ -485,8 +519,12 @@ impl<'a> Sidebar<'a> {
     }
 }
 
-impl Widget for Sidebar<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
+impl<'a> Sidebar<'a> {
+    /// Render while recording clickable geometry into `map` (P2.4).
+    ///
+    /// Panel heights and item rows depend on live content, so hit-testing
+    /// must use these recorded rects instead of estimated heights.
+    pub fn render_with_map(self, area: Rect, buf: &mut Buffer, map: &mut SidebarClickMap) {
         if !self.visible {
             return;
         }
@@ -1594,6 +1632,16 @@ impl Widget for Sidebar<'_> {
             && self.selected_panel < 6
             && (self.selected_item.is_some() || self.expanded_panels[self.selected_panel]);
 
+        // Content lengths before the line vecs move into render_panel calls.
+        let panel_line_counts = [
+            session_lines.len(),
+            context_lines.len(),
+            tasks_lines.len(),
+            todo_lines.len(),
+            git_lines.len(),
+            plugin_lines.len(),
+        ];
+
         Paragraph::new(header_lines).render(header_area, buf);
         self.render_panel(
             session_area,
@@ -1645,6 +1693,49 @@ impl Widget for Sidebar<'_> {
         );
         Paragraph::new(footer_lines).render(footer_area, buf);
 
+        // Record clickable geometry for hit-testing (P2.4). Item rows apply
+        // the same panel scroll offset the renderer used, so clicks land on
+        // the exact visible row. `panel_item_lines[p]` is built in display
+        // order, so rows stop at the first off-screen line.
+        *map = SidebarClickMap::default();
+        map.header = Some(header_area);
+        map.footer = Some(footer_area);
+        let panel_areas = [
+            session_area,
+            context_area,
+            tasks_area,
+            todo_area,
+            git_area,
+            plugins_area,
+        ];
+        for (p, panel_area) in panel_areas.iter().enumerate() {
+            if panel_area.height == 0 || panel_area.width == 0 {
+                continue;
+            }
+            map.panels[p] = Some(*panel_area);
+            let scroll_pos = Self::panel_scroll_pos(
+                panel_line_counts[p],
+                panel_area.height as usize,
+                self.panel_scrolls[p],
+                panel_selected_lines[p],
+            );
+            for &line_idx in &panel_item_lines[p] {
+                if line_idx < scroll_pos {
+                    continue;
+                }
+                let y = panel_area.y.saturating_add((line_idx - scroll_pos) as u16);
+                if y >= panel_area.y.saturating_add(panel_area.height) {
+                    break;
+                }
+                map.items[p].push(Rect {
+                    x: panel_area.x,
+                    y,
+                    width: panel_area.width,
+                    height: 1,
+                });
+            }
+        }
+
         // Global scrollbar (overall sidebar)
         let total_lines = all_lines.len();
         let visible_height = inner.height as usize;
@@ -1673,5 +1764,101 @@ impl Widget for Sidebar<'_> {
                 &mut scrollbar_state,
             );
         }
+    }
+}
+
+impl Widget for Sidebar<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let mut discard = SidebarClickMap::default();
+        self.render_with_map(area, buf, &mut discard);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn test_sidebar<'a>(theme: &'a Theme) -> Sidebar<'a> {
+        Sidebar::new(theme).tasks(vec![
+            Task {
+                name: "active one".to_string(),
+                status: TaskStatus::Active,
+            },
+            Task {
+                name: "done one".to_string(),
+                status: TaskStatus::Completed,
+            },
+            Task {
+                name: "queued one".to_string(),
+                status: TaskStatus::Queued,
+            },
+        ])
+    }
+
+    fn render_map(terminal: &mut Terminal<TestBackend>, sidebar: Sidebar) -> SidebarClickMap {
+        let mut map = SidebarClickMap::default();
+        terminal
+            .draw(|frame| {
+                sidebar.render_with_map(frame.area(), frame.buffer_mut(), &mut map);
+            })
+            .expect("draw");
+        map
+    }
+
+    #[test]
+    fn click_map_records_variable_height_task_rows() {
+        // Regression test for the "click one line above" bug: active tasks
+        // render a 2-line block (name + status label) while completed and
+        // queued tasks render 1 line, so uniform row math drifts.
+        let backend = TestBackend::new(40, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let theme = Theme::default();
+        let map = render_map(&mut terminal, test_sidebar(&theme));
+
+        let tasks_rect = map.panels[2].expect("tasks panel rect");
+        assert_eq!(map.items[2].len(), 3);
+        // Row offsets within the panel: header(0), active(1), label(2),
+        // completed(3), QUEUED(4), queued(5).
+        let rows: Vec<u16> = map.items[2].iter().map(|r| r.y - tasks_rect.y).collect();
+        assert_eq!(rows, vec![1, 3, 5]);
+        // Every row is exactly one line tall and spans the panel width.
+        for row in &map.items[2] {
+            assert_eq!(row.height, 1);
+            assert_eq!(row.x, tasks_rect.x);
+            assert_eq!(row.width, tasks_rect.width);
+        }
+    }
+
+    #[test]
+    fn click_map_panel_rects_are_contiguous() {
+        // Tall area so no panel is clipped to zero height.
+        let backend = TestBackend::new(40, 200);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let theme = Theme::default();
+        let map = render_map(&mut terminal, test_sidebar(&theme));
+
+        // Panels stack without gaps or overlaps.
+        let header = map.header.expect("header");
+        let mut cursor = header.y + header.height;
+        for panel in map.panels.iter().flatten() {
+            assert_eq!(panel.y, cursor);
+            cursor += panel.height;
+        }
+        assert_eq!(map.footer.expect("footer").y, cursor);
+    }
+
+    #[test]
+    fn click_map_collapsed_panel_has_no_items() {
+        let backend = TestBackend::new(40, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let theme = Theme::default();
+        let sidebar = test_sidebar(&theme).expanded(SidebarPanel::Tasks, false);
+        let map = render_map(&mut terminal, sidebar);
+
+        let tasks_rect = map.panels[2].expect("tasks panel rect");
+        assert_eq!(tasks_rect.height, 1); // header only
+        assert!(map.items[2].is_empty());
     }
 }

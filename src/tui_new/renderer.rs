@@ -25,8 +25,8 @@ use super::theme::Theme;
 use super::widgets::{
     FilePickerModal, FlashBar, FlashBarState, GitChange, GitStatus, Header, HelpModal, InputWidget,
     MessageArea, ModelPickerModal, ProviderPickerModal, QuestionOption, QuestionWidget,
-    SessionInfo, SessionPickerModal, Sidebar, StatusBar, Task, TaskStatus, TerminalFrame,
-    ThemePickerModal,
+    SessionInfo, SessionPickerModal, Sidebar, SidebarClickMap, StatusBar, StatusSectionMap, Task,
+    TaskStatus, TerminalFrame, ThemePickerModal,
 };
 
 fn resolve_model_display_name(
@@ -95,7 +95,10 @@ enum ClickTarget {
 /// Hit-testing must use the geometry from the last rendered frame instead of
 /// recomputing estimates from `terminal.size()`, otherwise clicks drift from
 /// what the user actually sees (borders, dynamic input height, sidebar, modal).
-#[derive(Debug, Clone, Copy, Default)]
+/// The sidebar and status bar additionally record their internal clickable
+/// geometry (panel/item rows, status sections) because those depend on live
+/// content and cannot be estimated (P2.4/P2.5).
+#[derive(Debug, Clone, Default)]
 struct LastLayout {
     /// Full terminal area of the last frame.
     area: Rect,
@@ -109,6 +112,10 @@ struct LastLayout {
     sidebar: Option<Rect>,
     /// Centered modal rect when a modal was rendered.
     modal: Option<Rect>,
+    /// Recorded sidebar panel/item rows (screen coords).
+    sidebar_map: SidebarClickMap,
+    /// Recorded status bar section ranges (screen coords).
+    status_map: StatusSectionMap,
 }
 
 impl LastLayout {
@@ -1665,7 +1672,7 @@ impl<B: Backend> TuiRenderer<B> {
     fn messages_area_rect(&self, _state: &SharedState) -> Option<Rect> {
         // Prefer the geometry from the last rendered frame so clicks resolve
         // against what the user actually sees.
-        if let Some(layout) = self.last_layout {
+        if let Some(layout) = self.last_layout.as_ref() {
             return Some(layout.messages);
         }
         let size = self.terminal.size().ok()?;
@@ -1982,8 +1989,37 @@ impl<B: Backend> TuiRenderer<B> {
         }
     }
 
-    /// Determine which sidebar panel was clicked based on row position
+    /// Determine which sidebar panel was clicked based on row position.
+    ///
+    /// Resolves against the recorded click map from the last rendered frame
+    /// (P2.4); falls back to height estimates only before the first frame.
     fn get_clicked_sidebar_panel(&self, row: u16, state: &SharedState) -> Option<usize> {
+        if let Some(layout) = self.last_layout.as_ref() {
+            let map = &layout.sidebar_map;
+            if let Some(header) = map.header {
+                if row >= header.y && row < header.y.saturating_add(header.height) {
+                    return None; // VIM header strip is not clickable
+                }
+            }
+            for (idx, panel) in map.panels.iter().enumerate() {
+                if let Some(rect) = panel {
+                    if row >= rect.y && row < rect.y.saturating_add(rect.height) {
+                        return Some(idx);
+                    }
+                }
+            }
+            if let Some(footer) = map.footer {
+                if row >= footer.y && row < footer.y.saturating_add(footer.height) {
+                    return Some(6); // Theme footer
+                }
+            }
+            return None;
+        }
+        self.clicked_sidebar_panel_estimate(row, state)
+    }
+
+    /// Legacy estimate-based panel lookup, used only before the first frame.
+    fn clicked_sidebar_panel_estimate(&self, row: u16, state: &SharedState) -> Option<usize> {
         use ratatui::layout::{Constraint, Direction, Layout};
 
         let area = self.terminal.size().unwrap_or_default();
@@ -2081,8 +2117,42 @@ impl<B: Backend> TuiRenderer<B> {
         None
     }
 
-    /// Hit test status bar to determine which icon/section was clicked
+    /// Hit test status bar to determine which icon/section was clicked.
+    ///
+    /// Resolves against the recorded section ranges from the last rendered
+    /// frame (P2.5); falls back to column estimates only before the first
+    /// frame.
     fn hit_test_status_bar(&self, col: u16, state: &SharedState) -> Option<Command> {
+        if let Some(layout) = self.last_layout.as_ref() {
+            let map = &layout.status_map;
+            let contains = |rect: &Option<Rect>| {
+                rect.is_some_and(|r| col >= r.x && col < r.x.saturating_add(r.width))
+            };
+            if contains(&map.agent_mode) {
+                return Some(Command::CycleAgentMode);
+            }
+            if contains(&map.build_mode)
+                && state.agent_mode() == crate::ui_backend::AgentMode::Build
+            {
+                return Some(Command::CycleBuildMode);
+            }
+            if contains(&map.thinking) {
+                return Some(Command::ToggleThinking);
+            }
+            if contains(&map.provider) {
+                return Some(Command::OpenProviderPicker);
+            }
+            return None;
+        }
+        Self::hit_test_status_bar_estimate(col, state, &self.terminal.size().unwrap_or_default())
+    }
+
+    /// Legacy estimate-based status hit-test, used only before the first frame.
+    fn hit_test_status_bar_estimate(
+        col: u16,
+        state: &SharedState,
+        size: &ratatui::layout::Size,
+    ) -> Option<Command> {
         // Status bar layout (approximate positions):
         // "agent • Build ▼  🟢 Balanced ▼  🧠  ≡ 7  VIM(INSERT)    ● Working...    • Model Provider  ⊙"
         //  0-15: Agent mode area
@@ -2092,7 +2162,6 @@ impl<B: Backend> TuiRenderer<B> {
         //  51-65: Vim mode
         //  Right side (-30 to end): Provider/Model
 
-        let size = self.terminal.size().unwrap_or_default();
         let status_width = size.width.saturating_sub(2); // Account for borders
 
         // Relative position from start of status bar
@@ -2152,7 +2221,7 @@ impl<B: Backend> TuiRenderer<B> {
         // Prefer the cached last-frame messages rect; fall back to estimates
         // only before the first frame has rendered.
         let (messages_start_y, messages_end_y, messages_height, main_width) =
-            if let Some(layout) = self.last_layout {
+            if let Some(layout) = self.last_layout.as_ref() {
                 let r = layout.messages;
                 let start = r.y;
                 let end = r.y.saturating_add(r.height);
@@ -2216,8 +2285,43 @@ impl<B: Backend> TuiRenderer<B> {
 
     /// Get the task index clicked within the Tasks panel
     /// Returns (task_list_index, is_queued_task)
+    ///
+    /// Resolves against the recorded task rows from the last rendered frame
+    /// (P2.4): task rows have variable heights (active tasks render an extra
+    /// status line), so the old "2 lines per task" estimate drifted.
     fn get_clicked_task_index(&self, row: u16, state: &SharedState) -> Option<(usize, bool)> {
-        let size = self.terminal.size().unwrap_or_default();
+        if let Some(layout) = self.last_layout.as_ref() {
+            for (display_idx, rect) in layout.sidebar_map.items[2].iter().enumerate() {
+                if row >= rect.y && row < rect.y.saturating_add(rect.height) {
+                    return Some((display_idx, Self::is_queued_task(state, display_idx)));
+                }
+            }
+            return None;
+        }
+        Self::clicked_task_index_estimate(row, state, &self.terminal)
+    }
+
+    /// Shared queued-task classification for a display task index.
+    fn is_queued_task(state: &SharedState, task_idx: usize) -> bool {
+        let tasks = state.tasks();
+        let active_count = tasks
+            .iter()
+            .filter(|t| t.status == StateTaskStatus::Active)
+            .count();
+        let completed_count = tasks
+            .iter()
+            .filter(|t| t.status == StateTaskStatus::Completed)
+            .count();
+        task_idx >= active_count + completed_count
+    }
+
+    /// Legacy estimate-based task lookup, used only before the first frame.
+    fn clicked_task_index_estimate(
+        row: u16,
+        state: &SharedState,
+        terminal: &Terminal<impl ratatui::backend::Backend>,
+    ) -> Option<(usize, bool)> {
+        let size = terminal.size().unwrap_or_default();
         let _sidebar_height = size.height.saturating_sub(2);
 
         // Calculate Tasks panel start position (same logic as get_clicked_sidebar_panel)
@@ -2244,18 +2348,7 @@ impl<B: Backend> TuiRenderer<B> {
 
         let tasks = state.tasks();
         if task_idx < tasks.len() {
-            // Determine if this is a queued task
-            let active_count = tasks
-                .iter()
-                .filter(|t| t.status == StateTaskStatus::Active)
-                .count();
-            let completed_count = tasks
-                .iter()
-                .filter(|t| t.status == StateTaskStatus::Completed)
-                .count();
-
-            let is_queued = task_idx >= active_count + completed_count;
-            return Some((task_idx, is_queued));
+            return Some((task_idx, Self::is_queued_task(state, task_idx)));
         }
 
         None
@@ -2266,8 +2359,8 @@ impl<B: Backend> TuiRenderer<B> {
     /// falls back to recomputing from `terminal.size()` only when no frame
     /// has rendered yet (e.g. in tests before the first `render()`).
     fn hit_test(&self, col: u16, row: u16, state: &SharedState) -> ClickTarget {
-        if let Some(layout) = self.last_layout {
-            return Self::hit_test_cached(col, row, state, &layout);
+        if let Some(layout) = self.last_layout.as_ref() {
+            return Self::hit_test_cached(col, row, state, layout);
         }
         let size = self.terminal.size().unwrap_or_default();
         let area = Rect::new(0, 0, size.width, size.height);
@@ -2490,6 +2583,9 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
         let current_model = state.current_model();
 
         let mut captured_layout: Option<LastLayout> = None;
+        // Clickable geometry recorded by the widgets during this frame (P2.4/P2.5).
+        let mut sidebar_map = SidebarClickMap::default();
+        let mut status_map = StatusSectionMap::default();
         self.terminal.draw(|frame| {
             let area = frame.area();
 
@@ -2553,6 +2649,9 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     status: chunks[4],
                     sidebar: sidebar_area,
                     modal: modal_rect,
+                    // Filled after the widgets render below (P2.4/P2.5).
+                    sidebar_map: SidebarClickMap::default(),
+                    status_map: StatusSectionMap::default(),
                 });
             }
 
@@ -2729,7 +2828,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 status = status.model(name);
             }
 
-            frame.render_widget(status, chunks[4]);
+            status.render_with_map(chunks[4], frame.buffer_mut(), &mut status_map);
 
             // Render sidebar if visible
             if let Some(sidebar_rect) = sidebar_area {
@@ -2861,7 +2960,14 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 sidebar =
                     sidebar.drag_state(state.dragging_task_index(), state.drag_target_index());
 
-                frame.render_widget(sidebar, sidebar_rect);
+                sidebar.render_with_map(sidebar_rect, frame.buffer_mut(), &mut sidebar_map);
+            }
+
+            // Publish the recorded clickable geometry with the frame layout so
+            // hit-testing resolves against what was actually drawn (P2.4/P2.5).
+            if let Some(ref mut layout) = captured_layout {
+                layout.sidebar_map = std::mem::take(&mut sidebar_map);
+                layout.status_map = std::mem::take(&mut status_map);
             }
 
             // Render modal if active (on top of everything)
@@ -3860,6 +3966,8 @@ mod tests {
             status: Rect::new(1, 27, 64, 1),
             sidebar: Some(Rect::new(65, 1, 34, 28)),
             modal: None,
+            sidebar_map: SidebarClickMap::default(),
+            status_map: StatusSectionMap::default(),
         }
     }
 
@@ -3908,8 +4016,82 @@ mod tests {
         let mut renderer = make_test_renderer(100, 30);
         let state = SharedState::new();
         let layout = layout_for_hit_test();
-        renderer.last_layout = Some(layout);
+        renderer.last_layout = Some(layout.clone());
         let rect = renderer.messages_area_rect(&state).expect("rect");
         assert_eq!(rect, layout.messages);
+    }
+
+    /// Recorded task rows have variable heights (active tasks render an
+    /// extra status line), so clicks must resolve against the recorded rows,
+    /// not "2 lines per task" estimates.
+    fn layout_with_task_rows() -> LastLayout {
+        let mut layout = layout_for_hit_test();
+        // Tasks panel at rows 10..16; task rows at 11 (active), 13
+        // (completed), 15 (queued) — mirroring real render output.
+        layout.sidebar_map.panels[2] = Some(Rect::new(65, 10, 34, 6));
+        layout.sidebar_map.items[2] = vec![
+            Rect::new(65, 11, 34, 1),
+            Rect::new(65, 13, 34, 1),
+            Rect::new(65, 15, 34, 1),
+        ];
+        layout.sidebar_map.panels[0] = Some(Rect::new(65, 4, 34, 3));
+        layout.sidebar_map.footer = Some(Rect::new(65, 28, 34, 1));
+        layout.status_map.agent_mode = Some(Rect::new(1, 28, 8, 1));
+        layout.status_map.thinking = Some(Rect::new(30, 28, 4, 1));
+        layout.status_map.provider = Some(Rect::new(70, 28, 20, 1));
+        layout
+    }
+
+    #[test]
+    fn test_task_click_resolves_to_recorded_row() {
+        let mut renderer = make_test_renderer(100, 30);
+        let state = SharedState::new();
+        renderer.last_layout = Some(layout_with_task_rows());
+
+        // Exact rows hit their task.
+        assert_eq!(renderer.get_clicked_task_index(11, &state), Some((0, true)));
+        assert_eq!(renderer.get_clicked_task_index(13, &state), Some((1, true)));
+        assert_eq!(renderer.get_clicked_task_index(15, &state), Some((2, true)));
+        // The old estimate mapped the "Active" label line (12) to task 0;
+        // recorded rows correctly resolve it to nothing.
+        assert_eq!(renderer.get_clicked_task_index(12, &state), None);
+        assert_eq!(renderer.get_clicked_task_index(14, &state), None);
+        // Header line of the panel is not a task.
+        assert_eq!(renderer.get_clicked_task_index(10, &state), None);
+    }
+
+    #[test]
+    fn test_sidebar_panel_click_resolves_to_recorded_rect() {
+        let mut renderer = make_test_renderer(100, 30);
+        let state = SharedState::new();
+        renderer.last_layout = Some(layout_with_task_rows());
+
+        assert_eq!(renderer.get_clicked_sidebar_panel(4, &state), Some(0));
+        assert_eq!(renderer.get_clicked_sidebar_panel(11, &state), Some(2));
+        assert_eq!(renderer.get_clicked_sidebar_panel(28, &state), Some(6));
+        // Gap between recorded rects resolves to nothing (fail-closed).
+        assert_eq!(renderer.get_clicked_sidebar_panel(8, &state), None);
+    }
+
+    #[test]
+    fn test_status_bar_click_resolves_to_recorded_sections() {
+        let mut renderer = make_test_renderer(100, 30);
+        let state = SharedState::new();
+        renderer.last_layout = Some(layout_with_task_rows());
+
+        assert_eq!(
+            renderer.hit_test_status_bar(3, &state),
+            Some(Command::CycleAgentMode)
+        );
+        assert_eq!(
+            renderer.hit_test_status_bar(31, &state),
+            Some(Command::ToggleThinking)
+        );
+        assert_eq!(
+            renderer.hit_test_status_bar(75, &state),
+            Some(Command::OpenProviderPicker)
+        );
+        // Gap between sections: no action.
+        assert_eq!(renderer.hit_test_status_bar(50, &state), None);
     }
 }

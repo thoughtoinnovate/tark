@@ -139,103 +139,129 @@ impl<'a> StatusBar<'a> {
     }
 }
 
-impl Widget for StatusBar<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
+/// Clickable section of the status bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusSection {
+    AgentMode,
+    BuildMode,
+    Thinking,
+    ThinkingTool,
+    Provider,
+    Help,
+}
+
+/// Screen x-ranges of the clickable status bar sections (P2.5).
+///
+/// Recorded during render from the exact spans drawn, so clicks resolve
+/// against real (variable-width, emoji-bearing) content instead of hardcoded
+/// column estimates.
+#[derive(Debug, Default, Clone)]
+pub struct StatusSectionMap {
+    /// Agent mode area (cycles agent mode).
+    pub agent_mode: Option<Rect>,
+    /// Build mode area (cycles build mode; only in Build agent mode).
+    pub build_mode: Option<Rect>,
+    /// Thinking `[🧠]` toggle.
+    pub thinking: Option<Rect>,
+    /// Thinking-tool `[💭]` indicator.
+    pub thinking_tool: Option<Rect>,
+    /// Provider/model area (opens provider picker).
+    pub provider: Option<Rect>,
+    /// Help `[?]` indicator.
+    pub help: Option<Rect>,
+}
+
+impl<'a> StatusBar<'a> {
+    /// Render while recording clickable section geometry into `map` (P2.5).
+    pub fn render_with_map(self, area: Rect, buf: &mut Buffer, map: &mut StatusSectionMap) {
         if area.height < 1 {
             return;
         }
 
-        // Build the complete status bar as a single line (left to right):
+        // Build the complete status bar as tagged sections (left to right):
         // Build ▼  🟢 Balanced ▼  [🧠] [💭]  ≡ 7    ● Model Provider  [?]
-        let mut spans = vec![];
+        let mut sections: Vec<(Option<StatusSection>, Span)> = vec![];
 
         // 1. Agent mode (Build ▼)
-        spans.push(Span::styled(
-            self.agent_mode_str(),
-            Style::default().fg(self.theme.yellow),
+        let tag = Some(StatusSection::AgentMode);
+        sections.push((
+            tag,
+            Span::styled(
+                self.agent_mode_str(),
+                Style::default().fg(self.theme.yellow),
+            ),
         ));
-        spans.push(Span::styled(
-            " ▼ ",
-            Style::default().fg(self.theme.text_muted),
+        sections.push((
+            tag,
+            Span::styled(" ▼ ", Style::default().fg(self.theme.text_muted)),
         ));
 
         // 2. Build mode (only if Build agent mode)
         if self.agent_mode == AgentMode::Build {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled("🟢 ", Style::default().fg(self.theme.green)));
-            spans.push(Span::styled(
-                self.build_mode_str(),
-                Style::default().fg(self.theme.green),
+            let tag = Some(StatusSection::BuildMode);
+            sections.push((tag, Span::raw(" ")));
+            sections.push((
+                tag,
+                Span::styled("🟢 ", Style::default().fg(self.theme.green)),
             ));
-            spans.push(Span::styled(
-                " ▼",
-                Style::default().fg(self.theme.text_muted),
+            sections.push((
+                tag,
+                Span::styled(self.build_mode_str(), Style::default().fg(self.theme.green)),
+            ));
+            sections.push((
+                tag,
+                Span::styled(" ▼", Style::default().fg(self.theme.text_muted)),
             ));
         }
 
         // 3. Indicators section (thinking brain + thinking tool + queue)
-        spans.push(Span::raw("  "));
+        sections.push((None, Span::raw("  ")));
 
         // Model-level thinking (brain)
-        if self.thinking_enabled {
-            // Thinking enabled: brain with golden/yellow border styling
-            spans.push(Span::styled("[", Style::default().fg(self.theme.yellow)));
-            spans.push(Span::styled(
-                "🧠",
-                Style::default().fg(self.theme.text_primary),
-            ));
-            spans.push(Span::styled("]", Style::default().fg(self.theme.yellow)));
+        let brain_border = if self.thinking_enabled {
+            self.theme.yellow
         } else {
-            // Thinking disabled: brain with muted border matching theme background
-            spans.push(Span::styled(
-                "[",
-                Style::default().fg(self.theme.text_muted),
-            ));
-            spans.push(Span::styled(
-                "🧠",
-                Style::default().fg(self.theme.text_muted),
-            ));
-            spans.push(Span::styled(
-                "]",
-                Style::default().fg(self.theme.text_muted),
-            ));
-        }
+            self.theme.text_muted
+        };
+        let brain_fg = if self.thinking_enabled {
+            self.theme.text_primary
+        } else {
+            self.theme.text_muted
+        };
+        let tag = Some(StatusSection::Thinking);
+        sections.push((tag, Span::styled("[", Style::default().fg(brain_border))));
+        sections.push((tag, Span::styled("🧠", Style::default().fg(brain_fg))));
+        sections.push((tag, Span::styled("]", Style::default().fg(brain_border))));
 
         // Thinking tool (thought bubble)
-        spans.push(Span::raw(" "));
-        if self.thinking_tool_enabled {
-            // Thinking tool enabled: thought bubble with cyan border
-            spans.push(Span::styled("[", Style::default().fg(self.theme.cyan)));
-            spans.push(Span::styled(
-                "💭",
-                Style::default().fg(self.theme.text_primary),
-            ));
-            spans.push(Span::styled("]", Style::default().fg(self.theme.cyan)));
+        sections.push((None, Span::raw(" ")));
+        let tool_border = if self.thinking_tool_enabled {
+            self.theme.cyan
         } else {
-            // Thinking tool disabled: thought bubble with muted border
-            spans.push(Span::styled(
-                "[",
-                Style::default().fg(self.theme.text_muted),
-            ));
-            spans.push(Span::styled(
-                "💭",
-                Style::default().fg(self.theme.text_muted),
-            ));
-            spans.push(Span::styled(
-                "]",
-                Style::default().fg(self.theme.text_muted),
-            ));
-        }
+            self.theme.text_muted
+        };
+        let tool_fg = if self.thinking_tool_enabled {
+            self.theme.text_primary
+        } else {
+            self.theme.text_muted
+        };
+        let tag = Some(StatusSection::ThinkingTool);
+        sections.push((tag, Span::styled("[", Style::default().fg(tool_border))));
+        sections.push((tag, Span::styled("💭", Style::default().fg(tool_fg))));
+        sections.push((tag, Span::styled("]", Style::default().fg(tool_border))));
 
         if self.queue_count > 0 {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                "≡ ",
-                Style::default().fg(self.theme.text_muted),
+            sections.push((None, Span::raw("  ")));
+            sections.push((
+                None,
+                Span::styled("≡ ", Style::default().fg(self.theme.text_muted)),
             ));
-            spans.push(Span::styled(
-                self.queue_count.to_string(),
-                Style::default().fg(self.theme.text_primary),
+            sections.push((
+                None,
+                Span::styled(
+                    self.queue_count.to_string(),
+                    Style::default().fg(self.theme.text_primary),
+                ),
             ));
         }
 
@@ -245,13 +271,13 @@ impl Widget for StatusBar<'_> {
             self.model_name,
             self.provider_name.to_uppercase()
         );
-        let left_width: usize = spans.iter().map(|s| s.width()).sum();
+        let left_width: usize = sections.iter().map(|(_, s)| s.width()).sum();
         let total_width = area.width as usize;
         let right_width = model_provider_text.len();
 
         if total_width > left_width + right_width {
             let padding = total_width - left_width - right_width;
-            spans.push(Span::raw(" ".repeat(padding)));
+            sections.push((None, Span::raw(" ".repeat(padding))));
         }
 
         // 4. Model/Provider (right-aligned) with connection indicator
@@ -261,29 +287,80 @@ impl Widget for StatusBar<'_> {
         } else {
             self.theme.red
         };
-        spans.push(Span::styled(
-            "● ",
-            Style::default().fg(connection_dot_color),
+        let tag = Some(StatusSection::Provider);
+        sections.push((
+            tag,
+            Span::styled("● ", Style::default().fg(connection_dot_color)),
         ));
-        spans.push(Span::styled(
-            self.model_name,
-            Style::default().fg(self.theme.text_primary),
+        sections.push((
+            tag,
+            Span::styled(
+                self.model_name,
+                Style::default().fg(self.theme.text_primary),
+            ),
         ));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            self.provider_name.to_uppercase(),
-            Style::default().fg(self.theme.text_muted),
+        sections.push((tag, Span::raw(" ")));
+        sections.push((
+            tag,
+            Span::styled(
+                self.provider_name.to_uppercase(),
+                Style::default().fg(self.theme.text_muted),
+            ),
         ));
 
         // 5. Help button (Ctrl+? to open)
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            "[?]",
-            Style::default().fg(self.theme.text_muted),
+        sections.push((None, Span::raw("  ")));
+        let tag = Some(StatusSection::Help);
+        sections.push((
+            tag,
+            Span::styled("[?]", Style::default().fg(self.theme.text_muted)),
         ));
 
+        // Record each tagged section's screen x-range from the exact spans.
+        *map = StatusSectionMap::default();
+        let mut x = area.x;
+        let mut open: Option<(StatusSection, u16)> = None;
+        let flush = |map: &mut StatusSectionMap, section: StatusSection, start: u16, end: u16| {
+            let rect = Rect::new(start, area.y, end.saturating_sub(start), 1);
+            match section {
+                StatusSection::AgentMode => map.agent_mode = Some(rect),
+                StatusSection::BuildMode => map.build_mode = Some(rect),
+                StatusSection::Thinking => map.thinking = Some(rect),
+                StatusSection::ThinkingTool => map.thinking_tool = Some(rect),
+                StatusSection::Provider => map.provider = Some(rect),
+                StatusSection::Help => map.help = Some(rect),
+            }
+        };
+        for (section, span) in &sections {
+            let w = span.width() as u16;
+            match (*section, open) {
+                (Some(s), None) => open = Some((s, x)),
+                (Some(s), Some((o, start))) if s != o => {
+                    flush(map, o, start, x);
+                    open = Some((s, x));
+                }
+                (None, Some((o, start))) => {
+                    flush(map, o, start, x);
+                    open = None;
+                }
+                _ => {}
+            }
+            x = x.saturating_add(w);
+        }
+        if let Some((o, start)) = open {
+            flush(map, o, start, x);
+        }
+
+        let spans: Vec<Span> = sections.into_iter().map(|(_, s)| s).collect();
         let line = Line::from(spans);
         Paragraph::new(line).render(area, buf);
+    }
+}
+
+impl Widget for StatusBar<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let mut discard = StatusSectionMap::default();
+        self.render_with_map(area, buf, &mut discard);
     }
 }
 
@@ -312,6 +389,51 @@ mod tests {
             .collect();
 
         assert!(content.contains("Build"));
+    }
+
+    #[test]
+    fn section_map_matches_rendered_columns() {
+        use ratatui::layout::Rect;
+        let backend = TestBackend::new(100, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+        let mut map = StatusSectionMap::default();
+
+        terminal
+            .draw(|f| {
+                let status = StatusBar::new(&theme).agent_mode(AgentMode::Build);
+                status.render_with_map(f.area(), f.buffer_mut(), &mut map);
+            })
+            .unwrap();
+
+        let end = |r: &Rect| r.x + r.width;
+        let agent = map.agent_mode.expect("agent");
+        let build = map.build_mode.expect("build");
+        let thinking = map.thinking.expect("thinking");
+        let tool = map.thinking_tool.expect("tool");
+        let provider = map.provider.expect("provider");
+        let help = map.help.expect("help");
+
+        // Sections tile left-to-right with no overlaps.
+        assert_eq!(agent.x, 0);
+        assert_eq!(build.x, end(&agent));
+        assert_eq!(thinking.x, end(&build) + 2);
+        assert_eq!(tool.x, end(&thinking) + 1);
+        assert!(provider.x > end(&tool));
+        assert_eq!(end(&provider), help.x - 2);
+        assert_eq!(end(&help), 100);
+        assert_eq!(help.width, 3); // "[?]"
+
+        // Buffer text under each recorded range matches the section.
+        let buffer = terminal.backend().buffer();
+        let text_at = |r: &Rect| -> String {
+            (r.x..r.x + r.width)
+                .map(|x| buffer.cell((x, 0)).unwrap().symbol().to_string())
+                .collect()
+        };
+        assert!(text_at(&agent).contains("Build"));
+        assert!(text_at(&thinking).contains("🧠"));
+        assert!(text_at(&help).contains("[?]"));
     }
 
     #[test]
