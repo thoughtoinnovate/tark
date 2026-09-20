@@ -328,6 +328,10 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Git Bash on Windows so pipefail/PIPESTATUS/grep semantics match Unix.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -336,11 +340,14 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: ${{ env.CACHE_VERSION }}
+      - name: Compile check first (fast, clear errors)
+        run: "cargo check --all-features --tests 2>&1 | tee check-output.log; test ${PIPESTATUS[0]} -eq 0"
       - name: Lib test suite
         run: "cargo test --all-features --lib 2>&1 | tee libtest-output.log; test ${PIPESTATUS[0]} -eq 0"
       - name: Report failure detail
         if: failure()
         run: |
-          sed 's/\x1b\[[0-9;]*m//g' libtest-output.log > libtest-clean.log
-          DETAIL=$( (echo '--- TAIL ---'; tail -12 libtest-clean.log; echo '--- FIRST ERRORS ---'; grep -E -m6 -A10 '^error(\[|:)' libtest-clean.log) | head -70 | tr '\n' ' ')
+          cat check-output.log libtest-output.log > combined.log 2>/dev/null || true
+          sed 's/\x1b\[[0-9;]*m//g' combined.log > libtest-clean.log
+          DETAIL=$( (echo '--- TAIL ---'; tail -15 libtest-clean.log; echo '--- FIRST ERRORS ---'; grep -E -m6 -A10 '^error(\[|:)' libtest-clean.log) | head -70 | tr '\n' ' ')
           echo "::error::libtest-failed ${DETAIL:0:4000}"
