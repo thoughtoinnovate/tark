@@ -222,6 +222,61 @@ impl AcpServer {
         self.sessions.lock().await.get(session_id).cloned()
     }
 
+    /// Atomically register a session enforcing the session cap (NFR3, S28).
+    ///
+    /// The check-and-insert holds one lock, so concurrent `session/new`
+    /// requests cannot overshoot the cap. Returns false when full.
+    async fn register_session(&self, session: Arc<AcpSession>) -> bool {
+        let mut sessions = self.sessions.lock().await;
+        if sessions.len() >= MAX_SESSIONS {
+            return false;
+        }
+        sessions.insert(session.id.clone(), Arc::clone(&session));
+        true
+    }
+
+    /// Cancel a session's active request (R8 S21, NFR4).
+    ///
+    /// Signals only the named session's interrupt flag and bumps only its
+    /// completion epoch; every other session is untouched. Returns true when
+    /// a request was actually active.
+    async fn cancel_session(&self, session_id: &str) -> bool {
+        let Some(session) = self.get_session(session_id).await else {
+            return false;
+        };
+        let current = session.current_request.lock().await;
+        if current.is_some() {
+            session.interrupt.store(true, Ordering::SeqCst);
+            // Invalidate in-flight completion results (R8 S22).
+            session
+                .completion_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Close a session, stopping its in-flight work (R8 S28, NFR4).
+    ///
+    /// Removal alone would orphan a running prompt loop holding the old
+    /// `Arc`: signalling interrupt plus the epoch bump lets the loop observe
+    /// shutdown, while failing owned outbound requests prevents any
+    /// interaction from resolving (or leaking) after close. Other sessions
+    /// are unaffected.
+    async fn close_session(&self, session_id: &str) {
+        let removed = self.sessions.lock().await.remove(session_id);
+        if let Some(session) = removed {
+            session.interrupt.store(true, Ordering::SeqCst);
+            session
+                .completion_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        // Fail that session's in-flight outbound requests so no
+        // interaction leaks or misattributes after close (R8 S28).
+        self.fail_session_outbound(session_id).await;
+    }
+
     fn validate_payload(method: &str, params: &Value) -> Result<()> {
         match method {
             "session/prompt" => {
@@ -481,7 +536,7 @@ impl AcpServer {
                 .await;
         }
 
-        let mut sessions = self.sessions.lock().await;
+        let sessions = self.sessions.lock().await;
         if sessions.len() >= MAX_SESSIONS {
             drop(sessions);
             return self
@@ -537,8 +592,20 @@ impl AcpServer {
             completion_epoch: std::sync::atomic::AtomicU64::new(0),
         });
 
-        sessions.insert(session_id.clone(), Arc::clone(&session));
         drop(sessions);
+
+        // Authoritative cap enforcement (also closes the check-then-insert
+        // race between concurrent session/new requests).
+        if !self.register_session(Arc::clone(&session)).await {
+            return self
+                .send_error_with_data(
+                    req_id,
+                    ACP_RATE_LIMITED,
+                    "Too many ACP sessions",
+                    error_data("rate_limited", "max sessions reached"),
+                )
+                .await;
+        }
 
         tokio::spawn(
             Arc::clone(&self).spawn_interaction_worker(Arc::clone(&session), interaction_rx),
@@ -959,7 +1026,7 @@ impl AcpServer {
                 let req_id = req.id;
                 let params: CancelParams = serde_json::from_value(req.params)
                     .context("Invalid params for session/cancel")?;
-                let Some(session) = self.get_session(&params.session_id).await else {
+                if self.get_session(&params.session_id).await.is_none() {
                     if let Some(id) = req_id {
                         return self
                             .send_error_with_data(
@@ -971,19 +1038,9 @@ impl AcpServer {
                             .await;
                     }
                     return Ok(());
-                };
-
-                let mut cancelled = false;
-                let current = session.current_request.lock().await;
-                if let Some(active) = current.as_ref() {
-                    let _ = active;
-                    session.interrupt.store(true, Ordering::SeqCst);
-                    // Invalidate in-flight completion results (R8 S22).
-                    session
-                        .completion_epoch
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    cancelled = true;
                 }
+
+                let cancelled = self.cancel_session(&params.session_id).await;
 
                 if let Some(id) = req_id {
                     return self
@@ -998,10 +1055,7 @@ impl AcpServer {
                 };
                 let params: CloseParams = serde_json::from_value(req.params)
                     .context("Invalid params for session/close")?;
-                self.sessions.lock().await.remove(&params.session_id);
-                // Fail that session's in-flight outbound requests so no
-                // interaction leaks or misattributes after close (R8 S28).
-                self.fail_session_outbound(&params.session_id).await;
+                self.close_session(&params.session_id).await;
                 self.send_response(req_id, json!({ "closed": true })).await
             }
             _ => {
@@ -1831,6 +1885,161 @@ mod tests {
         let params = permission_request_params("sess-1", "toolcall-2", "req-2", &req);
         assert_eq!(params["toolCall"]["title"], json!("read_file src/main.rs"));
         assert!(params["_meta"]["tark"]["workingDir"].is_null());
+    }
+
+    /// Session isolation tests (R8 S21/S28, NFR4) need a runnable agent;
+    /// they run under the `test-sim` provider feature (on by default).
+    #[cfg(feature = "test-sim")]
+    mod session_isolation_tests {
+        use super::*;
+        use crate::agent::ChatAgent;
+        use crate::llm::tark_sim::TarkSimProvider;
+
+        fn test_session(id: &str) -> Arc<AcpSession> {
+            let llm: Arc<dyn crate::llm::LlmProvider> = Arc::new(TarkSimProvider::new());
+            let (interaction_tx, _rx) = crate::tools::interaction_channel();
+            let tools = crate::tools::ToolRegistry::for_mode_with_interaction(
+                std::env::temp_dir(),
+                AgentMode::Build,
+                false,
+                Some(interaction_tx.clone()),
+            );
+            let agent = ChatAgent::with_mode(llm, tools, AgentMode::Build);
+            Arc::new(AcpSession {
+                id: id.to_string(),
+                cwd: std::env::temp_dir(),
+                provider: "tark_sim".to_string(),
+                model: None,
+                agent: Arc::new(Mutex::new(agent)),
+                context: Arc::new(Mutex::new(SessionContext::default())),
+                current_request: Arc::new(Mutex::new(Some("req-active".to_string()))),
+                interrupt: Arc::new(AtomicBool::new(false)),
+                interaction_tx,
+                request_times: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                completion_epoch: std::sync::atomic::AtomicU64::new(0),
+            })
+        }
+
+        fn test_server() -> Arc<AcpServer> {
+            let config = crate::config::Config::default();
+            Arc::new(AcpServer::new(std::env::temp_dir(), &config))
+        }
+
+        #[tokio::test]
+        async fn cancel_signals_only_the_named_session() {
+            let server = test_server();
+            let active = test_session("sess-active");
+            let idle = test_session("sess-idle");
+            *idle.current_request.lock().await = None;
+            server.register_session(active.clone()).await;
+            server.register_session(idle.clone()).await;
+
+            assert!(server.cancel_session("sess-active").await);
+            assert!(active.interrupt.load(Ordering::SeqCst));
+            assert_eq!(
+                active.completion_epoch.load(Ordering::SeqCst),
+                1,
+                "cancel bumps the epoch so stale completions are suppressed"
+            );
+            // Untouched session observes nothing.
+            assert!(!idle.interrupt.load(Ordering::SeqCst));
+            assert_eq!(idle.completion_epoch.load(Ordering::SeqCst), 0);
+
+            // Idle sessions report no cancellation; unknown ids fail closed.
+            assert!(!server.cancel_session("sess-idle").await);
+            assert!(!server.cancel_session("sess-ghost").await);
+        }
+
+        #[tokio::test]
+        async fn close_stops_inflight_work_and_fails_only_owned_outbound() {
+            use tokio::sync::oneshot;
+            let server = test_server();
+            let doomed = test_session("sess-doomed");
+            let survivor = test_session("sess-survivor");
+            server.register_session(doomed.clone()).await;
+            server.register_session(survivor.clone()).await;
+
+            // In-flight outbound requests owned by each session.
+            let (doomed_tx, doomed_rx) = oneshot::channel();
+            let (survivor_tx, survivor_rx) = oneshot::channel();
+            {
+                let mut pending = server.outbound_pending.lock().await;
+                pending.insert(11, (Some("sess-doomed".to_string()), doomed_tx));
+                pending.insert(12, (Some("sess-survivor".to_string()), survivor_tx));
+            }
+
+            server.close_session("sess-doomed").await;
+
+            // In-flight prompt loop observes shutdown via interrupt + epoch.
+            assert!(doomed.interrupt.load(Ordering::SeqCst));
+            assert_eq!(doomed.completion_epoch.load(Ordering::SeqCst), 1);
+            assert!(server.get_session("sess-doomed").await.is_none());
+            // Owned outbound fails (receiver observes cancellation → deny).
+            assert!(doomed_rx.await.is_err());
+            // The other session is fully unaffected.
+            assert!(!survivor.interrupt.load(Ordering::SeqCst));
+            assert_eq!(survivor.completion_epoch.load(Ordering::SeqCst), 0);
+            assert!(server.get_session("sess-survivor").await.is_some());
+            // Its outbound entry survives; clean up explicitly.
+            assert!(server.outbound_pending.lock().await.contains_key(&12));
+            server.fail_session_outbound("sess-survivor").await;
+            assert!(survivor_rx.await.is_err());
+        }
+
+        #[tokio::test]
+        async fn session_cap_holds_under_concurrent_registration() {
+            let server = test_server();
+            // Fill to the cap sequentially.
+            for i in 0..MAX_SESSIONS {
+                assert!(
+                    server
+                        .register_session(test_session(&format!("sess-{i}")))
+                        .await,
+                    "registration {i} must succeed"
+                );
+            }
+            // Concurrent overshoot attempts all fail; the cap never yields.
+            let attempts = futures::future::join_all((0..16).map(|i| {
+                let server = server.clone();
+                async move {
+                    server
+                        .register_session(test_session(&format!("race-{i}")))
+                        .await
+                }
+            }))
+            .await;
+            assert!(attempts.iter().all(|ok| !ok));
+            assert_eq!(server.sessions.lock().await.len(), MAX_SESSIONS);
+        }
+
+        #[tokio::test]
+        async fn concurrent_cancel_close_stress_stays_consistent() {
+            let server = test_server();
+            let mut ids = Vec::new();
+            for i in 0..MAX_SESSIONS {
+                let id = format!("stress-{i}");
+                server.register_session(test_session(&id)).await;
+                ids.push(id);
+            }
+            // Hammer cancel/close/drain concurrently: no panics, and every
+            // session ends either cancelled-in-place or closed.
+            futures::future::join_all(ids.iter().flat_map(|id| {
+                let cancel_server = server.clone();
+                let close_server = server.clone();
+                let cancel_id = id.clone();
+                let close_id = id.clone();
+                [
+                    tokio::spawn(async move { cancel_server.cancel_session(&cancel_id).await }),
+                    tokio::spawn(async move {
+                        close_server.close_session(&close_id).await;
+                        false
+                    }),
+                ]
+            }))
+            .await;
+            assert!(server.sessions.lock().await.is_empty());
+            assert!(server.outbound_pending.lock().await.is_empty());
+        }
     }
 
     #[test]
