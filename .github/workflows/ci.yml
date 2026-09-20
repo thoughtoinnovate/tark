@@ -313,8 +313,9 @@ jobs:
       - name: Report audit detail
         if: failure()
         run: |
-          DETAIL=$(grep -E -m5 -A4 'Crate:|warning:|error' audit-output.log | head -40 | tr '\n' ' ')
-          echo "::error::audit-failed ${DETAIL:0:1500}"
+          sed 's/\x1b\[[0-9;]*m//g' audit-output.log > audit-clean.log
+          DETAIL=$(grep -E -m20 -A4 'Crate:|warning:|error' audit-clean.log | head -80 | tr '\n' ' ')
+          echo "::error::audit-failed ${DETAIL:0:4000}"
 
   # Cross-platform test evidence (NFR6): lib suite on macOS + Windows.
   # Release binaries already build on all targets in release.yml.
@@ -338,5 +339,6 @@ jobs:
       - name: Report failure detail
         if: failure()
         run: |
-          DETAIL=$(grep -E -m8 -A6 '^error|FAILED|failures:$|panicked at' libtest-output.log | head -60 | tr '\n' ' ')
-          echo "::error::libtest-failed ${DETAIL:0:1500}"
+          sed 's/\x1b\[[0-9;]*m//g' libtest-output.log > libtest-clean.log
+          DETAIL=$( (tail -25 libtest-clean.log; grep -E -m8 -A8 '^error|FAILED|failures:|panicked at' libtest-clean.log) | head -60 | tr '\n' ' ')
+          echo "::error::libtest-failed ${DETAIL:0:4000}"

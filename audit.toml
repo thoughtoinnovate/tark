@@ -1,0 +1,65 @@
+# cargo-audit policy (R13: pinned, verified dependencies).
+#
+# `cargo audit` runs in CI and blocks release on findings. Entries below are
+# documented risk acceptances with follow-ups — never silent skips. Each
+# entry names the blocker or the reason the finding does not apply to the
+# pinned line. Re-check on every dependency update.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2025-0009: ring AES panic when overflow checking is enabled
+    # (debug builds only; release builds ship without overflow checks).
+    # Blocked: tree-sitter-javascript 0.21.4 pins cc ~1.0.90, conflicting
+    # with the cc ^1.2 required by ring >= 0.17.12.
+    # Follow-up: tree-sitter stack upgrade unblocking ring >= 0.17.12.
+    "RUSTSEC-2025-0009",
+    # RUSTSEC-2022-0055: axum request-body limit. False positive for the
+    # pinned 0.4.x line (advisory DB predates it): axum 0.7 enforces the 2MB
+    # DefaultBodyLimit on Json/Bytes extractors by default, and our server
+    # binds loopback only.
+    "RUSTSEC-2022-0055",
+    # wasmtime/wasmtime-wasi 27.0.0 findings. Fixing requires a 27 -> 43
+    # major migration (patched branches are 36.x/42.x/43.x only).
+    # Accepted pending that migration: guests are explicitly user-installed
+    # local WASM plugins (no remote multi-tenant trust boundary), and WASI
+    # filesystem access stays capability-scoped per server config.
+    # Follow-up: wasmtime 27 -> 43 migration.
+    "RUSTSEC-2025-0046",
+    "RUSTSEC-2025-0118",
+    "RUSTSEC-2026-0020",
+    "RUSTSEC-2026-0021",
+    "RUSTSEC-2026-0085",
+    "RUSTSEC-2026-0086",
+    "RUSTSEC-2026-0087",
+    "RUSTSEC-2026-0088",
+    "RUSTSEC-2026-0089",
+    "RUSTSEC-2026-0091",
+    "RUSTSEC-2026-0092",
+    "RUSTSEC-2026-0093",
+    "RUSTSEC-2026-0094",
+    "RUSTSEC-2026-0095",
+    "RUSTSEC-2026-0096",
+    "RUSTSEC-2026-0149",
+    "RUSTSEC-2026-0182",
+    "RUSTSEC-2026-0188",
+    "RUSTSEC-2026-0222",
+    "RUSTSEC-2026-0269",
+]
+
+[warnings]
+ignore = [
+    # Informational notices for transitive dependencies with no patched
+    # line available. Re-check on every dependency update.
+    "RUSTSEC-2026-0190", # anyhow unsound downcast_mut (transitive)
+    "RUSTSEC-2020-0054", # directories unmaintained (transitive)
+    "RUSTSEC-2020-0053", # dirs unmaintained (transitive)
+    "RUSTSEC-2025-0057", # fxhash unmaintained (transitive)
+    "RUSTSEC-2025-0014", # humantime unmaintained (transitive)
+    "RUSTSEC-2026-0002", # lru unsound IterMut (transitive)
+    "RUSTSEC-2026-0253", # lru unsound pop (transitive)
+    "RUSTSEC-2026-0186", # memmap2 unsound offset (transitive)
+    "RUSTSEC-2024-0436", # paste unmaintained (transitive)
+    "RUSTSEC-2026-0173", # proc-macro-error2 unmaintained (transitive)
+    "RUSTSEC-2025-0007", # ring unmaintained (see RUSTSEC-2025-0009 above)
+    "RUSTSEC-2017-0008", # serial unmaintained (transitive)
+]
