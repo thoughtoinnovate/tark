@@ -160,8 +160,10 @@ impl<B: Backend> TuiController<B> {
             // 1. Render current state
             self.renderer.render(&state)?;
 
-            // 2. Poll for user input (non-blocking)
-            if let Some(command) = self.renderer.poll_input(&state)? {
+            // 2. Drain ALL pending user input (non-blocking).
+            // Handling one event per frame starves input during bursts
+            // (scroll wheel, pastes) and while frames are slow.
+            for command in self.renderer.drain_input(&state)? {
                 self.handle_command(command).await?;
             }
 

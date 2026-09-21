@@ -143,7 +143,15 @@ pub struct TuiRenderer<B: Backend> {
     streaming_thinking_cache: super::widgets::markdown::StreamingMarkdownCache,
     /// Geometry from the last rendered frame, used for hit-testing.
     last_layout: Option<LastLayout>,
+    /// Cached git branch with refresh time. Resolving the branch spawns a
+    /// subprocess; doing that every frame stalls the event loop, worst on
+    /// platforms where process spawn is slow.
+    git_branch_cache: Option<(Instant, String)>,
 }
+
+/// How long a cached git branch stays valid. Branches change rarely (only
+/// on checkout), while frames render up to ~100 times per second.
+const GIT_BRANCH_CACHE_TTL: Duration = Duration::from_secs(5);
 
 impl<B: Backend> TuiRenderer<B> {
     /// Create a new TUI renderer
@@ -156,7 +164,21 @@ impl<B: Backend> TuiRenderer<B> {
             streaming_markdown_cache: super::widgets::markdown::StreamingMarkdownCache::new(),
             streaming_thinking_cache: super::widgets::markdown::StreamingMarkdownCache::new(),
             last_layout: None,
+            git_branch_cache: None,
         }
+    }
+
+    /// Current git branch, cached with a TTL so the render loop never
+    /// blocks on a subprocess spawn per frame.
+    fn git_branch(&mut self) -> String {
+        if let Some((at, branch)) = self.git_branch_cache.as_ref() {
+            if at.elapsed() < GIT_BRANCH_CACHE_TTL {
+                return branch.clone();
+            }
+        }
+        let branch = crate::tui_new::git_info::get_current_branch(&self.working_dir);
+        self.git_branch_cache = Some((Instant::now(), branch.clone()));
+        branch
     }
 
     /// Get reference to terminal (for testing)
@@ -167,6 +189,101 @@ impl<B: Backend> TuiRenderer<B> {
     /// Get mutable reference to terminal
     pub fn terminal_mut(&mut self) -> &mut Terminal<B> {
         &mut self.terminal
+    }
+
+    /// Drain ALL pending input events, returning one command per event.
+    ///
+    /// Handling a single event per frame lets bursts (scroll wheel,
+    /// pasted text, key repeats) queue up faster than they are processed,
+    /// so every input lags a full frame behind, worst while streaming
+    /// when frames are slowest.
+    pub(crate) fn drain_input(&mut self, state: &SharedState) -> Result<Vec<Command>> {
+        let poll_timeout = if state.llm_processing() {
+            Duration::from_millis(8)
+        } else {
+            Duration::from_millis(50)
+        };
+
+        let mut commands = Vec::new();
+        if event::poll(poll_timeout)? {
+            // First event (blocking up to the poll timeout), then everything
+            // already queued (non-blocking) so one frame absorbs the burst.
+            loop {
+                let event = event::read()?;
+                if let Some(command) = self.event_to_command(event, state)? {
+                    commands.push(command);
+                }
+                if !event::poll(Duration::ZERO)? {
+                    break;
+                }
+            }
+        }
+        Ok(commands)
+    }
+
+    /// Map a single terminal event to a command.
+    fn event_to_command(&mut self, event: Event, state: &SharedState) -> Result<Option<Command>> {
+        match event {
+            Event::Key(key) => {
+                // Special handling for ESC key
+                if key.code == KeyCode::Esc {
+                    let now = Instant::now();
+
+                    // Check for double-ESC (within 500ms)
+                    if let Some(last_esc) = self.last_esc_time {
+                        if now.duration_since(last_esc) < Duration::from_millis(500) {
+                            // Double-ESC detected - cancel agent if working
+                            self.last_esc_time = None;
+                            if state.llm_processing() {
+                                return Ok(Some(Command::CancelAgent));
+                            }
+                        }
+                    }
+
+                    self.last_esc_time = Some(now);
+
+                    // First ESC: handle questionnaire first, then modal, then normal ESC
+                    if state.active_questionnaire().is_some() {
+                        return Ok(Some(Command::QuestionCancel));
+                    }
+                }
+
+                Ok(Self::key_to_command(key, state))
+            }
+            Event::Mouse(mouse) => {
+                // Check for click outside questionnaire to dismiss it
+                if let MouseEventKind::Down(_) = mouse.kind {
+                    if state.active_questionnaire().is_some() {
+                        // Check if click is outside the question modal
+                        // The modal is centered, so approximate the bounds
+                        let (width, height) = self.get_size();
+                        let modal_width = width.min(65);
+                        let modal_height = height.min(15); // Approximate
+                        let modal_x = (width.saturating_sub(modal_width)) / 2;
+                        let modal_y = (height.saturating_sub(modal_height)) / 2;
+
+                        let click_x = mouse.column;
+                        let click_y = mouse.row;
+
+                        // If click is outside modal bounds, cancel the questionnaire
+                        if click_x < modal_x
+                            || click_x >= modal_x + modal_width
+                            || click_y < modal_y
+                            || click_y >= modal_y + modal_height
+                        {
+                            return Ok(Some(Command::QuestionCancel));
+                        }
+                    }
+                }
+                Ok(self.mouse_to_command(mouse, state))
+            }
+            Event::Paste(text) => Ok(Self::handle_paste(state, text)),
+            Event::Resize(_, _) => {
+                // Terminal resize handled automatically by ratatui
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
     }
 
     fn handle_text_char(c: char, state: &SharedState) -> Option<Command> {
@@ -2567,6 +2684,10 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
         let theme_preset = state.theme();
         self.theme = Theme::from_preset(theme_preset);
 
+        // Resolve the git branch before any other borrow: it spawns a
+        // subprocess on TTL expiry and needs &mut self.
+        let git_branch = self.git_branch();
+
         let theme = &self.theme;
         let messages = state.messages();
         let active_modal = state.active_modal();
@@ -2758,9 +2879,14 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                 .thinking_max_lines(config.thinking_max_lines)
                 .processing(state.llm_processing())
                 .collapsed_tool_groups(&collapsed_groups);
-            let (total_lines, viewport_height) = message_area.metrics(chunks[1]);
-            state.set_messages_metrics(total_lines, viewport_height);
+            // Single layout pass: the widget records its total into the
+            // sink while drawing, instead of laying out all messages twice
+            // per frame (once for metrics, once for draw).
+            let mut total_lines = 0usize;
+            let message_area = message_area.total_sink(&mut total_lines);
             frame.render_widget(message_area, chunks[1]);
+            let viewport_height = MessageArea::content_viewport(chunks[1]);
+            state.set_messages_metrics(total_lines, viewport_height);
 
             // Render status message strip
             let (flash_state, message) = build_status_message(state);
@@ -2949,9 +3075,7 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     .todos(todo_items)
                     .git_changes(git_changes_widget)
                     .plugin_widgets(state.plugin_widgets())
-                    .git_branch(crate::tui_new::git_info::get_current_branch(
-                        &self.working_dir,
-                    ));
+                    .git_branch(git_branch.clone());
 
                 sidebar.expanded_panels = state.sidebar_expanded_panels();
                 sidebar.selected_item = state.sidebar_selected_item();
@@ -3227,68 +3351,8 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
         };
 
         if event::poll(poll_timeout)? {
-            match event::read()? {
-                Event::Key(key) => {
-                    // Special handling for ESC key
-                    if key.code == KeyCode::Esc {
-                        let now = Instant::now();
-
-                        // Check for double-ESC (within 500ms)
-                        if let Some(last_esc) = self.last_esc_time {
-                            if now.duration_since(last_esc) < Duration::from_millis(500) {
-                                // Double-ESC detected - cancel agent if working
-                                self.last_esc_time = None;
-                                if state.llm_processing() {
-                                    return Ok(Some(Command::CancelAgent));
-                                }
-                            }
-                        }
-
-                        self.last_esc_time = Some(now);
-
-                        // First ESC: handle questionnaire first, then modal, then normal ESC
-                        if state.active_questionnaire().is_some() {
-                            return Ok(Some(Command::QuestionCancel));
-                        }
-                    }
-
-                    return Ok(Self::key_to_command(key, state));
-                }
-                Event::Mouse(mouse) => {
-                    // Check for click outside questionnaire to dismiss it
-                    if let MouseEventKind::Down(_) = mouse.kind {
-                        if state.active_questionnaire().is_some() {
-                            // Check if click is outside the question modal
-                            // The modal is centered, so approximate the bounds
-                            let (width, height) = self.get_size();
-                            let modal_width = width.min(65);
-                            let modal_height = height.min(15); // Approximate
-                            let modal_x = (width.saturating_sub(modal_width)) / 2;
-                            let modal_y = (height.saturating_sub(modal_height)) / 2;
-
-                            let click_x = mouse.column;
-                            let click_y = mouse.row;
-
-                            // If click is outside modal bounds, cancel the questionnaire
-                            if click_x < modal_x
-                                || click_x >= modal_x + modal_width
-                                || click_y < modal_y
-                                || click_y >= modal_y + modal_height
-                            {
-                                return Ok(Some(Command::QuestionCancel));
-                            }
-                        }
-                    }
-                    return Ok(self.mouse_to_command(mouse, state));
-                }
-                Event::Paste(text) => {
-                    return Ok(Self::handle_paste(state, text));
-                }
-                Event::Resize(_, _) => {
-                    // Terminal resize handled automatically by ratatui
-                }
-                _ => {}
-            }
+            let event = event::read()?;
+            return self.event_to_command(event, state);
         }
         Ok(None)
     }
@@ -4009,6 +4073,21 @@ mod tests {
         // Fallback path recomputes from terminal size; just assert it does not
         // panic and classifies the border as Outside.
         assert_eq!(renderer.hit_test(0, 0, &state), ClickTarget::Outside);
+    }
+
+    #[test]
+    fn test_git_branch_cache_serves_fresh_and_refreshes_stale() {
+        let mut renderer = make_test_renderer(100, 30);
+        // Stale entry forces a subprocess refresh (result is a real branch
+        // name or the "main" fallback, never the stale marker).
+        renderer.git_branch_cache = Some((
+            Instant::now() - GIT_BRANCH_CACHE_TTL - Duration::from_secs(1),
+            "STALE".into(),
+        ));
+        assert_ne!(renderer.git_branch(), "STALE");
+        // Fresh entry is served without spawning a subprocess.
+        renderer.git_branch_cache = Some((Instant::now(), "CACHED".into()));
+        assert_eq!(renderer.git_branch(), "CACHED");
     }
 
     #[test]

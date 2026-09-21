@@ -617,6 +617,10 @@ pub struct MessageArea<'a> {
     diff_view_mode: DiffViewMode,
     /// Set of collapsed tool group start indices
     collapsed_tool_groups: &'a std::collections::HashSet<usize>,
+    /// Optional sink receiving the total built line count after render.
+    /// Lets the renderer share one layout pass between metrics and drawing
+    /// instead of laying out all messages twice per frame.
+    total_sink: Option<&'a mut usize>,
 }
 
 /// Static empty hashset for default collapsed_tool_groups
@@ -714,6 +718,7 @@ impl<'a> MessageArea<'a> {
             vim_mode: crate::ui_backend::VimMode::Insert,
             diff_view_mode: DiffViewMode::Auto,
             collapsed_tool_groups: &EMPTY_HASHSET,
+            total_sink: None,
         }
     }
 
@@ -815,6 +820,24 @@ impl<'a> MessageArea<'a> {
     ) -> Self {
         self.collapsed_tool_groups = collapsed;
         self
+    }
+
+    /// Record the total built line count into `sink` when rendering.
+    /// The renderer uses this to update scroll metrics from the same layout
+    /// pass that draws, instead of laying out all messages a second time.
+    pub fn total_sink(mut self, sink: &'a mut usize) -> Self {
+        self.total_sink = Some(sink);
+        self
+    }
+
+    /// Viewport height (in lines) of the message area for a render rect.
+    /// Mirrors the border math in `render` so callers can compute scroll
+    /// metrics without a second layout pass.
+    pub fn content_viewport(area: Rect) -> usize {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED);
+        block.inner(area).height as usize
     }
 
     pub fn metrics(&self, area: Rect) -> (usize, usize) {
@@ -1288,7 +1311,10 @@ impl<'a> MessageArea<'a> {
 }
 
 impl Widget for MessageArea<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
+    fn render(mut self, area: Rect, buf: &mut Buffer) {
+        // Take the metrics sink up front: moving it later would conflict
+        // with borrows held by the line-building code below.
+        let total_sink = self.total_sink.take();
         let border_color = if self.focused {
             self.theme.border_focused
         } else {
@@ -2327,12 +2353,17 @@ impl Widget for MessageArea<'_> {
                     Span::styled(top_border, Style::default().fg(glow_color)),
                 ]));
 
-                // Render streaming content as markdown (per chunk)
-                let markdown_lines = super::markdown::render_markdown(
-                    content,
-                    self.theme,
-                    bubble_content_width.saturating_sub(2).max(1),
-                );
+                // Prefer pre-rendered lines from the incremental cache:
+                // re-parsing the whole growing content every frame is O(n^2)
+                // and starves input during streaming.
+                let markdown_lines = match self.streaming_lines {
+                    Some(ref prebuilt) => prebuilt.clone(),
+                    None => super::markdown::render_markdown(
+                        content,
+                        self.theme,
+                        bubble_content_width.saturating_sub(2).max(1),
+                    ),
+                };
                 for md_line in markdown_lines {
                     let line_width = md_line.width();
                     let padding = bubble_content_width.saturating_sub(2 + line_width);
@@ -2359,6 +2390,9 @@ impl Widget for MessageArea<'_> {
 
         // Store total line count before filtering
         let total_lines = lines.len();
+        if let Some(sink) = total_sink {
+            *sink = total_lines;
+        }
 
         let max_offset = total_lines.saturating_sub(inner.height as usize);
 
@@ -2400,6 +2434,78 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    fn test_messages() -> Vec<Message> {
+        vec![
+            Message::system("Welcome to Tark"),
+            Message::user("Hello with **bold**!"),
+            Message::agent("Hi there with `code`!"),
+        ]
+    }
+
+    /// The single-layout refactor: the total recorded by the render sink
+    /// must always equal what metrics() computes, or scroll bounds drift
+    /// from what is drawn.
+    #[test]
+    fn total_sink_matches_metrics() {
+        let theme = Theme::default();
+        let messages = test_messages();
+        let area = Rect::new(0, 0, 80, 24);
+
+        let probe = MessageArea::new(&messages, &theme);
+        let (expected_total, expected_viewport) = probe.metrics(area);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut recorded = usize::MAX;
+        terminal
+            .draw(|f| {
+                let widget = MessageArea::new(&messages, &theme).total_sink(&mut recorded);
+                f.render_widget(widget, f.area());
+            })
+            .unwrap();
+
+        assert_ne!(recorded, usize::MAX, "sink was not written");
+        assert_eq!(recorded, expected_total);
+        assert_eq!(MessageArea::content_viewport(area), expected_viewport);
+    }
+
+    /// The streaming incremental cache must actually be used: with prebuilt
+    /// lines set and *different* raw content, the output shows the prebuilt
+    /// text (previously the growing content was re-parsed every frame).
+    #[test]
+    fn render_prefers_prebuilt_streaming_lines() {
+        let theme = Theme::default();
+        let messages: Vec<Message> = vec![];
+        let prebuilt = vec![Line::from("PREBUILT_MARKER")];
+
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let widget = MessageArea::new(&messages, &theme)
+                    .streaming_content(Some("RAW_CONTENT_MARKER".to_string()))
+                    .streaming_lines(Some(prebuilt.clone()));
+                f.render_widget(widget, f.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..10 {
+            for x in 0..60 {
+                text.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+        }
+        assert!(
+            text.contains("PREBUILT_MARKER"),
+            "prebuilt streaming lines were not used"
+        );
+        assert!(
+            !text.contains("RAW_CONTENT_MARKER"),
+            "raw content was re-parsed instead of using prebuilt lines"
+        );
+    }
 
     #[test]
     fn test_message_area_renders_messages() {
