@@ -61,8 +61,26 @@ impl std::fmt::Display for OllamaTimeout {
 
 impl std::error::Error for OllamaTimeout {}
 
-/// True for failures worth retrying: timeouts and connection errors.
-/// HTTP 4xx (unknown model, bad request) and parse errors are not retried.
+/// Typed HTTP failure from the Ollama API, preserving the status code so
+/// retry and fallback policies can classify it without parsing strings.
+#[derive(Debug)]
+struct OllamaHttpError {
+    status: u16,
+    body: String,
+}
+
+impl std::fmt::Display for OllamaHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ollama API error ({}): {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for OllamaHttpError {}
+
+/// True for failures worth retrying: timeouts, connection errors, rate
+/// limits, and server-side 5xx (overloaded/crashed model runners often
+/// recover after backoff; these responses arrive fast, so retries are cheap).
+/// 400/404 and parse errors are not retried.
 fn is_transient(e: &anyhow::Error) -> bool {
     if e.downcast_ref::<OllamaTimeout>().is_some() {
         return true;
@@ -70,7 +88,22 @@ fn is_transient(e: &anyhow::Error) -> bool {
     if let Some(req_err) = e.downcast_ref::<reqwest::Error>() {
         return req_err.is_timeout() || req_err.is_connect();
     }
+    if let Some(http_err) = e.downcast_ref::<OllamaHttpError>() {
+        return matches!(http_err.status, 429 | 500 | 502 | 503 | 504);
+    }
     false
+}
+
+/// True when the server rejected a request that carried tools and the
+/// failure is plausibly about the tools themselves (rather than e.g. a
+/// missing model, which 404 already reports with a pull hint).
+///
+/// Callers use this to retry once with tools stripped: many local models
+/// choke on the native `tools` parameter but still follow tool instructions
+/// expressed in text (see `parse_tool_call`).
+fn is_tools_rejection(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<OllamaHttpError>()
+        .is_some_and(|http_err| http_err.status != 404 && (400..600).contains(&http_err.status))
 }
 
 /// Run `f` up to `max_attempts` times with 1s/2s/4s backoff on transient
@@ -501,24 +534,63 @@ impl OllamaProvider {
                 .context("Failed to send request to Ollama")?;
 
             if !response.status().is_success() {
-                let status = response.status();
+                let status = response.status().as_u16();
                 let error_text = response.text().await.unwrap_or_default();
-                if status.as_u16() == 404 {
-                    anyhow::bail!(
-                        "Ollama model '{}' not found ({}) — pull it with: ollama pull {} ({})",
-                        self.model,
+                if status == 404 {
+                    anyhow::bail!(OllamaHttpError {
                         status,
-                        self.model,
-                        error_text
-                    );
+                        body: format!(
+                            "model '{}' not found — pull it with: ollama pull {} ({})",
+                            self.model, self.model, error_text
+                        ),
+                    });
                 }
-                anyhow::bail!("Ollama API error ({}): {}", status, error_text);
+                anyhow::bail!(OllamaHttpError {
+                    status,
+                    body: error_text,
+                });
             }
 
             response
                 .json::<OllamaResponse>()
                 .await
                 .context("Failed to parse Ollama response")
+        })
+        .await
+    }
+
+    /// POST a streaming chat request with retries for transient setup
+    /// failures (connect resets under load, overloaded-model 5xx); the
+    /// first byte may take a full cold-load window to arrive.
+    async fn post_streaming(
+        &self,
+        url: &str,
+        setup_limit: Duration,
+        request: OllamaRequest,
+    ) -> Result<reqwest::Response> {
+        with_retry("chat stream setup", MAX_ATTEMPTS, || async {
+            let response =
+                tokio::time::timeout(setup_limit, self.client.post(url).json(&request).send())
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!(OllamaTimeout("stream setup")).context(format!(
+                    "Ollama model '{}' sent no data within {}s — the model may still be loading; \
+                     increase via OLLAMA_INITIAL_TIMEOUT",
+                    self.model,
+                    setup_limit.as_secs()
+                ))
+                    })?
+                    .context("Failed to send streaming request to Ollama")?;
+
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let error_text = response.text().await.unwrap_or_default();
+                anyhow::bail!(OllamaHttpError {
+                    status,
+                    body: error_text,
+                });
+            }
+            Ok(response)
         })
         .await
     }
@@ -548,9 +620,12 @@ impl OllamaProvider {
             .context("Failed to send request to Ollama")?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Ollama API error ({}): {}", status, error_text);
+            anyhow::bail!(OllamaHttpError {
+                status,
+                body: error_text,
+            });
         }
 
         let resp: OllamaGenerateResponse = response
@@ -598,6 +673,7 @@ impl LlmProvider for OllamaProvider {
 
         // Convert tools to native Ollama format
         let ollama_tools = tools.filter(|t| !t.is_empty()).map(Self::convert_tools);
+        let has_tools = ollama_tools.is_some();
 
         let request = OllamaRequest {
             model: self.model.clone(),
@@ -606,7 +682,22 @@ impl LlmProvider for OllamaProvider {
             tools: ollama_tools,
         };
 
-        let response = self.send_request(request).await?;
+        // If the model rejects the native tools parameter, retry once
+        // without it: text-level tool instructions still work through
+        // `parse_tool_call` below.
+        let response = match self.send_request(request.clone()).await {
+            Err(e) if has_tools && is_tools_rejection(&e) => {
+                tracing::warn!(
+                    "Ollama model '{}' rejected tools ({}); retrying without tools",
+                    self.model,
+                    e
+                );
+                let mut plain = request;
+                plain.tools = None;
+                self.send_request(plain).await?
+            }
+            other => other?,
+        };
 
         // Check if model returned tool calls (native tool calling)
         if let Some(tool_calls) = response.message.tool_calls {
@@ -679,32 +770,31 @@ impl LlmProvider for OllamaProvider {
         let url = format!("{}/api/chat", self.base_url);
         let setup_limit = initial_timeout();
 
-        // Retry transient setup failures (connect resets under load); the
-        // first byte may take a full cold-load window to arrive.
-        let response = with_retry("chat stream setup", MAX_ATTEMPTS, || async {
-            tokio::time::timeout(setup_limit, self.client.post(&url).json(&request).send())
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(OllamaTimeout("stream setup")).context(format!(
-                        "Ollama model '{}' sent no data within {}s — the model may still be loading; \
-                         increase via OLLAMA_INITIAL_TIMEOUT",
-                        self.model,
-                        setup_limit.as_secs()
-                    ))
-                })?
-                .context("Failed to send streaming request to Ollama")
-        })
-        .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            callback(StreamEvent::Error(format!(
-                "Ollama API error ({}): {}",
-                status, error_text
-            )));
-            anyhow::bail!("Ollama API error ({}): {}", status, error_text);
-        }
+        // If the model rejects the native tools parameter, retry once
+        // without it (same text-level fallback as non-streaming chat).
+        let response = match self
+            .post_streaming(&url, setup_limit, request.clone())
+            .await
+        {
+            Err(e) if has_tools && is_tools_rejection(&e) => {
+                tracing::warn!(
+                    "Ollama model '{}' rejected tools ({}); retrying without tools",
+                    self.model,
+                    e
+                );
+                let mut plain = request;
+                plain.tools = None;
+                self.post_streaming(&url, setup_limit, plain).await
+            }
+            other => other,
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                callback(StreamEvent::Error(e.to_string()));
+                return Err(e);
+            }
+        };
 
         // Process newline-delimited JSON stream
         let mut builder = StreamingResponseBuilder::new();
@@ -1161,7 +1251,9 @@ struct OllamaStreamChunk {
 mod tests {
     use super::PromptThinkingTagParser;
     use super::{initial_timeout, is_transient, mark_warmed, model_matches, warmed_at, with_retry};
-    use super::{OllamaTimeout, DEFAULT_CHUNK_TIMEOUT_SECS, DEFAULT_INITIAL_TIMEOUT_SECS};
+    use super::{
+        OllamaHttpError, OllamaTimeout, DEFAULT_CHUNK_TIMEOUT_SECS, DEFAULT_INITIAL_TIMEOUT_SECS,
+    };
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -1230,6 +1322,57 @@ mod tests {
         assert!(!is_transient(&anyhow::anyhow!(
             "Failed to parse Ollama response"
         )));
+        // Overloaded-model statuses are cheap to retry (they fail fast).
+        for status in [429, 500, 502, 503, 504] {
+            assert!(
+                is_transient(&anyhow::anyhow!(OllamaHttpError {
+                    status,
+                    body: "boom".to_string(),
+                })),
+                "status {status} should be transient"
+            );
+        }
+        // Client errors fail fast without retry.
+        for status in [400, 401, 403, 404] {
+            assert!(
+                !is_transient(&anyhow::anyhow!(OllamaHttpError {
+                    status,
+                    body: "nope".to_string(),
+                })),
+                "status {status} should not be transient"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_rejection_classification() {
+        use super::is_tools_rejection;
+        // A tools-bearing request rejected for any reason but "model not
+        // found" is worth one retry with tools stripped.
+        for status in [400, 422, 500, 503] {
+            assert!(
+                is_tools_rejection(&anyhow::anyhow!(OllamaHttpError {
+                    status,
+                    body: "bad".to_string(),
+                })),
+                "status {status} should trigger tools fallback"
+            );
+        }
+        assert!(!is_tools_rejection(&anyhow::anyhow!(OllamaHttpError {
+            status: 404,
+            body: "missing".to_string(),
+        })));
+        assert!(!is_tools_rejection(&anyhow::anyhow!(OllamaTimeout("x"))));
+        assert!(!is_tools_rejection(&anyhow::anyhow!("plain failure")));
+    }
+
+    #[test]
+    fn http_error_display_format() {
+        let err = super::OllamaHttpError {
+            status: 500,
+            body: "runner crashed".to_string(),
+        };
+        assert_eq!(err.to_string(), "Ollama API error (500): runner crashed");
     }
 
     #[test]

@@ -10,9 +10,14 @@ use tark_cli::llm::{LlmProvider, LlmResponse, Message, MessageContent, OllamaPro
 
 /// Minimal mock Ollama: /api/tags, /api/generate (0.5s; 30s for
 /// `slow-model`), /api/chat (streaming NDJSON or single JSON).
+/// `flaky-model` fails the first two `/api/chat` calls with 500 (retry
+/// coverage); `notools-model` rejects any `/api/chat` carrying `tools`
+/// with 400 (tools-stripped fallback coverage).
 const MOCK_OLLAMA_PY: &str = r#"
 import json, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+CALLS = {}
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -31,6 +36,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"models": [
                 {"name": "mock-model:latest", "size": 1, "modified_at": ""},
                 {"name": "slow-model:latest", "size": 1, "modified_at": ""},
+                {"name": "flaky-model:latest", "size": 1, "modified_at": ""},
+                {"name": "notools-model:latest", "size": 1, "modified_at": ""},
             ]}))
         else:
             self._send(404, "{}")
@@ -48,6 +55,16 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.5)
             self._send(200, json.dumps({"response": "ok", "done": True}))
         elif self.path == "/api/chat":
+            model = body.get("model", "")
+            if model == "flaky-model":
+                n = CALLS.get("flaky", 0) + 1
+                CALLS["flaky"] = n
+                if n <= 2:
+                    self._send(500, json.dumps({"error": "model overloaded"}))
+                    return
+            if model == "notools-model" and "tools" in body:
+                self._send(400, json.dumps({"error": "this model does not support tools"}))
+                return
             if body.get("stream"):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson")
@@ -78,8 +95,16 @@ fn user_message(text: &str) -> Message {
     }
 }
 
+/// Timeout knobs are process-global env: serialize tests that mutate them.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[tokio::test]
 async fn ollama_mock_end_to_end() {
+    // Timeout knobs are process-global: serialize. The guard is held across
+    // awaits, which is safe here (single critical section per test, no lock
+    // ordering, test-only).
+    #![allow(clippy::await_holding_lock)]
+    let _env = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().expect("tempdir");
     let script = dir.path().join("mock_ollama.py");
     std::fs::write(&script, MOCK_OLLAMA_PY).expect("write mock");
@@ -193,6 +218,107 @@ async fn ollama_mock_end_to_end() {
         "unexpected error: {err}"
     );
 
+    std::env::remove_var("OLLAMA_INITIAL_TIMEOUT");
+    std::env::remove_var("OLLAMA_CHUNK_TIMEOUT");
+    let _ = child.kill().await;
+}
+
+/// Spawns the mock and returns its base URL plus the child handle.
+/// Each test gets a fresh server (per-model call counters stay isolated).
+async fn spawn_mock() -> (String, tokio::process::Child) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Leak the dir: the server needs the script for its whole lifetime.
+    let script = dir.path().join("mock_ollama.py");
+    std::fs::write(&script, MOCK_OLLAMA_PY).expect("write mock");
+    std::mem::forget(dir);
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|exe| {
+            std::process::Command::new(exe)
+                .arg("--version")
+                .output()
+                .is_ok()
+        })
+        .unwrap_or("python3");
+    let mut child = tokio::process::Command::new(python)
+        .arg(&script)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn mock ollama");
+    let port: u16 = {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let stdout = child.stdout.take().expect("stdout");
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            reader.read_line(&mut line),
+        )
+        .await
+        .expect("mock startup")
+        .expect("read");
+        child.stdout = Some(reader.into_inner());
+        line.trim()
+            .strip_prefix("PORT ")
+            .expect("port line")
+            .parse()
+            .expect("port")
+    };
+    (format!("http://127.0.0.1:{port}"), child)
+}
+
+fn sample_tool() -> tark_cli::llm::ToolDefinition {
+    tark_cli::llm::ToolDefinition {
+        name: "get_weather".to_string(),
+        description: "Get weather for a city".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        }),
+    }
+}
+
+/// Transient 500s are retried: the mock fails twice, then answers.
+#[tokio::test]
+async fn ollama_mock_retries_transient_500s() {
+    #![allow(clippy::await_holding_lock)]
+    let _env = ENV_LOCK.lock().unwrap();
+    std::env::set_var("OLLAMA_INITIAL_TIMEOUT", "30");
+    std::env::set_var("OLLAMA_CHUNK_TIMEOUT", "30");
+    let (base_url, mut child) = spawn_mock().await;
+    let provider = OllamaProvider::new()
+        .expect("provider")
+        .with_base_url(&base_url)
+        .with_model("flaky-model");
+    let response = provider
+        .chat(&[user_message("hi")], Some(&[sample_tool()]))
+        .await
+        .expect("retried chat succeeds");
+    assert_eq!(response.text(), Some("hello"));
+    std::env::remove_var("OLLAMA_INITIAL_TIMEOUT");
+    std::env::remove_var("OLLAMA_CHUNK_TIMEOUT");
+    let _ = child.kill().await;
+}
+
+/// Models rejecting the tools parameter get one tools-stripped retry.
+#[tokio::test]
+async fn ollama_mock_falls_back_without_tools() {
+    #![allow(clippy::await_holding_lock)]
+    let _env = ENV_LOCK.lock().unwrap();
+    std::env::set_var("OLLAMA_INITIAL_TIMEOUT", "30");
+    std::env::set_var("OLLAMA_CHUNK_TIMEOUT", "30");
+    let (base_url, mut child) = spawn_mock().await;
+    let provider = OllamaProvider::new()
+        .expect("provider")
+        .with_base_url(&base_url)
+        .with_model("notools-model");
+    let response = provider
+        .chat(&[user_message("hi")], Some(&[sample_tool()]))
+        .await
+        .expect("fallback chat succeeds");
+    assert_eq!(response.text(), Some("hello"));
     std::env::remove_var("OLLAMA_INITIAL_TIMEOUT");
     std::env::remove_var("OLLAMA_CHUNK_TIMEOUT");
     let _ = child.kill().await;
