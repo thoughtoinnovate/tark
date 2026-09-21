@@ -9,7 +9,7 @@ Every ACP session starts with `initialize`:
 | Direction | Field | Contract |
 |-----------|-------|----------|
 | Client → backend | `protocolVersion` | Must be `1`. Anything else is rejected with `unsupported_version` naming the supported revision. |
-| Backend → client | `agentInfo.{name,version}` | `tark` + `CARGO_PKG_VERSION` (currently `0.12.7`). Clients must compare major/minor against their supported range and surface a remediation path on mismatch. |
+| Backend → client | `agentInfo.{name,version}` | `tark` + `CARGO_PKG_VERSION` (currently `0.12.8`). Clients must compare major/minor against their supported range and surface a remediation path on mismatch. |
 | Backend → client | `agentCapabilities` | Exactly the implemented subset (see below). Clients must not send methods outside it. |
 | Either | `_meta.tark.completion` | Optional `_tark/inlineCompletion` extension contract `{method, version: 1}`. Chat works identically with or without it. |
 

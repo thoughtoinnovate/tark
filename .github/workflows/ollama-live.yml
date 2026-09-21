@@ -1,0 +1,56 @@
+name: ollama-live
+
+# Heavy real-model end-to-end for the Ollama provider. Deliberately NOT on
+# the per-push path (model download + CPU inference cost minutes): it runs
+# manually, weekly, and on pushes that touch Ollama code. Fast deterministic
+# coverage lives in tests/ollama_mock.rs on every push.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 0"
+  push:
+    branches: [main]
+    paths:
+      - "src/llm/ollama.rs"
+      - "tests/ollama_mock.rs"
+      - "tests/ollama_live.rs"
+      - ".github/workflows/ollama-live.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  OLLAMA_MODEL_UNDER_TEST: "qwen2.5:1.5b"
+
+jobs:
+  live-ollama-e2e:
+    name: Live Ollama e2e (qwen2.5:1.5b, CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama and pull model
+        run: |
+          (nohup ollama serve > /tmp/ollama.log 2>&1 &)
+          for _ in $(seq 1 30); do
+            ollama list >/dev/null 2>&1 && break
+            sleep 2
+          done
+          ollama pull "$OLLAMA_MODEL_UNDER_TEST"
+
+      - name: Live provider test (shapes only, no exact strings)
+        env:
+          OLLAMA_TEST_URL: "http://localhost:11434"
+          OLLAMA_TEST_MODEL: ${{ env.OLLAMA_MODEL_UNDER_TEST }}
+          OLLAMA_INITIAL_TIMEOUT: "600"
+          OLLAMA_CHUNK_TIMEOUT: "180"
+        run: cargo test --all-features --test ollama_live
+
+      - name: Dump Ollama log on failure
+        if: failure()
+        run: tail -50 /tmp/ollama.log || true
