@@ -6,8 +6,12 @@
 
 set -e
 
-VERSION="v0.12.6"
-PREVIOUS_VERSION="v0.12.5"
+# Version selection is dynamic: unless pinned via --version, the installer
+# resolves the latest GitHub release tag at runtime, so this script never
+# goes stale and doubles as an updater (skips when already current).
+PINNED_VERSION=""
+FORCE_REINSTALL="false"
+CHECK_ONLY="false"
 REPO="thoughtoinnovate/tark"
 BINARY_NAME="tark"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -234,6 +238,113 @@ get_asset_name() {
     echo "${asset_name}"
 }
 
+# Fetch the latest release tag (e.g. v0.12.7) from the GitHub API.
+# Prefers python3, then jq, then a sed fallback. Fails with a clear
+# remediation message instead of installing a stale version.
+fetch_latest_tag() {
+    local url="https://api.github.com/repos/${REPO}/releases/latest"
+    local response=""
+
+    if command -v curl &> /dev/null; then
+        if [ -n "$GITHUB_TOKEN" ]; then
+            response=$(curl -fsSL \
+                --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" \
+                --max-time "${DOWNLOAD_TIMEOUT_SECONDS}" \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                "$url" 2>/dev/null) || response=""
+        else
+            response=$(curl -fsSL \
+                --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" \
+                --max-time "${DOWNLOAD_TIMEOUT_SECONDS}" \
+                "$url" 2>/dev/null) || response=""
+        fi
+    elif command -v wget &> /dev/null; then
+        response=$(wget -qO- \
+            --timeout="${CONNECT_TIMEOUT_SECONDS}" \
+            ${GITHUB_TOKEN:+--header="Authorization: Bearer ${GITHUB_TOKEN}"} \
+            "$url" 2>/dev/null) || response=""
+    fi
+
+    if [ -z "$response" ]; then
+        return 1
+    fi
+
+    local tag=""
+    if command -v python3 &> /dev/null; then
+        tag=$(echo "$response" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("tag_name", ""))' 2>/dev/null) || tag=""
+    elif command -v jq &> /dev/null; then
+        tag=$(echo "$response" | jq -r '.tag_name // empty' 2>/dev/null) || tag=""
+    else
+        tag=$(echo "$response" | grep -m1 '"tag_name":' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
+    fi
+
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+        echo "$tag"
+        return 0
+    fi
+    return 1
+}
+
+# Strip a leading 'v' for numeric comparison (v0.12.7 -> 0.12.7).
+normalize_version() {
+    echo "${1#v}"
+}
+
+# Compare two versions (leading 'v' tolerated).
+# Echoes -1 if $1 < $2, 0 if equal, 1 if $1 > $2. Pure bash (no sort -V,
+# which BSD/macOS sort lacks).
+compare_versions() {
+    local a b i av bv
+    a=$(normalize_version "$1")
+    b=$(normalize_version "$2")
+    local IFS='.'
+    # shellcheck disable=SC2206
+    local a_parts=($a) b_parts=($b)
+    for ((i = 0; i < 3; i++)); do
+        av=${a_parts[$i]:-0}
+        bv=${b_parts[$i]:-0}
+        # Force base-10 (avoid octal interpretation of 08/09).
+        av=$((10#$av)); bv=$((10#$bv))
+        if ((av < bv)); then echo -1; return 0; fi
+        if ((av > bv)); then echo 1; return 0; fi
+    done
+    echo 0
+    return 0
+}
+
+# Installed tark version (bare number, e.g. 0.12.7), or empty if absent.
+installed_version() {
+    if ! command -v "$BINARY_NAME" &> /dev/null; then
+        echo ""
+        return 1
+    fi
+    local reported
+    reported=$("$BINARY_NAME" --version 2>/dev/null | awk '{print $2}') || true
+    if [[ "$reported" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+        echo "$reported"
+        return 0
+    fi
+    echo ""
+    return 1
+}
+
+# Resolve which version to install: explicit pin wins, otherwise latest.
+resolve_target_version() {
+    if [ -n "$PINNED_VERSION" ]; then
+        if [[ "$PINNED_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "$PINNED_VERSION"
+            return 0
+        fi
+        error "Invalid --version '${PINNED_VERSION}'. Expected form: v0.12.7"
+    fi
+    local latest
+    if latest=$(fetch_latest_tag); then
+        echo "$latest"
+        return 0
+    fi
+    error "Could not determine the latest release (network/API issue?). Pin one explicitly: install.sh --version v0.12.7"
+}
+
 fetch_release_metadata() {
     local version="$1"
     local url="https://api.github.com/repos/${REPO}/releases/tags/${version}"
@@ -403,9 +514,9 @@ try_download() {
     return 0
 }
 
-# Download and install
+# Download and install (doubles as updater: skips when already current).
 install() {
-    local platform tmp_dir installed_version
+    local platform tmp_dir installed_version target_version current cmp
 
     info "Detecting platform..."
     platform=$(detect_platform)
@@ -419,19 +530,36 @@ install() {
     # Fail fast for invalid token/access issues before asset downloads.
     validate_github_token_access
 
+    # Resolve which version to install: explicit pin wins, else latest tag.
+    target_version=$(resolve_target_version)
+    info "Target version: ${target_version}"
+
+    # Update behavior: skip when already current (unless pinned or forced).
+    current=$(installed_version || true)
+    if [ -z "$PINNED_VERSION" ] && [ -n "$current" ]; then
+        cmp=$(compare_versions "$current" "$(normalize_version "$target_version")")
+        if [ "$cmp" = "0" ] && [ "$FORCE_REINSTALL" != "true" ]; then
+            success "tark ${current} is already up to date (latest: ${target_version}). Use --force to reinstall."
+            exit 0
+        fi
+        if [ "$cmp" = "1" ]; then
+            warn "Installed tark ${current} is newer than latest release ${target_version}; leaving it in place. Use --force to reinstall."
+            exit 0
+        fi
+        info "Updating tark ${current} -> ${target_version}..."
+    elif [ -n "$current" ]; then
+        info "Installed version: ${current}; (re)installing ${target_version}..."
+    fi
+
     # Create temp directory
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' EXIT
 
-    # Try to download the primary version, fallback to the previous one
-    if installed_version_raw=$(try_download "$VERSION" "$platform" "$tmp_dir"); then
+    # Single attempt against the resolved version; failures diagnose clearly.
+    if installed_version_raw=$(try_download "$target_version" "$platform" "$tmp_dir"); then
         installed_version=$(echo "$installed_version_raw" | tail -n 1)
-
-        :
-    elif installed_version=$(try_download "$PREVIOUS_VERSION" "$platform" "$tmp_dir"); then
-        warn "Primary version ${VERSION} failed, but successfully downloaded fallback version ${PREVIOUS_VERSION}."
     else
-        error "Failed to download both primary version ${VERSION} and fallback version ${PREVIOUS_VERSION}. Aborting."
+        error "Failed to download ${target_version} for ${platform}. Aborting."
     fi
 
     # Make executable
@@ -452,8 +580,9 @@ install() {
         info "Installed Version: ${installed_version}"
         actual_version=$($BINARY_NAME --version)
         info "Reported Version: ${actual_version}"
-        
-        local installed_version_for_compare=$(echo "$installed_version" | sed 's/^v//')
+
+        local installed_version_for_compare
+        installed_version_for_compare=$(normalize_version "$installed_version")
         if [ "$installed_version_for_compare" != "$(echo "$actual_version" | awk '{print $2}')" ]; then
              warn "Installed version (${installed_version}) does not match reported version (${actual_version})."
         fi
@@ -484,13 +613,43 @@ install() {
     fi
 }
 
+# Report latest vs installed versions without changing anything.
+check_update() {
+    local target_version current cmp
+    target_version=$(resolve_target_version)
+    current=$(installed_version || true)
+    if [ -z "$current" ]; then
+        info "tark is not installed. Latest release: ${target_version}."
+        exit 0
+    fi
+    cmp=$(compare_versions "$current" "$(normalize_version "$target_version")")
+    if [ "$cmp" = "0" ]; then
+        success "tark ${current} is up to date (latest: ${target_version})."
+    elif [ "$cmp" = "1" ]; then
+        info "Installed tark ${current} is newer than latest release ${target_version}."
+    else
+        info "Update available: tark ${current} -> ${target_version}. Re-run without --check to install."
+    fi
+    exit 0
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version|-v)
-            VERSION="v0.11.10"
-            PREVIOUS_VERSION="v0.11.10"
+            if [ -z "${2:-}" ]; then
+                error "--version needs a value (e.g. --version v0.12.7)"
+            fi
+            PINNED_VERSION="$2"
             shift 2
+            ;;
+        --force|-f)
+            FORCE_REINSTALL="true"
+            shift
+            ;;
+        --check|-c)
+            CHECK_ONLY="true"
+            shift
             ;;
         --install-dir|-d)
             INSTALL_DIR="$2"
@@ -509,12 +668,17 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "tark installer"
+            echo "tark installer and updater"
             echo ""
             echo "Usage: install.sh [OPTIONS]"
             echo ""
+            echo "Without options, installs the latest release, or updates an"
+            echo "existing installation when a newer release is available."
+            echo ""
             echo "Options:"
-            echo "  -v, --version VERSION   Install specific version (default: ${VERSION}, fallback: ${PREVIOUS_VERSION})"
+            echo "  -v, --version VERSION   Install a specific version (default: latest release)"
+            echo "  -f, --force             Reinstall even when already up to date"
+            echo "  -c, --check             Report latest vs installed versions, change nothing"
             echo "  -d, --install-dir DIR   Installation directory (default: /usr/local/bin)"
             echo "  --skip-verify           Skip SHA256 checksum verification (not recommended)"
             echo "  --prompt-token          Prompt securely for GitHub token (for private repos)"
@@ -532,7 +696,8 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Examples:"
             echo "  curl -fsSL https://raw.githubusercontent.com/thoughtoinnovate/tark/main/install.sh | bash"
-            echo "  ./install.sh --version v0.11.9"
+            echo "  ./install.sh --check"
+            echo "  ./install.sh --version v0.12.7"
             echo "  GITHUB_TOKEN=ghp_xxx ./install.sh"
             echo "  ./install.sh --prompt-token"
             echo "  printf '%s\n' \"\$GITHUB_TOKEN\" | ./install.sh --token-stdin"
@@ -545,5 +710,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Run installation
+# Run check or installation
+if [ "$CHECK_ONLY" = "true" ]; then
+    check_update
+fi
 install

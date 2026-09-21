@@ -7,5 +7,6 @@ pub mod http;
 pub mod mcp_cli;
 pub mod plugin_cli;
 pub mod remote;
+pub mod update;
 
 pub use http::update_status;

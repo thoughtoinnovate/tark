@@ -156,36 +156,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Update the installation script after release
-  update-install-script:
-    name: Update Install Script
-    needs: release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Get version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Update version in install script
-        run: |
-          if [ -f install.sh ]; then
-            sed -i "s/VERSION=.*/VERSION=\"${{ steps.version.outputs.version }}\"/" install.sh
-            git config user.name github-actions
-            git config user.email github-actions@github.com
-            git add install.sh
-            git commit -m "chore: update install script to ${{ steps.version.outputs.version }}" || true
-            git push || true
-          fi
+  # NOTE: install.sh resolves the latest release tag at runtime and needs
+  # no per-release version bump, so there is intentionally no automation
+  # committing to main from this workflow.

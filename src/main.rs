@@ -255,6 +255,21 @@ enum Commands {
         command: PluginCommands,
     },
 
+    /// Self-update tark to the latest release (or a pinned version)
+    Update {
+        /// Install a specific version instead of the latest (e.g. v0.12.7)
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Reinstall even when already up to date
+        #[arg(long, default_value_t = false)]
+        force: bool,
+
+        /// Only report latest vs installed versions, change nothing
+        #[arg(long, default_value_t = false)]
+        check: bool,
+    },
+
     /// Policy database management
     Policy {
         #[command(subcommand)]
@@ -618,6 +633,13 @@ async fn main() -> Result<()> {
                 transport::plugin_cli::run_plugin_auth(&plugin_id).await?;
             }
         },
+        Commands::Update {
+            version,
+            force,
+            check,
+        } => {
+            transport::update::run_self_update(version.as_deref(), force, check).await?;
+        }
         Commands::Policy { command } => match command {
             PolicyCommands::Verify { fix, cwd } => {
                 let working_dir = cwd
