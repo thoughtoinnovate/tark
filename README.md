@@ -13,6 +13,7 @@ AI-powered CLI agent with TUI chat interface and Neovim integration.
 - **Usage Dashboard**: Track costs, tokens, and sessions with interactive web dashboard
 - **Agent Modes**: Ask (read-only), Plan (propose changes), Build (full access)
 - **Approval System**: Approve risky operations with pattern matching
+- **Lightweight Subagents**: Delegate bounded exploration to parallel subagents (auto-tuned 1..5); monitor in the sidebar (`⑂`), drill into logs, send follow-ups, kill; summaries return to the parent — never raw transcripts
 
 ## Quick Install
 
@@ -285,6 +286,8 @@ Press `<leader>tc` (or your configured keymap) to toggle the chat window.
 | `/tools` | Show available tools |
 | `/plugins` | Show installed plugins |
 | `/usage` | Show usage statistics |
+| `/agents` | Open subagents monitor (or settings when idle) |
+| `/subagents [auto\|manual\|tools N\|pin ...]` | Open subagents settings / apply caps inline |
 | `/exit` | Close chat |
 
 ### Keyboard Shortcuts
@@ -302,6 +305,7 @@ Press `<leader>tc` (or your configured keymap) to toggle the chat window.
 | `Ctrl+T` | Toggle model-level thinking |
 | `Ctrl+M` | Cycle build mode (Manual → Balanced → Careful) |
 | `Ctrl+Shift+B` | Open trust level selector (Build mode only) |
+| `Ctrl+G` | Open subagents settings |
 | `Esc` | Close modal / Cancel operation |
 | `Esc Esc` | Cancel ongoing agent operation (double-tap) |
 
@@ -344,6 +348,12 @@ Selected files and folders are inserted into the prompt as `@path` tokens. Remov
 | `e` | Edit task (in Tasks panel) |
 | `D` | Delete task (in Tasks panel) |
 | `J/K` | Move task up/down (in Tasks panel) |
+| `Enter/s` | Open subagent detail (in Subagents panel) |
+| `i` | Open subagent detail at input (in Subagents panel) |
+| `x` | Kill subagent (in Subagents panel or detail modal) |
+| `c` | Clear finished subagents (in Subagents panel) |
+| `[`/`]` | Cycle Subagents filter (All → Active → Done) |
+| `f/n` | Follow-up (new turn) / nudge (no turn) in detail modal |
 
 ### Agent Modes
 
@@ -449,6 +459,33 @@ session_usage_poll_ms = 1000
 [tools]
 shell_enabled = true
 tool_timeout_secs = 60
+
+[agent.subagents]
+# Subagent cap mode: "auto" tunes the effective cap in [min,max] from
+# system resources, "manual" pins it to max_subagents
+mode = "auto"
+max_subagents = 5
+min_subagents = 1
+poll_ms = 2000
+cooldown_ms = 8000
+min_free_mem_mb = 512
+subagent_max_iterations = 5
+subagent_timeout_secs = 120
+subagent_mode = "ask"
+
+[agent.subagents.models]
+# Model inheritance: "inherit" snapshots the parent agent, "pinned" uses
+# provider/model/effort below unless a task overrides them (empty = inherit)
+mode = "inherit"
+provider = ""
+model = ""
+effort = ""
+
+[agent.parallel_tools]
+# Per-agent parallel tool fan-out: "auto" tunes in [min,max], "manual" pins to max
+mode = "auto"
+max_parallel_tools = 5
+min_parallel_tools = 1
 ```
 
 Tool calls can override the default timeout by including `timeout_secs` in their arguments.

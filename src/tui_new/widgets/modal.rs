@@ -132,6 +132,13 @@ impl<'a> HelpModal<'a> {
             ("/command", "Slash commands (try /help)"),
             ("j/k", "Navigate messages (Normal mode)"),
             ("g / G", "Scroll to top / bottom"),
+            ("y", "Yank focused message (Normal mode)"),
+            ("Y", "Yank last response (any focus)"),
+            ("v then y", "Visual select + yank (messages/input)"),
+            ("Alt+M", "Toggle mouse capture (native selection)"),
+            ("/copy", "Copy last response to clipboard"),
+            ("/export [path]", "Export session to a file"),
+            ("Shift+drag", "Terminal-native text selection"),
         ]
     }
 }

@@ -2092,7 +2092,7 @@ impl ChannelManager {
 
         let mut response = match cmd {
             RemoteCommand::Help => Some(
-                "Commands: /tark status | /tark mode <ask|plan|build> | /tark model <id> | /tark provider <id> | /tark trust <manual|careful|balanced> | /tark usage | /tark stop | /tark resume | /tark interrupt".to_string(),
+                "Commands: /tark status | /tark mode <ask|plan|build> | /tark model <id> | /tark provider <id> | /tark trust <manual|careful|balanced> | /tark usage | /tark agents | /tark stop | /tark resume | /tark interrupt".to_string(),
             ),
             RemoteCommand::Status => {
                 let queued = remote.registry().queued_count(&session.id);
@@ -2175,6 +2175,11 @@ impl ChannelManager {
                 session.output_tokens,
                 session.total_cost
             )),
+            RemoteCommand::Agents => {
+                // Get subagent status from the local app service if available
+                // This is a best-effort query since subagents are local to the TUI process
+                Some("Subagent status query not yet implemented for remote channels. Use the TUI to view subagents.".to_string())
+            }
         };
 
         if let Some(remote) = &self.remote {
@@ -2850,6 +2855,7 @@ enum RemoteCommand {
     Provider(String),
     Trust(TrustLevel),
     Usage,
+    Agents,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -3244,6 +3250,7 @@ fn parse_command_tokens(cmd: &str, arg: Option<&str>) -> Option<RemoteCommand> {
         "provider" => arg.map(|v| RemoteCommand::Provider(v.to_string())),
         "trust" => arg.and_then(parse_trust_level).map(RemoteCommand::Trust),
         "usage" => Some(RemoteCommand::Usage),
+        "agents" => Some(RemoteCommand::Agents),
         _ => None,
     }
 }

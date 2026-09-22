@@ -141,6 +141,12 @@ pub enum ModalType {
     Policy,
     /// Explicit permission interaction to grant an additional workspace root (R1)
     WorkspaceGrant,
+    /// Subagent detail modal (logs + input + kill, plan §C3)
+    SubagentDetail,
+    /// Session-start subagent permission grant (plan §C3)
+    SubagentGrant,
+    /// Subagent caps/model settings (plan §C3, also on `/subagents`, `Ctrl+G`)
+    SubagentSettings,
 }
 
 /// Active OAuth device flow session
@@ -184,6 +190,9 @@ pub struct UiState {
     pub focused_component: FocusedComponent,
     pub active_modal: Option<ModalType>,
     pub sidebar_visible: bool,
+    /// Whether terminal mouse capture is enabled (clicks/scroll go to the app).
+    /// When false, the terminal emulator handles mouse (native text selection works).
+    pub mouse_enabled: bool,
     pub theme: ThemePreset,
     pub diff_view_mode: DiffViewMode,
     pub status_message: Option<String>,
@@ -202,9 +211,12 @@ pub struct UiState {
     pub session_picker_filter: String,
 
     // Sidebar state
+    //
+    // Panel indices (plan §C1): 0 Session, 1 Context, 2 Tasks, 3 Subagents,
+    // 4 Todo, 5 Git, 6 Plugins, 7 Theme (footer, no expansion flag).
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
-    pub sidebar_expanded_panels: [bool; 6],
+    pub sidebar_expanded_panels: [bool; 7],
 }
 
 impl Default for UiState {
@@ -213,6 +225,7 @@ impl Default for UiState {
             focused_component: FocusedComponent::default(),
             active_modal: None,
             sidebar_visible: true,
+            mouse_enabled: true,
             theme: ThemePreset::CatppuccinMocha,
             diff_view_mode: DiffViewMode::Auto,
             status_message: None,
@@ -229,7 +242,7 @@ impl Default for UiState {
             session_picker_filter: String::new(),
             sidebar_selected_panel: 0,
             sidebar_selected_item: None,
-            sidebar_expanded_panels: [true, true, false, false, false, false],
+            sidebar_expanded_panels: [true, true, false, true, false, false, false],
         }
     }
 }
@@ -339,6 +352,8 @@ struct StateInner {
 
     // ========== UI State ==========
     pub sidebar_visible: bool,
+    /// Whether terminal mouse capture is enabled (see UiState::mouse_enabled).
+    pub mouse_enabled: bool,
     pub theme: ThemePreset,
     pub diff_view_mode: DiffViewMode,
     pub status_message: Option<String>,
@@ -390,9 +405,10 @@ struct StateInner {
     // ========== Sidebar State ==========
     pub sidebar_selected_panel: usize,
     pub sidebar_selected_item: Option<usize>,
-    pub sidebar_expanded_panels: [bool; 6],
+    /// Expansion flags for panels 0..6 (Theme footer exempt).
+    pub sidebar_expanded_panels: [bool; 7],
     pub sidebar_scroll_offset: usize,
-    pub sidebar_panel_scrolls: [usize; 6],
+    pub sidebar_panel_scrolls: [usize; 7],
     pub plugin_widgets: Vec<crate::ui_backend::types::PluginWidgetInfo>,
 
     // ========== Context ==========
@@ -407,6 +423,28 @@ struct StateInner {
 
     // ========== Tasks ==========
     pub tasks: Vec<TaskInfo>,
+
+    // ========== Subagents (plan §C1) ==========
+    /// Display snapshot for the sidebar Subagents section (panel 3).
+    /// Refreshed at ≤10Hz by the service poller; renderers skip redraw
+    /// when `subagent_version` is unchanged.
+    pub subagents: std::sync::Arc<[crate::ui_backend::types::SubagentInfo]>,
+    pub subagent_queued: Vec<crate::ui_backend::types::QueuedSubagent>,
+    pub subagent_version: u64,
+    /// Effective cap + mode for the `n/5 AUTO•/FIXED` badge.
+    pub subagent_effective: usize,
+    pub subagent_auto: bool,
+    pub subagent_other_sessions: usize,
+    pub subagent_filter: crate::ui_backend::types::SubagentFilter,
+    pub subagent_grant: crate::ui_backend::types::SessionGrant,
+    /// Open detail modal target (child id) + modal-local UI state.
+    pub subagent_detail_id: Option<String>,
+    pub subagent_detail_input: String,
+    pub subagent_detail_follow_tail: bool,
+    pub subagent_settings_selected: usize,
+    /// Live-editable subagent settings (modal edits apply to session;
+    /// `w` persists to `config.toml`). Seeded from config at startup.
+    pub subagent_settings: crate::ui_backend::types::SubagentSettingsState,
 
     // ========== Git ==========
     pub git_changes: Vec<GitChangeInfo>,
@@ -533,6 +571,7 @@ impl SharedState {
                 pending_operator: None,
                 paste_blocks: Vec::new(),
                 sidebar_visible: true,
+                mouse_enabled: true,
                 theme: ThemePreset::CatppuccinMocha,
                 diff_view_mode: DiffViewMode::Auto,
                 status_message: None,
@@ -566,9 +605,9 @@ impl SharedState {
                 policy_modal: None,
                 sidebar_selected_panel: 0,
                 sidebar_selected_item: None,
-                sidebar_expanded_panels: [true, true, false, false, false, false],
+                sidebar_expanded_panels: [true, true, false, true, false, false, false],
                 sidebar_scroll_offset: 0,
-                sidebar_panel_scrolls: [0, 0, 0, 0, 0, 0],
+                sidebar_panel_scrolls: [0, 0, 0, 0, 0, 0, 0],
                 plugin_widgets: Vec::new(),
                 context_files: Vec::new(),
                 tokens_used: 0,
@@ -576,6 +615,19 @@ impl SharedState {
                 context_breakdown: ContextBreakdown::default(),
                 session: None,
                 tasks: Vec::new(),
+                subagents: std::sync::Arc::from([]),
+                subagent_queued: Vec::new(),
+                subagent_version: 0,
+                subagent_effective: 5,
+                subagent_auto: true,
+                subagent_other_sessions: 0,
+                subagent_filter: crate::ui_backend::types::SubagentFilter::default(),
+                subagent_grant: crate::ui_backend::types::SessionGrant::default(),
+                subagent_detail_id: None,
+                subagent_detail_input: String::new(),
+                subagent_detail_follow_tail: true,
+                subagent_settings_selected: 0,
+                subagent_settings: crate::ui_backend::types::SubagentSettingsState::default(),
                 git_changes: Vec::new(),
                 available_providers: Vec::new(),
                 available_models: Vec::new(),
@@ -759,6 +811,7 @@ impl SharedState {
             focused_component: inner.focused_component,
             active_modal: inner.active_modal,
             sidebar_visible: inner.sidebar_visible,
+            mouse_enabled: inner.mouse_enabled,
             theme: inner.theme,
             diff_view_mode: inner.diff_view_mode,
             status_message: inner.status_message.clone(),
@@ -827,6 +880,10 @@ impl SharedState {
 
     pub fn sidebar_visible(&self) -> bool {
         self.read_inner().sidebar_visible
+    }
+
+    pub fn mouse_enabled(&self) -> bool {
+        self.read_inner().mouse_enabled
     }
 
     pub fn theme(&self) -> ThemePreset {
@@ -901,7 +958,7 @@ impl SharedState {
         self.read_inner().sidebar_selected_item
     }
 
-    pub fn sidebar_expanded_panels(&self) -> [bool; 6] {
+    pub fn sidebar_expanded_panels(&self) -> [bool; 7] {
         self.read_inner().sidebar_expanded_panels
     }
 
@@ -909,7 +966,7 @@ impl SharedState {
         self.read_inner().sidebar_scroll_offset
     }
 
-    pub fn sidebar_panel_scrolls(&self) -> [usize; 6] {
+    pub fn sidebar_panel_scrolls(&self) -> [usize; 7] {
         self.read_inner().sidebar_panel_scrolls
     }
 
@@ -1553,6 +1610,10 @@ impl SharedState {
         self.write_inner().sidebar_visible = visible;
     }
 
+    pub fn set_mouse_enabled(&self, enabled: bool) {
+        self.write_inner().mouse_enabled = enabled;
+    }
+
     pub fn set_theme(&self, theme: ThemePreset) {
         self.write_inner().theme = theme;
     }
@@ -2181,7 +2242,7 @@ impl SharedState {
         self.write_inner().sidebar_selected_item = item;
     }
 
-    pub fn set_sidebar_expanded_panels(&self, panels: [bool; 6]) {
+    pub fn set_sidebar_expanded_panels(&self, panels: [bool; 7]) {
         self.write_inner().sidebar_expanded_panels = panels;
     }
 
@@ -2190,7 +2251,7 @@ impl SharedState {
     }
 
     pub fn set_sidebar_panel_scroll(&self, panel: usize, offset: usize) {
-        if panel < 6 {
+        if panel < 7 {
             self.write_inner().sidebar_panel_scrolls[panel] = offset;
         }
     }
@@ -2269,6 +2330,116 @@ impl SharedState {
 
     pub fn set_git_changes(&self, changes: Vec<GitChangeInfo>) {
         self.write_inner().git_changes = changes;
+    }
+
+    // ========== Subagents (plan §C1) ==========
+
+    /// Display snapshot for the sidebar (cloned `Arc`, cheap).
+    pub fn subagents(&self) -> std::sync::Arc<[crate::ui_backend::types::SubagentInfo]> {
+        self.read_inner().subagents.clone()
+    }
+
+    pub fn subagent_queued(&self) -> Vec<crate::ui_backend::types::QueuedSubagent> {
+        self.read_inner().subagent_queued.clone()
+    }
+
+    pub fn subagent_version(&self) -> u64 {
+        self.read_inner().subagent_version
+    }
+
+    pub fn subagent_effective(&self) -> usize {
+        self.read_inner().subagent_effective
+    }
+
+    pub fn subagent_auto(&self) -> bool {
+        self.read_inner().subagent_auto
+    }
+
+    pub fn subagent_other_sessions(&self) -> usize {
+        self.read_inner().subagent_other_sessions
+    }
+
+    pub fn subagent_filter(&self) -> crate::ui_backend::types::SubagentFilter {
+        self.read_inner().subagent_filter
+    }
+
+    pub fn subagent_grant(&self) -> crate::ui_backend::types::SessionGrant {
+        self.read_inner().subagent_grant.clone()
+    }
+
+    pub fn subagent_detail_id(&self) -> Option<String> {
+        self.read_inner().subagent_detail_id.clone()
+    }
+
+    pub fn subagent_detail_input(&self) -> String {
+        self.read_inner().subagent_detail_input.clone()
+    }
+
+    pub fn subagent_detail_follow_tail(&self) -> bool {
+        self.read_inner().subagent_detail_follow_tail
+    }
+
+    pub fn subagent_settings_selected(&self) -> usize {
+        self.read_inner().subagent_settings_selected
+    }
+
+    pub fn subagent_settings(&self) -> crate::ui_backend::types::SubagentSettingsState {
+        self.read_inner().subagent_settings.clone()
+    }
+
+    pub fn set_subagent_settings(&self, settings: crate::ui_backend::types::SubagentSettingsState) {
+        self.write_inner().subagent_settings = settings;
+    }
+
+    /// Publish a fresh snapshot (bumps version so renderers can skip redraw).
+    pub fn set_subagents(
+        &self,
+        list: std::sync::Arc<[crate::ui_backend::types::SubagentInfo]>,
+        queued: Vec<crate::ui_backend::types::QueuedSubagent>,
+        effective: usize,
+        auto: bool,
+        other_sessions: usize,
+    ) {
+        let mut inner = self.write_inner();
+        inner.subagents = list;
+        inner.subagent_queued = queued;
+        inner.subagent_effective = effective;
+        inner.subagent_auto = auto;
+        inner.subagent_other_sessions = other_sessions;
+        inner.subagent_version = inner.subagent_version.wrapping_add(1);
+    }
+
+    pub fn set_subagent_filter(&self, filter: crate::ui_backend::types::SubagentFilter) {
+        self.write_inner().subagent_filter = filter;
+    }
+
+    pub fn set_subagent_grant(&self, grant: crate::ui_backend::types::SessionGrant) {
+        self.write_inner().subagent_grant = grant;
+    }
+
+    pub fn set_subagent_detail_id(&self, id: Option<String>) {
+        let mut inner = self.write_inner();
+        inner.subagent_detail_id = id;
+        // Opening the detail view resumes tailing; typing keeps it.
+        if inner.subagent_detail_id.is_some() {
+            inner.subagent_detail_follow_tail = true;
+        }
+    }
+
+    pub fn set_subagent_detail_input(&self, input: String) {
+        let mut inner = self.write_inner();
+        inner.subagent_detail_input = input;
+        inner.subagent_detail_follow_tail = false;
+    }
+
+    pub fn clear_subagent_detail_input(&self) {
+        let mut inner = self.write_inner();
+        inner.subagent_detail_input.clear();
+        inner.subagent_detail_follow_tail = true;
+    }
+
+    pub fn set_subagent_settings_selected(&self, selected: usize) {
+        self.write_inner().subagent_settings_selected = selected;
     }
 
     pub fn plugin_widgets(&self) -> Vec<crate::ui_backend::types::PluginWidgetInfo> {
@@ -3259,6 +3430,15 @@ mod tests {
 
         assert_eq!(state.message_cursor(), 0);
         assert_eq!(state.message_selection(), None);
+    }
+
+    #[test]
+    fn test_mouse_enabled_defaults_on_and_toggles() {
+        let state = SharedState::new();
+        assert!(state.mouse_enabled());
+        state.set_mouse_enabled(false);
+        assert!(!state.mouse_enabled());
+        assert!(!state.ui().mouse_enabled);
     }
 
     #[test]

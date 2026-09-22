@@ -306,6 +306,148 @@ pub struct TaskInfo {
     pub created_at: String,
 }
 
+/// Lifecycle status of a lightweight subagent (mirrors `agent::subagent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubagentStatus {
+    Queued,
+    Running,
+    WaitingInput,
+    Completed,
+    Failed,
+    Killed,
+}
+
+impl SubagentStatus {
+    /// Single-glyph status marker for the sidebar (matches plan §7 mocks).
+    pub fn glyph(&self) -> &'static str {
+        match self {
+            SubagentStatus::Queued => "○",
+            SubagentStatus::Running | SubagentStatus::WaitingInput => "●",
+            SubagentStatus::Completed => "✓",
+            SubagentStatus::Failed => "✗",
+            SubagentStatus::Killed => "⊗",
+        }
+    }
+}
+
+/// One subagent row for the sidebar (immutable display snapshot).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentInfo {
+    /// Full child id (`S:sub:uuid`).
+    pub id: String,
+    pub parent_session: String,
+    pub title: String,
+    pub status: SubagentStatus,
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+    /// `true` when model/effort differ from the parent (shows `*` marker).
+    pub overridden: bool,
+    /// Last log line, truncated for the row preview.
+    pub preview: String,
+    /// Retained tail for the detail modal (bounded, oldest dropped first).
+    #[serde(default)]
+    pub log_tail: Vec<String>,
+    /// Unread log chunks since the detail modal was last opened.
+    pub unread: u32,
+    pub elapsed_s: u64,
+    /// Parallel tool fan-out in use (`⇉ n/5`).
+    pub tools_used: usize,
+    pub tools_cap: usize,
+}
+
+/// A queued (not yet started) spawn, for the sidebar queue section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedSubagent {
+    pub id: String,
+    pub title: String,
+    pub position: usize,
+}
+
+/// Sidebar filter tabs for the Subagents section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SubagentFilter {
+    All,
+    /// Running + waiting + queued (default: quiet view).
+    #[default]
+    Active,
+    /// Completed + failed + killed.
+    Done,
+}
+
+/// Session-scoped subagent permission grant (plan §B5/C2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionGrant {
+    /// Agent ids with write-proxy approval (`*` = all agents in session).
+    pub write_agents: Vec<String>,
+    /// Agent ids with shell-proxy approval.
+    pub shell_agents: Vec<String>,
+    /// Auto-deny anything beyond read-only + safe shell, no prompts.
+    pub never_ask: bool,
+}
+
+/// Live-editable subagent settings snapshot (plan §C3 settings modal).
+///
+/// Mirrors `[agent.subagents]`, `[agent.parallel_tools]`, and
+/// `[agent.subagents.models]` from `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentSettingsState {
+    /// `auto` or `manual` (cap mode).
+    pub mode: String,
+    pub max_subagents: usize,
+    pub min_subagents: usize,
+    /// `auto` or `manual` (tool fan-out mode).
+    pub tools_mode: String,
+    pub max_parallel_tools: usize,
+    /// `inherit` or `pinned` (model inheritance).
+    pub pin_mode: String,
+    pub pin_provider: String,
+    pub pin_model: String,
+    pub pin_effort: String,
+}
+
+impl Default for SubagentSettingsState {
+    fn default() -> Self {
+        Self {
+            mode: "auto".to_string(),
+            max_subagents: 5,
+            min_subagents: 1,
+            tools_mode: "auto".to_string(),
+            max_parallel_tools: 5,
+            pin_mode: "inherit".to_string(),
+            pin_provider: String::new(),
+            pin_model: String::new(),
+            pin_effort: String::new(),
+        }
+    }
+}
+
+impl SubagentSettingsState {
+    /// One-line summary for the status bar / modal header.
+    pub fn badge(&self) -> String {
+        let model = if self.pin_mode == "pinned"
+            && (!self.pin_provider.is_empty() || !self.pin_model.is_empty())
+        {
+            format!(
+                "{}/{}",
+                if self.pin_provider.is_empty() {
+                    "inherit"
+                } else {
+                    &self.pin_provider
+                },
+                if self.pin_model.is_empty() {
+                    "inherit"
+                } else {
+                    &self.pin_model
+                }
+            )
+        } else {
+            "inherit".to_string()
+        };
+        format!("{}·{}·{}", self.mode, self.tools_mode, model)
+    }
+}
+
 /// Task status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {

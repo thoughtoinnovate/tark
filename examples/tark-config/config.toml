@@ -59,6 +59,33 @@ context_lines_after = 10
 max_iterations = 50
 timeout_seconds = 300
 
+[agent.subagents]
+# Subagent cap mode: "auto" tunes effective cap in [min,max] from resources,
+# "manual" pins it to max_subagents
+mode = "auto"
+max_subagents = 5
+min_subagents = 1
+poll_ms = 2000
+cooldown_ms = 8000
+min_free_mem_mb = 512
+subagent_max_iterations = 5
+subagent_timeout_secs = 120
+subagent_mode = "ask"
+
+[agent.subagents.models]
+# Model inheritance: "inherit" snapshots the parent agent, "pinned" uses
+# provider/model/effort below unless a task overrides them (empty = inherit)
+mode = "inherit"
+provider = ""
+model = ""
+effort = ""
+
+[agent.parallel_tools]
+# Per-agent parallel tool fan-out: "auto" tunes in [min,max], "manual" pins to max
+mode = "auto"
+max_parallel_tools = 5
+min_parallel_tools = 1
+
 [tools]
 shell_enabled = true
 

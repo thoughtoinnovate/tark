@@ -68,6 +68,7 @@ pub use types::{
 // Re-export for future use
 #[allow(unused_imports)]
 pub use types::{
-    ActiveToolInfo, AttachmentInfo, ContextFile, GitChangeInfo, GitStatus, Message, SessionInfo,
-    StatusInfo, TaskInfo, TaskStatus, ToolStatus,
+    ActiveToolInfo, AttachmentInfo, ContextFile, GitChangeInfo, GitStatus, Message, QueuedSubagent,
+    SessionGrant, SessionInfo, StatusInfo, SubagentFilter, SubagentInfo, SubagentSettingsState,
+    SubagentStatus, TaskInfo, TaskStatus, ToolStatus,
 };

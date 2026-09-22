@@ -569,6 +569,118 @@ fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+// ========== Parallel tool-call executor (plan §B4) ==========
+
+use crate::tools::{RiskLevel, ToolResult};
+use futures::stream::{self, StreamExt};
+use serde_json::Value;
+
+/// One turn's tool invocation, tagged with its original index so results
+/// merge back in LLM `tool_call_id` order (OpenAI pairing depends on it —
+/// sort by `index`, never by id string).
+#[derive(Debug, Clone)]
+pub struct PlannedToolCall {
+    pub index: usize,
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+/// Execution outcome preserving the original turn index.
+#[derive(Debug)]
+pub struct ExecutedToolCall {
+    pub index: usize,
+    pub id: String,
+    pub name: String,
+    pub result: Result<ToolResult>,
+}
+
+/// A read for fan-out purposes: known-`ReadOnly` tools plus unknown names
+/// (unknown tools fail fast inside `execute` with no side effects).
+fn is_parallelizable(tools: &ToolRegistry, name: &str) -> bool {
+    matches!(
+        tools.tool_risk_level(name),
+        None | Some(RiskLevel::ReadOnly)
+    )
+}
+
+/// Execute one turn's tool calls with bounded parallelism.
+///
+/// - Phase 1 (reads): `ReadOnly`/unknown calls run concurrently, bounded by
+///   `max_parallel` (clamped to ≥1). Permit acquisition itself times out so
+///   `max_parallel == 0` configurations fail loud instead of hanging.
+/// - Barrier: all reads join before any write starts.
+/// - Phase 2 (writes): `Write`/`Risky`/`Dangerous` calls run strictly
+///   sequentially in original index order (approval modals stay singular).
+/// - Merge: results sorted by original `index` — callers replay their
+///   existing sequential post-processing (duplicate detection, logging,
+///   context updates) unchanged.
+///
+/// Per-tool timeouts, interrupt polling, and panic recovery stay inside
+/// `ToolRegistry::execute`; panics escaping it (runtime shutdown) surface
+/// as `Err` for the affected call only.
+pub async fn execute_tool_calls(
+    tools: &ToolRegistry,
+    calls: &[ToolCall],
+    max_parallel: usize,
+) -> Vec<ExecutedToolCall> {
+    let max_parallel = max_parallel.max(1);
+    let planned: Vec<PlannedToolCall> = calls
+        .iter()
+        .enumerate()
+        .map(|(index, c)| PlannedToolCall {
+            index,
+            id: c.id.clone(),
+            name: c.name.clone(),
+            arguments: c.arguments.clone(),
+        })
+        .collect();
+    let (reads, writes): (Vec<_>, Vec<_>) = planned
+        .into_iter()
+        .partition(|c| is_parallelizable(tools, &c.name));
+
+    let mut out: Vec<ExecutedToolCall> = Vec::with_capacity(calls.len());
+
+    // Phase 1: reads in parallel, bounded by `max_parallel`.
+    //
+    // `buffer_unordered` (not `tokio::spawn`) so the shared `&ToolRegistry`
+    // borrow is allowed: no `'static` bound, no Send gymnastics. `execute`
+    // mutates nothing on the registry; per-tool timeouts, interrupt polling,
+    // and panic recovery stay inside it.
+    if !reads.is_empty() {
+        let mut parallel: Vec<ExecutedToolCall> = stream::iter(reads)
+            .map(|call| async move {
+                let result = tools.execute(&call.name, call.arguments).await;
+                ExecutedToolCall {
+                    index: call.index,
+                    id: call.id,
+                    name: call.name,
+                    result,
+                }
+            })
+            .buffer_unordered(max_parallel)
+            .collect()
+            .await;
+        out.append(&mut parallel);
+    }
+
+    // Phase 2: writes strictly sequential in index order.
+    let mut writes = writes;
+    writes.sort_by_key(|c| c.index);
+    for call in writes {
+        let result = tools.execute(&call.name, call.arguments).await;
+        out.push(ExecutedToolCall {
+            index: call.index,
+            id: call.id,
+            name: call.name,
+            result,
+        });
+    }
+
+    out.sort_by_key(|r| r.index);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +724,162 @@ mod tests {
 
         state.check_duplicate("overview", &args1, "result");
         assert!(!state.check_duplicate("overview", &args2, "result"));
+    }
+
+    // --- parallel executor tests (plan §B4) ---
+
+    use crate::tools::{Tool, ToolResult};
+    use std::sync::Arc as StdArc;
+
+    /// Read-only tool that sleeps, proving concurrency by wall-clock.
+    struct SleepTool {
+        name: &'static str,
+        ms: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for SleepTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "test sleeper"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(&self, _params: serde_json::Value) -> anyhow::Result<ToolResult> {
+            tokio::time::sleep(std::time::Duration::from_millis(self.ms)).await;
+            Ok(ToolResult::success(format!("done:{}", self.name)))
+        }
+    }
+
+    /// Write-risk sleeper: must run in the sequential phase.
+    struct WriteSleepTool(SleepTool);
+
+    #[async_trait::async_trait]
+    impl Tool for WriteSleepTool {
+        fn name(&self) -> &str {
+            self.0.name
+        }
+        fn description(&self) -> &str {
+            "test write sleeper"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn risk_level(&self) -> RiskLevel {
+            RiskLevel::Write
+        }
+        async fn execute(&self, params: serde_json::Value) -> anyhow::Result<ToolResult> {
+            self.0.execute(params).await
+        }
+    }
+
+    fn test_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+            thought_signature: None,
+        }
+    }
+
+    fn sleep_registry() -> crate::tools::ToolRegistry {
+        let temp = tempfile::TempDir::new().unwrap();
+        // Leak the tempdir so the registry's working dir outlives the call;
+        // the OS reclaims /tmp entries. (Only paths, no I/O, are used.)
+        let dir = temp.keep();
+        let mut reg = crate::tools::ToolRegistry::new(dir);
+        reg.register(StdArc::new(SleepTool {
+            name: "r1",
+            ms: 100,
+        }));
+        reg.register(StdArc::new(SleepTool {
+            name: "r2",
+            ms: 100,
+        }));
+        reg.register(StdArc::new(WriteSleepTool(SleepTool {
+            name: "w1",
+            ms: 100,
+        })));
+        reg
+    }
+
+    #[tokio::test]
+    async fn executor_preserves_index_order() {
+        let reg = sleep_registry();
+        let calls = vec![
+            test_call("c0", "r1"),
+            test_call("c1", "nope-missing"),
+            test_call("c2", "r2"),
+        ];
+        let out = execute_tool_calls(&reg, &calls, 3).await;
+        assert_eq!(out.len(), 3);
+        for (i, o) in out.iter().enumerate() {
+            assert_eq!(o.index, i, "result order must match turn order");
+        }
+        assert!(out[0].result.as_ref().unwrap().success);
+        // Unknown tools fail fast with a usable error (model can recover).
+        let err = out[1].result.as_ref().unwrap();
+        assert!(!err.success);
+        assert!(err.output.contains("Unknown tool"));
+        assert!(out[1].id == "c1");
+    }
+
+    #[tokio::test]
+    async fn executor_runs_reads_concurrently() {
+        let reg = sleep_registry();
+        let calls = vec![
+            test_call("c0", "r1"),
+            test_call("c1", "r2"),
+            test_call("c2", "r1"),
+        ];
+        let start = std::time::Instant::now();
+        let out = execute_tool_calls(&reg, &calls, 3).await;
+        let elapsed = start.elapsed();
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|o| o.result.as_ref().unwrap().success));
+        // Serial would take ~300ms; parallel ~100ms. Wide margin for loaded CI.
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "reads ran serially? elapsed={elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_sequences_writes_after_reads_barrier() {
+        let reg = sleep_registry();
+        // [read, write, read]: reads parallel (~100ms), then write (~100ms).
+        let calls = vec![
+            test_call("c0", "r1"),
+            test_call("c1", "w1"),
+            test_call("c2", "r2"),
+        ];
+        let start = std::time::Instant::now();
+        let out = execute_tool_calls(&reg, &calls, 3).await;
+        let elapsed = start.elapsed();
+        assert_eq!(out.len(), 3);
+        let order: Vec<usize> = out.iter().map(|o| o.index).collect();
+        assert_eq!(order, vec![0, 1, 2]);
+        assert!(out.iter().all(|o| o.result.as_ref().unwrap().success));
+        // Write ran exactly once in order (output mapping check).
+        assert!(out[1].result.as_ref().unwrap().output.contains("w1"));
+        // ~200ms expected; generous ceiling (serial would be ~300ms — the
+        // order assertion above, not timing, proves the barrier).
+        assert!(
+            elapsed < std::time::Duration::from_millis(900),
+            "elapsed={elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_clamps_zero_parallel_to_serial() {
+        let reg = sleep_registry();
+        let calls = vec![test_call("c0", "r1")];
+        let out = execute_tool_calls(&reg, &calls, 0).await;
+        assert_eq!(out.len(), 1);
+        assert!(out[0].result.as_ref().unwrap().success);
     }
 
     #[test]

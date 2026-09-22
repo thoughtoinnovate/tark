@@ -441,6 +441,20 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    /// Opt a registry into subagent spawning (parent agents only).
+    ///
+    /// Child registries never call this, so `spawn_task` cannot nest
+    /// (depth 0 enforced by construction, not convention).
+    pub fn enable_spawn_task(
+        &mut self,
+        manager: Arc<crate::agent::subagent::SubagentManager>,
+        parent: crate::agent::subagent::SharedParentCtx,
+    ) {
+        self.register(Arc::new(crate::tools::builtin::SpawnTaskTool::new(
+            manager, parent,
+        )));
+    }
+
     /// Set the default tool timeout (seconds)
     pub fn set_tool_timeout_secs(&mut self, secs: u64) {
         self.tool_timeout_secs = secs;

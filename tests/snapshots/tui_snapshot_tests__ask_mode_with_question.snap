@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshot_tests.rs
-assertion_line: 278
+assertion_line: 309
 expression: capture_buffer(&mut app)
 ---
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -20,12 +20,12 @@ expression: capture_buffer(&mut app)
 ││                                                             ││  LOADED CONTEXT (0)             ││
 ││                                                             ││                                 ││
 ││                                                             ││▶ Tasks 8                        ││
+││                                                             ││▼ ⑂ Subagents 0/5•               ││
+││                                                             ││                                 ││
 ││                                                             ││▶ 📋  Todo 0/0                    ││
 ││                                                             ││▶ Git Changes 5                  ││
-││                                                             ││▶ Plugins 0                      ││
-││                                                             ││  🐱  ▼                           ││
-│╰─────────────────────────────────────────────────────────────╯│                                 ││
-││● ·                Rate limited retrying in 1s               ││                                 ││
+│╰─────────────────────────────────────────────────────────────╯│▶ Plugins 0                      ││
+││● ·                Rate limited retrying in 1s               ││  🐱  ▼                           ││
 │╭ Prompt ─────────────────────────────────────────────────────╮│                                 ││
 ││What is rust?                                                ││                                 ││
 ││                                                             ││                                 ││

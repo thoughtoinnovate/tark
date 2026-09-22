@@ -15,12 +15,16 @@ use crate::ui_backend::PluginWidgetInfo;
 use crate::ui_backend::ThemePreset;
 use serde_json::Value;
 
-/// Sidebar panel type
+/// Sidebar panel type.
+///
+/// Discriminant order matches `SharedState::sidebar_selected_panel`
+/// (plan §C1): Subagents sits between Tasks and Todo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarPanel {
     Session,
     Context,
     Tasks,
+    Subagents,
     Todo,
     GitChanges,
     Plugins,
@@ -34,6 +38,7 @@ impl SidebarPanel {
             SidebarPanel::Session => "Session",
             SidebarPanel::Context => "Context",
             SidebarPanel::Tasks => "Tasks",
+            SidebarPanel::Subagents => "Subagents",
             SidebarPanel::Todo => "Todo",
             SidebarPanel::GitChanges => "Git Changes",
             SidebarPanel::Plugins => "Plugins",
@@ -47,6 +52,7 @@ impl SidebarPanel {
             SidebarPanel::Session => "📊",
             SidebarPanel::Context => "📂",
             SidebarPanel::Tasks => "✓",
+            SidebarPanel::Subagents => "⑂",
             SidebarPanel::Todo => "📋",
             SidebarPanel::GitChanges => "⎇",
             SidebarPanel::Plugins => "🔌",
@@ -108,16 +114,18 @@ fn format_tokens(tokens: usize) -> String {
 pub struct SidebarClickMap {
     /// VIM header strip (not clickable; clicks here resolve to nothing).
     pub header: Option<Rect>,
-    /// Panel header+content areas: 0=Session, 1=Context, 2=Tasks, 3=Todo,
-    /// 4=Git, 5=Plugins.
-    pub panels: [Option<Rect>; 6],
-    /// Theme footer strip (panel index 6 in selection terms).
+    /// Panel header+content areas: 0=Session, 1=Context, 2=Tasks,
+    /// 3=Subagents, 4=Todo, 5=Git, 6=Plugins.
+    pub panels: [Option<Rect>; 7],
+    /// Theme footer strip (panel index 7 in selection terms).
     pub footer: Option<Rect>,
     /// Visible clickable item rows per panel: `items[p][i]` is the screen row
     /// of the `i`-th clickable item in panel `p` (accounts for panel scroll).
     /// For the Tasks panel (`items[2]`), position `i` is the display task
-    /// index in render order (active, completed, queued).
-    pub items: [Vec<Rect>; 6],
+    /// index in render order (active, completed, queued). Subagents
+    /// (`items[3]`) registers title rows only — muted preview lines below
+    /// each row are display-only, so positions stay 1:1 with `selected_item`.
+    pub items: [Vec<Rect>; 7],
 }
 
 /// Sidebar widget
@@ -136,6 +144,12 @@ pub struct Sidebar<'a> {
     pub context_breakdown: ContextBreakdown,
     /// Tasks (high-level queued tasks)
     pub tasks: Vec<Task>,
+    /// Subagents (lightweight child runs, plan §C1)
+    pub subagents: Vec<crate::ui_backend::SubagentInfo>,
+    pub subagent_queued: Vec<crate::ui_backend::QueuedSubagent>,
+    pub subagent_effective: usize,
+    pub subagent_auto: bool,
+    pub subagent_other_sessions: usize,
     /// Todos (agent's immediate work items)
     pub todos: Vec<TodoItem>,
     /// Git changes
@@ -150,8 +164,10 @@ pub struct Sidebar<'a> {
     pub theme_preset: ThemePreset,
     /// Current theme name for display
     pub current_theme_name: String,
-    /// Which panels are expanded (Session, Context, Tasks, Todo, GitChanges, Plugins)
-    pub expanded_panels: [bool; 6],
+    /// Which panels are expanded (Session, Context, Tasks, Subagents, Todo,
+    /// GitChanges, Plugins; Theme footer exempt). Indices match
+    /// `SharedState::sidebar_selected_panel` (plan §C1).
+    pub expanded_panels: [bool; 7],
     /// Currently selected panel index
     pub selected_panel: usize,
     /// Selected item within panel (None = panel header selected)
@@ -163,7 +179,7 @@ pub struct Sidebar<'a> {
     /// Scroll offset for sidebar content
     pub scroll_offset: usize,
     /// Per-panel scroll offsets
-    pub panel_scrolls: [usize; 6],
+    pub panel_scrolls: [usize; 7],
     /// Index of task being dragged for reordering (within queued tasks)
     pub dragging_task_index: Option<usize>,
     /// Target position for the dragged task
@@ -194,6 +210,11 @@ impl<'a> Sidebar<'a> {
             tokens_total: 1_000_000,
             context_breakdown: ContextBreakdown::default(),
             tasks: Vec::new(),
+            subagents: Vec::new(),
+            subagent_queued: Vec::new(),
+            subagent_effective: 5,
+            subagent_auto: true,
+            subagent_other_sessions: 0,
             todos: Vec::new(),
             git_changes: Vec::new(),
             plugin_widgets: Vec::new(),
@@ -201,13 +222,13 @@ impl<'a> Sidebar<'a> {
             theme,
             theme_preset: ThemePreset::default(),
             current_theme_name: "Catppuccin Mocha".to_string(),
-            expanded_panels: [true, true, true, true, true, true], // All expanded by default
+            expanded_panels: [true, true, false, true, false, false, false],
             selected_panel: 0,
             selected_item: None,
             focused: false,
             vim_mode: crate::ui_backend::VimMode::Insert,
             scroll_offset: 0,
-            panel_scrolls: [0, 0, 0, 0, 0, 0],
+            panel_scrolls: [0, 0, 0, 0, 0, 0, 0],
             dragging_task_index: None,
             drag_target_index: None,
         }
@@ -235,9 +256,25 @@ impl<'a> Sidebar<'a> {
 
     pub fn expanded(mut self, panel: SidebarPanel, expanded: bool) -> Self {
         let idx = panel as usize;
-        if idx < 6 {
+        if idx < 7 {
             self.expanded_panels[idx] = expanded;
         }
+        self
+    }
+
+    pub fn subagents(
+        mut self,
+        subagents: Vec<crate::ui_backend::SubagentInfo>,
+        queued: Vec<crate::ui_backend::QueuedSubagent>,
+        effective: usize,
+        auto: bool,
+        other_sessions: usize,
+    ) -> Self {
+        self.subagents = subagents;
+        self.subagent_queued = queued;
+        self.subagent_effective = effective;
+        self.subagent_auto = auto;
+        self.subagent_other_sessions = other_sessions;
         self
     }
 
@@ -256,7 +293,7 @@ impl<'a> Sidebar<'a> {
         self
     }
 
-    pub fn panel_scrolls(mut self, scrolls: [usize; 6]) -> Self {
+    pub fn panel_scrolls(mut self, scrolls: [usize; 7]) -> Self {
         self.panel_scrolls = scrolls;
         self
     }
@@ -283,14 +320,15 @@ impl<'a> Sidebar<'a> {
 
     /// Navigate to next panel
     pub fn next_panel(&mut self) {
-        self.selected_panel = (self.selected_panel + 1) % 7; // 7 panels: Session, Context, Tasks, Todo, GitChanges, Plugins, Theme
+        // 8 panels: Session, Context, Tasks, Subagents, Todo, GitChanges, Plugins, Theme
+        self.selected_panel = (self.selected_panel + 1) % 8;
         self.selected_item = None;
     }
 
     /// Navigate to previous panel
     pub fn prev_panel(&mut self) {
         self.selected_panel = if self.selected_panel == 0 {
-            6
+            7
         } else {
             self.selected_panel - 1
         };
@@ -299,8 +337,8 @@ impl<'a> Sidebar<'a> {
 
     /// Navigate down within current panel
     pub fn next_item(&mut self) {
-        // Theme panel (index 6) doesn't have items to navigate
-        if self.selected_panel == 6 {
+        // Theme panel (index 7) doesn't have items to navigate
+        if self.selected_panel == 7 {
             return;
         }
 
@@ -312,10 +350,11 @@ impl<'a> Sidebar<'a> {
             0 => 3 + self.session_info.model_costs.len(), // name line + cost line + tokens line + per-model lines
             1 => self.context_files.len(),
             2 => self.tasks.len(),
-            3 => self.todos.len(), // Todo panel
-            4 => self.git_changes.len(),
-            5 => self.plugin_widgets.len(),
-            6 => 0, // Theme panel has no items
+            3 => self.subagents.len() + self.subagent_queued.len(), // Subagents panel
+            4 => self.todos.len(),                                  // Todo panel
+            5 => self.git_changes.len(),
+            6 => self.plugin_widgets.len(),
+            7 => 0, // Theme panel has no items
             _ => 0,
         };
 
@@ -341,6 +380,10 @@ impl<'a> Sidebar<'a> {
 
     /// Enter into selected panel (expand and select first item)
     pub fn enter_panel(&mut self) {
+        // Theme footer (index 7) has no expansion flag or items.
+        if self.selected_panel >= self.expanded_panels.len() {
+            return;
+        }
         if !self.expanded_panels[self.selected_panel] {
             self.expanded_panels[self.selected_panel] = true;
         }
@@ -555,10 +598,11 @@ impl<'a> Sidebar<'a> {
         let mut session_lines: Vec<Line> = vec![];
         let mut context_lines: Vec<Line> = vec![];
         let mut tasks_lines: Vec<Line> = vec![];
+        let mut subagents_lines: Vec<Line> = vec![];
         let mut todo_lines: Vec<Line> = vec![];
         let mut git_lines: Vec<Line> = vec![];
         let mut plugin_lines: Vec<Line> = vec![];
-        let mut panel_item_lines: [Vec<usize>; 6] = std::array::from_fn(|_| Vec::new());
+        let mut panel_item_lines: [Vec<usize>; 7] = std::array::from_fn(|_| Vec::new());
 
         // Available width for content (used for truncation)
         let content_width = inner.width;
@@ -1153,9 +1197,174 @@ impl<'a> Sidebar<'a> {
         }
         Self::push_line(&mut tasks_lines, &mut all_lines, Line::from(""));
 
+        // ======== SUBAGENTS SECTION (plan §C1) ========
+        // Panel index 3, between Tasks and Todo. Rows: active children then
+        // queued spawns. `panel_item_lines[3]` drives j/k + click mapping.
+        let subagents_expanded = self.expanded_panels[3];
+        let subagents_selected = self.selected_panel == 3 && self.selected_item.is_none();
+        let chevron = if subagents_expanded { "▼" } else { "▶" };
+        let running_count = self
+            .subagents
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.status,
+                    crate::ui_backend::SubagentStatus::Running
+                        | crate::ui_backend::SubagentStatus::WaitingInput
+                )
+            })
+            .count();
+        let total_count = self.subagents.len() + self.subagent_queued.len();
+
+        let subagents_header_color = if running_count > 0 {
+            self.theme.yellow // Amber while work is running
+        } else if self.focused && subagents_selected {
+            self.theme.cyan
+        } else {
+            self.theme.text_primary
+        };
+        let subagents_header_style = if self.focused && subagents_selected {
+            Style::default()
+                .fg(subagents_header_color)
+                .add_modifier(Modifier::BOLD)
+                .bg(self.theme.selection_bg)
+        } else {
+            Style::default()
+                .fg(subagents_header_color)
+                .add_modifier(Modifier::BOLD)
+        };
+        let sub_badge_color = if running_count > 0 {
+            self.theme.yellow
+        } else {
+            self.theme.blue
+        };
+        // Badge shows n/effective + mode marker (• auto, F manual).
+        let mode_marker = if self.subagent_auto { "•" } else { "F" };
+        Self::push_line(
+            &mut subagents_lines,
+            &mut all_lines,
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", chevron),
+                    Style::default().fg(self.theme.text_muted),
+                ),
+                Span::styled("⑂ Subagents", subagents_header_style),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{}/{}{}", total_count, self.subagent_effective, mode_marker),
+                    Style::default()
+                        .fg(self.theme.bg_main)
+                        .bg(sub_badge_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        );
+
+        if subagents_expanded {
+            let mut sub_idx = 0;
+            for agent in self.subagents.iter() {
+                let item_selected =
+                    self.focused && self.selected_panel == 3 && self.selected_item == Some(sub_idx);
+                let (glyph, glyph_color) = match agent.status {
+                    crate::ui_backend::SubagentStatus::Running
+                    | crate::ui_backend::SubagentStatus::WaitingInput => ("●", self.theme.green),
+                    crate::ui_backend::SubagentStatus::Queued => ("○", self.theme.text_muted),
+                    crate::ui_backend::SubagentStatus::Completed => ("✓", self.theme.green),
+                    crate::ui_backend::SubagentStatus::Failed => ("✗", self.theme.red),
+                    crate::ui_backend::SubagentStatus::Killed => ("⊗", self.theme.text_muted),
+                };
+                let item_style = if item_selected {
+                    Style::default()
+                        .fg(self.theme.cyan)
+                        .bg(self.theme.selection_bg)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                };
+                // Title + model·effort (* = override) + unread badge.
+                let model = if agent.overridden {
+                    format!("{}·{} *", agent.model, agent.effort)
+                } else {
+                    format!("{}·{}", agent.model, agent.effort)
+                };
+                let mut title = format!("{} {}", agent.title, model);
+                if agent.unread > 0 {
+                    title = format!("{} ●{}", title, agent.unread);
+                }
+                let truncated = Self::truncate_text(&title, content_width, 4);
+                let line_idx = subagents_lines.len();
+                panel_item_lines[3].push(line_idx);
+                Self::push_line(
+                    &mut subagents_lines,
+                    &mut all_lines,
+                    Line::from(vec![
+                        Span::styled(
+                            format!("  {} ", glyph),
+                            Style::default()
+                                .fg(glyph_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(truncated, item_style),
+                    ]),
+                );
+                // Muted preview line below the row.
+                Self::push_line(
+                    &mut subagents_lines,
+                    &mut all_lines,
+                    Line::from(vec![Span::styled(
+                        format!("    {}", agent.preview),
+                        Style::default().fg(self.theme.text_muted),
+                    )]),
+                );
+                sub_idx += 1;
+            }
+
+            for queued in self.subagent_queued.iter() {
+                let item_selected =
+                    self.focused && self.selected_panel == 3 && self.selected_item == Some(sub_idx);
+                let item_style = if item_selected {
+                    Style::default()
+                        .fg(self.theme.cyan)
+                        .bg(self.theme.selection_bg)
+                } else {
+                    Style::default().fg(self.theme.text_muted)
+                };
+                let truncated = Self::truncate_text(&queued.title, content_width, 4);
+                let line_idx = subagents_lines.len();
+                panel_item_lines[3].push(line_idx);
+                Self::push_line(
+                    &mut subagents_lines,
+                    &mut all_lines,
+                    Line::from(vec![
+                        Span::styled("  ○ ", Style::default().fg(self.theme.text_muted)),
+                        Span::styled(truncated, item_style),
+                        Span::styled(
+                            format!(" #{}", queued.position),
+                            Style::default().fg(self.theme.text_muted),
+                        ),
+                    ]),
+                );
+                sub_idx += 1;
+            }
+
+            if self.subagent_other_sessions > 0 {
+                Self::push_line(
+                    &mut subagents_lines,
+                    &mut all_lines,
+                    Line::from(vec![Span::styled(
+                        format!(
+                            "    (+{} other ⏳ — switch session to view)",
+                            self.subagent_other_sessions
+                        ),
+                        Style::default().fg(self.theme.text_muted),
+                    )]),
+                );
+            }
+        }
+        Self::push_line(&mut subagents_lines, &mut all_lines, Line::from(""));
+
         // ======== TODO SECTION ========
-        let todo_expanded = self.expanded_panels[3];
-        let todo_selected = self.selected_panel == 3 && self.selected_item.is_none();
+        let todo_expanded = self.expanded_panels[4];
+        let todo_selected = self.selected_panel == 4 && self.selected_item.is_none();
         let chevron = if todo_expanded { "▼" } else { "▶" };
         let todo_count = self.todos.len();
         let completed_todos = self
@@ -1227,7 +1436,7 @@ impl<'a> Sidebar<'a> {
             // Todo items
             for (i, item) in self.todos.iter().enumerate() {
                 let item_selected =
-                    self.focused && self.selected_panel == 3 && self.selected_item == Some(i);
+                    self.focused && self.selected_panel == 4 && self.selected_item == Some(i);
 
                 // Status icon and color
                 let (icon, status_color) = match item.status {
@@ -1261,7 +1470,7 @@ impl<'a> Sidebar<'a> {
                 let truncated_content = Self::truncate_text(&item.content, content_width, 4);
 
                 let line_idx = todo_lines.len();
-                panel_item_lines[3].push(line_idx);
+                panel_item_lines[4].push(line_idx);
                 Self::push_line(
                     &mut todo_lines,
                     &mut all_lines,
@@ -1275,8 +1484,8 @@ impl<'a> Sidebar<'a> {
         Self::push_line(&mut todo_lines, &mut all_lines, Line::from(""));
 
         // ======== GIT CHANGES SECTION ========
-        let git_expanded = self.expanded_panels[4];
-        let git_selected = self.selected_panel == 4 && self.selected_item.is_none();
+        let git_expanded = self.expanded_panels[5];
+        let git_selected = self.selected_panel == 5 && self.selected_item.is_none();
         let chevron = if git_expanded { "▼" } else { "▶" };
         let git_count = self.git_changes.len();
         let modified_count = self
@@ -1369,7 +1578,7 @@ impl<'a> Sidebar<'a> {
             // Show all files with status icons per mock design
             for (i, change) in self.git_changes.iter().enumerate() {
                 let item_selected =
-                    self.focused && self.selected_panel == 4 && self.selected_item == Some(i);
+                    self.focused && self.selected_panel == 5 && self.selected_item == Some(i);
                 let item_style = if item_selected {
                     Style::default()
                         .fg(self.theme.cyan)
@@ -1393,7 +1602,7 @@ impl<'a> Sidebar<'a> {
                 };
 
                 let line_idx = git_lines.len();
-                panel_item_lines[4].push(line_idx);
+                panel_item_lines[5].push(line_idx);
                 Self::push_line(
                     &mut git_lines,
                     &mut all_lines,
@@ -1415,8 +1624,8 @@ impl<'a> Sidebar<'a> {
         }
 
         // ======== PLUGINS SECTION ========
-        let plugins_expanded = self.expanded_panels[5];
-        let plugins_selected = self.selected_panel == 5 && self.selected_item.is_none();
+        let plugins_expanded = self.expanded_panels[6];
+        let plugins_selected = self.selected_panel == 6 && self.selected_item.is_none();
         let chevron = if plugins_expanded { "▼" } else { "▶" };
 
         let plugins_header_style = if self.focused && plugins_selected {
@@ -1463,7 +1672,7 @@ impl<'a> Sidebar<'a> {
             } else {
                 for (i, widget) in self.plugin_widgets.iter().enumerate() {
                     let item_selected =
-                        self.focused && self.selected_panel == 5 && self.selected_item == Some(i);
+                        self.focused && self.selected_panel == 6 && self.selected_item == Some(i);
                     let item_style = if item_selected {
                         Style::default()
                             .fg(self.theme.cyan)
@@ -1481,7 +1690,7 @@ impl<'a> Sidebar<'a> {
                         self.theme.text_muted
                     };
                     let line_idx = plugin_lines.len();
-                    panel_item_lines[5].push(line_idx);
+                    panel_item_lines[6].push(line_idx);
                     Self::push_line(
                         &mut plugin_lines,
                         &mut all_lines,
@@ -1540,7 +1749,7 @@ impl<'a> Sidebar<'a> {
         Self::push_line(&mut plugin_lines, &mut all_lines, Line::from(""));
 
         // Footer section: theme icon only, navigable
-        let footer_selected = self.focused && self.selected_panel == 6;
+        let footer_selected = self.focused && self.selected_panel == 7;
         let footer_style = if footer_selected {
             Style::default()
                 .fg(self.theme.cyan)
@@ -1574,6 +1783,11 @@ impl<'a> Sidebar<'a> {
         } else {
             1
         };
+        let subagents_height = if subagents_expanded {
+            subagents_lines.len() as u16
+        } else {
+            1
+        };
         let todo_height = if todo_expanded {
             todo_lines.len() as u16
         } else {
@@ -1595,6 +1809,7 @@ impl<'a> Sidebar<'a> {
             Constraint::Length(session_height),
             Constraint::Length(context_height),
             Constraint::Length(tasks_height),
+            Constraint::Length(subagents_height),
             Constraint::Length(todo_height),
             Constraint::Length(git_height),
             Constraint::Length(plugins_height),
@@ -1609,16 +1824,18 @@ impl<'a> Sidebar<'a> {
         let session_area = panel_chunks[1];
         let context_area = panel_chunks[2];
         let tasks_area = panel_chunks[3];
-        let todo_area = panel_chunks[4];
-        let git_area = panel_chunks[5];
-        let plugins_area = panel_chunks[6];
-        let footer_area = panel_chunks[7];
+        let subagents_area = panel_chunks[4];
+        let todo_area = panel_chunks[5];
+        let git_area = panel_chunks[6];
+        let plugins_area = panel_chunks[7];
+        let footer_area = panel_chunks[8];
 
-        let mut panel_selected_lines: [Option<usize>; 6] = [None, None, None, None, None, None];
+        let mut panel_selected_lines: [Option<usize>; 7] =
+            [None, None, None, None, None, None, None];
         if self.focused {
             if let Some(selected_item) = self.selected_item {
                 let panel_idx = self.selected_panel;
-                if panel_idx < 6 {
+                if panel_idx < 7 {
                     let indices = &panel_item_lines[panel_idx];
                     panel_selected_lines[panel_idx] = indices
                         .get(selected_item)
@@ -1629,7 +1846,7 @@ impl<'a> Sidebar<'a> {
         }
 
         let panel_has_focus = self.focused
-            && self.selected_panel < 6
+            && self.selected_panel < 7
             && (self.selected_item.is_some() || self.expanded_panels[self.selected_panel]);
 
         // Content lengths before the line vecs move into render_panel calls.
@@ -1637,6 +1854,7 @@ impl<'a> Sidebar<'a> {
             session_lines.len(),
             context_lines.len(),
             tasks_lines.len(),
+            subagents_lines.len(),
             todo_lines.len(),
             git_lines.len(),
             plugin_lines.len(),
@@ -1668,27 +1886,35 @@ impl<'a> Sidebar<'a> {
             buf,
         );
         self.render_panel(
-            todo_area,
-            todo_lines,
+            subagents_area,
+            subagents_lines,
             self.panel_scrolls[3],
             panel_selected_lines[3],
             panel_has_focus && self.selected_panel == 3,
             buf,
         );
         self.render_panel(
-            git_area,
-            git_lines,
+            todo_area,
+            todo_lines,
             self.panel_scrolls[4],
             panel_selected_lines[4],
             panel_has_focus && self.selected_panel == 4,
             buf,
         );
         self.render_panel(
-            plugins_area,
-            plugin_lines,
+            git_area,
+            git_lines,
             self.panel_scrolls[5],
             panel_selected_lines[5],
             panel_has_focus && self.selected_panel == 5,
+            buf,
+        );
+        self.render_panel(
+            plugins_area,
+            plugin_lines,
+            self.panel_scrolls[6],
+            panel_selected_lines[6],
+            panel_has_focus && self.selected_panel == 6,
             buf,
         );
         Paragraph::new(footer_lines).render(footer_area, buf);
@@ -1704,6 +1930,7 @@ impl<'a> Sidebar<'a> {
             session_area,
             context_area,
             tasks_area,
+            subagents_area,
             todo_area,
             git_area,
             plugins_area,
@@ -1781,20 +2008,22 @@ mod tests {
     use ratatui::Terminal;
 
     fn test_sidebar<'a>(theme: &'a Theme) -> Sidebar<'a> {
-        Sidebar::new(theme).tasks(vec![
-            Task {
-                name: "active one".to_string(),
-                status: TaskStatus::Active,
-            },
-            Task {
-                name: "done one".to_string(),
-                status: TaskStatus::Completed,
-            },
-            Task {
-                name: "queued one".to_string(),
-                status: TaskStatus::Queued,
-            },
-        ])
+        Sidebar::new(theme)
+            .expanded(SidebarPanel::Tasks, true)
+            .tasks(vec![
+                Task {
+                    name: "active one".to_string(),
+                    status: TaskStatus::Active,
+                },
+                Task {
+                    name: "done one".to_string(),
+                    status: TaskStatus::Completed,
+                },
+                Task {
+                    name: "queued one".to_string(),
+                    status: TaskStatus::Queued,
+                },
+            ])
     }
 
     fn render_map(terminal: &mut Terminal<TestBackend>, sidebar: Sidebar) -> SidebarClickMap {
@@ -1860,5 +2089,101 @@ mod tests {
         let tasks_rect = map.panels[2].expect("tasks panel rect");
         assert_eq!(tasks_rect.height, 1); // header only
         assert!(map.items[2].is_empty());
+    }
+
+    fn test_agent(
+        title: &str,
+        status: crate::ui_backend::SubagentStatus,
+    ) -> crate::ui_backend::SubagentInfo {
+        crate::ui_backend::SubagentInfo {
+            id: format!("s:sub:{title}"),
+            parent_session: "s".to_string(),
+            title: title.to_string(),
+            status,
+            provider: "openrouter".to_string(),
+            model: "sonnet".to_string(),
+            effort: "med".to_string(),
+            overridden: false,
+            preview: "rg…".to_string(),
+            log_tail: vec!["✓ rg → 14 hits".to_string()],
+            unread: 0,
+            elapsed_s: 12,
+            tools_used: 4,
+            tools_cap: 5,
+        }
+    }
+
+    #[test]
+    fn subagents_section_renders_between_tasks_and_todo() {
+        // Tall area so panels are not clipped.
+        let backend = TestBackend::new(40, 200);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let theme = Theme::default();
+        let sidebar = Sidebar::new(&theme).subagents(
+            vec![
+                test_agent("explore-auth", crate::ui_backend::SubagentStatus::Running),
+                test_agent("check-policy", crate::ui_backend::SubagentStatus::Completed),
+            ],
+            vec![crate::ui_backend::QueuedSubagent {
+                id: "s:sub:q".to_string(),
+                title: "write-migr".to_string(),
+                position: 1,
+            }],
+            5,
+            true,
+            0,
+        );
+        let map = render_map(&mut terminal, sidebar);
+
+        // Panel index 3 sits strictly between Tasks (2) and Todo (4).
+        let tasks = map.panels[2].expect("tasks rect");
+        let subs = map.panels[3].expect("subagents rect");
+        let todo = map.panels[4].expect("todo rect");
+        assert!(subs.y >= tasks.y + tasks.height);
+        assert!(todo.y >= subs.y + subs.height);
+        // Two active rows + one queued row registered 1:1 (previews excluded).
+        assert_eq!(map.items[3].len(), 3);
+    }
+
+    #[test]
+    fn subagents_panel_cycles_at_index_three() {
+        let theme = Theme::default();
+        let mut sidebar = Sidebar::new(&theme);
+        // Session(0) → Context(1) → Tasks(2) → Subagents(3).
+        for _ in 0..3 {
+            sidebar.next_panel();
+        }
+        assert_eq!(sidebar.selected_panel, 3);
+        // Full cycle covers all 8 panels and wraps.
+        for _ in 0..5 {
+            sidebar.next_panel();
+        }
+        assert_eq!(sidebar.selected_panel, 0);
+        sidebar.prev_panel();
+        assert_eq!(sidebar.selected_panel, 7);
+    }
+
+    #[test]
+    fn subagents_next_item_counts_rows_plus_queue() {
+        let theme = Theme::default();
+        let mut sidebar = Sidebar::new(&theme).subagents(
+            vec![test_agent("a", crate::ui_backend::SubagentStatus::Running)],
+            vec![crate::ui_backend::QueuedSubagent {
+                id: "s:sub:q".to_string(),
+                title: "b".to_string(),
+                position: 1,
+            }],
+            5,
+            true,
+            0,
+        );
+        sidebar.selected_panel = 3;
+        sidebar.next_item();
+        assert_eq!(sidebar.selected_item, Some(0));
+        sidebar.next_item();
+        assert_eq!(sidebar.selected_item, Some(1));
+        // Only two navigable rows — clamped.
+        sidebar.next_item();
+        assert_eq!(sidebar.selected_item, Some(1));
     }
 }

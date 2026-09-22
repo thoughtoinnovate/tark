@@ -381,6 +381,23 @@ impl TarkStorage {
         Ok(path)
     }
 
+    /// Persist one subagent run transcript (plan §B5).
+    ///
+    /// Stored at `sessions/<parent>/conversations/sub_<uuid>.json` with
+    /// `context_transient: true` so restore paths never load it into a
+    /// live context. Atomic via write-temp-then-rename; safe to call from
+    /// the single-owner subagent actor (per-session serialization).
+    pub fn save_sub_transcript(&self, doc: &SubTranscript) -> Result<PathBuf> {
+        let dir = self.session_conversations_dir(&doc.parent_session);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("sub_{}.json", sanitize_sub_id(&doc.child_id)));
+        let content = serde_json::to_string_pretty(doc)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, content)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(path)
+    }
+
     /// Load a chat session by ID
     pub fn load_session(&self, id: &str) -> Result<ChatSession> {
         // Try new directory structure first
@@ -2064,6 +2081,56 @@ pub struct SessionMessage {
     pub segments: Vec<SegmentRecord>,
 }
 
+/// One subagent run transcript (plan §B5).
+///
+/// Always written with `context_transient: true`: restore paths must never
+/// load these into a live context (see `ConversationManager::restore_from_session`
+/// and `ChatAgent::restore_from_session`, both of which filter the flag).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubTranscript {
+    /// Owning parent session id (`S` in `S:sub:uuid`).
+    pub parent_session: String,
+    /// Full child id (`S:sub:uuid`).
+    pub child_id: String,
+    pub title: String,
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+    pub subroot: PathBuf,
+    /// Terminal status: `completed` | `failed` | `killed`.
+    pub status: String,
+    /// Truncated summary handed to the parent (≤ `SUMMARY_CHAR_BUDGET`).
+    pub summary: String,
+    /// Retained ring-buffer log tail (bounded, oldest dropped first).
+    pub log_tail: Vec<String>,
+    pub elapsed_s: u64,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    /// Always true — restore paths filter on this flag.
+    pub context_transient: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Filename-safe projection of a child id (`S:sub:uuid` → `uuid` part,
+/// anything else → alphanumerics, rest → `_`).
+pub fn sanitize_sub_id(child_id: &str) -> String {
+    if let Some(uuid) = child_id.rsplit(':').next() {
+        if !uuid.is_empty() && uuid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return uuid.to_string();
+        }
+    }
+    child_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Metadata for an archived conversation chunk.
 #[derive(Debug, Clone)]
 pub struct ArchiveChunkMeta {
@@ -3551,6 +3618,62 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.len(), 2);
         assert!(loaded[0].context_transient);
+    }
+
+    #[test]
+    fn test_sub_transcript_roundtrip_is_transient() {
+        let temp = TempDir::new().unwrap();
+        let storage = TarkStorage::new(temp.path()).unwrap();
+
+        let mut session = ChatSession::new();
+        session.add_message("user", "Hello");
+        storage.save_session(&session).unwrap();
+
+        let doc = SubTranscript {
+            parent_session: session.id.clone(),
+            child_id: format!(
+                "{}:sub:{}",
+                session.id, "12345678-1234-1234-1234-123456789abc"
+            ),
+            title: "explore auth".to_string(),
+            provider: "openrouter".to_string(),
+            model: "sonnet".to_string(),
+            effort: "medium".to_string(),
+            subroot: PathBuf::from("/w/src/auth"),
+            status: "completed".to_string(),
+            summary: "14 callers".to_string(),
+            log_tail: vec!["✓ rg → 14 hits".to_string()],
+            elapsed_s: 18,
+            input_tokens: 100,
+            output_tokens: 50,
+            context_transient: true,
+            created_at: chrono::Utc::now(),
+        };
+        let path = storage.save_sub_transcript(&doc).unwrap();
+        assert!(path.ends_with("sub_12345678-1234-1234-1234-123456789abc.json"));
+
+        // Atomic write: no temp leftovers, valid JSON with transient flag.
+        assert!(!path.with_extension("json.tmp").exists());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let loaded: SubTranscript = serde_json::from_str(&raw).unwrap();
+        assert!(loaded.context_transient);
+        assert_eq!(loaded.summary, "14 callers");
+        assert_eq!(loaded.log_tail.len(), 1);
+
+        // Parent session untouched: still exactly its own message.
+        let reloaded = storage.load_session(&session.id).unwrap();
+        assert_eq!(reloaded.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_sanitize_sub_id() {
+        assert_eq!(
+            sanitize_sub_id("sess:sub:12345678-1234-1234-1234-123456789abc"),
+            "12345678-1234-1234-1234-123456789abc"
+        );
+        assert_eq!(sanitize_sub_id("plain"), "plain");
+        assert_eq!(sanitize_sub_id("../../evil"), "______evil");
+        assert_eq!(sanitize_sub_id(""), "");
     }
 
     #[test]

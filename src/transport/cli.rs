@@ -1113,14 +1113,25 @@ pub async fn run_tui_new(
     tracing::debug!("Raw mode enabled");
 
     let mut stdout = stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )
-    .context("Failed to enter alternate screen. Terminal may not support this feature.")?;
-    tracing::debug!("Entered alternate screen with mouse capture enabled");
+    // Mouse capture is opt-out via `tui.mouse = false` so the terminal can
+    // handle selection natively. Toggle at runtime with Alt+M or /mouse.
+    let mouse_enabled = Config::load().unwrap_or_default().tui.mouse;
+    if mouse_enabled {
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )
+        .context("Failed to enter alternate screen. Terminal may not support this feature.")?;
+    } else {
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)
+            .context("Failed to enter alternate screen. Terminal may not support this feature.")?;
+    }
+    tracing::debug!(
+        "Entered alternate screen (mouse capture {})",
+        if mouse_enabled { "enabled" } else { "disabled" }
+    );
 
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)

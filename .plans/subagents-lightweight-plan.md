@@ -1,14 +1,17 @@
 # Tark lightweight subagents — executable build plan v1
 
 **Artifact:** Implementation plan for session-tied lightweight subagents + TUI monitor
-**Status:** Approved (auto 1..5 default, manual override)
+**Status:** Implemented (auto 1..5 default, manual override)
+**Last verified:** 2026-09-22 — `cargo check` clean, `fmt --check` clean,
+`clippy --all-targets` zero warnings, `cargo test --lib` 739/0,
+snapshots 22/22, widget integration 49/49.
 **Scope:** Rust backend (`src/`) + TUI (`src/tui_new/`, `src/ui_backend/`) + config + docs. No editor plugin changes.
 **Non-goals v1:** nested spawn (depth 0), child Write/Shell auto-run (proxied prompt only), git-worktree isolation, CSV batch jobs, remote mirroring of child logs.
 
 ## 0. Locked decisions (do not re-debate)
 
 1. `auto` default ON bounds `1..5`; `manual` = fixed `max`. Same dual-mode for `parallel_tools 1..5` per agent (parent + each child). `ollama` auto-caps to 2.
-2. Light = `tokio::spawn`, isolated `ConversationContext`, `Ask` read-only, `max_iterations 5`, `timeout 120s`, `WorkspaceCap(subroot ⊆ parent root)`, shared `Arc<dyn LlmProvider>`. No nesting (`spawn_task` absent in child registry). Summaries 200–500 tok only, never raw transcripts.
+2. Light = `tokio::spawn`, isolated `ConversationContext`, `Ask` read-only, `max_iterations 5`, `timeout 120s`, `WorkspaceCap::with_roots([subroot])` with kernel-enforced `open_read/open_write/remove_file/ensure_parent_dir` (openat2 `BENEATH|NO_MAGICLINKS|NO_XDEV` on Linux via `rustix`, `O_NOFOLLOW` fallback elsewhere; errors as `CapIoError::Denied|Io` — landed in working tree), shared `Arc<dyn LlmProvider>`. No nesting (`spawn_task` absent in child registry). Summaries 200–500 tok only, never raw transcripts.
 3. Models: inherit parent snapshot at spawn → per-task override `provider/model/effort`; settings `pinned` wins unless overridden. Invalid override falls back to parent + log line. Effort via `ThinkSettings::resolve` / `resolve_auto` (`src/llm/types.rs:45,64`).
 4. Session affinity: `child_id = S:sub:uuid`, `session_tag = S`. Switch session = detach + hide (`+m other` hint), restore tail on return. Close/archive/delete/quit session = kill pool (`interrupt flag + handle.abort() + killpg`). Transcripts to `sessions/<S>/conversations/sub_<id>.json` with `context_transient:true` (excluded from restore/compact); parent `session.json` gets summary-only `Tool` message. Cost: `usage.db` row `S:sub:id`. Approvals: `policy.db` patterns `S:sub:id` and `S:sub:*`, never leak across sessions.
 5. Spawn only if independent + non-conflicting + substantive; else return `⊘ inline:<reason>` (subroot overlap / similarity >0.9 dup / trivial <50 chars / write-conflict). Read-heavy first; write-heavy stays inline in parent.
@@ -23,7 +26,7 @@
 |---|-----|-------|
 | 1 | `ToolRegistry::for_mode_with_services` accepts `interrupt: Option<Arc<AtomicBool>>` — child gets fresh `Arc::new(AtomicBool::new(false))`. Additionally pass `tokio_util::sync::CancellationToken` (child-linked to global) into registry; replace 50ms `INTERRUPT_POLL_INTERVAL` spin with `select! { tool_fut, _ = token.cancelled() }` | `tools/mod.rs:181,203,264,297,617` |
 | 2 | ALL SQLite (`PolicyEngine::check_approval`, `TarkMemory`, `UsageTracker::log_usage`) via `tokio::task::spawn_blocking`. NEW single `UsageWriter` actor: `mpsc::channel(256)` + batch `INSERT` coalesce; children send `UsageEvent`, never touch `Connection` directly | `tools/policy/engine.rs`, `tools/mod.rs:489`, `tools/builtin/memory.rs`, `storage/usage.rs`, new `agent/usage_writer.rs` or `storage/usage_actor.rs` |
-| 3 | `ResourceMonitor`: `OnceLock<usize>` cached `available_parallelism()`; `cfg(target_os="linux")` `/proc/meminfo|loadavg` reads via `spawn_blocking` every 2s + 200ms jitter; non-Linux fallback = `cpu/2`, no mem/load. Output via `watch::Sender<usize>` (latest-value, no queue). `manual` = monitor off, `effective=max`. `ollama → min(max,2)` short-circuit before sampling | `agent/resources.rs` new |
+| 3 | `ResourceMonitor`: `OnceLock<usize>` cached `available_parallelism()`; `cfg(target_os="linux")` `/proc/meminfo|loadavg` reads via `spawn_blocking` every 2s + 200ms jitter; non-Linux fallback = `cpu/2`, no mem/load. Output via `watch::Sender<usize>` (latest-value, no queue). `manual` = monitor off, `effective=max`. `ollama → min(max,2)` short-circuit before sampling. NOTE: `rustix 0.38` (Linux-only) already in tree for workspace openat2 — resources stays dep-free (std only) | `agent/resources.rs` new |
 | 4 | `SubagentManager` actor owns `pools: HashMap<String, PerSessionPool>` (no `DashMap`, no `RwLock` — single owner task). `PerSessionPool.children: HashMap<Id, Arc<ChildView>>` replace-on-update (copy-on-write). `JoinHandle`s live ONLY in actor, never in shared maps | `agent/subagent.rs` new |
 | 5 | Child log ring: `struct RingBuf { buf: VecDeque<Arc<str>>, bytes: usize, cap: 65536 }`, `with_capacity(100)`, push drops oldest. UI receives tail slice only, never full-log clone | `agent/subagent.rs` Child struct |
 | 6 | `spawn_task` tool schema includes `timeout_secs: 180` (separate from default 60s tool timeout) | `tools/builtin/subagent.rs` new |
@@ -97,10 +100,12 @@ struct ManagerInner {
 
 // ── pure fns (testable, no I/O) ─────────────────────────────
 pub fn derive_child_registry_spec(parent: &ParentSpec) -> ChildRegistrySpec {
-    // mode=Ask, tools=readonly+safe_shell+propose (cached Arc<[ToolDefinition]> per mode),
+    // mode=Ask, tools=readonly+safe_shell+propose (cached Arc<[ToolDefinition]> per mode;
+    //   file tools already migrated to cap.open_read/open_write/remove_file in tree —
+    //   child Cap MUST be passed into every file-tool constructor, never working_dir.join),
     // trust=Careful, no spawn_task/ask_user, fresh interrupt + CancellationToken child,
-    // fresh Todo/Thinking trackers, WorkspaceCap(subroot), session_id=S:sub:uuid,
-    // token_cap=8k, auto_compact=OFF (fail-fast summarize-and-exit)
+    // fresh Todo/Thinking trackers, WorkspaceCap::with_roots([subroot]) (kernel openat2),
+    // session_id=S:sub:uuid, token_cap=8k, auto_compact=OFF (fail-fast summarize-and-exit)
 }
 pub fn worthiness(req: &SpawnReq, siblings: &[ChildView]) -> Result<(), String> {
     // O(1): xxhash64(prompt) equality → deny "dup"
@@ -190,6 +195,26 @@ cargo build --release && cargo fmt --all -- --check && cargo clippy --all-target
 Lua tests only if plugin touched (not in v1). Update `README.md` (features/keys/config), `AGENTS.md` arch tables, `///` doc comments. Keep versions in sync if release (`Cargo.toml` + neovim `init.lua`). Commit `feat: lightweight session-tied subagents (auto 1..5)` only when explicitly requested.
 
 ## 5. Parallelization plan
+
+**Status (2026-09-21): A1 ✓, B1 ✓, B2+B3 ✓, B4 ✓, B5 ✓, C1 ✓,
+C3-widgets ✓ — `check`/`fmt` clean, `clippy` zero warnings, full lib
+737 pass (only 2 failures: concurrent worker's `command_autocomplete`
+counts, untouched by this plan). Snapshots: 14 regenerated (Subagents
+line), 22/22 green. Remaining: C2 (service poller + command arms +
+approval proxy + grant trigger), C3-keys (keymap, `/subagents`,
+settings apply, status bar), §4.**
+
+**C1 implementation notes (deviations recorded):**
+- Panel renumber 7→8 panels (Subagents=3, Todo=4, Git=5, Plugins=6,
+  Theme=7); `expanded_panels`/`panel_scrolls`/`panel_item_lines`/
+  clickmap `[6]→[7]`; controller + widget nav + mouse estimate updated.
+- Legacy `app.rs` TUI kept compiling with minimal arms (BFF-only gap
+  documented in code); its arrays stay `[bool;6]` with index mapping.
+- Hot-path deviation: flat `SharedState` fields + `subagent_version`
+  (no nested lock — 10Hz producer coalescing makes per-chunk writes moot).
+- `SubagentInfo` carries `log_tail` so the detail modal needs no
+  placeholder pass.
+- `SlashCommand`/`Ctrl+G`/settings-apply land with C3-keys, not C1.
 
 Critical path: `A1 → B1+B2+B3 → B4+B5 → C1 → C2 → C3 → §4`. Max safe fan-out **2 workers** (backend + frontend; 3-way risks same-file contention in `state.rs/renderer.rs/service.rs`):
 - **Batch 1 (after A1):** W1=`B1 resources + B4 parallel-tools` (both touch agent loop but disjoint files: `resources.rs` vs `tool_orchestrator.rs/chat.rs`), W2=`B2 manager + B3 spawn_task + B5 storage/usage-actor` (single owner — manager header shapes storage + tool). Merge on `ChildView/SpawnReq/ManagerCmd` freeze first.

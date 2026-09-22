@@ -231,6 +231,10 @@ impl Default for CompletionConfig {
 pub struct AgentConfig {
     pub max_iterations: usize,
     pub working_directory: String,
+    /// Lightweight subagent caps (`[agent.subagents]`, plan §A1)
+    pub subagents: SubagentConfig,
+    /// Per-agent parallel tool fan-out (`[agent.parallel_tools]`, plan §A1)
+    pub parallel_tools: ParallelToolsConfig,
 }
 
 impl Default for AgentConfig {
@@ -238,7 +242,152 @@ impl Default for AgentConfig {
         Self {
             max_iterations: 50, // Increased from 25 for complex multi-step tasks
             working_directory: ".".to_string(),
+            subagents: SubagentConfig::default(),
+            parallel_tools: ParallelToolsConfig::default(),
         }
+    }
+}
+
+/// Lightweight subagent limits (`[agent.subagents]`).
+///
+/// `mode = "auto"` (default) tunes the effective cap in `[min,max]` from
+/// system resources; `mode = "manual"` pins it to `max_subagents`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubagentConfig {
+    pub mode: String,
+    pub max_subagents: usize,
+    pub min_subagents: usize,
+    pub poll_ms: u64,
+    pub cooldown_ms: u64,
+    pub min_free_mem_mb: u64,
+    pub subagent_max_iterations: usize,
+    pub subagent_timeout_secs: u64,
+    pub subagent_mode: String,
+    /// Model inheritance (`[agent.subagents.models]`): `inherit` snapshots the
+    /// parent, `pinned` uses the pin below unless a task overrides it.
+    pub models: SubagentModelPin,
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            mode: "auto".to_string(),
+            max_subagents: 5,
+            min_subagents: 1,
+            poll_ms: 2000,
+            cooldown_ms: 8000,
+            min_free_mem_mb: 512,
+            subagent_max_iterations: 5,
+            subagent_timeout_secs: 120,
+            subagent_mode: "ask".to_string(),
+            models: SubagentModelPin::default(),
+        }
+    }
+}
+
+impl SubagentConfig {
+    /// Clamp `min <= max <= 16` and normalize `mode`; warn on correction.
+    /// Returns the validated `(min, max)`.
+    pub fn validated_bounds(&self) -> (usize, usize) {
+        let mut max = self.max_subagents.clamp(1, 16);
+        let mut min = self.min_subagents.clamp(1, 16);
+        if min > max {
+            tracing::warn!(
+                "subagents.min_subagents ({}) > max_subagents ({}), clamping min to max",
+                min,
+                max
+            );
+            min = max;
+        }
+        let _ = &mut max;
+        (min, max)
+    }
+
+    /// Effective cap for `manual` mode (validated `max`).
+    pub fn manual_effective(&self) -> usize {
+        self.validated_bounds().1
+    }
+
+    /// Whether `auto` tuning is enabled (`mode == "auto"`).
+    pub fn is_auto(&self) -> bool {
+        self.mode.eq_ignore_ascii_case("auto")
+    }
+}
+
+/// Per-agent parallel tool fan-out (`[agent.parallel_tools]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ParallelToolsConfig {
+    pub mode: String,
+    pub max_parallel_tools: usize,
+    pub min_parallel_tools: usize,
+}
+
+impl Default for ParallelToolsConfig {
+    fn default() -> Self {
+        Self {
+            mode: "auto".to_string(),
+            max_parallel_tools: 5,
+            min_parallel_tools: 1,
+        }
+    }
+}
+
+impl ParallelToolsConfig {
+    /// Clamp `min <= max <= 8`; warn on correction.
+    pub fn validated_bounds(&self) -> (usize, usize) {
+        let max = self.max_parallel_tools.clamp(1, 8);
+        let mut min = self.min_parallel_tools.clamp(1, 8);
+        if min > max {
+            tracing::warn!(
+                "parallel_tools.min_parallel_tools ({}) > max_parallel_tools ({}), clamping min to max",
+                min,
+                max
+            );
+            min = max;
+        }
+        (min, max)
+    }
+
+    /// Effective cap for `manual` mode (validated `max`, at least 1).
+    pub fn manual_effective(&self) -> usize {
+        self.validated_bounds().1.max(1)
+    }
+
+    /// Whether `auto` tuning is enabled.
+    pub fn is_auto(&self) -> bool {
+        self.mode.eq_ignore_ascii_case("auto")
+    }
+}
+
+/// Model inheritance for subagents (`[agent.subagents.models]`).
+///
+/// Empty `provider`/`model`/`effort` means "inherit parent snapshot".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubagentModelPin {
+    pub mode: String,
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+}
+
+impl Default for SubagentModelPin {
+    fn default() -> Self {
+        Self {
+            mode: "inherit".to_string(),
+            provider: String::new(),
+            model: String::new(),
+            effort: String::new(),
+        }
+    }
+}
+
+impl SubagentModelPin {
+    /// Whether a pinned model should be used (`mode == "pinned"`).
+    pub fn is_pinned(&self) -> bool {
+        self.mode.eq_ignore_ascii_case("pinned")
     }
 }
 
@@ -271,6 +420,9 @@ pub struct TuiConfig {
     pub plugin_widget_poll_ms: u64,
     /// Session usage poll interval in milliseconds (0 to disable)
     pub session_usage_poll_ms: u64,
+    /// Enable terminal mouse capture (clicks/scroll handled by the app).
+    /// Disable for native terminal text selection.
+    pub mouse: bool,
 }
 
 impl Default for TuiConfig {
@@ -279,6 +431,7 @@ impl Default for TuiConfig {
             theme: "catppuccin_mocha".to_string(),
             plugin_widget_poll_ms: 2000,
             session_usage_poll_ms: 1000,
+            mouse: true,
         }
     }
 }
@@ -500,8 +653,65 @@ impl Default for ThinkingConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{ThinkingConfig, TuiConfig};
+    use super::{ParallelToolsConfig, SubagentConfig, SubagentModelPin, ThinkingConfig, TuiConfig};
     use crate::ui_backend::ThemePreset;
+
+    #[test]
+    fn subagent_defaults() {
+        let cfg = SubagentConfig::default();
+        assert_eq!(cfg.mode, "auto");
+        assert!(cfg.is_auto());
+        assert_eq!(cfg.validated_bounds(), (1, 5));
+        assert_eq!(cfg.manual_effective(), 5);
+        assert_eq!(cfg.subagent_max_iterations, 5);
+        assert_eq!(cfg.subagent_timeout_secs, 120);
+        assert_eq!(cfg.subagent_mode, "ask");
+        assert!(!cfg.models.is_pinned());
+    }
+
+    #[test]
+    fn subagent_invalid_clamp() {
+        let cfg = SubagentConfig {
+            min_subagents: 9,
+            max_subagents: 3,
+            ..SubagentConfig::default()
+        };
+        assert_eq!(cfg.validated_bounds(), (3, 3));
+
+        let cfg = SubagentConfig {
+            min_subagents: 0,
+            max_subagents: 99,
+            ..SubagentConfig::default()
+        };
+        assert_eq!(cfg.validated_bounds(), (1, 16));
+    }
+
+    #[test]
+    fn parallel_tools_defaults_and_clamp() {
+        let cfg = ParallelToolsConfig::default();
+        assert!(cfg.is_auto());
+        assert_eq!(cfg.validated_bounds(), (1, 5));
+        assert_eq!(cfg.manual_effective(), 5);
+
+        let cfg = ParallelToolsConfig {
+            min_parallel_tools: 7,
+            max_parallel_tools: 2,
+            ..ParallelToolsConfig::default()
+        };
+        assert_eq!(cfg.validated_bounds(), (2, 2));
+    }
+
+    #[test]
+    fn subagent_model_pin_modes() {
+        assert!(!SubagentModelPin::default().is_pinned());
+        let pinned = SubagentModelPin {
+            mode: "pinned".to_string(),
+            provider: "openrouter".to_string(),
+            model: "haiku".to_string(),
+            effort: "low".to_string(),
+        };
+        assert!(pinned.is_pinned());
+    }
 
     #[test]
     fn thinking_default_is_medium() {
@@ -555,6 +765,7 @@ mod tests {
                 theme: theme_str.to_string(),
                 plugin_widget_poll_ms: 2000,
                 session_usage_poll_ms: 1000,
+                mouse: true,
             };
             assert_eq!(
                 cfg.theme_preset(),
@@ -571,11 +782,13 @@ mod tests {
             theme: "NORD".to_string(),
             plugin_widget_poll_ms: 2000,
             session_usage_poll_ms: 1000,
+            mouse: true,
         };
         let cfg_mixed = TuiConfig {
             theme: "Tokyo_Night".to_string(),
             plugin_widget_poll_ms: 2000,
             session_usage_poll_ms: 1000,
+            mouse: true,
         };
 
         assert_eq!(cfg_upper.theme_preset(), ThemePreset::Nord);
@@ -588,9 +801,19 @@ mod tests {
             theme: "invalid_theme".to_string(),
             plugin_widget_poll_ms: 2000,
             session_usage_poll_ms: 1000,
+            mouse: true,
         };
         // Should fall back to default
         assert_eq!(cfg.theme_preset(), ThemePreset::default());
+    }
+
+    #[test]
+    fn tui_config_mouse_defaults_to_enabled() {
+        let cfg = TuiConfig::default();
+        assert!(cfg.mouse);
+        // Missing key in TOML must deserialize to enabled (backward compatible)
+        let parsed: TuiConfig = toml::from_str("theme = \"nord\"").unwrap_or_default();
+        assert!(parsed.mouse);
     }
 }
 

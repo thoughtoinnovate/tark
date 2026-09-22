@@ -173,9 +173,9 @@ fn test_sidebar_scrollbar_visible_when_overflowing() {
 
     let mut focused_sidebar = Sidebar::new(&theme)
         .focused(true)
-        .selected_panel(4)
+        .selected_panel(5)
         .git_changes(changes.clone());
-    focused_sidebar.expanded_panels = [false, false, false, false, true, false];
+    focused_sidebar.expanded_panels = [false, false, false, false, false, true, false];
     focused_sidebar.selected_item = Some(0);
 
     let output = render_widget(focused_sidebar, 40, 16);
@@ -195,9 +195,9 @@ fn test_sidebar_scrollbar_visible_when_overflowing() {
 
     let mut unfocused_sidebar = Sidebar::new(&theme)
         .focused(false)
-        .selected_panel(4)
+        .selected_panel(5)
         .git_changes(unfocused_changes);
-    unfocused_sidebar.expanded_panels = [false, false, false, false, true, false];
+    unfocused_sidebar.expanded_panels = [false, false, false, false, false, true, false];
     unfocused_sidebar.selected_item = Some(0);
 
     let output = render_widget(unfocused_sidebar, 40, 16);
@@ -224,7 +224,7 @@ fn test_sidebar_session_model_line_highlights_when_selected() {
         .focused(true)
         .selected_panel(0)
         .session_info(session_info);
-    sidebar.expanded_panels = [true, false, false, false, false, false];
+    sidebar.expanded_panels = [true, false, false, false, false, false, false];
     sidebar.selected_item = Some(3);
 
     let buf = render_widget_buffer(sidebar, 40, 12);

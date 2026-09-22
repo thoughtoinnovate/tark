@@ -20,7 +20,7 @@ use crate::ui_backend::approval::ApprovalCardState;
 use crate::ui_backend::questionnaire::QuestionnaireState;
 use crate::ui_backend::session_service::SessionService;
 use crate::ui_backend::UiRenderer;
-use crate::ui_backend::{AppEvent, AppService, Command, SharedState};
+use crate::ui_backend::{AppEvent, AppService, Command, FocusedComponent, ModalType, SharedState};
 
 use super::modals::{ModalManager, ModalResult};
 use super::renderer::TuiRenderer;
@@ -150,6 +150,8 @@ impl<B: Backend> TuiController<B> {
 
         let state = self.service.state().clone();
         let config = crate::config::Config::load().unwrap_or_default();
+        // Sync mouse-capture flag with config (cli.rs enables capture conditionally).
+        state.set_mouse_enabled(config.tui.mouse);
         self.spawn_session_usage_poller(state.clone(), config.tui.session_usage_poll_ms);
         self.spawn_interaction_task(state.clone());
         self.spawn_remote_mirror_task(state.clone(), &config);
@@ -1585,7 +1587,7 @@ impl<B: Backend> TuiController<B> {
                 }
             }
             if text.starts_with('/') {
-                return self.handle_slash_command(text).await;
+                return Box::pin(self.handle_slash_command(text)).await;
             }
         }
 
@@ -1661,6 +1663,31 @@ impl<B: Backend> TuiController<B> {
                 } else {
                     state.set_active_modal(Some(crate::ui_backend::ModalType::Help));
                     state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
+                }
+                return Ok(());
+            }
+            Command::ToggleMouse => {
+                // Terminal capture is a TUI-level concern: flip the crossterm
+                // capture here, record the flag in shared state. When off,
+                // the terminal handles the mouse natively (text selection).
+                let enabled = !state.mouse_enabled();
+                let result = if enabled {
+                    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
+                } else {
+                    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)
+                };
+                match result {
+                    Ok(_) => {
+                        state.set_mouse_enabled(enabled);
+                        state.set_status_message(Some(if enabled {
+                            "Mouse capture enabled".to_string()
+                        } else {
+                            "Mouse capture off — drag to select text natively".to_string()
+                        }));
+                    }
+                    Err(e) => {
+                        state.set_status_message(Some(format!("Mouse toggle failed: {}", e)));
+                    }
                 }
                 return Ok(());
             }
@@ -2487,7 +2514,8 @@ impl<B: Backend> TuiController<B> {
             }
             Command::ToggleSidebarPanel(panel_idx) => {
                 // Toggle the expansion state of a sidebar panel
-                if *panel_idx < 6 {
+                // (0..6 flaggable; 7 Theme footer exempt)
+                if *panel_idx < 7 {
                     let mut panels = state.sidebar_expanded_panels();
                     panels[*panel_idx] = !panels[*panel_idx];
                     state.set_sidebar_expanded_panels(panels);
@@ -2511,7 +2539,8 @@ impl<B: Backend> TuiController<B> {
                     }
                 } else {
                     // At panel level - navigate to previous panel
-                    let new_panel = if panel_idx == 0 { 6 } else { panel_idx - 1 };
+                    // (0 Session … 7 Theme footer; Subagents is 3)
+                    let new_panel = if panel_idx == 0 { 7 } else { panel_idx - 1 };
                     state.set_sidebar_selected_panel(new_panel);
                 }
                 return Ok(());
@@ -2543,9 +2572,11 @@ impl<B: Backend> TuiController<B> {
                         0 => session_item_count, // Session: name, cost, tokens, per-model lines
                         1 => state.context_files().len(),
                         2 => state.tasks().len(),
-                        3 => todo_count,
-                        4 => state.git_changes().len(),
-                        5 => state.plugin_widgets().len(),
+                        // Subagents panel: active rows + queued rows
+                        3 => state.subagents().len() + state.subagent_queued().len(),
+                        4 => todo_count,
+                        5 => state.git_changes().len(),
+                        6 => state.plugin_widgets().len(),
                         _ => 0,
                     };
                     if let Some(item) = selected_item {
@@ -2555,7 +2586,7 @@ impl<B: Backend> TuiController<B> {
                     }
                 } else {
                     // At panel level - navigate to next panel
-                    let new_panel = (panel_idx + 1) % 7;
+                    let new_panel = (panel_idx + 1) % 8;
                     state.set_sidebar_selected_panel(new_panel);
                 }
                 return Ok(());
@@ -2564,7 +2595,7 @@ impl<B: Backend> TuiController<B> {
                 let panel_idx = state.sidebar_selected_panel();
                 let selected_item = state.sidebar_selected_item();
 
-                if panel_idx == 6 {
+                if panel_idx == 7 {
                     // Theme panel - open theme picker
                     state.set_theme_before_preview(Some(state.theme()));
                     state.set_active_modal(Some(crate::ui_backend::ModalType::ThemePicker));
@@ -2577,7 +2608,7 @@ impl<B: Backend> TuiController<B> {
                         state.set_theme_picker_selected(idx);
                     }
                     state.set_theme_picker_filter(String::new());
-                } else if selected_item.is_none() && panel_idx < 6 {
+                } else if selected_item.is_none() && panel_idx < 7 {
                     // At panel header - toggle expansion
                     let mut panels = state.sidebar_expanded_panels();
                     panels[panel_idx] = !panels[panel_idx];
@@ -2591,8 +2622,8 @@ impl<B: Backend> TuiController<B> {
                 let panel_idx = state.sidebar_selected_panel();
                 let panels = state.sidebar_expanded_panels();
 
-                // Theme panel (6) opens theme picker instead of entering
-                if panel_idx == 6 {
+                // Theme panel (7) opens theme picker instead of entering
+                if panel_idx == 7 {
                     state.set_theme_before_preview(Some(state.theme()));
                     state.set_active_modal(Some(crate::ui_backend::ModalType::ThemePicker));
                     state.set_focused_component(crate::ui_backend::FocusedComponent::Modal);
@@ -2603,7 +2634,7 @@ impl<B: Backend> TuiController<B> {
                         state.set_theme_picker_selected(idx);
                     }
                     state.set_theme_picker_filter(String::new());
-                } else if panel_idx < 6 && panels[panel_idx] {
+                } else if panel_idx < 7 && panels[panel_idx] {
                     // Panel is expanded - enter and select first item
                     let session_item_count = {
                         let mut count = 2usize + state.session_cost_by_model().len();
@@ -2625,15 +2656,16 @@ impl<B: Backend> TuiController<B> {
                         0 => session_item_count, // Session: name, cost, tokens, per-model lines
                         1 => state.context_files().len(),
                         2 => state.tasks().len(),
-                        3 => todo_count,
-                        4 => state.git_changes().len(),
-                        5 => state.plugin_widgets().len(),
+                        3 => state.subagents().len() + state.subagent_queued().len(),
+                        4 => todo_count,
+                        5 => state.git_changes().len(),
+                        6 => state.plugin_widgets().len(),
                         _ => 0,
                     };
                     if max_items > 0 {
                         state.set_sidebar_selected_item(Some(0));
                     }
-                } else if panel_idx < 6 {
+                } else if panel_idx < 7 {
                     // Panel is collapsed - expand it first
                     let mut panels = state.sidebar_expanded_panels();
                     panels[panel_idx] = true;
@@ -4299,6 +4331,40 @@ impl<B: Backend> TuiController<B> {
                     return Ok(());
                 }
             }
+            "/copy" => {
+                // Copy the most recent assistant message to the clipboard
+                let ok = self.service.yank_last_response();
+                let detail = state
+                    .status_message()
+                    .unwrap_or_else(|| "Copy failed".to_string());
+                use crate::ui_backend::{Message, MessageRole};
+                let msg = Message {
+                    role: MessageRole::System,
+                    content: if ok {
+                        "Copied last response to clipboard".to_string()
+                    } else {
+                        format!("Copy failed: {}", detail)
+                    },
+                    thinking: None,
+                    context_transient: true,
+                    tool_calls: Vec::new(),
+                    segments: Vec::new(),
+                    tool_args: None,
+                    collapsed: false,
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    remote: false,
+                    provider: None,
+                    model: None,
+                };
+                state.add_message(msg);
+                state.clear_input();
+                return Ok(());
+            }
+            "/mouse" => {
+                self.handle_command(Command::ToggleMouse).await?;
+                state.clear_input();
+                return Ok(());
+            }
             cmd if cmd.starts_with("/export") => {
                 // Export session: /export [path]
                 let path_str = cmd.trim_start_matches("/export").trim();
@@ -4310,7 +4376,11 @@ impl<B: Backend> TuiController<B> {
                 } else {
                     path_str.to_string()
                 };
-                match self.service.export_session(std::path::Path::new(&path)) {
+                match self
+                    .service
+                    .export_session(std::path::Path::new(&path))
+                    .await
+                {
                     Ok(_) => {
                         use crate::ui_backend::{Message, MessageRole};
                         let msg = Message {
@@ -4406,6 +4476,40 @@ impl<B: Backend> TuiController<B> {
                     state.clear_input();
                     return Ok(());
                 }
+            }
+            "/agents" => {
+                // Open the subagents settings/detail modal
+                if !self
+                    .service
+                    .subagent_manager
+                    .running_counts()
+                    .await
+                    .is_empty()
+                    || !self.service.state().subagent_queued().is_empty()
+                {
+                    self.service
+                        .state()
+                        .set_active_modal(Some(ModalType::SubagentDetail));
+                    self.service
+                        .state()
+                        .set_focused_component(FocusedComponent::Modal);
+                    self.service.state().set_subagent_detail_id(Some(
+                        self.service
+                            .state()
+                            .subagents()
+                            .first()
+                            .map(|s| s.id.clone())
+                            .unwrap_or_default(),
+                    ));
+                } else {
+                    self.service
+                        .state()
+                        .set_active_modal(Some(ModalType::SubagentSettings));
+                    self.service
+                        .state()
+                        .set_focused_component(FocusedComponent::Modal);
+                }
+                state.clear_input();
             }
             _ => {
                 // Unknown command - add system message

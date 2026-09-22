@@ -828,6 +828,11 @@ pub struct ChatAgent {
     plan_service: Option<Arc<PlanService>>,
     /// Cached plan context for Build mode system prompt injection
     plan_context: Option<PlanContext>,
+    /// Max parallel tool executions per turn (plan §B4; default 5).
+    /// Read-only tools fan out up to this bound; writes stay sequential.
+    /// Wired to `[agent.parallel_tools]` in Phase C; subagent children
+    /// inherit the same default.
+    max_parallel_tools: usize,
 }
 
 impl ChatAgent {
@@ -862,7 +867,13 @@ impl ChatAgent {
             thinking_tool_enabled: false, // Off by default, enabled via /thinking command
             plan_service: None,
             plan_context: None,
+            max_parallel_tools: 5,
         }
+    }
+
+    /// Set the per-turn parallel tool fan-out bound (clamped to ≥1 at use).
+    pub fn set_max_parallel_tools(&mut self, max: usize) {
+        self.max_parallel_tools = max;
     }
 
     /// Set the plan service for Build mode plan context injection
@@ -1636,8 +1647,17 @@ impl ChatAgent {
                     // First, add the assistant message with tool calls (required for OpenAI)
                     self.context.add_assistant_tool_calls(limited_calls);
 
-                    // Execute each tool call and add results
-                    for (i, call) in limited_calls.iter().enumerate() {
+                    // Phase 1: execute the turn's tools (reads in parallel,
+                    // writes sequential after a barrier). Phase 2 below
+                    // replays status/logging/context updates in turn order.
+                    let turn_results = super::tool_orchestrator::execute_tool_calls(
+                        &self.tools,
+                        limited_calls,
+                        self.max_parallel_tools,
+                    )
+                    .await;
+                    for outcome in turn_results {
+                        let (i, call) = (outcome.index, &limited_calls[outcome.index]);
                         // Update status with current tool and argument
                         let tool_arg = match &call.name[..] {
                             "grep" | "file_search" => call
@@ -1704,12 +1724,9 @@ impl ChatAgent {
                             self.mode
                         );
 
-                        // Execute tool - registry isolation ensures only available tools can run
-                        // If tool doesn't exist in registry, execute() returns "Unknown tool" error
-                        let result = self
-                            .tools
-                            .execute(&call.name, call.arguments.clone())
-                            .await?;
+                        // Executed up-front in parallel; `?` preserves the
+                        // original error-propagation semantics.
+                        let result = outcome.result?;
 
                         // Check for duplicate results to prevent infinite loops
                         let result_key = format!(
@@ -1834,8 +1851,16 @@ impl ChatAgent {
                     // Add assistant message with tool calls (required for OpenAI)
                     self.context.add_assistant_tool_calls(limited_tool_calls);
 
-                    // Execute tool calls
-                    for (i, call) in limited_tool_calls.iter().enumerate() {
+                    // Phase 1: parallel execution; phase 2 replays
+                    // status/logging/context updates in turn order.
+                    let turn_results = super::tool_orchestrator::execute_tool_calls(
+                        &self.tools,
+                        limited_tool_calls,
+                        self.max_parallel_tools,
+                    )
+                    .await;
+                    for outcome in turn_results {
+                        let (i, call) = (outcome.index, &limited_tool_calls[outcome.index]);
                         // Update status with current tool
                         let tool_arg = match &call.name[..] {
                             "grep" | "file_search" => call
@@ -1901,11 +1926,9 @@ impl ChatAgent {
                             self.mode
                         );
 
-                        // Execute tool - registry isolation ensures only available tools can run
-                        let result = self
-                            .tools
-                            .execute(&call.name, call.arguments.clone())
-                            .await?;
+                        // Executed up-front in parallel; `?` preserves the
+                        // original error-propagation semantics.
+                        let result = outcome.result?;
 
                         // Log if a tool was rejected
                         if !result.success && result.output.contains("Unknown tool") {
@@ -2151,34 +2174,32 @@ impl ChatAgent {
                     // First, add the assistant message with tool calls
                     self.context.add_assistant_tool_calls(limited_calls);
 
-                    // Execute each tool call with interrupt checking
-                    for (i, call) in limited_calls.iter().enumerate() {
-                        // Check for interrupt before each tool execution
-                        if interrupt_check() {
-                            tracing::info!(
-                                "Agent interrupted before tool execution: {}",
-                                call.name
-                            );
-                            self.context.add_tool_result(
-                                &call.id,
-                                sanitize_tool_output_for_context(
-                                    &call.name,
-                                    "⚠️ Interrupted by user",
-                                ),
-                            );
-                            return Ok(AgentResponse {
-                                text: format!(
-                                    "⚠️ *Operation interrupted before executing {}*",
-                                    call.name
-                                ),
-                                thinking: None,
-                                tool_calls_made: total_tool_calls,
-                                tool_call_log,
-                                auto_compacted,
-                                context_usage_percent: self.context.usage_percentage(),
-                                usage: Some(accumulated_usage),
-                            });
-                        }
+                    // Single interrupt gate before the turn's tools fire;
+                    // mid-batch interrupts are still honored per-tool by the
+                    // registry's shared interrupt flag. Post-processing below
+                    // replays sequentially in turn order.
+                    if interrupt_check() {
+                        tracing::info!("Agent interrupted before tool batch execution");
+                        self.context.add_assistant("⚠️ Interrupted by user");
+                        return Ok(AgentResponse {
+                            text: "⚠️ *Operation interrupted before executing tools*".to_string(),
+                            thinking: None,
+                            tool_calls_made: total_tool_calls,
+                            tool_call_log,
+                            auto_compacted,
+                            context_usage_percent: self.context.usage_percentage(),
+                            usage: Some(accumulated_usage),
+                        });
+                    }
+
+                    let turn_results = super::tool_orchestrator::execute_tool_calls(
+                        &self.tools,
+                        limited_calls,
+                        self.max_parallel_tools,
+                    )
+                    .await;
+                    for outcome in turn_results {
+                        let (i, call) = (outcome.index, &limited_calls[outcome.index]);
 
                         // Update status
                         let tool_arg = call
@@ -2203,10 +2224,9 @@ impl ChatAgent {
                             self.mode
                         );
 
-                        let result = self
-                            .tools
-                            .execute(&call.name, call.arguments.clone())
-                            .await?;
+                        // Executed up-front in parallel; `?` preserves the
+                        // original error-propagation semantics.
+                        let result = outcome.result?;
 
                         // Check for duplicate results to prevent infinite loops
                         let result_key = format!(
@@ -2325,33 +2345,30 @@ impl ChatAgent {
 
                     self.context.add_assistant_tool_calls(limited_tool_calls);
 
-                    // Execute tool calls with interrupt checking
-                    for (i, call) in limited_tool_calls.iter().enumerate() {
-                        if interrupt_check() {
-                            tracing::info!(
-                                "Agent interrupted before tool execution: {}",
-                                call.name
-                            );
-                            self.context.add_tool_result(
-                                &call.id,
-                                sanitize_tool_output_for_context(
-                                    &call.name,
-                                    "⚠️ Interrupted by user",
-                                ),
-                            );
-                            return Ok(AgentResponse {
-                                text: format!(
-                                    "⚠️ *Operation interrupted before executing {}*",
-                                    call.name
-                                ),
-                                thinking: None,
-                                tool_calls_made: total_tool_calls,
-                                tool_call_log,
-                                auto_compacted,
-                                context_usage_percent: self.context.usage_percentage(),
-                                usage: Some(accumulated_usage),
-                            });
-                        }
+                    // Single interrupt gate before the turn's tools fire (see
+                    // ToolCalls arm above for rationale); replay in order.
+                    if interrupt_check() {
+                        tracing::info!("Agent interrupted before tool batch execution");
+                        self.context.add_assistant("⚠️ Interrupted by user");
+                        return Ok(AgentResponse {
+                            text: "⚠️ *Operation interrupted before executing tools*".to_string(),
+                            thinking: None,
+                            tool_calls_made: total_tool_calls,
+                            tool_call_log,
+                            auto_compacted,
+                            context_usage_percent: self.context.usage_percentage(),
+                            usage: Some(accumulated_usage),
+                        });
+                    }
+
+                    let turn_results = super::tool_orchestrator::execute_tool_calls(
+                        &self.tools,
+                        limited_tool_calls,
+                        self.max_parallel_tools,
+                    )
+                    .await;
+                    for outcome in turn_results {
+                        let (i, call) = (outcome.index, &limited_tool_calls[outcome.index]);
 
                         let tool_arg = call
                             .arguments
@@ -2368,10 +2385,9 @@ impl ChatAgent {
                         )
                         .await;
 
-                        let result = self
-                            .tools
-                            .execute(&call.name, call.arguments.clone())
-                            .await?;
+                        // Executed up-front in parallel; `?` preserves the
+                        // original error-propagation semantics.
+                        let result = outcome.result?;
 
                         // Check for duplicate results to prevent infinite loops
                         let result_key = format!(
@@ -2697,40 +2713,55 @@ impl ChatAgent {
                     // First, add the assistant message with tool calls (required for OpenAI)
                     self.context.add_assistant_tool_calls(limited_calls);
 
-                    // Execute each tool call and add results
+                    // Single interrupt gate before the batch fires (mid-batch
+                    // interrupts are still honored per-tool by the shared
+                    // flag inside the registry). Start notifications go out
+                    // for the whole batch; completions replay in turn order.
+                    if interrupt_check() {
+                        tracing::info!("Agent interrupted before tool batch");
+                        self.context
+                            .add_assistant("⚠️ *Operation interrupted by user*");
+                        return Ok(AgentResponse {
+                            text: "⚠️ *Operation interrupted by user*".to_string(),
+                            thinking: None,
+                            tool_calls_made: total_tool_calls,
+                            tool_call_log,
+                            auto_compacted,
+                            context_usage_percent: self.context.usage_percentage(),
+                            usage: Some(accumulated_usage),
+                        });
+                    }
+
+                    // Commit any accumulated text before this tool invocation
+                    // This creates a separate bubble per tool boundary (if text exists)
+                    if !accumulated_text.is_empty() {
+                        on_commit_intermediate(accumulated_text.clone());
+                        accumulated_text.clear();
+                    }
+
+                    // Notify about all tool calls up-front (batched starts)
                     for call in limited_calls.iter() {
-                        // Check for interrupt before each tool
-                        if interrupt_check() {
-                            tracing::info!("Agent interrupted before tool: {}", call.name);
-                            self.context
-                                .add_assistant("⚠️ *Operation interrupted by user*");
-                            return Ok(AgentResponse {
-                                text: "⚠️ *Operation interrupted by user*".to_string(),
-                                thinking: None,
-                                tool_calls_made: total_tool_calls,
-                                tool_call_log,
-                                auto_compacted,
-                                context_usage_percent: self.context.usage_percentage(),
-                                usage: Some(accumulated_usage),
-                            });
-                        }
-
-                        // Commit any accumulated text before this tool invocation
-                        // This creates a separate bubble per tool boundary (if text exists)
-                        if !accumulated_text.is_empty() {
-                            on_commit_intermediate(accumulated_text.clone());
-                            accumulated_text.clear();
-                        }
-
-                        // Notify about tool call
                         let args_preview = serde_json::to_string(&call.arguments)
                             .unwrap_or_else(|_| "{}".to_string());
                         on_tool_call(call.name.clone(), args_preview);
+                    }
 
-                        // Yield to allow the UI to render the "tool started" state
-                        tokio::task::yield_now().await;
+                    // Yield to allow the UI to render the "tool started" state
+                    tokio::task::yield_now().await;
 
-                        // Check for think tool loops (step-1 repetition)
+                    let turn_results = super::tool_orchestrator::execute_tool_calls(
+                        &self.tools,
+                        limited_calls,
+                        self.max_parallel_tools,
+                    )
+                    .await;
+                    for outcome in turn_results {
+                        let call = &limited_calls[outcome.index];
+
+                        // Check for think tool loops (step-1 repetition).
+                        // Runs before the (already executed) result is used;
+                        // a loop discards one side-effect-free think call and
+                        // reuses the exact warning path below.
                         if call.name == "think" && think_detector.check_and_record(&call.arguments)
                         {
                             tracing::warn!(
@@ -2760,30 +2791,31 @@ impl ChatAgent {
                             self.mode
                         );
 
-                        let result =
-                            match self.tools.execute(&call.name, call.arguments.clone()).await {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    // Surface error as tool result so model can recover
-                                    let msg = format!("Tool '{}' failed: {}", call.name, e);
-                                    on_tool_complete(call.name.clone(), msg.clone(), false);
-                                    self.context.add_tool_result(
-                                        &call.id,
-                                        sanitize_tool_output_for_context(&call.name, &msg),
-                                    );
-                                    let preview = if msg.len() > 200 {
-                                        format!("{}...", truncate_at_char_boundary(&msg, 200))
-                                    } else {
-                                        msg
-                                    };
-                                    tool_call_log.push(ToolCallLog {
-                                        tool: call.name.clone(),
-                                        args: call.arguments.clone(),
-                                        result_preview: preview,
-                                    });
-                                    continue;
-                                }
-                            };
+                        // Executed up-front in parallel; the `Err` arm below
+                        // preserves the original recover-inline semantics.
+                        let result = match outcome.result {
+                            Ok(r) => r,
+                            Err(e) => {
+                                // Surface error as tool result so model can recover
+                                let msg = format!("Tool '{}' failed: {}", call.name, e);
+                                on_tool_complete(call.name.clone(), msg.clone(), false);
+                                self.context.add_tool_result(
+                                    &call.id,
+                                    sanitize_tool_output_for_context(&call.name, &msg),
+                                );
+                                let preview = if msg.len() > 200 {
+                                    format!("{}...", truncate_at_char_boundary(&msg, 200))
+                                } else {
+                                    msg
+                                };
+                                tool_call_log.push(ToolCallLog {
+                                    tool: call.name.clone(),
+                                    args: call.arguments.clone(),
+                                    result_preview: preview,
+                                });
+                                continue;
+                            }
+                        };
 
                         // Check for duplicate results to prevent infinite loops
                         let result_key = format!(
@@ -2902,53 +2934,66 @@ impl ChatAgent {
                         );
                     }
 
-                    for call in limited_tool_calls {
-                        if interrupt_check() {
-                            tracing::info!("Agent interrupted before tool: {}", call.name);
-                            self.context
-                                .add_assistant("⚠️ *Operation interrupted by user*");
-                            return Ok(AgentResponse {
-                                text: "⚠️ *Operation interrupted by user*".to_string(),
-                                thinking: None,
-                                tool_calls_made: total_tool_calls,
-                                tool_call_log,
-                                auto_compacted,
-                                context_usage_percent: self.context.usage_percentage(),
-                                usage: Some(accumulated_usage),
-                            });
-                        }
+                    // Single interrupt gate before the batch fires (same
+                    // rationale as the ToolCalls arm above).
+                    if interrupt_check() {
+                        tracing::info!("Agent interrupted before tool batch");
+                        self.context
+                            .add_assistant("⚠️ *Operation interrupted by user*");
+                        return Ok(AgentResponse {
+                            text: "⚠️ *Operation interrupted by user*".to_string(),
+                            thinking: None,
+                            tool_calls_made: total_tool_calls,
+                            tool_call_log,
+                            auto_compacted,
+                            context_usage_percent: self.context.usage_percentage(),
+                            usage: Some(accumulated_usage),
+                        });
+                    }
 
+                    for call in limited_tool_calls.iter() {
                         let args_preview = serde_json::to_string(&call.arguments)
                             .unwrap_or_else(|_| "{}".to_string());
                         on_tool_call(call.name.clone(), args_preview);
+                    }
 
-                        // Yield to allow the UI to render the "tool started" state
-                        tokio::task::yield_now().await;
+                    // Yield to allow the UI to render the "tool started" state
+                    tokio::task::yield_now().await;
 
-                        let result =
-                            match self.tools.execute(&call.name, call.arguments.clone()).await {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    // Surface error as tool result so model can recover
-                                    let msg = format!("Tool '{}' failed: {}", call.name, e);
-                                    on_tool_complete(call.name.clone(), msg.clone(), false);
-                                    self.context.add_tool_result(
-                                        &call.id,
-                                        sanitize_tool_output_for_context(&call.name, &msg),
-                                    );
-                                    let preview = if msg.len() > 200 {
-                                        format!("{}...", truncate_at_char_boundary(&msg, 200))
-                                    } else {
-                                        msg
-                                    };
-                                    tool_call_log.push(ToolCallLog {
-                                        tool: call.name.clone(),
-                                        args: call.arguments.clone(),
-                                        result_preview: preview,
-                                    });
-                                    continue;
-                                }
-                            };
+                    let turn_results = super::tool_orchestrator::execute_tool_calls(
+                        &self.tools,
+                        limited_tool_calls,
+                        self.max_parallel_tools,
+                    )
+                    .await;
+                    for outcome in turn_results {
+                        let call = &limited_tool_calls[outcome.index];
+
+                        // Executed up-front in parallel; the `Err` arm below
+                        // preserves the original recover-inline semantics.
+                        let result = match outcome.result {
+                            Ok(r) => r,
+                            Err(e) => {
+                                // Surface error as tool result so model can recover
+                                let msg = format!("Tool '{}' failed: {}", call.name, e);
+                                on_tool_complete(call.name.clone(), msg.clone(), false);
+                                self.context.add_tool_result(
+                                    &call.id,
+                                    sanitize_tool_output_for_context(&call.name, &msg),
+                                );
+                                let preview = if msg.len() > 200 {
+                                    format!("{}...", truncate_at_char_boundary(&msg, 200))
+                                } else {
+                                    msg
+                                };
+                                tool_call_log.push(ToolCallLog {
+                                    tool: call.name.clone(),
+                                    args: call.arguments.clone(),
+                                    result_preview: preview,
+                                });
+                                continue;
+                            }
+                        };
 
                         // Check for duplicate results to prevent infinite loops
                         let result_key = format!(

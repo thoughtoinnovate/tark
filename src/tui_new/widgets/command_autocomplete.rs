@@ -25,6 +25,9 @@ pub enum SlashCommand {
     Clear,
     ClearCosts,
     Compact,
+    Copy,
+    Export,
+    Mouse,
     Think,
     Thinking,
     Tools,
@@ -35,6 +38,7 @@ pub enum SlashCommand {
     Plan,
     Ask,
     Build,
+    Agents,
 }
 
 impl SlashCommand {
@@ -49,6 +53,9 @@ impl SlashCommand {
             Self::Clear,
             Self::ClearCosts,
             Self::Compact,
+            Self::Copy,
+            Self::Export,
+            Self::Mouse,
             Self::Think,
             Self::Thinking,
             Self::Tools,
@@ -73,6 +80,9 @@ impl SlashCommand {
             Self::Clear => "clear",
             Self::ClearCosts => "clear-costs",
             Self::Compact => "compact",
+            Self::Copy => "copy",
+            Self::Export => "export",
+            Self::Mouse => "mouse",
             Self::Think => "think",
             Self::Thinking => "thinking",
             Self::Tools => "tools",
@@ -83,6 +93,7 @@ impl SlashCommand {
             Self::Plan => "plan",
             Self::Ask => "ask",
             Self::Build => "build",
+            Self::Agents => "agents",
         }
     }
 
@@ -97,6 +108,9 @@ impl SlashCommand {
             Self::Clear => "Clear conversation history",
             Self::ClearCosts => "Reset session usage totals",
             Self::Compact => "Compact context to free up space",
+            Self::Copy => "Copy last response to clipboard",
+            Self::Export => "Export session to a file",
+            Self::Mouse => "Toggle mouse capture (native text selection)",
             Self::Think => "Toggle model thinking level (off/low/medium/high)",
             Self::Thinking => "Toggle think tool for structured reasoning",
             Self::Tools => "Show available tools",
@@ -107,6 +121,7 @@ impl SlashCommand {
             Self::Plan => "Switch to Plan mode",
             Self::Ask => "Switch to Ask mode",
             Self::Build => "Switch to Build mode",
+            Self::Agents => "Show subagents",
         }
     }
 
@@ -121,6 +136,9 @@ impl SlashCommand {
             Self::Clear => "🗑️",
             Self::ClearCosts => "🧹",
             Self::Compact => "📦",
+            Self::Copy => "📋",
+            Self::Export => "💾",
+            Self::Mouse => "🖱️",
             Self::Think => "🧠",
             Self::Thinking => "💭",
             Self::Tools => "🔧",
@@ -131,6 +149,7 @@ impl SlashCommand {
             Self::Plan => "📋",
             Self::Ask => "💬",
             Self::Build => "🔨",
+            Self::Agents => "⑂",
         }
     }
 
@@ -369,10 +388,11 @@ mod tests {
     #[test]
     fn test_slash_command_find_matches_c() {
         let matches = SlashCommand::find_matches("c");
-        assert_eq!(matches.len(), 3); // clear, clear-costs, compact
+        assert_eq!(matches.len(), 4); // clear, clear-costs, compact, copy
         assert!(matches.contains(&SlashCommand::Clear));
         assert!(matches.contains(&SlashCommand::ClearCosts));
         assert!(matches.contains(&SlashCommand::Compact));
+        assert!(matches.contains(&SlashCommand::Copy));
     }
 
     #[test]
@@ -390,7 +410,7 @@ mod tests {
         let mut state = AutocompleteState::new();
         state.activate("m");
         assert!(state.active);
-        assert_eq!(state.matches.len(), 1); // model
+        assert_eq!(state.matches.len(), 2); // model, agents
         assert_eq!(state.selected_command(), Some(SlashCommand::Model));
     }
 

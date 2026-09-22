@@ -63,6 +63,10 @@ pub enum Command {
     /// Toggle sidebar visibility
     ToggleSidebar,
 
+    /// Toggle terminal mouse capture (when off, the terminal handles
+    /// mouse natively so text selection/copy works)
+    ToggleMouse,
+
     /// Toggle thinking block display (model-level extended thinking)
     ToggleThinking,
 
@@ -184,6 +188,9 @@ pub enum Command {
 
     /// Yank (copy) message content
     YankMessage,
+
+    /// Yank (copy) the most recent assistant message, regardless of focus
+    YankLastResponse,
 
     // ========== Context Files ==========
     /// Open file picker to add context
@@ -369,6 +376,39 @@ pub enum Command {
 
     /// Cancel task edit
     CancelTaskEdit,
+
+    // ========== Subagent Management (plan §C1) ==========
+    /// Focus the sidebar Subagents panel (index 3)
+    FocusSubagents,
+
+    /// Open the detail modal for a subagent (logs view)
+    SubagentOpenDetail(String),
+
+    /// Kill a running/queued subagent
+    SubagentKill(String),
+
+    /// Send a follow-up (starts a new turn) to a running subagent
+    SubagentSendFollowup { id: String, message: String },
+
+    /// Send a nudge (no turn) to a running subagent
+    SubagentSendNudge { id: String, message: String },
+
+    /// Clear finished (completed/failed/killed) subagents, keep last 20
+    SubagentsClearDone,
+
+    /// Cycle the Subagents sidebar filter (All → Active → Done)
+    SubagentsCycleFilter,
+
+    /// Record the session-start permission grant answer
+    GrantSubagentScope {
+        scope_all: bool,
+        write_proxy: bool,
+        shell_proxy: bool,
+        never_ask: bool,
+    },
+
+    /// Open the Subagents settings modal (also on `Ctrl+G`, `/subagents`)
+    OpenSubagentSettings,
 }
 
 /// Convert keyboard events to commands

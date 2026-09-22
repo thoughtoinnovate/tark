@@ -74,6 +74,14 @@ fn osc52_sequence(text: &str) -> String {
     }
 }
 
+/// Most recent assistant message content (for yank-last-response / /copy).
+fn last_assistant_content(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::Assistant)
+        .map(|m| m.content.clone())
+}
 fn tool_group_info(messages: &[Message], idx: usize) -> Option<(usize, usize)> {
     let msg = messages.get(idx)?;
     if msg.role != MessageRole::Tool {
@@ -169,6 +177,15 @@ pub struct AppService {
     tool_timeout_secs: u64,
     plugin_widget_last_refresh: std::sync::Mutex<std::time::Instant>,
     plugin_widget_inflight: std::sync::atomic::AtomicBool,
+    // ========== Lightweight subagents (plan §C2) ==========
+    /// Always-present subagent actor handle (cheap `mpsc` clone).
+    pub(crate) subagent_manager: Arc<crate::agent::subagent::SubagentManager>,
+    /// Auto-tune monitor (None in manual mode).
+    subagent_monitor: Option<crate::agent::resources::ResourceMonitor>,
+    /// Live auto-tune cap (stuck at max in manual mode).
+    subagent_cap_rx: tokio::sync::watch::Receiver<usize>,
+    /// Parent context snapshot for `spawn_task` (None when LLM init failed).
+    subagent_parent: Option<crate::agent::subagent::SharedParentCtx>,
 }
 
 impl std::fmt::Debug for AppService {
@@ -178,6 +195,8 @@ impl std::fmt::Debug for AppService {
             .field("session_svc", &self.session_svc.is_some())
             .field("state", &self.state)
             .field("working_dir", &self.working_dir)
+            .field("subagent_monitor", &self.subagent_monitor.is_some())
+            .field("subagent_parent", &self.subagent_parent.is_some())
             .finish()
     }
 }
@@ -309,8 +328,30 @@ impl AppService {
 
         let (interaction_tx, interaction_rx) = crate::tools::interaction_channel();
 
+        // Initialize lightweight subagents (plan §C2): manager + auto-tune
+        // monitor are LLM-independent and always built; the parent context
+        // and `spawn_task` registration need the provider (built below).
+        let sub_cfg = global_config.agent.subagents.clone();
+        let local_provider = provider.as_deref() == Some("ollama");
+        let (subagent_monitor, subagent_cap_rx) = if sub_cfg.is_auto() {
+            let (monitor, rx) =
+                crate::agent::resources::ResourceMonitor::spawn(&sub_cfg, local_provider);
+            (Some(monitor), rx)
+        } else {
+            let max = sub_cfg.manual_effective();
+            let (_stuck_tx, rx) = tokio::sync::watch::channel(max);
+            (None, rx)
+        };
+        let subagent_manager = Arc::new(crate::agent::subagent::SubagentManager::new(
+            &sub_cfg,
+            subagent_cap_rx.clone(),
+        ));
+
         // Initialize ChatAgent
-        let chat_agent_result = (|| -> Result<crate::agent::ChatAgent> {
+        let chat_agent_result = (|| -> Result<(
+            crate::agent::ChatAgent,
+            crate::agent::subagent::SharedParentCtx,
+        )> {
             // Create LLM provider
             let provider_name = provider.clone().unwrap_or_else(|| "tark_sim".to_string());
             let llm_provider = crate::llm::create_provider_with_options(
@@ -335,7 +376,24 @@ impl AppService {
             let initial_trust = state.trust_level();
             tools.set_trust_level(initial_trust);
 
-            let mut agent = crate::agent::ChatAgent::new(Arc::from(llm_provider), tools)
+            // Parent context for `spawn_task` delegation (plan §C2). The
+            // session id is filled in once the session manager exists below
+            // and refreshed on every session switch + sidebar refresh.
+            let llm: Arc<dyn crate::llm::LlmProvider> = Arc::from(llm_provider);
+            let parent_ctx: crate::agent::subagent::SharedParentCtx =
+                Arc::new(std::sync::RwLock::new(crate::agent::subagent::ParentCtx {
+                    session_id: String::new(),
+                    working_dir: working_dir.clone(),
+                    llm: llm.clone(),
+                    provider: provider_name.clone(),
+                    model: model.clone().unwrap_or_default(),
+                    effort: default_think_level.clone(),
+                    max_iterations: global_config.agent.max_iterations,
+                    pin: sub_cfg.models.clone(),
+                }));
+            tools.enable_spawn_task(subagent_manager.clone(), parent_ctx.clone());
+
+            let mut agent = crate::agent::ChatAgent::new(llm, tools)
                 .with_max_iterations(global_config.agent.max_iterations);
             agent.set_thinking_config(global_config.thinking.clone());
             agent.set_think_level_sync(default_think_level.clone());
@@ -345,11 +403,11 @@ impl AppService {
             // It will be set via conv_svc.set_trust_level() after ConversationService creation.
             // The ToolRegistry already has the correct trust level set above.
 
-            Ok(agent)
+            Ok((agent, parent_ctx))
         })();
 
-        let (conversation_svc, session_svc) = match chat_agent_result {
-            Ok(chat_agent) => {
+        let (conversation_svc, session_svc, subagent_parent) = match chat_agent_result {
+            Ok((chat_agent, parent_ctx)) => {
                 // Initialize ConversationService
                 let mut conv_svc = ConversationService::new_with_interaction(
                     chat_agent,
@@ -381,8 +439,9 @@ impl AppService {
                 // Get current session ID and sync to agent for pattern tracking
                 let current_session_id = session_mgr.current().id.clone();
                 let conv_for_session = conv_svc.clone();
+                let conv_session_id = current_session_id.clone();
                 tokio::spawn(async move {
-                    let _ = conv_for_session.set_session_id(current_session_id).await;
+                    let _ = conv_for_session.set_session_id(conv_session_id).await;
                 });
 
                 // Initialize SessionService
@@ -416,7 +475,12 @@ impl AppService {
 
                 tracing::info!("Services initialized successfully");
 
-                (Some(conv_svc), Some(sess_svc))
+                // Fill the spawn_task parent session id now that sessions exist.
+                if let Ok(mut parent) = parent_ctx.write() {
+                    parent.session_id = current_session_id.clone();
+                }
+
+                (Some(conv_svc), Some(sess_svc), Some(parent_ctx))
             }
             Err(e) => {
                 let error_msg = format!("Failed to initialize LLM: {}", e);
@@ -442,7 +506,7 @@ impl AppService {
                 };
                 state.add_message(system_msg);
 
-                (None, None)
+                (None, None, None)
             }
         };
 
@@ -453,6 +517,18 @@ impl AppService {
         let catalog = super::CatalogService::new();
         let tools = super::ToolExecutionService::new(super::commands::AgentMode::default());
         let git = GitService::new(working_dir.clone());
+
+        // Async usage attribution for subagent runs (`S:sub:uuid`).
+        // Best-effort: a missing tracker only disables attribution.
+        // Fire-and-forget ordering: the writer is set before any spawn
+        // can arrive (spawns only happen via later tool calls).
+        if let Ok(tracker) = storage_facade.get_usage_tracker() {
+            let writer = crate::storage::usage::UsageWriter::spawn(Arc::new(tracker));
+            let manager = subagent_manager.clone();
+            tokio::spawn(async move {
+                manager.set_usage_writer(writer).await;
+            });
+        }
 
         Ok(Self {
             conversation_svc,
@@ -469,7 +545,170 @@ impl AppService {
             tool_timeout_secs: global_config.tools.tool_timeout_secs,
             plugin_widget_last_refresh: std::sync::Mutex::new(std::time::Instant::now()),
             plugin_widget_inflight: std::sync::atomic::AtomicBool::new(false),
+            subagent_manager,
+            subagent_monitor,
+            subagent_cap_rx,
+            subagent_parent,
         })
+    }
+
+    /// Current parent session for subagent operations.
+    ///
+    /// Prefers the live `spawn_task` snapshot, falls back to the session
+    /// service. Never empty in practice; manager calls tolerate unknowns.
+    pub async fn subagent_session(&self) -> String {
+        if let Some(ref parent) = self.subagent_parent {
+            if let Ok(guard) = parent.read() {
+                if !guard.session_id.is_empty() {
+                    return guard.session_id.clone();
+                }
+            }
+        }
+        if let Some(ref session_svc) = self.session_svc {
+            return session_svc.get_current().await.session_id;
+        }
+        String::new()
+    }
+
+    /// Refresh the sidebar Subagents section from the manager (plan §C2).
+    ///
+    /// Called from `refresh_sidebar_data` (message-driven) and by the 100ms
+    /// TUI poller (C3). Also refreshes the `spawn_task` parent snapshot
+    /// (session/provider/model/effort) so delegation never goes stale.
+    pub async fn refresh_subagents(&self) {
+        // Keep the spawn_task parent context live: session switches,
+        // provider/model picks, and think-level toggles all flow through
+        // here instead of touching every command arm. All awaits happen
+        // BEFORE taking the (std) lock — never hold it across `.await`.
+        let provider = self.state.current_provider();
+        let model = self.state.current_model();
+        let mut session_id = String::new();
+        if let Some(ref sess_svc) = self.session_svc {
+            session_id = sess_svc.get_current().await.session_id;
+        }
+        if let Some(ref parent) = self.subagent_parent {
+            if let Ok(mut p) = parent.write() {
+                if let Some(ref prov) = provider {
+                    p.provider.clone_from(prov);
+                }
+                if let Some(ref mdl) = model {
+                    p.model.clone_from(mdl);
+                }
+                if !session_id.is_empty() {
+                    p.session_id.clone_from(&session_id);
+                }
+            }
+        }
+
+        let session_id = self
+            .subagent_parent
+            .as_ref()
+            .and_then(|p| p.read().ok().map(|g| g.session_id.clone()))
+            .unwrap_or_default();
+        if session_id.is_empty() {
+            return;
+        }
+        let snap = self.subagent_manager.snapshot(&session_id).await;
+        let counts = self.subagent_manager.running_counts().await;
+        let other: usize = counts
+            .iter()
+            .filter(|(s, _)| s.as_str() != session_id)
+            .map(|(_, n)| n)
+            .sum();
+
+        let (parent_provider, parent_model) = (
+            self.state.current_provider().unwrap_or_default(),
+            self.state.current_model().unwrap_or_default(),
+        );
+        let filter = self.state.subagent_filter();
+        let mut list = Vec::with_capacity(snap.active.len());
+        for v in snap.active.iter() {
+            let status = match v.status {
+                crate::agent::subagent::SubStatus::Queued => {
+                    crate::ui_backend::types::SubagentStatus::Queued
+                }
+                crate::agent::subagent::SubStatus::Running => {
+                    crate::ui_backend::types::SubagentStatus::Running
+                }
+                crate::agent::subagent::SubStatus::WaitingInput => {
+                    crate::ui_backend::types::SubagentStatus::WaitingInput
+                }
+                crate::agent::subagent::SubStatus::Completed => {
+                    crate::ui_backend::types::SubagentStatus::Completed
+                }
+                crate::agent::subagent::SubStatus::Failed => {
+                    crate::ui_backend::types::SubagentStatus::Failed
+                }
+                crate::agent::subagent::SubStatus::Killed => {
+                    crate::ui_backend::types::SubagentStatus::Killed
+                }
+            };
+            let show = match filter {
+                crate::ui_backend::types::SubagentFilter::All => true,
+                crate::ui_backend::types::SubagentFilter::Active => matches!(
+                    status,
+                    crate::ui_backend::types::SubagentStatus::Running
+                        | crate::ui_backend::types::SubagentStatus::WaitingInput
+                        | crate::ui_backend::types::SubagentStatus::Queued
+                ),
+                crate::ui_backend::types::SubagentFilter::Done => matches!(
+                    status,
+                    crate::ui_backend::types::SubagentStatus::Completed
+                        | crate::ui_backend::types::SubagentStatus::Failed
+                        | crate::ui_backend::types::SubagentStatus::Killed
+                ),
+            };
+            if !show {
+                continue;
+            }
+            list.push(crate::ui_backend::types::SubagentInfo {
+                id: v.id.to_string(),
+                parent_session: v.parent_session.to_string(),
+                title: v.title.to_string(),
+                status,
+                provider: v.provider.to_string(),
+                model: v.model.to_string(),
+                effort: v.effort.to_string(),
+                overridden: v.provider.as_ref() != parent_provider
+                    || v.model.as_ref() != parent_model,
+                preview: v.preview.to_string(),
+                log_tail: v.log_tail.clone(),
+                unread: v.unread,
+                elapsed_s: v.elapsed_s,
+                tools_used: 0,
+                tools_cap: 5,
+            });
+        }
+        let queued: Vec<crate::ui_backend::types::QueuedSubagent> = snap
+            .queued
+            .iter()
+            .filter(|_| !matches!(filter, crate::ui_backend::types::SubagentFilter::Done))
+            .map(|q| crate::ui_backend::types::QueuedSubagent {
+                id: q.id.to_string(),
+                title: q.title.to_string(),
+                position: q.position,
+            })
+            .collect();
+        let effective = (*self.subagent_cap_rx.borrow()).max(1);
+        let has_activity = !list.is_empty() || !queued.is_empty();
+        self.state.set_subagents(
+            Arc::from(list.into_boxed_slice()),
+            queued,
+            effective,
+            self.subagent_monitor.is_some(),
+            other,
+        );
+
+        // Session-start grant (non-blocking confirm): first live subagent
+        // activity with a pristine grant pops the modal once per process.
+        // (Per-session persistence of the answer lands with the proxy turn.)
+        if has_activity
+            && self.state.subagent_grant() == crate::ui_backend::types::SessionGrant::default()
+            && self.state.active_modal().is_none()
+        {
+            self.state.set_active_modal(Some(ModalType::SubagentGrant));
+            self.state.set_focused_component(FocusedComponent::Modal);
+        }
     }
 
     /// Get the shared state
@@ -686,6 +925,18 @@ impl AppService {
                 let visible = !self.state.sidebar_visible();
                 self.state.set_sidebar_visible(visible);
             }
+            Command::ToggleMouse => {
+                // Terminal capture itself is toggled by the TUI frontend
+                // (controller); the service records the desired state here
+                // for other frontends.
+                let enabled = !self.state.mouse_enabled();
+                self.state.set_mouse_enabled(enabled);
+                self.state.set_status_message(Some(if enabled {
+                    "Mouse capture enabled".to_string()
+                } else {
+                    "Mouse capture disabled — terminal text selection works".to_string()
+                }));
+            }
             Command::ToggleThinking => {
                 let enabled = !self.state.thinking_enabled();
                 if self.state.llm_processing() {
@@ -774,6 +1025,14 @@ impl AppService {
                             .set_status_message(Some("Clipboard unavailable for yank".to_string()));
                     }
                 }
+                if self.state.vim_mode() == VimMode::Visual
+                    && self.state.focused_component() == FocusedComponent::Messages
+                {
+                    self.state.set_vim_mode(VimMode::Normal);
+                }
+            }
+            Command::YankLastResponse => {
+                self.yank_last_response();
                 if self.state.vim_mode() == VimMode::Visual
                     && self.state.focused_component() == FocusedComponent::Messages
                 {
@@ -2395,6 +2654,7 @@ impl AppService {
                     let session_svc = session_svc.clone();
                     let conv_svc = self.conversation_svc.clone();
                     let event_tx = self.event_tx.clone();
+                    let subagent_parent = self.subagent_parent.clone();
 
                     tokio::spawn(async move {
                         match session_svc.switch_to(&session_id).await {
@@ -2402,6 +2662,12 @@ impl AppService {
                                 // Sync session ID to conversation service for pattern tracking
                                 if let Some(ref conv) = conv_svc {
                                     let _ = conv.set_session_id(session_id.clone()).await;
+                                }
+                                // Keep spawn_task delegation tagged to this session.
+                                if let Some(ref parent) = subagent_parent {
+                                    if let Ok(mut p) = parent.write() {
+                                        p.session_id.clone_from(&session_id);
+                                    }
                                 }
 
                                 // Messages are restored via restore_from_session in session_svc
@@ -2416,6 +2682,108 @@ impl AppService {
                         }
                     });
                 }
+            }
+
+            // ========== Lightweight subagents (plan §C2) ==========
+            Command::FocusSubagents => {
+                self.state.set_focused_component(FocusedComponent::Panel);
+                self.state.set_sidebar_selected_panel(3);
+                self.state.set_sidebar_selected_item(None);
+            }
+            Command::SubagentOpenDetail(id) => {
+                let session = self.subagent_session().await;
+                self.subagent_manager.mark_seen(&id, &session).await;
+                self.state.set_subagent_detail_id(Some(id));
+                self.state.clear_subagent_detail_input();
+                self.state.set_active_modal(Some(ModalType::SubagentDetail));
+                self.state.set_focused_component(FocusedComponent::Modal);
+            }
+            Command::SubagentKill(id) => {
+                let session = self.subagent_session().await;
+                self.subagent_manager.kill(&id, &session).await;
+                self.refresh_subagents().await;
+            }
+            Command::SubagentSendFollowup { id, message } => {
+                let session = self.subagent_session().await;
+                if let Err(e) = self
+                    .subagent_manager
+                    .send_input(
+                        &id,
+                        &session,
+                        crate::agent::subagent::ChildMsg::Followup(message),
+                    )
+                    .await
+                {
+                    self.state
+                        .set_status_message(Some(format!("Subagent input rejected: {e}")));
+                }
+            }
+            Command::SubagentSendNudge { id, message } => {
+                let session = self.subagent_session().await;
+                if let Err(e) = self
+                    .subagent_manager
+                    .send_input(
+                        &id,
+                        &session,
+                        crate::agent::subagent::ChildMsg::Nudge(message),
+                    )
+                    .await
+                {
+                    self.state
+                        .set_status_message(Some(format!("Subagent input rejected: {e}")));
+                }
+            }
+            Command::SubagentsClearDone => {
+                let session = self.subagent_session().await;
+                // Retention rule: keep the 20 most recent finished runs.
+                self.subagent_manager.clear_finished(&session, 20).await;
+                self.refresh_subagents().await;
+            }
+            Command::SubagentsCycleFilter => {
+                use crate::ui_backend::types::SubagentFilter;
+                let next = match self.state.subagent_filter() {
+                    SubagentFilter::All => SubagentFilter::Active,
+                    SubagentFilter::Active => SubagentFilter::Done,
+                    SubagentFilter::Done => SubagentFilter::All,
+                };
+                self.state.set_subagent_filter(next);
+                self.refresh_subagents().await;
+            }
+            Command::GrantSubagentScope {
+                scope_all,
+                write_proxy,
+                shell_proxy,
+                never_ask,
+            } => {
+                // Resolve "this agent" to the currently live children when
+                // the grant is scoped per-agent rather than session-wide.
+                let agents = if scope_all {
+                    vec!["*".to_string()]
+                } else {
+                    self.state
+                        .subagents()
+                        .iter()
+                        .map(|s| s.id.clone())
+                        .collect()
+                };
+                self.state
+                    .set_subagent_grant(crate::ui_backend::types::SessionGrant {
+                        write_agents: if write_proxy {
+                            agents.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        shell_agents: if shell_proxy { agents } else { Vec::new() },
+                        never_ask,
+                    });
+                self.state.set_active_modal(None);
+                self.state.set_focused_component(FocusedComponent::Panel);
+            }
+            Command::OpenSubagentSettings => {
+                self.state.set_subagent_settings_selected(0);
+                self.state
+                    .set_active_modal(Some(ModalType::SubagentSettings));
+                self.state.set_focused_component(FocusedComponent::Modal);
             }
 
             // Not yet implemented
@@ -2717,10 +3085,38 @@ impl AppService {
         Ok(())
     }
 
+    /// Copy the most recent assistant message to the clipboard.
+    /// Returns true on success; sets a status message either way.
+    pub fn yank_last_response(&self) -> bool {
+        match last_assistant_content(&self.state.messages()) {
+            Some(content) if try_set_clipboard(content.clone()) => {
+                self.state
+                    .set_status_message(Some("Yanked last response".to_string()));
+                true
+            }
+            Some(_) => {
+                self.state
+                    .set_status_message(Some("Clipboard unavailable for yank".to_string()));
+                false
+            }
+            None => {
+                self.state
+                    .set_status_message(Some("No assistant response to yank".to_string()));
+                false
+            }
+        }
+    }
+
     /// Export current session to file
-    pub fn export_session(&self, _path: &std::path::Path) -> Result<()> {
-        // TODO: Implement session export through SessionService
-        Ok(())
+    pub async fn export_session(&self, path: &std::path::Path) -> Result<()> {
+        if let Some(ref session_svc) = self.session_svc {
+            session_svc
+                .export(path)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+        } else {
+            anyhow::bail!("Session service unavailable")
+        }
     }
 
     /// Import session from file
@@ -3190,6 +3586,9 @@ impl AppService {
 
         // Update tasks from current state
         self.update_tasks();
+
+        // Update lightweight subagents section (plan §C2; cheap snapshot).
+        self.refresh_subagents().await;
 
         let mut panels = self.state.sidebar_expanded_panels();
         if !self.state.tasks().is_empty() {
@@ -3726,6 +4125,28 @@ mod tests {
             segments: Vec::new(),
             tool_args: None,
         }
+    }
+
+    #[test]
+    fn last_assistant_content_picks_most_recent() {
+        let messages = vec![
+            test_message(MessageRole::User, "hi"),
+            test_message(MessageRole::Assistant, "first"),
+            test_message(MessageRole::Tool, "ran"),
+            test_message(MessageRole::Assistant, "second"),
+            test_message(MessageRole::System, "note"),
+        ];
+        assert_eq!(last_assistant_content(&messages).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn last_assistant_content_none_without_assistant() {
+        let messages = vec![
+            test_message(MessageRole::User, "hi"),
+            test_message(MessageRole::System, "note"),
+        ];
+        assert_eq!(last_assistant_content(&messages), None);
+        assert_eq!(last_assistant_content(&[]), None);
     }
 
     #[test]

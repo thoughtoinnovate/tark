@@ -351,6 +351,10 @@ For TUI features, you MUST:
 | File | Purpose | When to Modify |
 |------|---------|----------------|
 | `src/agent/chat.rs` | Chat agent logic | Adding agent features |
+| `src/agent/subagent.rs` | SubagentManager actor + spawn policy | Changing subagent lifecycle/spawning |
+| `src/agent/resources.rs` | ResourceMonitor auto-tune caps | Changing cap heuristics |
+| `src/agent/tool_orchestrator.rs` | Parallel tool executor | Changing fan-out/barrier semantics |
+| `src/tools/builtin/subagent.rs` | `spawn_task` delegation tool | Changing spawn schema/policy |
 | `src/tools/mod.rs` | Tool registry & mode composition | Adding/modifying tools |
 | `src/tools/workspace.rs` | WorkspaceCap confinement (R1) | Changing path authorization |
 | `src/tools/shell.rs` | Shell execution + process-group kill | Changing process controls |

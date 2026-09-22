@@ -692,6 +692,127 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Token usage attributed to one subagent run (plan §B5).
+///
+/// `session_id` is the full child id (`S:sub:uuid`) so costs attribute to
+/// the child while remaining joinable to the parent session by prefix.
+#[derive(Debug, Clone)]
+pub struct SubagentUsage {
+    pub session_id: String,
+    pub provider: String,
+    pub model: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+enum WriterMsg {
+    Direct(UsageLog),
+    Subagent(SubagentUsage),
+}
+
+/// Async batching usage writer (plan §B5).
+///
+/// A single background task owns all SQLite writes: callers `try_send`
+/// (never block) and the task drains greedily (up to 100 per wake) through
+/// the shared [`UsageTracker`]. Cost for subagent entries is computed
+/// in-task from cached pricing (offline-safe fallback). `Full` drops with
+/// a counter — backpressure is visible, never a hang.
+///
+/// Legacy direct `log_usage` call sites are intentionally untouched here;
+/// they already run backgrounded. New (subagent) writes go through this.
+#[derive(Debug, Clone)]
+pub struct UsageWriter {
+    tx: tokio::sync::mpsc::Sender<WriterMsg>,
+    dropped: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl UsageWriter {
+    /// Spawn the writer task over a shared tracker.
+    pub fn spawn(tracker: Arc<UsageTracker>) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WriterMsg>(256);
+        let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        tokio::spawn(async move {
+            // Greedy batches: take the first message blocking, then drain
+            // up to 100 without blocking. Ends when all senders are gone.
+            while let Some(first) = rx.recv().await {
+                let mut batch = vec![first];
+                while batch.len() < 100 {
+                    match rx.try_recv() {
+                        Ok(msg) => batch.push(msg),
+                        _ => break,
+                    }
+                }
+                for msg in batch {
+                    let log = match msg {
+                        WriterMsg::Direct(log) => log,
+                        WriterMsg::Subagent(u) => {
+                            // Child ids (`S:sub:uuid`) are not chat
+                            // sessions — ensure the FK row exists
+                            // (idempotent OR IGNORE) so the log lands.
+                            let _ = tracker.ensure_session_exists(
+                                &u.session_id,
+                                &u.session_id,
+                                "tark",
+                                "subagent",
+                            );
+                            let cost = tracker
+                                .calculate_cost(
+                                    &u.provider,
+                                    &u.model,
+                                    u.input_tokens,
+                                    u.output_tokens,
+                                )
+                                .await;
+                            UsageLog {
+                                session_id: u.session_id,
+                                provider: u.provider,
+                                model: u.model,
+                                mode: "subagent".to_string(),
+                                input_tokens: u.input_tokens,
+                                output_tokens: u.output_tokens,
+                                cost_usd: cost,
+                                request_type: "subagent".to_string(),
+                                estimated: false,
+                            }
+                        }
+                    };
+                    if let Err(e) = tracker.log_usage(log) {
+                        tracing::error!("usage writer failed to persist log: {e:#}");
+                    }
+                }
+            }
+        });
+        Self { tx, dropped }
+    }
+
+    /// Enqueue a pre-costed log. Drops (counted) instead of blocking.
+    pub fn log(&self, log: UsageLog) {
+        if self.tx.try_send(WriterMsg::Direct(log)).is_err() {
+            let n = self
+                .dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            tracing::warn!("usage writer queue full, dropped log #{n}");
+        }
+    }
+
+    /// Enqueue subagent token usage; cost computed in-task.
+    pub fn log_subagent(&self, usage: SubagentUsage) {
+        if self.tx.try_send(WriterMsg::Subagent(usage)).is_err() {
+            let n = self
+                .dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            tracing::warn!("usage writer queue full, dropped subagent log #{n}");
+        }
+    }
+
+    /// Logs dropped due to a full queue (monitoring hook).
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,6 +858,39 @@ mod tests {
         let summary = tracker.get_summary().unwrap();
         assert_eq!(summary.total_tokens, 150);
         assert_eq!(summary.log_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_usage_writer_batches_subagent_logs() {
+        let tmp = TempDir::new().unwrap();
+        let tracker = Arc::new(UsageTracker::new(tmp.path()).unwrap());
+        let writer = UsageWriter::spawn(tracker.clone());
+
+        for i in 0..3 {
+            writer.log_subagent(SubagentUsage {
+                session_id: format!("sess:sub:{i}"),
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                input_tokens: 100,
+                output_tokens: 50,
+            });
+        }
+
+        // Eventual consistency: poll with deadline (writer is async).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let totals = loop {
+            let t = tracker.get_session_totals("sess:sub:0").unwrap();
+            if t.0 == 150 || std::time::Instant::now() > deadline {
+                break t;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert_eq!(totals.0, 150, "tokens attributed to child session");
+        assert_eq!(writer.dropped(), 0);
+
+        let summary = tracker.get_summary().unwrap();
+        assert_eq!(summary.total_tokens, 450);
+        assert_eq!(summary.log_count, 3);
     }
 
     #[test]

@@ -252,11 +252,19 @@ impl ConversationManager {
             .collect()
     }
 
-    /// Restore from a chat session
+    /// Restore from a chat session.
+    ///
+    /// Messages flagged `context_transient` (compaction summaries,
+    /// subagent transcripts, ephemeral system notes) are NEVER loaded
+    /// into the live context — they would pollute it and, for subagent
+    /// transcripts, could exceed the window on large fan-outs.
     pub fn restore_from_session(&mut self, session: &ChatSession) {
         self.messages.clear();
 
         for session_msg in &session.messages {
+            if session_msg.context_transient {
+                continue;
+            }
             let message = Message {
                 role: session_msg.role.clone(),
                 content: session_msg.content.clone(),
@@ -428,6 +436,40 @@ mod tests {
         // Can't append content when not streaming
         let result = mgr.append_streaming_content("test");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_restore_skips_transient_messages() {
+        use crate::storage::{ChatSession, SessionMessage};
+
+        let mut session = ChatSession::new();
+        let msg = |role: &str, content: &str, transient: bool| SessionMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+            remote: false,
+            provider: None,
+            model: None,
+            context_transient: transient,
+            thinking_content: None,
+            segments: Vec::new(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        };
+        session.messages = vec![
+            msg("user", "do the thing", false),
+            msg("assistant", "transient compaction summary", true),
+            msg("assistant", "subagent transcript dump", true),
+            msg("assistant", "done", false),
+        ];
+
+        let mut mgr = ConversationManager::new();
+        mgr.restore_from_session(&session);
+
+        // Only durable messages enter the live context.
+        assert_eq!(mgr.message_count(), 2);
+        assert_eq!(mgr.messages()[0].content, "do the thing");
+        assert_eq!(mgr.messages()[1].content, "done");
     }
 
     #[test]

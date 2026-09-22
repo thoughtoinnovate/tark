@@ -17,6 +17,9 @@ use crate::ui_backend::{
     SharedState, TaskStatus as StateTaskStatus,
 };
 
+use super::modals::subagent_modal::{
+    SubagentDetailModal, SubagentGrantModal, SubagentSettingsModal,
+};
 use super::modals::{
     ApprovalModal, DeviceFlowModal, PluginModal, SessionSwitchConfirmModal, TaskDeleteConfirmModal,
     TaskEditModal, ToolsModal, TrustModal, WorkspaceGrantModal,
@@ -529,6 +532,9 @@ impl<B: Backend> TuiRenderer<B> {
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(Command::ToggleSidebar),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(Command::ToggleThinking),
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Command::ToggleThinkingTool),
+            // Mouse capture toggle (Alt+M): when off, the terminal handles the
+            // mouse natively so text selection/copy works. See also /mouse.
+            (KeyCode::Char('m'), KeyModifiers::ALT) => Some(Command::ToggleMouse),
 
             // Vim keybindings for messages panel and sidebar
             // These should only consume the key if actually used, otherwise fall through to insert
@@ -787,6 +793,49 @@ impl<B: Backend> TuiRenderer<B> {
                     (FocusedComponent::Messages, VimMode::Normal) => Some(Command::YankMessage),
                     (FocusedComponent::Messages, VimMode::Visual) => Some(Command::YankSelection),
                     (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('y')),
+                    _ => None,
+                }
+            }
+            (KeyCode::Char('Y'), KeyModifiers::SHIFT) => {
+                use crate::ui_backend::VimMode;
+                // Yank last assistant response regardless of focused message.
+                // Pickers with text filter: pass character through for typing
+                if matches!(
+                    state.active_modal(),
+                    Some(ModalType::ThemePicker)
+                        | Some(ModalType::ProviderPicker)
+                        | Some(ModalType::ModelPicker)
+                        | Some(ModalType::SessionPicker)
+                ) {
+                    return Some(Command::ModalFilter("Y".to_string()));
+                }
+                // FilePicker: update filter directly (it uses a different mechanism)
+                if state.active_modal() == Some(ModalType::FilePicker) {
+                    let current_filter = state.file_picker_filter();
+                    state.set_file_picker_filter(format!("{}Y", current_filter));
+                    if state.focused_component() == FocusedComponent::Input {
+                        return Some(Command::InsertChar('Y'));
+                    }
+                    return None;
+                }
+                // Questionnaire takes priority - block Y from yanking while typing
+                if let Some(q) = state.active_questionnaire() {
+                    // For FreeText: only insert if in edit mode
+                    // For Other: only insert if editing other
+                    if (q.question_type == crate::ui_backend::questionnaire::QuestionType::FreeText
+                        && q.is_editing_free_text)
+                        || q.is_editing_other()
+                    {
+                        state.questionnaire_insert_char('Y');
+                    }
+                    return None;
+                }
+                match (state.focused_component(), state.vim_mode()) {
+                    (FocusedComponent::Messages, VimMode::Normal)
+                    | (FocusedComponent::Messages, VimMode::Visual) => {
+                        Some(Command::YankLastResponse)
+                    }
+                    (FocusedComponent::Input, VimMode::Insert) => Some(Command::InsertChar('Y')),
                     _ => None,
                 }
             }
@@ -1956,6 +2005,11 @@ impl<B: Backend> TuiRenderer<B> {
 
     /// Convert mouse event to command
     fn mouse_to_command(&self, mouse: MouseEvent, state: &SharedState) -> Option<Command> {
+        // Mouse capture can be disabled at runtime (/mouse, Alt+M) so the
+        // terminal handles selection natively; ignore stray mouse events.
+        if !state.mouse_enabled() {
+            return None;
+        }
         // Mouse events are high-frequency; keep logs at trace to avoid debug-mode UI stalls.
         tracing::trace!(
             "Mouse event: kind={:?}, col={}, row={}",
@@ -2127,7 +2181,7 @@ impl<B: Backend> TuiRenderer<B> {
             }
             if let Some(footer) = map.footer {
                 if row >= footer.y && row < footer.y.saturating_add(footer.height) {
-                    return Some(6); // Theme footer
+                    return Some(7); // Theme footer
                 }
             }
             return None;
@@ -2172,7 +2226,7 @@ impl<B: Backend> TuiRenderer<B> {
         // Check if click is in footer area (theme icon)
         let footer_row = sidebar_rect.y + sidebar_rect.height.saturating_sub(2);
         if row >= footer_row {
-            return Some(6); // Theme panel
+            return Some(7); // Theme panel
         }
 
         let inner_y = sidebar_rect.y + 1;
@@ -2187,8 +2241,9 @@ impl<B: Backend> TuiRenderer<B> {
         let session_h = if panels[0] { 5u16 } else { 1u16 };
         let context_h = if panels[1] { 6u16 } else { 1u16 };
         let tasks_h = if panels[2] { 4u16 } else { 1u16 };
-        let todo_h = if panels[3] { 4u16 } else { 1u16 };
-        let plugins_h = if panels[5] { 4u16 } else { 1u16 };
+        let subagents_h = if panels[3] { 3u16 } else { 1u16 };
+        let todo_h = if panels[4] { 4u16 } else { 1u16 };
+        let plugins_h = if panels[6] { 4u16 } else { 1u16 };
 
         if row < inner_y + header_h {
             return None; // Header area (VIM mode)
@@ -2214,21 +2269,27 @@ impl<B: Backend> TuiRenderer<B> {
         }
         cursor += tasks_h;
 
-        // Todo panel (index 3)
-        if row >= cursor && row < cursor + todo_h {
+        // Subagents panel (index 3)
+        if row >= cursor && row < cursor + subagents_h {
             return Some(3);
+        }
+        cursor += subagents_h;
+
+        // Todo panel (index 4)
+        if row >= cursor && row < cursor + todo_h {
+            return Some(4);
         }
         cursor += todo_h;
 
         // Plugin panel sits just above footer
         let plugin_start = footer_row.saturating_sub(plugins_h);
         if row >= plugin_start && row < footer_row {
-            return Some(5);
+            return Some(6);
         }
 
-        // Git panel (index 4) - takes remaining space between panels and plugins
+        // Git panel (index 5) - takes remaining space between panels and plugins
         if row >= cursor && row < plugin_start {
-            return Some(4);
+            return Some(5);
         }
 
         None
@@ -3072,6 +3133,13 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                     )
                     .context_breakdown(state.context_breakdown())
                     .tasks(tasks_widget)
+                    .subagents(
+                        state.subagents().to_vec(),
+                        state.subagent_queued(),
+                        state.subagent_effective(),
+                        state.subagent_auto(),
+                        state.subagent_other_sessions(),
+                    )
                     .todos(todo_items)
                     .git_changes(git_changes_widget)
                     .plugin_widgets(state.plugin_widgets())
@@ -3260,6 +3328,30 @@ impl<B: Backend> UiRenderer for TuiRenderer<B> {
                         let modal = TaskDeleteConfirmModal::new(theme)
                             .task_preview(&preview)
                             .selected(0); // Default to Cancel
+                        frame.render_widget(modal, area);
+                    }
+                    ModalType::SubagentDetail => {
+                        let info = state
+                            .subagent_detail_id()
+                            .and_then(|id| state.subagents().iter().find(|s| s.id == id).cloned());
+                        let modal = SubagentDetailModal::new(
+                            theme,
+                            info,
+                            state.subagent_detail_input(),
+                            state.subagent_detail_follow_tail(),
+                        );
+                        frame.render_widget(modal, area);
+                    }
+                    ModalType::SubagentGrant => {
+                        let modal = SubagentGrantModal::from_grant(theme, &state.subagent_grant());
+                        frame.render_widget(modal, area);
+                    }
+                    ModalType::SubagentSettings => {
+                        let modal = SubagentSettingsModal::new(
+                            theme,
+                            state.subagent_settings(),
+                            state.subagent_settings_selected(),
+                        );
                         frame.render_widget(modal, area);
                     }
                 }
@@ -4147,7 +4239,8 @@ mod tests {
 
         assert_eq!(renderer.get_clicked_sidebar_panel(4, &state), Some(0));
         assert_eq!(renderer.get_clicked_sidebar_panel(11, &state), Some(2));
-        assert_eq!(renderer.get_clicked_sidebar_panel(28, &state), Some(6));
+        // Theme footer moved 6 → 7 when the Subagents panel landed at 3.
+        assert_eq!(renderer.get_clicked_sidebar_panel(28, &state), Some(7));
         // Gap between recorded rects resolves to nothing (fail-closed).
         assert_eq!(renderer.get_clicked_sidebar_panel(8, &state), None);
     }

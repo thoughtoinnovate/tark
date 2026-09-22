@@ -12,6 +12,7 @@ pub mod policy_modal;
 pub mod provider_picker;
 pub mod session_picker;
 pub mod session_switch_confirm;
+pub mod subagent_modal;
 pub mod task_edit_modal;
 pub mod theme_picker;
 pub mod tools_modal;
@@ -27,6 +28,9 @@ pub use policy_modal::{PolicyModal, PolicyModalWidget, PolicyPatternEntry};
 pub use provider_picker::ProviderPickerHandler;
 pub use session_picker::SessionPickerHandler;
 pub use session_switch_confirm::SessionSwitchConfirmModal;
+pub use subagent_modal::{
+    SubagentDetailModal, SubagentGrantModal, SubagentSettingsModal, SUBAGENT_SETTINGS_ROWS,
+};
 pub use task_edit_modal::{TaskDeleteConfirmModal, TaskEditModal};
 pub use theme_picker::ThemePickerHandler;
 pub use tools_modal::ToolsModal;
@@ -76,6 +80,9 @@ impl ModalManager {
             | Some(ModalType::TaskEdit)
             | Some(ModalType::TaskDeleteConfirm)
             | Some(ModalType::WorkspaceGrant)
+            | Some(ModalType::SubagentDetail)
+            | Some(ModalType::SubagentGrant)
+            | Some(ModalType::SubagentSettings)
             | None => {
                 // These modals are handled directly in controller/renderer
                 Ok(ModalResult::NotHandled)

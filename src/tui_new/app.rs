@@ -836,8 +836,14 @@ impl<B: Backend> TuiApp<B> {
                         },
                     ]);
 
-                // Set expanded state for each panel
-                sidebar.expanded_panels = state.sidebar_expanded_panels;
+                // Set expanded state for each panel. Legacy state predates
+                // Subagents (BFF index 3): expand the 6 legacy flags into
+                // the widget's 7, defaulting Subagents expanded (it renders
+                // empty here — no subagent feed in the legacy TUI, BFF-only).
+                let legacy = state.sidebar_expanded_panels;
+                sidebar.expanded_panels = [
+                    legacy[0], legacy[1], legacy[2], true, legacy[3], legacy[4], legacy[5],
+                ];
                 sidebar.selected_item = state.sidebar_selected_item;
 
                 let sidebar = sidebar
@@ -937,6 +943,11 @@ impl<B: Backend> TuiApp<B> {
                     }
                     ModalType::WorkspaceGrant => {
                         // WorkspaceGrant modal handled in tui_new renderer
+                    }
+                    ModalType::SubagentDetail
+                    | ModalType::SubagentGrant
+                    | ModalType::SubagentSettings => {
+                        // Subagent modals are BFF-only (v1 gap, legacy renders nothing)
                     }
                 }
             }
@@ -1137,6 +1148,13 @@ impl<B: Backend> TuiApp<B> {
                                         }
                                         Some(ModalType::WorkspaceGrant) => {
                                             // WorkspaceGrant handled in controller
+                                        }
+                                        Some(ModalType::SubagentDetail)
+                                        | Some(ModalType::SubagentGrant)
+                                        | Some(ModalType::SubagentSettings) => {
+                                            // Subagent modals are BFF-only (v1 gap);
+                                            // legacy TUI just closes them.
+                                            self.state.close_modal();
                                         }
                                         None => {}
                                     }

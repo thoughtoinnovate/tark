@@ -4,8 +4,10 @@
 //! - `thinking`: Structured step-by-step reasoning
 //! - `memory`: Persistent cross-session memory storage
 //! - `todo`: Session-scoped todo list tracking
+//! - `spawn_task`: Delegate bounded exploration to a light subagent
 
 pub mod memory;
+pub mod subagent;
 pub mod thinking;
 pub mod todo;
 
@@ -14,6 +16,8 @@ pub mod todo;
 pub use memory::{
     MemoryDeleteTool, MemoryEntry, MemoryListTool, MemoryQueryTool, MemoryStoreTool, TarkMemory,
 };
+#[allow(unused_imports)]
+pub use subagent::SpawnTaskTool;
 #[allow(unused_imports)]
 pub use thinking::{ThinkTool, ThinkingSummary, ThinkingTracker, Thought};
 #[allow(unused_imports)]

@@ -173,4 +173,36 @@ pub enum AppEvent {
         total_thoughts: u32,
         content: String,
     },
+
+    // ========== Subagent Events (plan §C1) ==========
+    /// Subagent pool snapshot for one parent session.
+    ///
+    /// Carries `Arc` payloads; renderers pull the snapshot and skip redraw
+    /// when `version` is unchanged. Events tagged with a non-current
+    /// `session_tag` must be discarded by the controller (same guard as
+    /// `LlmTextChunk` session mismatch).
+    SubagentsUpdated {
+        session_tag: std::sync::Arc<str>,
+        snapshot: std::sync::Arc<[crate::ui_backend::types::SubagentInfo]>,
+        queued: std::sync::Arc<[crate::ui_backend::types::QueuedSubagent]>,
+        version: u64,
+        effective: usize,
+        auto: bool,
+    },
+
+    /// One child log chunk (coalesced at 10Hz/4KB by the producer).
+    SubagentLogChunk {
+        id: std::sync::Arc<str>,
+        session_tag: std::sync::Arc<str>,
+        chunk: std::sync::Arc<str>,
+        dropped: u32,
+    },
+
+    /// A child changed lifecycle status.
+    SubagentStatusChanged {
+        id: std::sync::Arc<str>,
+        session_tag: std::sync::Arc<str>,
+        status: crate::ui_backend::types::SubagentStatus,
+        summary: Option<String>,
+    },
 }
